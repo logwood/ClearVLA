@@ -40,6 +40,7 @@ def _integrate_cache(
     dtype: torch.dtype,
     static_metrics: dict[str, Tensor] | None = None,
     execution_mode: str = "learned",
+    deployment_fastpath: bool = False,
 ) -> SamplingResult:
     """Integrate one already materialized static cache."""
 
@@ -83,6 +84,7 @@ def _integrate_cache(
                 noisy_action_field=value,
                 time=time,
                 execution_mode=execution_mode,
+                deployment_fastpath=deployment_fastpath,
                 collect_diagnostics=collect_diagnostics and index == steps - 1,
             )
         value = value + dt * output.bottom.physical_velocity.to(dtype=value.dtype)
@@ -102,6 +104,7 @@ def _integrate_cache(
             noisy_action_field=value,
             time=endpoint_time,
             execution_mode=execution_mode,
+            deployment_fastpath=deployment_fastpath,
             collect_diagnostics=False,
         )
     outlet_output = model.outlet_adapter.finalize(
@@ -200,6 +203,7 @@ def sample_refined_cached_action_with_cache(
     collect_diagnostics: bool = False,
     dtype: torch.dtype | None = None,
     execution_mode: str = "learned",
+    deployment_fastpath: bool = False,
 ) -> tuple[SamplingResult, OnlinePolicyCache]:
     """Run one proposal pass, one W rerun, and one refined pass.
 
@@ -221,6 +225,7 @@ def sample_refined_cached_action_with_cache(
         collect_diagnostics=False,
         dtype=runtime_dtype,
         execution_mode=execution_mode,
+        deployment_fastpath=deployment_fastpath,
     )
     refined_cache, refinement_metrics = refine_cached_world(
         model,
@@ -239,6 +244,7 @@ def sample_refined_cached_action_with_cache(
         collect_diagnostics=collect_diagnostics,
         dtype=runtime_dtype,
         execution_mode=execution_mode,
+        deployment_fastpath=deployment_fastpath,
     )
     proposal_action = proposal.action.detach().float()
     refined_action = refined.action.detach().float()
@@ -295,6 +301,7 @@ def sample_refined_cached_action(
     collect_diagnostics: bool = False,
     dtype: torch.dtype | None = None,
     execution_mode: str = "learned",
+    deployment_fastpath: bool = False,
 ) -> SamplingResult:
     """Run the bounded outer closure and return only its final sample."""
 
@@ -307,6 +314,7 @@ def sample_refined_cached_action(
         collect_diagnostics=collect_diagnostics,
         dtype=dtype,
         execution_mode=execution_mode,
+        deployment_fastpath=deployment_fastpath,
     )
     return result
 
@@ -321,6 +329,7 @@ def sample_action(
     initial_physical_noise: Tensor | None = None,
     collect_diagnostics: bool = False,
     dtype: torch.dtype | None = None,
+    deployment_fastpath: bool = False,
 ) -> SamplingResult:
     """Integrate five updates, then evaluate heads at the clean endpoint."""
 
@@ -355,6 +364,7 @@ def sample_action(
         initial_physical_noise=initial_physical_noise,
         collect_diagnostics=collect_diagnostics,
         dtype=dtype,
+        deployment_fastpath=deployment_fastpath,
     )
     return replace(result, metrics={**static_metrics, **result.metrics})
 
@@ -370,6 +380,7 @@ def sample_cached_action(
     collect_diagnostics: bool = False,
     dtype: torch.dtype | None = None,
     execution_mode: str = "learned",
+    deployment_fastpath: bool = False,
 ) -> SamplingResult:
     """Deploy from a cache already built for another read-only consumer."""
 
@@ -385,6 +396,7 @@ def sample_cached_action(
         collect_diagnostics=collect_diagnostics,
         dtype=dtype,
         execution_mode=execution_mode,
+        deployment_fastpath=deployment_fastpath,
     )
 
 

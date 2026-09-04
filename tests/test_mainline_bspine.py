@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import pytest
 import torch
+from torch import nn
 
 from clearvla.mainline.v120_core.bspine import (
     BSPINE0_BASIS_DIGEST,
     BSPINE0_SPEC_FINGERPRINT,
+    BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
+    BSPINE_ARM_ONLY_IMPLEMENTATION,
+    BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
+    ArmOnlyBSpine,
     BSpine0,
+    validate_bspine_module,
 )
 
 _BASIS_DIGEST = BSPINE0_BASIS_DIGEST
@@ -21,6 +28,20 @@ def _spine(*, hidden: int = 32) -> BSpine0:
         control_points=12,
         expected_basis_digest=_BASIS_DIGEST,
         expected_spec_fingerprint=BSPINE0_SPEC_FINGERPRINT,
+    )
+
+
+def _arm_only_spine(*, hidden: int = 32) -> ArmOnlyBSpine:
+    return ArmOnlyBSpine(
+        horizon=24,
+        hidden_size=hidden,
+        arm_dim=6,
+        gripper_field_dim=6,
+        degree=3,
+        control_points=12,
+        expected_action_group_mask=BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
+        expected_basis_digest=_BASIS_DIGEST,
+        expected_spec_fingerprint=BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
     )
 
 
@@ -241,3 +262,107 @@ def test_bspine0_rejects_wrong_serialized_basis_identity() -> None:
         assert "basis digest" in str(error)
     else:
         raise AssertionError("B-spine accepted the wrong serialized basis identity")
+
+
+def test_bspine0_state_dict_contract_is_unchanged() -> None:
+    spine = _spine()
+    state = spine.state_dict()
+    assert tuple(state) == (
+        "analysis",
+        "synthesis",
+        "coarse_lifts.arm_absolute.weight",
+        "coarse_lifts.arm_delta.weight",
+        "coarse_lifts.gripper_value.weight",
+        "coarse_lifts.gripper_delta.weight",
+        "coarse_lifts.gripper_auxiliary.weight",
+        "detail_lifts.arm_absolute.weight",
+        "detail_lifts.arm_delta.weight",
+        "detail_lifts.gripper_value.weight",
+        "detail_lifts.gripper_delta.weight",
+        "detail_lifts.gripper_auxiliary.weight",
+    )
+    assert tuple(state["analysis"].shape) == (12, 24)
+    assert tuple(state["synthesis"].shape) == (24, 12)
+    assert tuple(state["coarse_lifts.arm_absolute.weight"].shape) == (32, 6)
+    assert tuple(state["coarse_lifts.gripper_auxiliary.weight"].shape) == (32, 4)
+    assert "action_group_mask" not in state
+
+
+def test_arm_only_spine_is_exact_zero_initialized_and_serializes_mask() -> None:
+    spine = _arm_only_spine()
+    physical = torch.randn(3, 24, 18)
+    controls, coarse, detail = spine.decompose(physical)
+    assert controls.shape == (3, 12, 12)
+    assert coarse.shape == detail.shape == (3, 24, 12)
+    torch.testing.assert_close(
+        coarse + detail,
+        physical[..., :12],
+        atol=5.0e-7,
+        rtol=0.0,
+    )
+    tokens, metrics = spine(physical, collect_diagnostics=True)
+    assert tokens.shape == (3, 24, 32)
+    assert torch.count_nonzero(tokens) == 0
+    assert float(metrics["bottom_spine_decomposition_max_abs"]) <= 5.0e-7
+    assert float(metrics["bottom_spine_gripper_raw_only"]) == 1.0
+    assert tuple(spine.action_group_mask.tolist()) == (1, 1, 0, 0, 0)
+    assert sum(parameter.numel() for parameter in spine.parameters()) == 2 * 12 * 32
+
+
+def test_arm_only_spine_ignores_gripper_and_responds_to_arm() -> None:
+    spine = _arm_only_spine(hidden=16)
+    with torch.no_grad():
+        for parameter in spine.parameters():
+            parameter.fill_(0.01)
+    generator = torch.Generator().manual_seed(806)
+    physical = torch.randn(2, 24, 18, generator=generator)
+    gripper_changed = physical.clone()
+    gripper_changed[..., 12:] = torch.randn(2, 24, 6, generator=generator) * 7.0
+    arm_changed = physical.clone()
+    arm_changed[..., :12] += torch.randn(2, 24, 12, generator=generator)
+
+    baseline, _ = spine(physical)
+    changed_gripper, _ = spine(gripper_changed)
+    changed_arm, _ = spine(arm_changed)
+    torch.testing.assert_close(changed_gripper, baseline, atol=0.0, rtol=0.0)
+    assert float((changed_arm - baseline).detach().abs().sum()) > 0.0
+
+
+def test_arm_only_state_dict_round_trip_and_cross_identity_rejection() -> None:
+    source = _arm_only_spine(hidden=16)
+    generator = torch.Generator().manual_seed(807)
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.copy_(
+                torch.randn(parameter.shape, generator=generator) * 1.0e-2
+            )
+    physical = torch.randn(2, 24, 18, generator=generator)
+    expected, _ = source(physical)
+    state = source.state_dict()
+    assert "action_group_mask" in state
+
+    restored = _arm_only_spine(hidden=16)
+    restored.load_state_dict(state, strict=True)
+    actual, _ = restored(physical)
+    torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
+
+    with pytest.raises(RuntimeError):
+        _spine(hidden=16).load_state_dict(state, strict=True)
+    with pytest.raises(RuntimeError):
+        _arm_only_spine(hidden=16).load_state_dict(
+            _spine(hidden=16).state_dict(),
+            strict=True,
+        )
+
+
+def test_installed_spine_type_and_identity_are_fail_closed() -> None:
+    all_field = _spine()
+    arm_only = _arm_only_spine()
+    assert validate_bspine_module(all_field) is all_field
+    assert validate_bspine_module(arm_only) is arm_only
+
+    class Pretender(nn.Module):
+        implementation_id = BSPINE_ARM_ONLY_IMPLEMENTATION
+
+    with pytest.raises(TypeError, match="unsupported implementation identity"):
+        validate_bspine_module(Pretender())

@@ -28,7 +28,9 @@ from ..config import ExperimentConfig
 from ..interfaces import ObservableHistory
 from ..v120_core.bspine import (
     BSPINE0_IMPLEMENTATION,
+    BSPINE_ARM_ONLY_IMPLEMENTATION,
     BSPINE_DISABLED_IMPLEMENTATION,
+    ArmOnlyBSpine,
     BSpine0,
 )
 from ..v120_core.layer_contracts import LayerContractAdapterHeads
@@ -182,6 +184,20 @@ class RestoredV120EvidenceBottom(nn.Module):
                     gripper_field_dim=bottom.gripper_field_dim,
                     degree=bottom.bspine_degree,
                     control_points=bottom.bspine_control_points,
+                    expected_basis_digest=bottom.bspine_basis_digest,
+                    expected_spec_fingerprint=bottom.bspine_spec_fingerprint,
+                )
+            )
+        elif bottom.bspine_implementation == BSPINE_ARM_ONLY_IMPLEMENTATION:
+            self.decoder.install_spine(
+                ArmOnlyBSpine(
+                    horizon=dims.action_horizon,
+                    hidden_size=dims.hidden_size,
+                    arm_dim=dims.action_dim - 1,
+                    gripper_field_dim=bottom.gripper_field_dim,
+                    degree=bottom.bspine_degree,
+                    control_points=bottom.bspine_control_points,
+                    expected_action_group_mask=bottom.bspine_action_group_mask,
                     expected_basis_digest=bottom.bspine_basis_digest,
                     expected_spec_fingerprint=bottom.bspine_spec_fingerprint,
                 )

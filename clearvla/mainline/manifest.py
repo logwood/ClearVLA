@@ -14,6 +14,7 @@ from typing import Mapping, cast
 
 from .v120_core.bspine import (
     BSPINE0_IMPLEMENTATION,
+    BSPINE_ARM_ONLY_IMPLEMENTATION,
     BSPINE_DISABLED_IMPLEMENTATION,
 )
 
@@ -138,6 +139,15 @@ BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
         )
     ),
 )
+ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
+    schema=BSPINE_CAPABILITY_SCHEMA,
+    components=ComponentABI(
+        bottom=(
+            ComponentABI().bottom
+            + "_parallel_fixed_bspline_arm_only_v1_cubic_k12_fp32_raw_gripper"
+        )
+    ),
+)
 
 
 def architecture_manifest_for_bspine_implementation(
@@ -149,6 +159,8 @@ def architecture_manifest_for_bspine_implementation(
         return ARCHITECTURE_MANIFEST
     if str(implementation) == BSPINE0_IMPLEMENTATION:
         return BSPINE_ARCHITECTURE_MANIFEST
+    if str(implementation) == BSPINE_ARM_ONLY_IMPLEMENTATION:
+        return ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST
     raise ValueError(f"unsupported B-spine implementation: {implementation!r}")
 
 

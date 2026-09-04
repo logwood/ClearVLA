@@ -19,7 +19,7 @@ from torch import Tensor, nn
 
 from ..model.component_contracts import TerminalHeadOutput
 from ..model.routing import register_gradient_rms_metric
-from .bspine import BSpine0
+from .bspine import BSpineModule, validate_bspine_module
 from .codec import NativeTimePhysicalActionTokenLift
 from .controller import EvidenceExecutionController
 from .decoder import ActionOnlyPhysicalVelocityHead
@@ -70,6 +70,17 @@ class EvidenceView:
     ranges: dict[str, tuple[int, int]]
     summaries: dict[str, Tensor]
     masks: dict[str, Tensor]
+
+
+@dataclass(frozen=True)
+class _DeploymentCandidatePrefixChart:
+    """Locally validated canonical chart for one decoder invocation."""
+
+    blocks: Tensor
+    repeats: Tensor
+    batch: int
+    depth: int
+    dwell: int
 
 
 class EvidenceViewAdapter(nn.Module):
@@ -841,7 +852,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         # B-spine is installed only by the selected Schema31 execution-bottom
         # factory, after every baseline decoder owner has been constructed.
         # Keeping ``None`` here preserves Schema30 registration and RNG exactly.
-        self.spine: BSpine0 | None = None
+        self.spine: BSpineModule | None = None
         self.trajectory_lift = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         # Retain the legacy module name for checkpoint compatibility.  The
         # proposal is evidence, not a second direct action writer.
@@ -1110,14 +1121,12 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         # recreate the exact-one dead zone even though the head itself is FP32.
         return 1.0 - progress * (1.0 - learned_fp32.clamp(0.0, 1.0))
 
-    def install_spine(self, spine: BSpine0) -> None:
+    def install_spine(self, spine: BSpineModule) -> None:
         """Install the selected numerical view after baseline construction."""
 
         if self.spine is not None:
             raise RuntimeError("the execution decoder already owns a B-spine")
-        if not isinstance(spine, BSpine0):
-            raise TypeError("execution decoder spine must be BSpine0")
-        self.spine = spine
+        self.spine = validate_bspine_module(spine)
 
     def set_execution_eval_ablation(
         self,
@@ -1887,6 +1896,147 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         )
         return action_stack, candidate_velocity, mask, operation_rows.mean()
 
+    def _run_deployment_candidate_prefix_reuse(
+        self,
+        action: Tensor,
+        *,
+        neutral_action: Tensor,
+        decision_index: int,
+        baseline_velocity: Tensor,
+        candidate_chart: _DeploymentCandidatePrefixChart,
+        evidence_tokens: Tensor,
+        evidence_value_tokens: Tensor,
+        global_condition: Tensor,
+        evidence_key_bias: Tensor,
+        evidence_scale: float | Tensor,
+        capacity_ratios: Tensor | None,
+        identity_boundary: bool,
+        prepared_factors: tuple[Tensor, ...] | None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Evaluate the canonical eval chart once per block prefix.
+
+        Candidate ``(block, dwell=d)`` is an exact prefix of
+        ``(block, dwell=d+1)``.  The authoritative training implementation
+        deliberately builds every candidate independently; this opt-in
+        deployment implementation publishes each intermediate prefix into the
+        same block-major/dwell-major chart instead.  The current block's first
+        prefix is also the already-computed neutral branch supplied by the
+        caller.  No tensor is retained on the module, so reuse cannot cross a
+        decision, ODE node, observation, or request.
+        """
+
+        if self.training or torch.is_grad_enabled():
+            raise ValueError(
+                "deployment candidate-prefix reuse requires eval mode under no_grad"
+            )
+        batch = candidate_chart.batch
+        depth = candidate_chart.depth
+        dwell = candidate_chart.dwell
+        candidate_blocks = candidate_chart.blocks
+        candidate_repeats = candidate_chart.repeats
+        candidate_count = int(candidate_blocks.shape[1])
+        if depth != len(self.blocks) or dwell != self.max_dwell:
+            raise ValueError("validated deployment candidate chart is stale")
+        if int(action.shape[0]) != batch:
+            raise ValueError("candidate action batch must match the global candidate chart")
+        expected_prediction_shape = (
+            batch,
+            self.horizon,
+            int(self.config.physical_action_dim),
+        )
+        if tuple(baseline_velocity.shape) != expected_prediction_shape:
+            raise ValueError(
+                "candidate prediction reference must match the velocity-head output"
+            )
+        if tuple(neutral_action.shape) != tuple(action.shape):
+            raise ValueError("deployment neutral candidate must match the action shape")
+        if neutral_action.device != action.device or neutral_action.dtype != action.dtype:
+            raise ValueError("deployment neutral candidate must match action device and dtype")
+        if decision_index < 0 or decision_index >= depth:
+            raise ValueError(
+                "deployment candidate-prefix decision index is outside the block chart"
+            )
+
+        # Legal rows are derived from the validated chart and this decision;
+        # callers cannot inject a same-shaped but owner-inconsistent mask.
+        mask = candidate_blocks >= decision_index
+        operation_mask = mask & (candidate_blocks < depth)
+        operation_rows = (
+            operation_mask.float() * (candidate_repeats.detach().float() + 1.0)
+        )
+        candidate_actions = [action.clone() for _ in range(candidate_count)]
+        neutral_owner = decision_index
+
+        # The global chart is block-major and then dwell-major.  All dwell
+        # entries for one owner have the same legal rows, so one causal chain
+        # produces every candidate for that owner.
+        for owner in range(depth):
+            first_candidate = owner * dwell
+            rows = torch.nonzero(
+                operation_mask[:, first_candidate], as_tuple=False
+            ).flatten()
+            if int(rows.numel()) == 0:
+                continue
+            selected_block = candidate_blocks.index_select(0, rows)[:, first_candidate]
+            selected_evidence = evidence_tokens.index_select(0, rows)
+            selected_evidence_value = evidence_value_tokens.index_select(0, rows)
+            selected_condition = global_condition.index_select(0, rows)
+            selected_capacity = (
+                None
+                if capacity_ratios is None
+                else capacity_ratios.index_select(0, rows)
+            )
+            selected_scale = self._select_scale_rows(
+                evidence_scale, rows, batch=batch
+            )
+            current = action.index_select(0, rows)
+            repeat_start = 0
+            if owner == neutral_owner:
+                current = neutral_action.index_select(0, rows)
+                candidate_actions[first_candidate] = candidate_actions[
+                    first_candidate
+                ].index_copy(0, rows, current)
+                repeat_start = 1
+
+            one_repeat = torch.ones_like(selected_block)
+            for repeat_index in range(repeat_start, dwell):
+                current, _, _ = self._apply_selected_native_operations(
+                    current,
+                    block_index=selected_block,
+                    repeat_count=one_repeat,
+                    evidence_tokens=selected_evidence,
+                    evidence_value_tokens=selected_evidence_value,
+                    global_condition=selected_condition,
+                    evidence_key_bias=evidence_key_bias,
+                    evidence_scale=selected_scale,
+                    capacity_ratios=selected_capacity,
+                    identity_boundary=identity_boundary,
+                    prepared_factors=prepared_factors,
+                )
+                candidate_index = first_candidate + repeat_index
+                candidate_actions[candidate_index] = candidate_actions[
+                    candidate_index
+                ].index_copy(0, rows, current)
+
+        action_stack = torch.stack(candidate_actions, dim=1)
+        candidate_velocity = self.terminal_controller.predict_candidate_velocity(
+            self.terminal_controller.normalize(
+                action_stack.reshape(-1, *action_stack.shape[2:])
+            )
+        ).reshape(
+            batch,
+            candidate_count,
+            self.horizon,
+            int(self.config.physical_action_dim),
+        )
+        terminal = candidate_blocks == depth
+        candidate_velocity = torch.where(
+            terminal[:, :, None, None],
+            baseline_velocity[:, None].to(dtype=candidate_velocity.dtype),
+            candidate_velocity,
+        )
+        return action_stack, candidate_velocity, mask, operation_rows.mean()
+
     def _soft_execution_probabilities(
         self,
         value_field: Tensor,
@@ -1973,6 +2123,75 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         return (
             candidate_blocks[None].expand(int(batch), -1),
             candidate_repeats[None].expand(int(batch), -1),
+        )
+
+    def _validate_deployment_candidate_prefix_chart(
+        self,
+        action: Tensor,
+        *,
+        candidate_blocks: Tensor,
+        candidate_repeats: Tensor,
+    ) -> _DeploymentCandidatePrefixChart:
+        """Validate the exact fastpath chart once before its decision loop."""
+
+        if self.training or torch.is_grad_enabled():
+            raise ValueError(
+                "deployment candidate-prefix reuse requires eval mode under no_grad"
+            )
+        if not self.dynamic_block_route_enabled or self.dwell_mode != "learned":
+            raise ValueError(
+                "deployment candidate-prefix reuse requires the learned global dynamic route"
+            )
+        if self.max_dwell != 2 or not self.identity_candidate_enabled:
+            raise ValueError(
+                "deployment candidate-prefix reuse requires dwell=2 and the identity candidate"
+            )
+        if candidate_blocks.ndim != 2:
+            raise ValueError("candidate blocks must be [B,candidate]")
+
+        batch, candidate_count = candidate_blocks.shape
+        depth = len(self.blocks)
+        dwell = self.max_dwell
+        expected_candidates = depth * dwell + 1
+        if candidate_count != expected_candidates:
+            raise ValueError(
+                "deployment candidate-prefix reuse requires the canonical global candidate chart"
+            )
+        if tuple(candidate_repeats.shape) != (batch, candidate_count):
+            raise ValueError("candidate repeat ids must match candidate blocks")
+        if int(action.shape[0]) != batch:
+            raise ValueError("candidate action batch must match the global candidate chart")
+        if candidate_blocks.device != action.device or candidate_repeats.device != action.device:
+            raise ValueError("deployment candidate chart must share the action device")
+        if candidate_blocks.dtype != torch.long or candidate_repeats.dtype != torch.long:
+            raise ValueError("deployment candidate block/repeat ids must be int64")
+
+        expected_blocks = torch.arange(
+            depth, device=action.device, dtype=torch.long
+        ).repeat_interleave(dwell)
+        expected_repeats = torch.arange(
+            dwell, device=action.device, dtype=torch.long
+        ).repeat(depth)
+        expected_blocks = torch.cat(
+            (expected_blocks, expected_blocks.new_tensor([depth]))
+        )
+        expected_repeats = torch.cat(
+            (expected_repeats, expected_repeats.new_zeros(1))
+        )
+        expected_blocks = expected_blocks[None].expand(batch, -1)
+        expected_repeats = expected_repeats[None].expand(batch, -1)
+        if not torch.equal(candidate_blocks, expected_blocks) or not torch.equal(
+            candidate_repeats, expected_repeats
+        ):
+            raise ValueError(
+                "deployment candidate-prefix reuse requires exact block-major/dwell-major ids"
+            )
+        return _DeploymentCandidatePrefixChart(
+            blocks=candidate_blocks,
+            repeats=candidate_repeats,
+            batch=batch,
+            depth=depth,
+            dwell=dwell,
         )
 
     def _mean_field_execution_policy(
@@ -2125,6 +2344,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         evidence_scale: float | Tensor,
         execution_terminal_probability: Tensor | None = None,
         execution_terminal_uncertainty: Tensor | None = None,
+        deployment_fastpath: bool = False,
     ) -> dict[str, Any]:
         """Run one continuous monotonic execution contract.
 
@@ -2141,6 +2361,15 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         dwell = self.max_dwell
         candidate_blocks, candidate_repeats = self._global_execution_candidate_chart(
             batch=batch, device=device
+        )
+        deployment_candidate_chart = (
+            self._validate_deployment_candidate_prefix_chart(
+                action,
+                candidate_blocks=candidate_blocks,
+                candidate_repeats=candidate_repeats,
+            )
+            if deployment_fastpath
+            else None
         )
         candidate_count = int(candidate_blocks.shape[1])
         operation_candidate_count = depth * dwell
@@ -2324,27 +2553,50 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 # of extra dropout noise or host RNG drift.  The neutral branch
                 # therefore remains bitwise identical at progress zero.
                 with deterministic_module_probe(*modules):
-                    legal_candidate_mask = (
-                        (candidate_blocks >= decision_index)
-                        & (candidate_blocks <= depth)
-                    )
-                    candidate_action_stack, candidate_velocity_stack, probe_mask, probe_operation_count = (
-                        self._run_differentiable_native_candidates(
-                            block_input,
-                            baseline_velocity=prefix_velocity_rows[-1],
-                            candidate_blocks=candidate_blocks,
-                            candidate_repeats=candidate_repeats,
-                            candidate_mask=legal_candidate_mask,
-                            evidence_tokens=evidence_tokens,
-                            evidence_value_tokens=evidence_value_tokens,
-                            global_condition=global_condition,
-                            evidence_key_bias=evidence_bias,
-                            evidence_scale=evidence_scale,
-                            capacity_ratios=capacity_ratios,
-                            identity_boundary=identity_boundary,
-                            prepared_factors=prepared_factors,
+                    if deployment_fastpath:
+                        if deployment_candidate_chart is None:
+                            raise RuntimeError(
+                                "deployment candidate-prefix chart was not validated"
+                            )
+                        candidate_action_stack, candidate_velocity_stack, probe_mask, probe_operation_count = (
+                            self._run_deployment_candidate_prefix_reuse(
+                                block_input,
+                                baseline_velocity=prefix_velocity_rows[-1],
+                                candidate_chart=deployment_candidate_chart,
+                                evidence_tokens=evidence_tokens,
+                                evidence_value_tokens=evidence_value_tokens,
+                                global_condition=global_condition,
+                                evidence_key_bias=evidence_bias,
+                                evidence_scale=evidence_scale,
+                                capacity_ratios=capacity_ratios,
+                                identity_boundary=identity_boundary,
+                                prepared_factors=prepared_factors,
+                                neutral_action=neutral_action,
+                                decision_index=decision_index,
+                            )
                         )
-                    )
+                    else:
+                        legal_candidate_mask = (
+                            (candidate_blocks >= decision_index)
+                            & (candidate_blocks <= depth)
+                        )
+                        candidate_action_stack, candidate_velocity_stack, probe_mask, probe_operation_count = (
+                            self._run_differentiable_native_candidates(
+                                block_input,
+                                baseline_velocity=prefix_velocity_rows[-1],
+                                candidate_blocks=candidate_blocks,
+                                candidate_repeats=candidate_repeats,
+                                candidate_mask=legal_candidate_mask,
+                                evidence_tokens=evidence_tokens,
+                                evidence_value_tokens=evidence_value_tokens,
+                                global_condition=global_condition,
+                                evidence_key_bias=evidence_bias,
+                                evidence_scale=evidence_scale,
+                                capacity_ratios=capacity_ratios,
+                                identity_boundary=identity_boundary,
+                                prepared_factors=prepared_factors,
+                            )
+                        )
                 (
                     learned_probabilities,
                     learned_next_pointer,
@@ -2960,6 +3212,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         evidence_scale: float | Tensor = 1.0,
         noisy_scale: float | Tensor = 1.0,
         spine_zero: bool = False,
+        deployment_fastpath: bool = False,
     ) -> dict[str, Tensor]:
         if not self.training:
             # Parent-module ``load_state_dict`` restores child buffers through
@@ -2977,6 +3230,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             raise ValueError("B-spine zero intervention is evaluation-only")
         if spine_zero and self.spine is None:
             raise ValueError("B-spine zero intervention requires the Schema31 execution bottom")
+        if deployment_fastpath and (self.training or torch.is_grad_enabled()):
+            raise ValueError(
+                "deployment fastpath requires eval mode under no_grad"
+            )
         if self.policy_delta_bridge_enabled:
             if policy_action_tokens is not None:
                 raise ValueError(
@@ -3171,6 +3428,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 execution_terminal_uncertainty=(
                     execution_terminal_uncertainty
                 ),
+                deployment_fastpath=deployment_fastpath,
             )
             dynamic_output = self._finalize_dynamic_output(
                 result=dynamic_result,

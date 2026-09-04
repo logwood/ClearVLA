@@ -23,6 +23,9 @@ from .v120_core.bspine import (
     BSPINE0_DEGREE,
     BSPINE0_IMPLEMENTATION,
     BSPINE0_SPEC_FINGERPRINT,
+    BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
+    BSPINE_ARM_ONLY_IMPLEMENTATION,
+    BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
     BSPINE_DISABLED_IMPLEMENTATION,
 )
 
@@ -365,6 +368,7 @@ class BottomConfig:
     bspine_control_points: int = 0
     bspine_basis_digest: str = ""
     bspine_spec_fingerprint: str = ""
+    bspine_action_group_mask: str = ""
 
     def validate(self) -> None:
         if self.flow_time_distribution != "v120_mirrored_beta_1_5_1":
@@ -434,10 +438,11 @@ class BottomConfig:
                 or int(self.bspine_control_points) != 0
                 or self.bspine_basis_digest
                 or self.bspine_spec_fingerprint
+                or self.bspine_action_group_mask
             ):
                 raise ValueError(
                     "disabled B-spine cannot carry an inactive degree, control count, "
-                    "basis digest or spec fingerprint"
+                    "basis digest, spec fingerprint or action-group mask"
                 )
         elif self.bspine_implementation == BSPINE0_IMPLEMENTATION:
             expected = (
@@ -457,10 +462,34 @@ class BottomConfig:
                     "B-spine-0 must use the frozen cubic K=12 basis digest and "
                     "spec fingerprint"
                 )
+            if self.bspine_action_group_mask:
+                raise ValueError(
+                    "the existing all-field B-spine identity cannot carry a new group mask"
+                )
+        elif self.bspine_implementation == BSPINE_ARM_ONLY_IMPLEMENTATION:
+            expected = (
+                BSPINE0_DEGREE,
+                BSPINE0_CONTROL_POINTS,
+                BSPINE0_BASIS_DIGEST,
+                BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
+                BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
+            )
+            actual = (
+                int(self.bspine_degree),
+                int(self.bspine_control_points),
+                str(self.bspine_basis_digest),
+                str(self.bspine_spec_fingerprint),
+                str(self.bspine_action_group_mask),
+            )
+            if actual != expected:
+                raise ValueError(
+                    "arm-only B-spine must use the frozen cubic K=12 basis, "
+                    "arm-only spec fingerprint and serialized 11000 group mask"
+                )
         else:
             raise ValueError(
-                "bottom.bspine_implementation must be disabled or "
-                f"{BSPINE0_IMPLEMENTATION}"
+                "bottom.bspine_implementation must be disabled, "
+                f"{BSPINE0_IMPLEMENTATION} or {BSPINE_ARM_ONLY_IMPLEMENTATION}"
             )
 
 
@@ -681,8 +710,13 @@ class ExperimentConfig:
                 "bspine_control_points",
                 "bspine_basis_digest",
                 "bspine_spec_fingerprint",
+                "bspine_action_group_mask",
             ):
                 bottom.pop(name)
+        elif self.bottom.bspine_implementation == BSPINE0_IMPLEMENTATION:
+            # Preserve the existing Schema31 all-field config/checkpoint
+            # identity; its implementation ID already fixes the legacy mask.
+            bottom.pop("bspine_action_group_mask")
         return payload
 
     def digest(self, *, include_paths: bool = False) -> str:

@@ -8,6 +8,7 @@ import torch
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.manifest import (
     ARCHITECTURE_MANIFEST,
+    ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST,
     BSPINE_ARCHITECTURE_MANIFEST,
     ArchitectureManifest,
     ComponentABI,
@@ -15,6 +16,7 @@ from clearvla.mainline.manifest import (
     manifest_from_mapping,
 )
 from clearvla.mainline.model.component_contracts import (
+    BSPINE_ARM_ONLY_EXECUTION_BOTTOM,
     BSPINE0_EXECUTION_BOTTOM,
     ComponentSelection,
 )
@@ -28,6 +30,9 @@ from clearvla.mainline.runtime.deployment import (
 )
 from clearvla.mainline.training.optimizer import build_optimizer
 from clearvla.mainline.v120_core.bspine import (
+    BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
+    BSPINE_ARM_ONLY_IMPLEMENTATION,
+    BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
     BSPINE0_BASIS_DIGEST,
     BSPINE0_CONTROL_POINTS,
     BSPINE0_DEGREE,
@@ -68,6 +73,40 @@ def test_bspine_selects_schema31_without_relabeling_the_baseline() -> None:
     assert manifest_from_mapping(manifest.as_dict()) == manifest
     selection = ComponentSelection.from_config(config)
     assert selection.execution_bottom == BSPINE0_EXECUTION_BOTTOM
+
+
+def test_arm_only_bspine_has_distinct_manifest_and_component_identity() -> None:
+    base = ExperimentConfig()
+    config = replace(
+        base,
+        bottom=replace(
+            base.bottom,
+            bspine_implementation=BSPINE_ARM_ONLY_IMPLEMENTATION,
+            bspine_degree=BSPINE0_DEGREE,
+            bspine_control_points=BSPINE0_CONTROL_POINTS,
+            bspine_basis_digest=BSPINE0_BASIS_DIGEST,
+            bspine_spec_fingerprint=BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
+            bspine_action_group_mask=BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
+        ),
+    )
+    config.validate()
+    manifest = architecture_manifest_for_bspine_implementation(
+        config.bottom.bspine_implementation
+    )
+    assert manifest is ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST
+    assert manifest.schema == BSPINE_ARCHITECTURE_MANIFEST.schema == 31
+    assert len(
+        {
+            ARCHITECTURE_MANIFEST.digest(),
+            BSPINE_ARCHITECTURE_MANIFEST.digest(),
+            ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST.digest(),
+        }
+    ) == 3
+    assert manifest.components.bottom != BSPINE_ARCHITECTURE_MANIFEST.components.bottom
+    assert manifest_from_mapping(manifest.as_dict()) == manifest
+    selection = ComponentSelection.from_config(config)
+    assert selection.execution_bottom == BSPINE_ARM_ONLY_EXECUTION_BOTTOM
+    assert selection.execution_bottom != BSPINE0_EXECUTION_BOTTOM
 
 
 def test_mainline_manifest_rejects_version_or_component_drift() -> None:

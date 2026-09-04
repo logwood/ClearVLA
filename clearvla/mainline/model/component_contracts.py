@@ -16,6 +16,7 @@ from torch import Tensor, nn
 
 from ..v120_core.bspine import (
     BSPINE0_IMPLEMENTATION,
+    BSPINE_ARM_ONLY_IMPLEMENTATION,
     BSPINE_DISABLED_IMPLEMENTATION,
 )
 from .action_contract import V120SeedContext
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 COMPONENT_ABI_REVISION = "mainline-modular-v1"
 BASELINE_EXECUTION_BOTTOM = "v120_evidence_mmdit_v1"
 BSPINE0_EXECUTION_BOTTOM = "v120_evidence_mmdit_bspine0_v1"
+BSPINE_ARM_ONLY_EXECUTION_BOTTOM = "v120_evidence_mmdit_bspine_arm_only_v1"
 
 
 def _execution_bottom_selection(config: "ExperimentConfig") -> str:
@@ -43,6 +45,8 @@ def _execution_bottom_selection(config: "ExperimentConfig") -> str:
         return BASELINE_EXECUTION_BOTTOM
     if implementation == BSPINE0_IMPLEMENTATION:
         return BSPINE0_EXECUTION_BOTTOM
+    if implementation == BSPINE_ARM_ONLY_IMPLEMENTATION:
+        return BSPINE_ARM_ONLY_EXECUTION_BOTTOM
     raise ValueError(f"unsupported B-spine implementation: {implementation!r}")
 
 
@@ -383,6 +387,7 @@ def map_legacy_state_dict(
 
 
 __all__ = [
+    "BSPINE_ARM_ONLY_EXECUTION_BOTTOM",
     "COMPONENT_ABI_REVISION",
     "ComponentSelection",
     "DynamicQueryBundle",

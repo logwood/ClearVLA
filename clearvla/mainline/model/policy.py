@@ -653,6 +653,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         noisy_action_field: Tensor,
         time: Tensor,
         execution_mode: str = "learned",
+        deployment_fastpath: bool = False,
         require_execution_supervision: bool = False,
         collect_diagnostics: bool = False,
     ) -> PolicyStepOutput:
@@ -711,6 +712,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             seed=seed_context,
             transition=transition,
             execution_mode=execution_mode,
+            deployment_fastpath=deployment_fastpath,
             require_execution_supervision=require_execution_supervision,
             collect_diagnostics=collect_diagnostics,
         )

@@ -1127,6 +1127,7 @@ class ExecutionBottomStage(nn.Module):
         seed: V120SeedContext,
         transition: ControlledTransitionState,
         execution_mode: str = "learned",
+        deployment_fastpath: bool = False,
         require_execution_supervision: bool = False,
         collect_diagnostics: bool = False,
     ) -> tuple[BottomDecoderOutput, dict[str, Tensor]]:
@@ -1192,6 +1193,7 @@ class ExecutionBottomStage(nn.Module):
                 evidence_scale=1.0,
                 noisy_scale=1.0,
                 spine_zero=execution_mode == "spine_zero",
+                deployment_fastpath=deployment_fastpath,
             )
         finally:
             if execution_mode != "learned":
