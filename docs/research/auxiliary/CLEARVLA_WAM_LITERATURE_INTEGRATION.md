@@ -77,11 +77,11 @@ fresh matched run must connect the proposed mechanism to physical action.
 | Object-centric future models (SlotFormer, DINO-WM, V-JEPA 2) | Compact future/object supervision without pixel generation | W field/identity/transport intervention, then action utility |
 | Privileged future and contact targets (FLARE, ForeTime-VLA, PHR-VLA) | Teacher-only phase, transition-time or wrist-contact targets | Stop-gradient target probe; deployment reachability must remain zero |
 | World-action models (LaWAM, ImageWAM, AcrossWAM) | Action-to-future and future-to-action reachability | Matched W/action zero, shuffle and scale interventions |
-| Iterative action generation (Diffusion Policy, MIP, \u03c0\u2080) | Compare computation depth with behavior, not call count | Direct head vs current flow under the same evidence and W lifecycle |
+| Iterative action generation (Diffusion Policy, MIP, π₀) | Compare computation depth with behavior, not call count | Direct head vs current flow under the same evidence and W lifecycle |
 | Flow solvers (Trajectory-Consistent Flow Matching, Dense-Jump) | Audit integration error and time coverage | Fixed-checkpoint step-doubling and schedule panel |
 | Long-horizon/chunk methods (ACT, OpenVLA-OFT, ChunkFlow) | Seam and receding-horizon diagnostics | Consecutive-chunk replay with executed history |
-| Lightweight/runtime methods (SmolVLA, Reflex, C\u00b3ache) | Static/dynamic cache partition and latency accounting | Measure encode, W rebuild, dynamic call, solver and robot wait separately |
-| Unified outlets (Octo, RDT-1B, \u03c0\u2080) | Explicit outlet adapters, not hidden task conditions | Hold tensors fixed while renaming task metadata; output must remain identical |
+| Lightweight/runtime methods (SmolVLA, Reflex, C³ache) | Static/dynamic cache partition and latency accounting | Measure encode, W rebuild, dynamic call, solver and robot wait separately |
+| Unified outlets (Octo, RDT-1B, π₀) | Explicit outlet adapters, not hidden task conditions | Hold tensors fixed while renaming task metadata; output must remain identical |
 
 These references motivate tests; they do not authorize copying their losses,
 solver schedules, extra planners, latent actions or training objectives.

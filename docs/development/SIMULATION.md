@@ -48,7 +48,7 @@ outlet owns its own normalizer, decoded cache, DINO cache, language bank,
 configuration and checkpoint. Never mix converted smoke data with expert data.
 
 CALVIN conversion keeps terminal action tails rather than truncating windows:
-policy centers through `terminal-24\) are followed by 24 absorbing frames
+policy centers through `terminal-24` are followed by 24 absorbing frames
 (terminal RGB/state repeat, arm command zero, gripper command held). Synthetic
 rows are excluded from normalizer fitting, and source-trajectory split identity
 is preserved.
@@ -79,17 +79,17 @@ legacy MuJoCo evaluators.
 One bounded simulator rollout:
 
 ```bash
-/data/senwang/envs/clearvla-sim/bin/python -m clearvla.simulation.rollout \\
-  --environment maniskill-stackcube \\
-  --policy random --seed 1 --steps 200 --max-episode-steps 200 \\
-  --record-dir /data/senwang/data/clearvla_sim/maniskill_stackcube_v1 \\
+/data/senwang/envs/clearvla-sim/bin/python -m clearvla.simulation.rollout \
+  --environment maniskill-stackcube \
+  --policy random --seed 1 --steps 200 --max-episode-steps 200 \
+  --record-dir /data/senwang/data/clearvla_sim/maniskill_stackcube_v1 \
   --episode-id random_000001
 ```
 
 Audit a converted or recorded root:
 
 ```bash
-/data/senwang/envs/clearvla-sim/bin/python -m clearvla.simulation.dataset \\
+/data/senwang/envs/clearvla-sim/bin/python -m clearvla.simulation.dataset \
   /data/senwang/data/clearvla_sim/maniskill_stackcube_v1
 ```
 
@@ -107,9 +107,9 @@ causal alignment, and write expert output under a new namespace.
 First use bounded protocol roots; never promote a bounded root in place:
 
 ```bash
-CLEARVLA_CALVIN_LIMIT_PER_SPLIT=2 \\
-  CLEARVLA_LIBERO_LIMIT_TASKS=1 \\
-  CLEARVLA_LIBERO_LIMIT_DEMOS=3 \\
+CLEARVLA_CALVIN_LIMIT_PER_SPLIT=2 \
+  CLEARVLA_LIBERO_LIMIT_TASKS=1 \
+  CLEARVLA_LIBERO_LIMIT_DEMOS=3 \
   bash scripts/convert_remote_benchmarks.sh calvin-debug libero-spatial
 ```
 
@@ -128,11 +128,11 @@ bash scripts/build_remote_benchmark_artifacts.sh libero --language --caches
 Audit ingress and typing before training:
 
 ```bash
-/data/senwang/envs/clearvla-sim/bin/python -m clearvla.benchmarks.audit \\
+/data/senwang/envs/clearvla-sim/bin/python -m clearvla.benchmarks.audit \
   /data/senwang/data/libero/converted/libero_spatial_full
 
-/data/senwang/envs/clearvla-sim/bin/python -m clearvla.benchmarks.training_smoke \\
-  --config /data/senwang/data/libero/configs/libero_spatial_full.json \\
+/data/senwang/envs/clearvla-sim/bin/python -m clearvla.benchmarks.training_smoke \
+  --config /data/senwang/data/libero/configs/libero_spatial_full.json \
   --output /data/senwang/data/libero/validation/libero_spatial_full_training_smoke.json
 ```
 
@@ -146,8 +146,8 @@ The read-only CALVIN raw reader is a parity/source interface, not the formal
 training path:
 
 ```bash
-/data/senwang/envs/clearvla-sim/bin/python -m clearvla.benchmarks.calvin_raw \\
-  --source /data/senwang/data/calvin/raw/task_ABC_D \\
+/data/senwang/envs/clearvla-sim/bin/python -m clearvla.benchmarks.calvin_raw \
+  --source /data/senwang/data/calvin/raw/task_ABC_D \
   --task-filter open_drawer
 ```
 
