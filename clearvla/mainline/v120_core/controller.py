@@ -647,6 +647,7 @@ class EvidenceExecutionController(nn.Module):
         feedback: Tensor | None = None,
         evidence_value_tokens: Tensor | None = None,
         evidence_key_bias: Tensor | None = None,
+        collect_diagnostics: bool = True,
     ) -> EvidenceExecutionOutput:
         batch = int(global_condition.shape[0])
         if state is None:
@@ -695,7 +696,8 @@ class EvidenceExecutionController(nn.Module):
             attended, weights, ownership = self._competitive_attention(
                 queries, keys, values, source_key_bias
             )
-            ownership_rows.append(ownership.detach().float())
+            if collect_diagnostics:
+                ownership_rows.append(ownership.detach().float())
             attended = attended + 0.20 * slot_function
             state = update(
                 attended.reshape(batch * self.token_count, self.hidden_size),
@@ -746,6 +748,13 @@ class EvidenceExecutionController(nn.Module):
             if not 0 <= int(block_index) < self.block_count:
                 raise ValueError("block_index is outside the native controller repertoire")
             capacity_ratio = capacity_ratios[:, int(block_index)]
+        if not collect_diagnostics:
+            return EvidenceExecutionOutput(
+                state=state,
+                capacity_ratio=capacity_ratio,
+                capacity_ratios=capacity_ratios,
+                metrics={},
+            )
         attention_entropy = -(
             weights.float().clamp_min(1e-8) * weights.float().clamp_min(1e-8).log()
         ).sum(dim=-1).mean()

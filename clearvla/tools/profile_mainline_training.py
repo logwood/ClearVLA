@@ -69,6 +69,14 @@ def _parser() -> argparse.ArgumentParser:
             "every training step for a matched timing baseline."
         ),
     )
+    parser.add_argument(
+        "--retain-candidate-operation-diagnostics",
+        action="store_true",
+        help=(
+            "Retain audit-only block/controller statistics inside every "
+            "candidate operation for a matched timing baseline."
+        ),
+    )
     parser.add_argument("--repeat-batch", action="store_true")
     parser.add_argument(
         "--phase-breakdown",
@@ -215,6 +223,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     model = ClearVLAMainlinePolicy(config).to(device)
     if args.retain_training_execution_diagnostics:
         model.execution_bottom._retain_training_decoder_diagnostics = True
+    if args.retain_candidate_operation_diagnostics:
+        model.execution_bottom.decoder._retain_candidate_operation_diagnostics = True
     if args.candidate_prefix_reuse:
         model.execution_bottom.decoder._training_candidate_prefix_reuse = True
     compile_seconds = 0.0
@@ -342,6 +352,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "postglobal_audit": bool(args.retain_postglobal_audit),
         "training_execution_diagnostics": bool(
             args.retain_training_execution_diagnostics
+        ),
+        "candidate_operation_diagnostics": bool(
+            args.retain_candidate_operation_diagnostics
         ),
         "repeat_batch": bool(args.repeat_batch),
         "phase_breakdown": bool(args.phase_breakdown),

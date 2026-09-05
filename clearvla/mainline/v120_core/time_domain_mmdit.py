@@ -211,6 +211,7 @@ class EvidenceViewAdapter(nn.Module):
         visual_selector_tokens: Tensor | None = None,
         visual_value_tokens: Tensor | None = None,
         visual_key_bias: Tensor | None = None,
+        collect_diagnostics: bool = True,
     ) -> EvidenceView:
         if trajectory_tokens.ndim != 3 or int(trajectory_tokens.shape[-1]) != self.hidden_size:
             raise ValueError(f"trajectory_tokens must be [B,N,{self.hidden_size}]")
@@ -311,11 +312,19 @@ class EvidenceViewAdapter(nn.Module):
             device=reference.device,
             dtype=reference.dtype,
         )
-        summaries = {name: value.mean(dim=1) for name, value in value_sources.items()}
-        masks = {
-            name: torch.ones(value.shape[:2], device=value.device, dtype=torch.bool)
-            for name, value in source_tokens.items()
-        }
+        summaries = (
+            {name: value.mean(dim=1) for name, value in value_sources.items()}
+            if collect_diagnostics
+            else {}
+        )
+        masks = (
+            {
+                name: torch.ones(value.shape[:2], device=value.device, dtype=torch.bool)
+                for name, value in source_tokens.items()
+            }
+            if collect_diagnostics
+            else {}
+        )
         selector_tokens = prepared_selector.tokens
         value_tokens = prepared_values.tokens
         key_bias = prepared_selector.key_bias
@@ -427,7 +436,13 @@ class EvidenceConditionOrganizer(nn.Module):
         value = min(max(float(value), 1e-4), 1.0 - 1e-4)
         return math.log(value / (1.0 - value))
 
-    def forward(self, view: EvidenceView, time: Tensor) -> dict[str, Tensor | dict[str, Tensor]]:
+    def forward(
+        self,
+        view: EvidenceView,
+        time: Tensor,
+        *,
+        collect_diagnostics: bool = True,
+    ) -> dict[str, Tensor | dict[str, Tensor]]:
         layer_start, layer_stop = view.ranges["layer"]
         layer = view.value_tokens[:, layer_start:layer_stop]
         state = self.layer_scan_init.to(device=layer.device, dtype=layer.dtype).expand(
@@ -458,7 +473,7 @@ class EvidenceConditionOrganizer(nn.Module):
         global_condition = z_token + time_hidden
         z_zero_delta = torch.zeros((), device=z.device, dtype=torch.float32)
         z_shuffle_delta = torch.zeros((), device=z.device, dtype=torch.float32)
-        if self.z_probe_enabled and not self.training:
+        if collect_diagnostics and self.z_probe_enabled and not self.training:
             # This is an evaluation-only compiler probe for the active
             # Evidence path. It measures the change in the actual global
             # condition consumed by the native blocks, rather than reviving
@@ -477,31 +492,42 @@ class EvidenceConditionOrganizer(nn.Module):
                 z_shuffle_delta = (
                     (shuffled_condition - reference).norm(dim=-1).mean() / reference_norm
                 )
-        source_metrics = {
-            f"evidence_{name}_summary_norm": view.summaries[name]
-            .detach()
-            .float()
-            .norm(dim=-1)
-            .mean()
-            for name in self.source_names
-        }
-        metrics = {
-            "evidence_condition_scan_norm": scan.detach().float().norm(dim=-1).mean(),
-            "evidence_condition_lateral_norm": torch.zeros(
-                (), device=scan.device, dtype=torch.float32
-            ),
-            "evidence_condition_lateral_scale": torch.zeros(
-                (), device=scan.device, dtype=torch.float32
-            ),
-            "evidence_condition_intent_norm": intent_context.detach().float().norm(dim=-1).mean(),
-            "evidence_condition_norm": condition.detach().float().norm(dim=-1).mean(),
-            "evidence_latent_norm": z.detach().float().norm(dim=-1).mean(),
-            "evidence_latent_batch_variance": z.detach().float().var(dim=0, unbiased=False).mean(),
-            "evidence_global_condition_norm": global_condition.detach().float().norm(dim=-1).mean(),
-            "evidence_z_zero_condition_delta": z_zero_delta,
-            "evidence_z_shuffle_condition_delta": z_shuffle_delta,
-            **source_metrics,
-        }
+        metrics: dict[str, Tensor] = {}
+        if collect_diagnostics:
+            source_metrics = {
+                f"evidence_{name}_summary_norm": view.summaries[name]
+                .detach()
+                .float()
+                .norm(dim=-1)
+                .mean()
+                for name in self.source_names
+            }
+            metrics = {
+                "evidence_condition_scan_norm": scan.detach().float().norm(dim=-1).mean(),
+                "evidence_condition_lateral_norm": torch.zeros(
+                    (), device=scan.device, dtype=torch.float32
+                ),
+                "evidence_condition_lateral_scale": torch.zeros(
+                    (), device=scan.device, dtype=torch.float32
+                ),
+                "evidence_condition_intent_norm": intent_context.detach()
+                .float()
+                .norm(dim=-1)
+                .mean(),
+                "evidence_condition_norm": condition.detach().float().norm(dim=-1).mean(),
+                "evidence_latent_norm": z.detach().float().norm(dim=-1).mean(),
+                "evidence_latent_batch_variance": z.detach()
+                .float()
+                .var(dim=0, unbiased=False)
+                .mean(),
+                "evidence_global_condition_norm": global_condition.detach()
+                .float()
+                .norm(dim=-1)
+                .mean(),
+                "evidence_z_zero_condition_delta": z_zero_delta,
+                "evidence_z_shuffle_condition_delta": z_shuffle_delta,
+                **source_metrics,
+            }
         return {
             "condition": condition,
             "latent": z,
@@ -628,6 +654,7 @@ class TimeDomainMMDiTBlock(nn.Module):
         evidence_key_bias: Tensor | None = None,
         evidence_scale: float | Tensor = 1.0,
         execution_gate: float | Tensor | None = None,
+        collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Apply one host block with an optional capacity gate at its input.
 
@@ -713,6 +740,8 @@ class TimeDomainMMDiTBlock(nn.Module):
         ffn_update = ffn_gate * self.drop(ffn_direction)
         action = action + ffn_update
 
+        if not collect_diagnostics:
+            return action, {}
         evidence_entropy, evidence_max = self._attention_stats(evidence_weights)
         self_contribution = composition_scale * shared_gate * self_direction
         evidence_contribution = composition_scale * shared_gate * evidence_anchor
@@ -1538,6 +1567,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None = None,
+        collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor], list[dict[str, Tensor]]]:
         """Execute one typed host operation for one owner per sample.
 
@@ -1594,11 +1624,15 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     capacity_ratios=capacity,
                     identity_boundary=identity_boundary,
                     prepared_factors=prepared_factors,
+                    collect_diagnostics=collect_diagnostics,
                 )
             )
             result.index_copy_(0, rows, owned_action)
-            metric_rows.append(block_metrics)
-            contraction_rows.extend(owned_contractions)
+            if collect_diagnostics:
+                metric_rows.append(block_metrics)
+                contraction_rows.extend(owned_contractions)
+        if not collect_diagnostics:
+            return result, {}, []
         if not metric_rows:
             raise RuntimeError("native operation has no valid block owner")
         names = tuple(metric_rows[0])
@@ -1621,6 +1655,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
+        collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor], list[dict[str, Tensor]]]:
         """Execute one statically known block owner without row dispatch."""
 
@@ -1637,6 +1672,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             evidence_key_bias=evidence_key_bias,
             evidence_scale=evidence_scale,
             execution_gate=None,
+            collect_diagnostics=collect_diagnostics,
         )
         if not self.operator_capacity_enabled:
             return owned_action, block_metrics, []
@@ -1670,8 +1706,13 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             depth_ratio_override=capacity,
             binary_group_selection=False,
             identity_bypass=identity_boundary,
+            collect_diagnostics=collect_diagnostics,
         )
-        return action + contracted_update, block_metrics, [contraction_metrics]
+        return (
+            action + contracted_update,
+            block_metrics,
+            [contraction_metrics] if collect_diagnostics else [],
+        )
 
     @staticmethod
     def _select_scale_rows(
@@ -1709,6 +1750,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
+        collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor], list[dict[str, Tensor]]]:
         """Execute only the hard operation selected for each sample.
 
@@ -1744,10 +1786,14 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 capacity_ratios=row_capacity,
                 identity_boundary=identity_boundary,
                 prepared_factors=prepared_factors,
+                collect_diagnostics=collect_diagnostics,
             )
             result = result.index_copy(0, rows, updated)
-            metric_rows.append(metrics)
-            contraction_rows.extend(contractions)
+            if collect_diagnostics:
+                metric_rows.append(metrics)
+                contraction_rows.extend(contractions)
+        if not collect_diagnostics:
+            return result, {}, []
         return result, self._mean_metric_rows(metric_rows), contraction_rows
 
     def _probe_native_candidates(
@@ -1842,6 +1888,13 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     capacity_ratios=row_capacity,
                     identity_boundary=identity_boundary,
                     prepared_factors=probe_factors,
+                    collect_diagnostics=bool(
+                        getattr(
+                            self,
+                            "_retain_candidate_operation_diagnostics",
+                            False,
+                        )
+                    ),
                 )
                 candidate_velocity = self.terminal_controller.predict_candidate_velocity(
                     self.terminal_controller.normalize(candidate_action)
@@ -1912,6 +1965,13 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     capacity_ratios=row_capacity,
                     identity_boundary=identity_boundary,
                     prepared_factors=prepared_factors,
+                    collect_diagnostics=bool(
+                        getattr(
+                            self,
+                            "_retain_candidate_operation_diagnostics",
+                            False,
+                        )
+                    ),
                 )
                 candidate_action = candidate_action.index_copy(0, rows, updated)
             candidate_actions.append(candidate_action)
@@ -2010,6 +2070,13 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     capacity_ratios=capacity_ratios,
                     identity_boundary=identity_boundary,
                     prepared_factors=prepared_factors,
+                    collect_diagnostics=bool(
+                        getattr(
+                            self,
+                            "_retain_candidate_operation_diagnostics",
+                            False,
+                        )
+                    ),
                 )
                 candidate_index = first_candidate + repeat_index
                 candidate_actions[candidate_index] = current
@@ -2148,6 +2215,13 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     capacity_ratios=selected_capacity,
                     identity_boundary=identity_boundary,
                     prepared_factors=prepared_factors,
+                    collect_diagnostics=bool(
+                        getattr(
+                            self,
+                            "_retain_candidate_operation_diagnostics",
+                            False,
+                        )
+                    ),
                 )
                 candidate_index = first_candidate + repeat_index
                 candidate_actions[candidate_index] = candidate_actions[
@@ -2481,6 +2555,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         execution_terminal_probability: Tensor | None = None,
         execution_terminal_uncertainty: Tensor | None = None,
         deployment_fastpath: bool = False,
+        collect_diagnostics: bool = True,
     ) -> dict[str, Any]:
         """Run one continuous monotonic execution contract.
 
@@ -2645,9 +2720,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 evidence_key_bias=evidence_bias,
                 feedback=feedback,
                 block_index=controller_block,
+                collect_diagnostics=collect_diagnostics,
             )
             controller_state = control.state
-            controller_rows.append(control.metrics)
+            if collect_diagnostics:
+                controller_rows.append(control.metrics)
             capacity_ratios = self._execution_capacity(control.capacity_ratios)
             value_field = self.execution_controller.predict_execution_value(
                 state=controller_state,
@@ -2681,6 +2758,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         capacity_ratios=capacity_ratios,
                         identity_boundary=identity_boundary,
                         prepared_factors=prepared_factors,
+                        collect_diagnostics=collect_diagnostics,
                     )
                 )
                 contraction_rows.extend(neutral_contractions)
@@ -2944,6 +3022,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                             capacity_ratios=capacity_ratios.index_select(0, active_rows),
                             identity_boundary=identity_boundary,
                             prepared_factors=prepared_factors,
+                            collect_diagnostics=collect_diagnostics,
                         )
                     )
                     action = action.index_copy(0, active_rows, updated)
@@ -3471,8 +3550,13 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             visual_selector_tokens=visual_selector_tokens,
             visual_value_tokens=visual_value_tokens,
             visual_key_bias=visual_key_bias,
+            collect_diagnostics=collect_diagnostics,
         )
-        organized = self.organizer(view, time)
+        organized = self.organizer(
+            view,
+            time,
+            collect_diagnostics=collect_diagnostics,
+        )
         global_condition = organized["global_condition"]
         z_token = organized["latent_token"]
         condition_hidden = organized["condition_hidden"]
@@ -3611,6 +3695,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     execution_terminal_uncertainty
                 ),
                 deployment_fastpath=deployment_fastpath,
+                collect_diagnostics=collect_diagnostics,
             )
             dynamic_output = self._finalize_dynamic_output(
                 result=dynamic_result,
@@ -3692,9 +3777,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     evidence_key_bias=evidence_bias,
                     feedback=feedback,
                     block_index=block_index,
+                    collect_diagnostics=collect_diagnostics,
                 )
                 controller_state = control.state
-                controller_rows.append(control.metrics)
+                if collect_diagnostics:
+                    controller_rows.append(control.metrics)
             capacity = self._execution_capacity(
                 None if control is None else control.capacity_ratio
             )
@@ -3804,6 +3891,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         ),
                         identity_boundary=identity_boundary,
                         prepared_factors=prepared_operation_factors,
+                        collect_diagnostics=collect_diagnostics,
                     )
                 )
             contraction_rows.extend(committed_contractions)

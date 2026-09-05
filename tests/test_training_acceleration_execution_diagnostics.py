@@ -77,6 +77,9 @@ def test_execution_only_training_surface_preserves_complete_update_and_rng() -> 
     execution_only_model = ClearVLAMainlinePolicy(config).train()
     execution_only_model.load_state_dict(initial)
     diagnostic_model.execution_bottom._retain_training_decoder_diagnostics = True
+    diagnostic_model.execution_bottom.decoder._retain_candidate_operation_diagnostics = (
+        True
+    )
 
     diagnostic_engine = _engine(diagnostic_model, config)
     execution_only_engine = _engine(execution_only_model, config)
