@@ -56,6 +56,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--t5-condition", type=Path)
     parser.add_argument("--disable-gradient-spike-audit", action="store_true")
     parser.add_argument("--repeat-batch", action="store_true")
+    parser.add_argument(
+        "--phase-breakdown",
+        action="store_true",
+        help="Synchronize each train-step phase for a diagnostic breakdown.",
+    )
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -177,9 +182,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     phase_values: dict[str, list[float]] = {}
     data_wait_values: list[float] = []
     conversion_values: list[float] = []
-    step_losses: list[float] = []
+    step_losses: list[torch.Tensor] = []
     repeated_batch = None
+    measured_started = 0.0
     for step in range(args.steps):
+        if step == args.warmup:
+            _sync(device)
+            measured_started = time.perf_counter()
         if args.repeat_batch and repeated_batch is not None:
             raw_batch = repeated_batch
             wait_seconds = 0.0
@@ -196,7 +205,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             config=config,
             device=device,
         )
-        _sync(device)
+        if args.phase_breakdown:
+            _sync(device)
         conversion_seconds = time.perf_counter() - convert_started
         phase: dict[str, float] = {}
         handler = None
@@ -209,14 +219,19 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             batch,
             collect_diagnostics=False,
             gradient_spike_handler=handler,
-            phase_timing=phase,
+            phase_timing=phase if args.phase_breakdown else None,
         )
         data_wait_values.append(_finite_float(wait_seconds))
         conversion_values.append(_finite_float(conversion_seconds))
-        step_losses.append(float(result.loss))
+        step_losses.append(result.loss.detach())
         if step >= args.warmup:
             for name, value in phase.items():
                 phase_values.setdefault(name, []).append(_finite_float(value))
+
+    _sync(device)
+    measured_seconds = time.perf_counter() - measured_started
+    measured_steps = int(args.steps - args.warmup)
+    measured_samples = measured_steps * int(config.optimizer.batch_size)
 
     report: dict[str, object] = {
         "schema": "clearvla-training-acceleration-profile-v1",
@@ -229,8 +244,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "warmup": int(args.warmup),
         "gradient_spike_audit": not args.disable_gradient_spike_audit,
         "repeat_batch": bool(args.repeat_batch),
-        "loss_first": step_losses[0],
-        "loss_last": step_losses[-1],
+        "phase_breakdown": bool(args.phase_breakdown),
+        "measured_seconds": _finite_float(measured_seconds),
+        "steps_per_second": float(measured_steps / max(measured_seconds, 1e-8)),
+        "samples_per_second": float(measured_samples / max(measured_seconds, 1e-8)),
+        "loss_first": float(step_losses[0]),
+        "loss_last": float(step_losses[-1]),
         "data_wait_seconds": _summary(data_wait_values[args.warmup :]),
         "batch_conversion_seconds": _summary(conversion_values[args.warmup :]),
         "phases_seconds": {
