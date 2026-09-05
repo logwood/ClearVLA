@@ -281,11 +281,11 @@ class NestedLowRankContractionBank(nn.Module):
             # A true topology-level bypass: identity warm-up must not pay for
             # QR/projection work or expose contraction parameters to the main
             # loss through a numerically cancelling graph.
-            one_rows = torch.ones(batch, device=base_update.device, dtype=torch.float32)
-            zero_rows = torch.zeros_like(one_rows)
-            rank = torch.as_tensor(float(self.rank), device=base_update.device, dtype=torch.float32)
             if not collect_diagnostics:
                 return base_update, {}
+            one_rows = torch.ones(batch, device=base_update.device, dtype=torch.float32)
+            zero_rows = torch.zeros_like(one_rows)
+            rank = base_update.new_full((), float(self.rank), dtype=torch.float32)
             metrics = {
                 "depth_ratio": one_rows.mean(),
                 "depth_ratio_min": one_rows.amin(),

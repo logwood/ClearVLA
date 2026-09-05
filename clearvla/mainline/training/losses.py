@@ -836,12 +836,17 @@ def execution_value_terms(
         candidate_dim=2,
     )
     valid_field = valid[..., None, None].expand_as(predicted)
-    component_weight = (
-        predicted.new_tensor([1.0, 0.0])
-        if calvin_binary
-        else predicted.new_tensor([float(codec.arm_dim), 1.0])
-        / float(codec.arm_dim + 1)
-    )
+    if calvin_binary:
+        component_weight = torch.stack(
+            (predicted.new_ones(()), predicted.new_zeros(()))
+        )
+    else:
+        component_weight = torch.stack(
+            (
+                predicted.new_full((), float(codec.arm_dim)),
+                predicted.new_ones(()),
+            )
+        ) / float(codec.arm_dim + 1)
     physical_weight = valid_field.float() * component_weight[None, None, None, None]
     active = valid.float().sum(dim=2) > 1.0
     active_float = active.float()

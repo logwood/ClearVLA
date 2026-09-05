@@ -3942,20 +3942,22 @@ class LateRawDetailPolicyReader(nn.Module):
         updated = trajectory + update
         if not collect_diagnostics:
             return updated, {
-                "flow_jepa_p1_query_rows": trajectory.new_tensor(
-                    float(horizon * address_basis), dtype=torch.float32
+                "flow_jepa_p1_query_rows": trajectory.new_full(
+                    (), float(horizon * address_basis), dtype=torch.float32
                 ),
-                "flow_jepa_p2_query_rows": trajectory.new_tensor(
-                    float(horizon * basis), dtype=torch.float32
+                "flow_jepa_p2_query_rows": trajectory.new_full(
+                    (), float(horizon * basis), dtype=torch.float32
                 ),
-                "flow_jepa_p1_query_chunk": trajectory.new_tensor(
-                    float(chunk), dtype=torch.float32
+                "flow_jepa_p1_query_chunk": trajectory.new_full(
+                    (), float(chunk), dtype=torch.float32
                 ),
-                "flow_jepa_p1_shared_factual": trajectory.new_tensor(
+                "flow_jepa_p1_shared_factual": trajectory.new_full(
+                    (),
                     float(self.utility_precision_mainline),
                     dtype=torch.float32,
                 ),
-                "flow_jepa_shared_factual_glimpse_bank": trajectory.new_tensor(
+                "flow_jepa_shared_factual_glimpse_bank": trajectory.new_full(
+                    (),
                     float(self.shared_factual_glimpse_bank),
                     dtype=torch.float32,
                 ),

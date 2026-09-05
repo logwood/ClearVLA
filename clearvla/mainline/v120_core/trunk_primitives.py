@@ -922,8 +922,8 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
             normalized, denominator = variance_floored_centered_norm(
                 value, self.normalization_floor
             )
-            gain = normalized.new_tensor(
-                1.0 / self.normalization_floor, dtype=torch.float32
+            gain = normalized.new_full(
+                (), 1.0 / self.normalization_floor, dtype=torch.float32
             )
             if module.elementwise_affine:
                 if module.weight is None or module.bias is None:
@@ -1665,8 +1665,8 @@ class ControlledResidualLatentDynamics(nn.Module):
             "rollout_delta_norm": delta_norm,
             "rollout_base_norm": base_norm,
             "rollout_decomposition_expansion_ratio": expansion_ratio,
-            "rollout_base_is_fixed_zero": base_norm.new_tensor(
-                float(self.base_mode == "fixed_zero")
+            "rollout_base_is_fixed_zero": base_norm.new_full(
+                (), float(self.base_mode == "fixed_zero")
             ),
             "rollout_delta_gain": self.delta_gain.detach().float().abs(),
         }

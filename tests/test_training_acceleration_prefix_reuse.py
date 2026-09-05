@@ -293,6 +293,59 @@ def test_terminal_candidate_velocity_reuse_preserves_training_update() -> None:
             )
 
 
+def test_static_neutral_owner_preserves_complete_training_update() -> None:
+    """A known decision owner can bypass dynamic grouping without semantic drift."""
+
+    config = _config()
+    torch.manual_seed(9148)
+    reference = ClearVLAMainlinePolicy(config).train()
+    initial = copy.deepcopy(reference.state_dict())
+    optimized = ClearVLAMainlinePolicy(config).train()
+    optimized.load_state_dict(initial)
+    for model in (reference, optimized):
+        model.execution_bottom.decoder._training_candidate_prefix_reuse = True
+    optimized.execution_bottom.decoder._static_neutral_owner = True
+
+    reference_engine = _engine(reference, config)
+    optimized_engine = _engine(optimized, config)
+    batch = _batch(config, batch=2)
+    torch.manual_seed(9152)
+    reference_result = reference_engine.train_step(batch, collect_diagnostics=False)
+    torch.manual_seed(9152)
+    optimized_result = optimized_engine.train_step(batch, collect_diagnostics=False)
+
+    torch.testing.assert_close(
+        optimized_result.loss,
+        reference_result.loss,
+        rtol=2e-5,
+        atol=2e-7,
+    )
+    for (reference_name, reference_parameter), (
+        optimized_name,
+        optimized_parameter,
+    ) in zip(
+        reference.named_parameters(), optimized.named_parameters(), strict=True
+    ):
+        assert optimized_name == reference_name
+        torch.testing.assert_close(
+            optimized_parameter,
+            reference_parameter,
+            rtol=2e-5,
+            atol=2e-7,
+            msg=reference_name,
+        )
+        if reference_parameter.grad is None or optimized_parameter.grad is None:
+            assert reference_parameter.grad is optimized_parameter.grad
+        else:
+            torch.testing.assert_close(
+                optimized_parameter.grad,
+                reference_parameter.grad,
+                rtol=2e-5,
+                atol=2e-7,
+                msg=f"gradient: {reference_name}",
+            )
+
+
 def test_prepared_controller_source_lanes_preserve_forward_values() -> None:
     config = _config()
     torch.manual_seed(9120)

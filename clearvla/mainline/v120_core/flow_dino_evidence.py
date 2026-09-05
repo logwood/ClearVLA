@@ -704,10 +704,11 @@ def _smooth_bound_flow_to_image(flow: Tensor) -> tuple[Tensor, Tensor]:
         device=flow.device,
         dtype=torch.float32,
     )
-    maximum = flow.new_tensor(
-        (float(max(int(width) - 1, 0)), float(max(int(height) - 1, 0))),
-        dtype=torch.float32,
-    )[None, :, None, None]
+    # The bottom-right coordinate is exactly ``[width-1, height-1]``.  Reuse
+    # that already device-resident value instead of constructing the same
+    # constant through a CPU-to-CUDA scalar copy, which is illegal inside a
+    # CUDA graph capture and redundant in eager execution.
+    maximum = base[:1, :, -1:, -1:]
     positive_limit = (maximum - base).clamp_min(0.0)
     negative_limit = base.clamp_min(0.0)
     proposal = flow.float()
@@ -735,9 +736,17 @@ def _normalize_flow_evidence(flow: Tensor) -> Tensor:
         raise ValueError("flow evidence must have a two-channel displacement axis")
     height = int(flow.shape[-2])
     width = int(flow.shape[-1])
-    scale = flow.new_tensor(
-        (float(max(width - 1, 1)), float(max(height - 1, 1))),
-        dtype=torch.float32,
+    width_scale = float(max(width - 1, 1))
+    height_scale = float(max(height - 1, 1))
+    scale = (
+        flow.new_full((2,), width_scale, dtype=torch.float32)
+        if width == height
+        else torch.stack(
+            (
+                flow.new_full((), width_scale, dtype=torch.float32),
+                flow.new_full((), height_scale, dtype=torch.float32),
+            )
+        )
     )
     view = (1,) * (flow.ndim - 3) + (2, 1, 1)
     return flow.float() / scale.reshape(view)
@@ -768,7 +777,7 @@ def _zero_preserving_variance_std(
     """Finite-slope ``sqrt(v + eps^2) - eps`` with exact zero value."""
 
     variance_f = variance.float().clamp_min(0.0)
-    epsilon_f = variance_f.new_tensor(float(epsilon)).clamp_min(1.0e-12)
+    epsilon_f = variance_f.new_full((), float(epsilon)).clamp_min(1.0e-12)
     root = torch.sqrt(variance_f + epsilon_f.square())
     return variance_f / (root + epsilon_f)
 
@@ -781,7 +790,7 @@ def _zero_preserving_variance_std_gain(
     """Analytic Jacobian magnitude of the live variance-to-std map."""
 
     variance_f = variance.float().clamp_min(0.0)
-    epsilon_f = variance_f.new_tensor(float(epsilon)).clamp_min(1.0e-12)
+    epsilon_f = variance_f.new_full((), float(epsilon)).clamp_min(1.0e-12)
     return 0.5 / torch.sqrt(variance_f + epsilon_f.square())
 
 
@@ -2227,10 +2236,14 @@ class _RawPyramidFlow(nn.Module):
             "flow_jepa_refinement_sequence_loss": sequence_loss,
         }
         metrics = {
-            "flow_jepa_raw_high_grid_size": forward.new_tensor(float(forward.shape[-1])),
-            "flow_jepa_raw_mid_grid_size": forward.new_tensor(float(mid_forward.shape[-1])),
-            "flow_jepa_raw_coarse_grid_size": forward.new_tensor(
-                float(coarse_shape[-1])
+            "flow_jepa_raw_high_grid_size": forward.new_full(
+                (), float(forward.shape[-1])
+            ),
+            "flow_jepa_raw_mid_grid_size": forward.new_full(
+                (), float(mid_forward.shape[-1])
+            ),
+            "flow_jepa_raw_coarse_grid_size": forward.new_full(
+                (), float(coarse_shape[-1])
             ),
             "flow_jepa_raw_flow_magnitude": _stable_vector_norm(
                 forward, dim=1
@@ -2276,8 +2289,8 @@ class _RawPyramidFlow(nn.Module):
                 visibility_transition_width_min
             ),
             "flow_jepa_visibility_gain_bound_max": visibility_gain_bound_max,
-            "flow_jepa_complete_numerical_contract": forward.new_tensor(
-                float(self.complete_numerical_contract), dtype=torch.float32
+            "flow_jepa_complete_numerical_contract": forward.new_full(
+                (), float(self.complete_numerical_contract), dtype=torch.float32
             ),
             "flow_jepa_correlation_feature_rms_min": torch.minimum(
                 joined_mid.correlation_feature_rms_min,
@@ -2304,11 +2317,11 @@ class _RawPyramidFlow(nn.Module):
             "flow_jepa_raw_observable_motion_fraction": observable_motion.float()
             .mean()
             .detach(),
-            "flow_jepa_zero_flow_guard": forward.new_tensor(
-                float(self.zero_flow_guard), dtype=torch.float32
+            "flow_jepa_zero_flow_guard": forward.new_full(
+                (), float(self.zero_flow_guard), dtype=torch.float32
             ),
-            "flow_jepa_bounded_flow_coordinates": forward.new_tensor(
-                float(self.bounded_coordinates), dtype=torch.float32
+            "flow_jepa_bounded_flow_coordinates": forward.new_full(
+                (), float(self.bounded_coordinates), dtype=torch.float32
             ),
             "flow_jepa_raw_image_enabled": forward.new_ones((), dtype=torch.float32),
         }
@@ -3912,7 +3925,10 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             off_diagonal = ~torch.eye(
                 self.slots, device=pair_distance.device, dtype=torch.bool
             )[None]
-            slot_distance = pair_distance[off_diagonal.expand_as(pair_distance)].mean()
+            distance_mask = off_diagonal.expand_as(pair_distance)
+            slot_distance = (
+                pair_distance * distance_mask.to(dtype=pair_distance.dtype)
+            ).sum() / distance_mask.sum().clamp_min(1)
             # Center separation alone can miss two broad posteriors that have
             # the same expectation but retain different hypotheses.  Measure
             # the full categorical posterior with a bounded Hellinger
@@ -3931,9 +3947,11 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             slot_posterior_distance = (
                 1.0 - slot_affinity.clamp(0.0, 1.0)
             ).clamp_min(0.0).sqrt()
-            slot_posterior_distance = slot_posterior_distance[
-                off_diagonal.expand_as(slot_posterior_distance)
-            ].mean()
+            posterior_mask = off_diagonal.expand_as(slot_posterior_distance)
+            slot_posterior_distance = (
+                slot_posterior_distance
+                * posterior_mask.to(dtype=slot_posterior_distance.dtype)
+            ).sum() / posterior_mask.sum().clamp_min(1)
         else:
             slot_distance = coarse_centers.new_zeros(())
             slot_posterior_distance = coarse_centers.new_zeros(())
@@ -4037,11 +4055,11 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
         )
         metrics = {
             "flow_jepa_address_lattice_enabled": coarse_centers.new_ones(()),
-            "flow_jepa_address_slot_count": coarse_centers.new_tensor(
-                float(self.slots)
+            "flow_jepa_address_slot_count": coarse_centers.new_full(
+                (), float(self.slots)
             ),
-            "flow_jepa_address_fine_candidates_per_slot": coarse_centers.new_tensor(
-                float(offsets.shape[0])
+            "flow_jepa_address_fine_candidates_per_slot": coarse_centers.new_full(
+                (), float(offsets.shape[0])
             ),
             "flow_jepa_address_coarse_entropy": coarse_entropy.mean().detach(),
             "flow_jepa_address_coarse_max": coarse_probability.max(
@@ -4081,8 +4099,8 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             "flow_jepa_address_source_raw_pair_cosine": (
                 raw_pair_cosine_mean.detach()
             ),
-            "flow_jepa_coordinate_typed_raw_detail": coarse_centers.new_tensor(
-                float(self.coordinate_typed_raw_detail), dtype=torch.float32
+            "flow_jepa_coordinate_typed_raw_detail": coarse_centers.new_full(
+                (), float(self.coordinate_typed_raw_detail), dtype=torch.float32
             ),
             "flow_jepa_literal_rgb_chart_rms": (
                 literal_rgb_chart.detach().float().square().mean().sqrt()
@@ -4090,11 +4108,11 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
                 else coarse_centers.new_zeros((), dtype=torch.float32)
             ),
             "flow_jepa_address_flow_prior_scale": prior_scale.detach(),
-            "flow_jepa_address_flow_prior_floor": coarse_centers.new_tensor(
-                self.flow_prior_floor
+            "flow_jepa_address_flow_prior_floor": coarse_centers.new_full(
+                (), self.flow_prior_floor
             ),
-            "flow_jepa_address_flow_prior_floor_sigma": coarse_centers.new_tensor(
-                floor_sigma
+            "flow_jepa_address_flow_prior_floor_sigma": coarse_centers.new_full(
+                (), floor_sigma
             ),
             "flow_jepa_address_flow_prior_floor_logit_span": (
                 floor_flow_bias.amax(dim=-1) - floor_flow_bias.amin(dim=-1)
@@ -8558,6 +8576,17 @@ class FlowDINOEvidenceEncoder(nn.Module):
         self.mask_block = int(config.flow_jepa_mask_block_size)
         self.motion_mask_fraction = float(config.flow_jepa_motion_mask_fraction)
         self.history_offsets = tuple(int(value) for value in config.flow_jepa_history_offsets)
+        self.register_buffer(
+            "history_pair_dt",
+            torch.tensor(
+                [
+                    self.history_offsets[index + 1] - self.history_offsets[index]
+                    for index in range(len(self.history_offsets) - 1)
+                ],
+                dtype=torch.float32,
+            )[None, :, None, None, None, None],
+            persistent=False,
+        )
         self.window_offsets = tuple(
             int(value) for value in config.flow_jepa_effective_window_offsets
         )
@@ -9753,14 +9782,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
         content_selector = content_selector + identity + self.evidence_type[:, 0:1].to(
             device=visual.device, dtype=content_selector.dtype
         )[:, :, None, None, None]
-        pair_dt = torch.as_tensor(
-            [
-                self.history_offsets[index + 1] - self.history_offsets[index]
-                for index in range(pair_count)
-            ],
-            device=visual.device,
-            dtype=torch.float32,
-        )[None, :, None, None, None, None]
+        pair_dt = self.history_pair_dt.to(device=visual.device, dtype=torch.float32)
         # Geometry stays in native/grid units for address compilation and
         # diagnostics.  The learned motion K/V lane receives a
         # resolution-independent coordinate in [-1,1], with confidence,
@@ -9847,16 +9869,17 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 context_dropout[:, -1].float().mean().detach()
             ),
             "flow_jepa_future_target_fraction": future_mask.float().mean().detach(),
-            "flow_jepa_predictive_change_contract": selector.new_tensor(
-                float(self.predictive_change_contract), dtype=torch.float32
+            "flow_jepa_predictive_change_contract": selector.new_full(
+                (), float(self.predictive_change_contract), dtype=torch.float32
             ),
-            "flow_jepa_early_raw_mask_before_mixing": selector.new_tensor(
-                float(self.predictive_change_contract), dtype=torch.float32
+            "flow_jepa_early_raw_mask_before_mixing": selector.new_full(
+                (), float(self.predictive_change_contract), dtype=torch.float32
             ),
-            "flow_jepa_future_absolute_dino_seed": selector.new_tensor(
-                float(not self.predictive_change_contract), dtype=torch.float32
+            "flow_jepa_future_absolute_dino_seed": selector.new_full(
+                (), float(not self.predictive_change_contract), dtype=torch.float32
             ),
-            "flow_jepa_context_target_mask_aligned": selector.new_tensor(
+            "flow_jepa_context_target_mask_aligned": selector.new_full(
+                (),
                 float(
                     self.predictive_change_contract
                     and (
@@ -9867,10 +9890,11 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 ),
                 dtype=torch.float32,
             ),
-            "flow_jepa_future_shared_spatial_mask": selector.new_tensor(
-                float(self.predictive_change_contract), dtype=torch.float32
+            "flow_jepa_future_shared_spatial_mask": selector.new_full(
+                (), float(self.predictive_change_contract), dtype=torch.float32
             ),
-            "flow_jepa_deploy_context_unmasked": selector.new_tensor(
+            "flow_jepa_deploy_context_unmasked": selector.new_full(
+                (),
                 float(
                     self.predictive_change_contract
                     and not self.training
@@ -9879,23 +9903,31 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 ),
                 dtype=torch.float32,
             ),
-            "flow_jepa_evidence_token_count": selector.new_tensor(float(selector.shape[1])).float(),
-            "flow_jepa_horizon_min": selector.new_tensor(float(self.window_offsets[0])).float(),
-            "flow_jepa_horizon_max": selector.new_tensor(float(self.window_offsets[-1])).float(),
-            "flow_jepa_horizon_count": selector.new_tensor(float(len(self.window_offsets))).float(),
-            "flow_jepa_coarse_grid_size": selector.new_tensor(float(grid)).float(),
-            "flow_jepa_native_grid_size": selector.new_tensor(
-                float(round(float(visual.shape[3]) ** 0.5))
+            "flow_jepa_evidence_token_count": selector.new_full(
+                (), float(selector.shape[1])
+            ).float(),
+            "flow_jepa_horizon_min": selector.new_full(
+                (), float(self.window_offsets[0])
+            ).float(),
+            "flow_jepa_horizon_max": selector.new_full(
+                (), float(self.window_offsets[-1])
+            ).float(),
+            "flow_jepa_horizon_count": selector.new_full(
+                (), float(len(self.window_offsets))
+            ).float(),
+            "flow_jepa_coarse_grid_size": selector.new_full((), float(grid)).float(),
+            "flow_jepa_native_grid_size": selector.new_full(
+                (), float(round(float(visual.shape[3]) ** 0.5))
             ).float(),
             "flow_jepa_role_hierarchy": selector.new_ones((), dtype=torch.float32),
-            "flow_jepa_grounding_block_count": selector.new_tensor(
-                float(self.config.flow_jepa_grounding_blocks)
+            "flow_jepa_grounding_block_count": selector.new_full(
+                (), float(self.config.flow_jepa_grounding_blocks)
             ).float(),
-            "flow_jepa_world_block_count": selector.new_tensor(
-                float(self.config.flow_jepa_world_blocks)
+            "flow_jepa_world_block_count": selector.new_full(
+                (), float(self.config.flow_jepa_world_blocks)
             ).float(),
-            "flow_jepa_policy_block_count": selector.new_tensor(
-                float(self.config.flow_jepa_policy_blocks)
+            "flow_jepa_policy_block_count": selector.new_full(
+                (), float(self.config.flow_jepa_policy_blocks)
             ).float(),
             "flow_jepa_late_bottleneck": selector.new_ones((), dtype=torch.float32),
         }
@@ -10188,7 +10220,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 # [-1,1] literal chart and cannot reveal a JEPA-masked cell.
                 current_rgb_for_address = torch.where(
                     current_rgb_mask,
-                    current_rgb_for_address.new_tensor(0.5),
+                    current_rgb_for_address.new_full((), 0.5),
                     current_rgb_for_address,
                 )
             address_bank, lattice_metrics = self.soft_address_compiler(
@@ -10305,7 +10337,8 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 "flow_jepa_raw_detail_action_independent_compile": source.new_ones(
                     (), dtype=torch.float32
                 ),
-                "flow_jepa_raw_detail_token_count": source.new_tensor(
+                "flow_jepa_raw_detail_token_count": source.new_full(
+                    (),
                     float(
                         self.cameras
                         * grid
@@ -10315,8 +10348,8 @@ class FlowDINOEvidenceEncoder(nn.Module):
                     ),
                     dtype=torch.float32,
                 ),
-                "flow_jepa_refined_evidence_token_count": source.new_tensor(
-                    float(pack.selector_tokens.shape[1]), dtype=torch.float32
+                "flow_jepa_refined_evidence_token_count": source.new_full(
+                    (), float(pack.selector_tokens.shape[1]), dtype=torch.float32
                 ),
                 "flow_jepa_grounding_refinement": source.new_ones(
                     (), dtype=torch.float32
@@ -10924,14 +10957,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
             device=content_selector.device, dtype=content_selector.dtype
         )[:, :, None, None, None]
 
-        pair_dt = torch.as_tensor(
-            [
-                self.history_offsets[index + 1] - self.history_offsets[index]
-                for index in range(pair_count)
-            ],
-            device=visual.device,
-            dtype=torch.float32,
-        )[None, :, None, None, None, None]
+        pair_dt = self.history_pair_dt.to(device=visual.device, dtype=torch.float32)
         fine_flow_u = unflatten(fine_flow_forward)
         fine_grid_u = unflatten(fine_grid_forward)
         fine_confidence_u = unflatten(fine_confidence)
@@ -11172,14 +11198,9 @@ class FlowDINOEvidenceEncoder(nn.Module):
         )[:, :, None, None, None]
         content_values = content_value
 
-        pair_dt = torch.as_tensor(
-            [
-                self.history_offsets[index + 1] - self.history_offsets[index]
-                for index in range(pair_count)
-            ],
-            device=flow_forward.device,
-            dtype=torch.float32,
-        )[None, :, None, None, None, None]
+        pair_dt = self.history_pair_dt.to(
+            device=flow_forward.device, dtype=torch.float32
+        )
         flow_xy = flow_forward.permute(0, 1, 2, 4, 5, 3).float()
         motion_raw = torch.cat(
             (

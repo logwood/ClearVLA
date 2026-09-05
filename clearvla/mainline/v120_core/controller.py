@@ -276,7 +276,12 @@ class NativeExecutionValueReader(nn.Module):
                 if tuple(block_index.shape) != (batch,):
                     raise ValueError("value-reader block index must be an int or [B]")
                 block_index = block_index.to(device=action_tokens.device, dtype=torch.long)
-                if bool(((block_index < 0) | (block_index >= self.block_count)).any()):
+                validate_values = block_index.device.type != "cuda" or not (
+                    torch.cuda.is_current_stream_capturing()
+                )
+                if validate_values and bool(
+                    ((block_index < 0) | (block_index >= self.block_count)).any()
+                ):
                     raise ValueError("value-reader block index is outside its repertoire")
                 block = block_identity.index_select(0, block_index)
                 block = block[:, None]
@@ -296,7 +301,10 @@ class NativeExecutionValueReader(nn.Module):
             candidate_block_index = candidate_block_index.to(
                 device=action_tokens.device, dtype=torch.long
             )
-            if bool(
+            validate_values = candidate_block_index.device.type != "cuda" or not (
+                torch.cuda.is_current_stream_capturing()
+            )
+            if validate_values and bool(
                 ((candidate_block_index < 0) | (candidate_block_index > self.block_count)).any()
             ):
                 raise ValueError("candidate block ids are outside the controller repertoire")
@@ -312,7 +320,10 @@ class NativeExecutionValueReader(nn.Module):
             candidate_repeat_index = candidate_repeat_index.to(
                 device=action_tokens.device, dtype=torch.long
             )
-            if bool(
+            validate_values = candidate_repeat_index.device.type != "cuda" or not (
+                torch.cuda.is_current_stream_capturing()
+            )
+            if validate_values and bool(
                 ((candidate_repeat_index < 0) | (candidate_repeat_index >= self.max_dwell)).any()
             ):
                 raise ValueError("candidate repeat ids are outside the reader repertoire")
@@ -806,7 +817,12 @@ class EvidenceExecutionController(nn.Module):
             if tuple(block_index.shape) != (batch,):
                 raise ValueError("controller block_index must be an int or [B]")
             block_index = block_index.to(device=state.device, dtype=torch.long)
-            if bool(((block_index < 0) | (block_index >= self.block_count)).any()):
+            validate_values = block_index.device.type != "cuda" or not (
+                torch.cuda.is_current_stream_capturing()
+            )
+            if validate_values and bool(
+                ((block_index < 0) | (block_index >= self.block_count)).any()
+            ):
                 raise ValueError("block_index is outside the native controller repertoire")
             capacity_ratio = capacity_ratios.gather(1, block_index[:, None]).squeeze(1)
         else:

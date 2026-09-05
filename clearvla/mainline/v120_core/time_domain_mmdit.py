@@ -680,7 +680,7 @@ class TimeDomainMMDiTBlock(nn.Module):
         if isinstance(value, Tensor):
             scale = value.to(device=reference.device, dtype=reference.dtype)
         else:
-            scale = reference.new_tensor(float(value))
+            scale = reference.new_full((), float(value))
         if scale.ndim == 0:
             return scale
         if scale.ndim == 1 and int(scale.shape[0]) == int(reference.shape[0]):
@@ -1091,6 +1091,29 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             self.max_dwell = 1
         if self.max_dwell < 1:
             raise ValueError("native evidence max dwell must be positive")
+        candidate_blocks_template = torch.arange(depth, dtype=torch.long).repeat_interleave(
+            self.max_dwell
+        )
+        candidate_repeats_template = torch.arange(
+            self.max_dwell, dtype=torch.long
+        ).repeat(depth)
+        if self.identity_candidate_enabled:
+            candidate_blocks_template = torch.cat(
+                (candidate_blocks_template, torch.tensor([depth], dtype=torch.long))
+            )
+            candidate_repeats_template = torch.cat(
+                (candidate_repeats_template, torch.zeros(1, dtype=torch.long))
+            )
+        self.register_buffer(
+            "_candidate_blocks_template",
+            candidate_blocks_template,
+            persistent=False,
+        )
+        self.register_buffer(
+            "_candidate_repeats_template",
+            candidate_repeats_template,
+            persistent=False,
+        )
         host_rng_state = torch.get_rng_state()
         sidecar_generator = torch.Generator(device="cpu")
         sidecar_generator.manual_seed((int(torch.initial_seed()) ^ 0x92E7A11) % (2**63 - 1))
@@ -1302,8 +1325,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 "execution value field must be [B,candidate,horizon,2]"
             )
         arm_dim = max(int(arm_dim), 1)
-        component_weight = value_field.new_tensor([float(arm_dim), 1.0]) / float(arm_dim + 1)
-        return (value_field * component_weight).sum(dim=-1).mean(dim=-1)
+        weighted = value_field[..., 0] * float(arm_dim) + value_field[..., 1]
+        return (weighted / float(arm_dim + 1)).mean(dim=-1)
 
     @staticmethod
     def _select_execution_candidate(
@@ -1397,7 +1420,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             lane_routed.append(routed_lane)
             lane_route_metrics.append(routed_lane_metrics)
         routed = torch.stack(lane_routed, dim=0).sum(dim=0)
-        scale = routed.new_tensor(
+        scale = routed.new_full(
+            (),
             float(
                 getattr(
                     self.config,
@@ -1878,7 +1902,12 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         batch = int(action.shape[0])
         if tuple(block_index.shape) != (batch,) or tuple(repeat_count.shape) != (batch,):
             raise ValueError("selected native block and repeat count must be [B]")
-        if bool(((repeat_count < 1) | (repeat_count > self.max_dwell)).any()):
+        validate_values = repeat_count.device.type != "cuda" or not (
+            torch.cuda.is_current_stream_capturing()
+        )
+        if validate_values and bool(
+            ((repeat_count < 1) | (repeat_count > self.max_dwell)).any()
+        ):
             raise ValueError("selected native repeat count is outside the dwell repertoire")
         result = action
         metric_rows: list[dict[str, Tensor]] = []
@@ -2925,17 +2954,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         policy owns, but it never changes the meaning or size of the chart.
         """
 
-        blocks = torch.arange(len(self.blocks), device=device, dtype=torch.long)
-        repeats = torch.arange(self.max_dwell, device=device, dtype=torch.long)
-        candidate_blocks = blocks.repeat_interleave(self.max_dwell)
-        candidate_repeats = repeats.repeat(len(self.blocks))
-        if self.identity_candidate_enabled:
-            candidate_blocks = torch.cat(
-                [candidate_blocks, candidate_blocks.new_tensor([len(self.blocks)])]
-            )
-            candidate_repeats = torch.cat(
-                [candidate_repeats, candidate_repeats.new_zeros(1)]
-            )
+        candidate_blocks = self._candidate_blocks_template.to(device=device)
+        candidate_repeats = self._candidate_repeats_template.to(device=device)
         return (
             candidate_blocks[None].expand(int(batch), -1),
             candidate_repeats[None].expand(int(batch), -1),
@@ -3063,15 +3083,16 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         conditional_entropy = scores.new_zeros(batch)
         skip_probability = scores.new_zeros(batch)
         terminal_probability = scores.new_zeros(batch)
-        terminal_candidate = operation_candidate_count
         prior_weight = float(
             getattr(self.config, "latent_cvae_mmdit_terminal_prior_weight", 0.25)
         )
         for pointer_index in range(depth):
-            local_indices = list(range(pointer_index * dwell, operation_candidate_count))
-            local_indices.append(terminal_candidate)
-            index = torch.as_tensor(local_indices, device=scores.device, dtype=torch.long)
-            local_logits = -scores.index_select(1, index) / temperature
+            # The legal candidates are one contiguous suffix: every operation
+            # from the current block onward, followed by the terminal row.
+            # Expressing that static topology as a slice avoids constructing a
+            # CUDA index tensor inside every captured training step.
+            local_start = pointer_index * dwell
+            local_logits = -scores[:, local_start:] / temperature
             local_logits[:, -1] = local_logits[:, -1] + math.log(prior_weight)
             if terminal_logit_bias is not None:
                 local_logits[:, -1] = (
@@ -3080,35 +3101,35 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             local_probabilities = torch.softmax(local_logits, dim=-1)
             source_mass = policy_pointer_mass[:, pointer_index]
             contribution = source_mass[:, None] * local_probabilities
-            global_probabilities = global_probabilities.index_add(1, index, contribution)
+            global_probabilities = global_probabilities + F.pad(
+                contribution, (local_start, 0)
+            )
             conditional_entropy = conditional_entropy + source_mass * (
                 -(
                     local_probabilities
                     * local_probabilities.clamp_min(1e-8).log()
                 ).sum(dim=-1)
             )
-            local_blocks = torch.div(index[:-1], dwell, rounding_mode="floor")
-            skip_mask = local_blocks > pointer_index
-            if bool(skip_mask.any()):
-                skip_probability = skip_probability + contribution[:, :-1][:, skip_mask].sum(dim=-1)
+            # The first ``dwell`` operation rows belong to the current block;
+            # all later non-terminal rows skip at least one block.
+            skip_probability = skip_probability + contribution[:, dwell:-1].sum(
+                dim=-1
+            )
             terminal_probability = terminal_probability + contribution[:, -1]
 
         terminal_mass = policy_pointer_mass[:, depth]
-        next_pointer_mass = scores.new_zeros(batch, depth + 1)
-        terminal_index = torch.as_tensor([depth], device=scores.device)
-        next_pointer_mass = next_pointer_mass.index_add(
-            1, terminal_index, (terminal_mass + terminal_probability)[:, None]
+        block_mass = global_probabilities[:, :operation_candidate_count].reshape(
+            batch, depth, dwell
+        ).sum(dim=-1)
+        terminal_total = terminal_mass + terminal_probability
+        next_pointer_mass = torch.cat(
+            (
+                scores.new_zeros(batch, 1),
+                block_mass[:, :-1],
+                (terminal_total + block_mass[:, -1])[:, None],
+            ),
+            dim=1,
         )
-        for block_index in range(depth):
-            block_mass = global_probabilities[
-                :, block_index * dwell : (block_index + 1) * dwell
-            ].sum(dim=-1)
-            destination = torch.as_tensor(
-                [block_index + 1], device=scores.device
-            )
-            next_pointer_mass = next_pointer_mass.index_add(
-                1, destination, block_mass[:, None]
-            )
         return (
             global_probabilities,
             next_pointer_mass,
@@ -3131,11 +3152,17 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             raise ValueError("hard execution value field and mask are misaligned")
         if tuple(neutral_index.shape) != (batch,):
             raise ValueError("hard execution neutral indices must be [B]")
-        safe_mask = candidate_mask.bool().clone()
+        safe_mask = candidate_mask.bool()
         inactive = ~safe_mask.any(dim=-1)
-        if bool(inactive.any()):
-            safe_mask[inactive, 0] = True
-            neutral_index = torch.where(inactive, torch.zeros_like(neutral_index), neutral_index)
+        # An inactive row receives a deterministic candidate-zero sentinel.
+        # Keep this tensorized: converting ``inactive.any()`` to a host bool
+        # synchronizes CUDA and is illegal while recording a CUDA graph.
+        safe_mask = safe_mask | F.pad(
+            inactive[:, None], (0, candidate_count - 1), value=False
+        )
+        neutral_index = torch.where(
+            inactive, torch.zeros_like(neutral_index), neutral_index
+        )
         learned = self._soft_execution_probabilities(
             value_field, safe_mask, candidate_blocks
         )
@@ -3385,27 +3412,51 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
 
             if soft_contract:
                 pointer_before = pointer_mass
-                neutral_block = torch.full(
-                    (batch,), decision_index, device=device, dtype=torch.long
-                )
-                neutral_repeat = torch.ones(batch, device=device, dtype=torch.long)
-                neutral_action, neutral_metrics, neutral_contractions = (
-                    self._apply_selected_native_operations(
-                        block_input,
-                        block_index=neutral_block,
-                        repeat_count=neutral_repeat,
-                        evidence_tokens=evidence_tokens,
-                        evidence_value_tokens=evidence_value_tokens,
-                        global_condition=global_condition,
-                        evidence_key_bias=evidence_bias,
-                        evidence_scale=evidence_scale,
-                        capacity_ratios=capacity_ratios,
-                        identity_boundary=identity_boundary,
-                        prepared_factors=prepared_factors,
-                        prepared_block_contexts=prepared_block_contexts,
-                        collect_diagnostics=collect_diagnostics,
+                if bool(getattr(self, "_static_neutral_owner", False)):
+                    neutral_action, neutral_metrics, neutral_contractions = (
+                        self._apply_owned_native_operation(
+                            block_input,
+                            owner=decision_index,
+                            evidence_tokens=evidence_tokens,
+                            evidence_value_tokens=evidence_value_tokens,
+                            global_condition=global_condition,
+                            evidence_key_bias=evidence_bias,
+                            evidence_scale=evidence_scale,
+                            capacity_ratios=capacity_ratios,
+                            identity_boundary=identity_boundary,
+                            prepared_factors=prepared_factors,
+                            prepared_static=(
+                                None
+                                if prepared_block_contexts is None
+                                else prepared_block_contexts[decision_index]
+                            ),
+                            collect_diagnostics=collect_diagnostics,
+                        )
                     )
-                )
+                else:
+                    neutral_block = torch.full(
+                        (batch,), decision_index, device=device, dtype=torch.long
+                    )
+                    neutral_repeat = torch.ones(
+                        batch, device=device, dtype=torch.long
+                    )
+                    neutral_action, neutral_metrics, neutral_contractions = (
+                        self._apply_selected_native_operations(
+                            block_input,
+                            block_index=neutral_block,
+                            repeat_count=neutral_repeat,
+                            evidence_tokens=evidence_tokens,
+                            evidence_value_tokens=evidence_value_tokens,
+                            global_condition=global_condition,
+                            evidence_key_bias=evidence_bias,
+                            evidence_scale=evidence_scale,
+                            capacity_ratios=capacity_ratios,
+                            identity_boundary=identity_boundary,
+                            prepared_factors=prepared_factors,
+                            prepared_block_contexts=prepared_block_contexts,
+                            collect_diagnostics=collect_diagnostics,
+                        )
+                    )
                 contraction_rows.extend(neutral_contractions)
                 # Candidate evaluation is a differentiable chart, not a source
                 # of extra dropout noise or host RNG drift.  The neutral branch
@@ -4273,7 +4324,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     collect_diagnostics=collect_diagnostics,
                 )
             )
-            policy_workspace_scale = action.new_tensor(
+            policy_workspace_scale = action.new_full(
+                (),
                 float(
                     getattr(
                         self.config,
@@ -4298,7 +4350,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 # Both branches have a complete path.  Fixed variance-preserving
                 # fusion removes the arbitrary 0.10 bottleneck without adding a
                 # learned amplitude gate that could collapse either source.
-                policy_workspace_scale = action.new_tensor(math.sqrt(0.5))
+                policy_workspace_scale = action.new_full((), math.sqrt(0.5))
                 workspace_direction = F.layer_norm(
                     lifted_policy.float(),
                     (int(lifted_policy.shape[-1]),),
@@ -4308,8 +4360,9 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 policy_workspace_update = policy_workspace_scale * workspace_direction
                 action = policy_workspace_scale * action + policy_workspace_update
             else:
-                policy_workspace_scale = action.new_tensor(
-                    float(getattr(self.config, "flow_jepa_policy_workspace_scale", 0.10))
+                policy_workspace_scale = action.new_full(
+                    (),
+                    float(getattr(self.config, "flow_jepa_policy_workspace_scale", 0.10)),
                 )
                 policy_workspace_update = policy_workspace_scale * lifted_policy
                 action = action + policy_workspace_update
