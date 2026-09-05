@@ -66,6 +66,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Synchronize each train-step phase for a diagnostic breakdown.",
     )
+    parser.add_argument(
+        "--compile-mmdit-blocks",
+        action="store_true",
+        help="Compile only the stable TimeDomainMMDiT action blocks with Inductor.",
+    )
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -141,6 +146,26 @@ def _finite_float(value: Any) -> float:
     return result
 
 
+def _compile_mmdit_blocks(model: ClearVLAMainlinePolicy) -> float:
+    """Compile the repeated action blocks without wrapping the parent module."""
+
+    started = time.perf_counter()
+    decoder = model.execution_bottom.decoder
+    blocks = tuple(decoder.blocks)
+    if not blocks:
+        raise RuntimeError("cannot compile an empty MMDiT block list")
+    for block in blocks:
+        # Assigning the callable on the instance keeps the original Module
+        # tree, parameter names, optimizer ownership and checkpoint ABI intact.
+        block.forward = torch.compile(  # type: ignore[method-assign]
+            block.forward,
+            dynamic=False,
+            fullgraph=False,
+            mode="reduce-overhead",
+        )
+    return time.perf_counter() - started
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     if args.steps <= 0 or args.warmup < 0 or args.warmup >= args.steps:
         raise ValueError("require steps > warmup >= 0")
@@ -159,6 +184,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     iterator = iter(loader)
     model = ClearVLAMainlinePolicy(config).to(device)
+    compile_seconds = 0.0
+    if args.compile_mmdit_blocks:
+        compile_seconds = _compile_mmdit_blocks(model)
     optimizer, _ownership = build_optimizer(model, config)
     schedule = WarmupCosineSchedule(
         optimizer,
@@ -252,6 +280,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "postglobal_audit": bool(args.retain_postglobal_audit),
         "repeat_batch": bool(args.repeat_batch),
         "phase_breakdown": bool(args.phase_breakdown),
+        "compile_mmdit_blocks": bool(args.compile_mmdit_blocks),
+        "compile_setup_seconds": _finite_float(compile_seconds),
         "measured_seconds": _finite_float(measured_seconds),
         "steps_per_second": float(measured_steps / max(measured_seconds, 1e-8)),
         "samples_per_second": float(measured_samples / max(measured_seconds, 1e-8)),
