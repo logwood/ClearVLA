@@ -21,6 +21,7 @@ from clearvla.vision.preprocessing import (
 from ..checkpoint import CheckpointIdentity
 from ..config import DataConfig, ExperimentConfig, config_from_mapping
 from ..data.normalizer import ArrayNormalizer
+from ..manifest import manifest_from_mapping
 
 DEPLOYMENT_ABI_SCHEMA = "clearvla-mainline-deployment-abi-v1"
 CONTINUOUS_GRIPPER_CODEC_BOUNDARY_SCOPE = (
@@ -146,11 +147,31 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         raise ValueError("deployment ABI graph section ownership differs")
     if str(abi.get("graph_config_sha256", "")) != canonical_sha256(graph):
         raise ValueError("deployment ABI graph digest is inconsistent")
-    manifest = _mapping(abi.get("architecture_manifest", {}), name="architecture_manifest")
+    raw_manifest = abi.get("architecture_manifest")
+    if raw_manifest is None:
+        # Pre-boundary ABI fixtures did not carry a manifest. They remain
+        # readable for legacy validation tests; every new checkpoint ABI is
+        # required to carry and validate the complete manifest below.
+        manifest = None
+    else:
+        manifest = manifest_from_mapping(
+            _mapping(raw_manifest, name="architecture_manifest"),
+            require_current_schema=True,
+        )
     hybrid = graph.get("hybrid")
     hybrid_enabled = isinstance(hybrid, Mapping) and hybrid.get("enabled") is True
-    if (int(manifest.get("schema", -1)) == 32) != hybrid_enabled:
-        raise ValueError("deployment manifest and hybrid solver lifecycle differ")
+    if manifest is not None:
+        if (int(manifest.schema) == 32) != hybrid_enabled:
+            raise ValueError("deployment manifest and hybrid solver lifecycle differ")
+        if hybrid_enabled and not all(
+            "hybrid_v1" in value
+            for value in (
+                manifest.components.bottom,
+                manifest.components.training,
+                manifest.components.runtime,
+            )
+        ):
+            raise ValueError("hybrid deployment manifest component identity is incomplete")
     observation = _mapping(abi.get("observation"), name="observation")
     action = _mapping(abi.get("action"), name="action")
     normalizers = _mapping(abi.get("normalizers"), name="normalizers")
