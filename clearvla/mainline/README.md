@@ -1,228 +1,107 @@
 # ClearVLA independent mainline
 
-`clearvla/mainline/` is the only active capability-named implementation. The
-historical V39 CLI/runtime/trunk and V-numbered launchers are migration or
-comparison references, not runtime parents of this package.
+`clearvla/mainline/` is the only active capability-named implementation.
+V-numbered trainers and launchers are historical comparison material.
 
-The compact architecture source of truth is
-[`docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`](../../docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md).
+Read the [architecture contract](../../docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md)
+for graph semantics, the [issue ledger](../../docs/research/CURRENT_MAINLINE_ISSUES.md)
+for unresolved behavior, and the [handoff](../../docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md)
+for live process state. This file keeps only package boundaries and stable entry
+points.
 
-## Active vertical path
-
-```text
-config / manifest / typed online and training inputs
-  -> three-frame current observation + two learned flows
-  -> Pre-G local chart
-  -> G1/G2/G3 progressive local grounding with an N=49 rematerialization
-  -> one dense global K+null grounding objective
-  -> S public interval carrier + per-type [interval,K,type] relevance
-  -> typed-free coarse physical proposal [B,4,7]
-  -> goal-invariant W(ObjectWorldBelief, PhysicalActionCondition)
-  -> action-tagged four-interval CandidateWorld
-  -> P1 one cached protected-detail read over all progressive candidates
-  -> per-ODE V120 P1 policy block
-  -> P2 bounded consequence read
-  -> P3 temporal/state-change optional lanes plus protected carriers
-  -> shared V120 action/context canvas seed
-  -> true P1/P2 terminal layer contracts
-  -> per-ODE noisy-action controlled transition
-  -> V120 Evidence MMDiT / execution value / capacity bottom
-```
-
-Training adds one no-grad future-teacher branch. Future evidence has a separate
-typed input and cannot enter the online/deployment API.
-
-The 24-row executed-history future proposal is an auxiliary supervised
-prediction in the recovered V120 object path. Its separate 4-recent +
-3-summary history encoding remains the observable executed-history condition
-used by the shared V120 canvas seed; it is not a P1 or controlled-action alias.
-
-## Package boundaries
+## Package boundary
 
 ```text
-clearvla/mainline/
-  config.py          active nested configuration
-  manifest.py        compact architecture identity
-  interfaces.py      disjoint online/training inputs
-  model/             observation, G/S/W/P, transition and bottom
-  training/          objectives, optimizer and engine
-  runtime/           sampling, evaluation, logs and checkpoints
-  train.py           direct entry point
+config.py / manifest.py       configuration and serialized identity
+interfaces.py                 disjoint online and future-supervision inputs
+model/components.py           registered component hierarchy
+model/policy.py               static/dynamic composition root
+model/observation_*           current RGB/DINO history and G evidence
+model/intent.py               S intent owner
+model/dynamics.py             W future-world owner
+model/v120_p1.py / compiler.py P1, P2 and P3 evidence
+model/transition.py           controlled-transition consumer
+model/restored_bottom.py      V120 execution bottom
+model/action_codec.py         canonical physical action field
+training/                     objectives, optimizer and engine
+runtime/                      sampling, evaluation, logging and checkpoints
+train.py                      direct entry point
 ```
 
-This package must not import the legacy trainer/runtime/trunk or a
-`current_vXXX` launcher. Audited low-level numerical primitives are extracted
-under `v120_core/`; their callers still own explicit typed boundaries.
-
-## Change policy
-
-The recovery reference is V120 `long`, commit
-`0b92d359a2889a0a1b1eba256007c00ccbc54f3c`.
-
-- Preserve active V120 tensor semantics, source ordering, residual positions,
-  dynamic frequency and loss ownership.
-- Repair a behavior only when source semantics are self-contradictory or the
-  source/log evidence is recorded before the change.
-- Remove inactive ancestry and diagnostic aliases only when they cannot alter
-  the active graph.
-- Show the old/new path before any change to input statistics, gradient
-  geometry, attention competition, counterfactual or source bank.
-- Do not use gates, quotas, entropy targets, artificial gradients or extra
-  loss weight to hide an unresolved connection problem.
-
-## Active identity
-
-```text
-capability:    object_intent_dynamics_323
-schema:        30 (Schema28-core recovery ABI)
-topology:      3-2-3
-intervals:     4-8 / 8-16 / 16-32 / 32-48
-parameters:    measured and written per module at startup; never hard-coded
-```
-
-The local recovery overlay deliberately changes the top/training/runtime ABI
-identity while keeping the manifest schema at 30. Pre-recovery Schema29/30
-checkpoints are not exact-resume or migration inputs; any future run must start
-fresh with a new output directory and the complete current identity.
-
-The recovery path keeps W's compact physical-action API, but restores the
-Schema28 core semantics for the disputed S/W/camera/gripper boundaries. Training
-encodes the observation once, runs one formal velocity forward, and composes
-the loss once; it does not estimate a detached endpoint or rebuild W during
-training. Deployment remains the existing bounded two-pass correction: a
-proposal ODE, one W rebuild from its decoded proposal, then a refined ODE.
-Goal, S values and coarse hidden tokens remain absent from W's API, and P2
-continues to consume an atomic CandidateWorld whose action-condition identity
-matches the cache.
-
-Deployment and validation use one bounded outer correction: a complete ODE
-proposal pass, one W rebuild from the decoded 24-row proposal, then a second
-complete ODE pass from identical initial noise. The final action may differ
-from the action that conditioned W, so interval/delta mismatch is logged as a
-residual and is not labeled a fixed point. Training encodes observation/G/S/P1
-once and sends the sole action/future loss through the formal dynamic pass.
-
-S uses the Schema28 fixed K/type mean and RMS contracts; typed W uses the
-action-carrier modulation; camera coordinate/transport reduction uses
-validity-times-support; and continuous gripper encode/decode/loss/evaluation
-share one profile-owned causal boundary. Pen/CALVIN use current action-state;
-RDT uses the previous executed command. Arm deltas and the network-facing
-`PhysicalActionCondition` remain current-state anchored. Event masks select
-rows only and never reanchor deployment. Near-one capacity control remains
-FP32 through contraction. No event gate, capacity quota, new loss weight or
-extra clipping stage is added.
+The package must not import legacy trainers, runtimes or `current_vXXX`
+launchers. Numerical primitives under `v120_core/` remain subordinate to
+the typed boundaries above.
 
 ## Runtime contract
 
-- Observation/G/S, P1's N=49 detail read and the 512-row transition source
-  build once per observation. Initial W builds once and only W is rebuilt once
-  between the two deployment passes.
-- In each pass the shared seed, dynamic P1, P2/P3, terminal contracts,
-  ControlledTransition and bottom run at `[0,.2,.4,.6,.8]`; `t=1` supplies the
-  retained motion head and cannot update action.
-- Both passes share exact initial physical noise. Decoded gripper events are
-  evaluation-only behavior of the second integrated physical action; there is
-  no event classifier in runtime.
-- Execution candidate/value charts are mandatory for every train/eval loss
-  forward, even after the optional diagnostic-batch budget is exhausted; they
-  stay disabled during both ordinary deployment ODE passes.
-- Teacher builds once per training batch and zero times in deployment.
-- Training has one formal velocity call and one loss composition per batch; the
-  detached endpoint self-conditioning lifecycle is historical only.
-- P1 retains N=49 until each action/object query chooses a candidate; chunks
-  are checkpointed rather than materializing the complete backward graph.
-- Batch-eight production process peak must remain at or below 22 GiB.
+- Online input: three causal RGB/DINO frames, state, executed history and
+  language. Future evidence is training-only.
+- Training: one online encode, one formal velocity forward and one loss
+  composition.
+- Deployment: one proposal ODE, one decoded-proposal W rebuild, and one
+  refined ODE from the same initial noise. This is a bounded correction, not a
+  fixed point.
+- Shared core: seven-dimensional action -> `[B,24,18]` physical field
+  with arm value, arm adjacent-difference and continuous-gripper branches.
+- Outlet semantics stay in adapters: Pen continuous, RDT-8 right-arm/two-view,
+  CALVIN relative-command sampler/W adaptation plus isolated binary command.
+- Optional B-spine adds a bottom-internal view beside the unchanged raw lift;
+  it is not the default codec or an accepted behavior upgrade.
 
-## Run
+## Lifecycle vocabulary
 
-The Pen launcher uses the established server defaults:
+| Mode | Meaning |
+|---|---|
+| `new_training` | New model/optimizer state and empty output directory |
+| `exact_resume` | Continuation accepted by the serialized resume contract |
+| `validation_replay` | Read-only checkpoint evaluation; no optimizer/RNG restore or writes |
+| `component_initialization` | Bounded construction/smoke; not training evidence |
 
-```text
-data:          /data/liang.zhang/dataset/grab_pen_single/grab_pen_single
-decoded cache: /data/senwang/data/cache_336
-DINO cache:    /data/senwang/data/dinov2_cache_336
-T5:            /data/senwang/checkpoint/grasp_pen_embed.pt
-```
+An output-directory guard is filesystem safety, not architecture identity.
+Exact resume requires matching architecture/component ABI, data, optimizer and
+continuation contracts.
 
-Pen smoke:
+## Stable entry points
 
-```bash
-RUN_TAG=schema30_pen_smoke_$(date +%Y%m%d_%H%M%S)
-CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR="runs/${RUN_TAG}" \
-nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
-```
-
-Pen formal batch-eight run:
+Resolve config and dataset identity before launch; do not infer them from a
+run tag. Use a fresh output directory for every formal run.
 
 ```bash
-RUN_TAG=schema30_pen_b8_$(date +%Y%m%d_%H%M%S)
-CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR="runs/${RUN_TAG}" \
-nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
+# Pen baseline smoke
+CUDA_VISIBLE_DEVICES=0 OUT_DIR=runs/pen_smoke bash scripts/smoke_mainline.sh
+
+# Pen baseline training
+CUDA_VISIBLE_DEVICES=0 OUT_DIR=runs/pen_formal bash scripts/train_mainline.sh
+
+# RDT-8 smoke/training
+CUDA_VISIBLE_DEVICES=1 OUT_DIR=runs/rdt8_smoke bash scripts/smoke_rdt_multitask.sh
+CUDA_VISIBLE_DEVICES=1 OUT_DIR=runs/rdt8_formal bash scripts/train_rdt_multitask.sh
+
+# Read-only checkpoint validation
+CHECKPOINT=/path/to/checkpoint bash scripts/validate_mainline_checkpoint.sh
 ```
 
-The provisional Schema31 B-spine-0 candidate uses the dedicated Pen config.
-Run its smoke and formal job from fresh output directories; omitting
-`MAINLINE_CONFIG` would silently select the Schema30 baseline instead:
+The opt-in B-spine candidate requires
+`MAINLINE_CONFIG=configs/mainline/object_intent_dynamics_323_pen_bspine0.json`;
+omitting it selects the baseline. Override data/cache/T5 paths, batch size or
+workers only when the resolved environment differs, and serialize the result.
+
+## Audit and change policy
+
+Audit a run directory, not a copied console tail:
 
 ```bash
-RUN_TAG=schema31_pen_bspine0_smoke_$(date +%Y%m%d_%H%M%S)
-CUDA_VISIBLE_DEVICES=0 \
-MAINLINE_CONFIG=configs/mainline/object_intent_dynamics_323_pen_bspine0.json \
-MAINLINE_BATCH_SIZE=8 \
-OUT_DIR="runs/${RUN_TAG}" \
-nohup bash scripts/smoke_mainline.sh > "${RUN_TAG}.log" 2>&1 &
-
-RUN_TAG=schema31_pen_bspine0_b8_$(date +%Y%m%d_%H%M%S)
-CUDA_VISIBLE_DEVICES=0 \
-MAINLINE_CONFIG=configs/mainline/object_intent_dynamics_323_pen_bspine0.json \
-MAINLINE_BATCH_SIZE=8 \
-OUT_DIR="runs/${RUN_TAG}" \
-nohup bash scripts/train_mainline.sh > "${RUN_TAG}.log" 2>&1 &
+python -m clearvla.tools.audit_policy_logs runs/<run> --format text
 ```
 
-RDT-8 uses the bounded two-camera/right-arm adapter and its separate launcher:
+A complete curve outranks a best checkpoint. Smoke, interface checks and
+checkpoint round-trip do not establish learned behavior.
 
-```bash
-RUN_TAG=schema30_rdt8_smoke_$(date +%Y%m%d_%H%M%S)
-CUDA_VISIBLE_DEVICES=1 \
-OUT_DIR="runs/${RUN_TAG}" \
-nohup bash scripts/smoke_rdt_multitask.sh > "${RUN_TAG}.log" 2>&1 &
+Preserve typed axes, owner boundaries, call counts and the shared action field
+unless a separately accepted decision changes them. Record producer-to-consumer
+evidence before a semantic repair. Keep outlet conversion at the outlet
+boundary, and do not use gains, quotas, artificial gradients, clipping or extra
+loss weight to hide an unresolved connection.
 
-RUN_TAG=schema30_rdt8_b8_$(date +%Y%m%d_%H%M%S)
-CUDA_VISIBLE_DEVICES=1 \
-OUT_DIR="runs/${RUN_TAG}" \
-nohup bash scripts/train_rdt_multitask.sh > "${RUN_TAG}.log" 2>&1 &
-```
-
-Each fresh output directory must be absent or empty. Override
-`DATA_ROOT`, `CACHE_DIR`, `DINO_CACHE_DIR`, `T5_CONDITION_PATH`,
-`MAINLINE_BATCH_SIZE` or `MAINLINE_NUM_WORKERS` only when the server layout
-actually differs.
-
-Audit a run directory, not a copied console tail or a best checkpoint:
-
-```bash
-python -m clearvla.tools.audit_policy_logs \
-  runs/schema30_pen_b8_<timestamp> --format text
-```
-
-For final recovery assessment, add a verified local V120 baseline with
-`--recovery-baseline /path/to/v120_long.log --require-recovery`. Cross-version
-claims also require a matching split and action-normalizer fingerprint.
-
-## Release gates and current state
-
-The gate list below is the checklist for a future fresh recovery run. The
-historical Schema30 gates were run before the recovery overlay and do not
-certify this dirty working tree; no recovery anchor has been launched.
-
-- full finite forward/backward and unique optimizer ownership;
-- teacher isolation, two matched ODE passes and one W-rebuild frequency checks;
-- physical-action/goal invariance, stale-world rejection and final-residual checks;
-- typed axis, object permutation, P2 bounds and neutral consequence checks;
-- fresh CUDA BF16 smoke and batch-eight memory measurement;
-- complete eight-epoch comparison against V120, including action/native,
-  first/tail, horizon bands, arm/gripper, event/motion, G/S/W/P and gradients;
-- no early divergence or later rebound hidden by aggregate/best RMSE.
+Live PIDs and current release claims belong in the handoff and issue ledger,
+not in this package README.
