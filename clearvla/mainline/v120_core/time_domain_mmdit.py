@@ -1896,6 +1896,127 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         )
         return action_stack, candidate_velocity, mask, operation_rows.mean()
 
+    def _run_differentiable_native_candidates_prefix_reuse(
+        self,
+        action: Tensor,
+        *,
+        baseline_velocity: Tensor,
+        candidate_blocks: Tensor,
+        candidate_repeats: Tensor,
+        candidate_mask: Tensor,
+        evidence_tokens: Tensor,
+        evidence_value_tokens: Tensor,
+        global_condition: Tensor,
+        evidence_key_bias: Tensor,
+        evidence_scale: float | Tensor,
+        capacity_ratios: Tensor | None,
+        identity_boundary: bool,
+        prepared_factors: tuple[Tensor, ...] | None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Build the attached training chart by reusing each dwell prefix.
+
+        The canonical chart contains ``(block, dwell)`` candidates.  For a
+        fixed block, dwell=2 is the exact continuation of dwell=1; the old
+        implementation recomputed the first operation independently for both
+        candidates.  This path evaluates one causal chain per block and
+        publishes every intermediate prefix.  It preserves the candidate
+        values and mask while reducing the number of native operations from
+        ``sum(1..dwell)`` to ``dwell`` per block.  The caller enables it only
+        for controlled parity/throughput experiments until its numerical gate
+        is accepted.
+        """
+
+        batch, candidate_count = candidate_blocks.shape
+        if tuple(candidate_repeats.shape) != (batch, candidate_count):
+            raise ValueError("candidate repeat ids must match candidate blocks")
+        if tuple(candidate_mask.shape) != (batch, candidate_count):
+            raise ValueError("candidate mask must match candidate blocks")
+        mask = candidate_mask.to(device=action.device, dtype=torch.bool)
+        operation_mask = mask & (candidate_blocks < len(self.blocks))
+        operation_rows = (
+            operation_mask.float() * (candidate_repeats.detach().float() + 1.0)
+        )
+        candidate_actions: list[Tensor] = [
+            action.clone() for _ in range(candidate_count)
+        ]
+        dwell = int(self.max_dwell)
+        for owner in range(len(self.blocks)):
+            first_candidate = owner * dwell
+            if first_candidate >= candidate_count:
+                break
+            rows = torch.nonzero(
+                operation_mask[:, first_candidate], as_tuple=False
+            ).flatten()
+            if int(rows.numel()) == 0:
+                continue
+            # The global chart is block-major/dwell-major; all dwell entries
+            # for one owner have the same legal rows and owner id.  Fail fast
+            # if a future caller supplies a non-canonical chart.
+            for repeat_index in range(dwell):
+                candidate_index = first_candidate + repeat_index
+                if candidate_index >= candidate_count:
+                    break
+                expected_rows = torch.nonzero(
+                    operation_mask[:, candidate_index], as_tuple=False
+                ).flatten()
+                if not torch.equal(rows, expected_rows):
+                    raise ValueError(
+                        "prefix reuse requires a canonical block/dwell candidate chart"
+                    )
+                owner_ids = candidate_blocks.index_select(0, rows)[:, candidate_index]
+                if not bool((owner_ids == owner).all()):
+                    raise ValueError("prefix reuse candidate owner ids are inconsistent")
+
+            selected_evidence = evidence_tokens.index_select(0, rows)
+            selected_evidence_value = evidence_value_tokens.index_select(0, rows)
+            selected_condition = global_condition.index_select(0, rows)
+            selected_capacity = (
+                None
+                if capacity_ratios is None
+                else capacity_ratios.index_select(0, rows)
+            )
+            selected_scale = self._select_scale_rows(
+                evidence_scale, rows, batch=batch
+            )
+            current = action.index_select(0, rows)
+            one_repeat = torch.ones_like(rows)
+            for repeat_index in range(dwell):
+                current, _, _ = self._apply_selected_native_operations(
+                    current,
+                    block_index=torch.full_like(rows, owner),
+                    repeat_count=one_repeat,
+                    evidence_tokens=selected_evidence,
+                    evidence_value_tokens=selected_evidence_value,
+                    global_condition=selected_condition,
+                    evidence_key_bias=evidence_key_bias,
+                    evidence_scale=selected_scale,
+                    capacity_ratios=selected_capacity,
+                    identity_boundary=identity_boundary,
+                    prepared_factors=prepared_factors,
+                )
+                candidate_index = first_candidate + repeat_index
+                candidate_actions[candidate_index] = candidate_actions[
+                    candidate_index
+                ].index_copy(0, rows, current)
+        action_stack = torch.stack(candidate_actions, dim=1)
+        candidate_velocity = self.terminal_controller.predict_candidate_velocity(
+            self.terminal_controller.normalize(
+                action_stack.reshape(-1, *action_stack.shape[2:])
+            )
+        ).reshape(
+            batch,
+            candidate_count,
+            self.horizon,
+            int(self.config.physical_action_dim),
+        )
+        terminal = candidate_blocks == len(self.blocks)
+        candidate_velocity = torch.where(
+            terminal[:, :, None, None],
+            baseline_velocity[:, None].to(dtype=candidate_velocity.dtype),
+            candidate_velocity,
+        )
+        return action_stack, candidate_velocity, mask, operation_rows.mean()
+
     def _run_deployment_candidate_prefix_reuse(
         self,
         action: Tensor,
@@ -2580,8 +2701,19 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                             (candidate_blocks >= decision_index)
                             & (candidate_blocks <= depth)
                         )
+                        candidate_runner = (
+                            self._run_differentiable_native_candidates_prefix_reuse
+                            if bool(
+                                getattr(
+                                    self,
+                                    "_training_candidate_prefix_reuse",
+                                    False,
+                                )
+                            )
+                            else self._run_differentiable_native_candidates
+                        )
                         candidate_action_stack, candidate_velocity_stack, probe_mask, probe_operation_count = (
-                            self._run_differentiable_native_candidates(
+                            candidate_runner(
                                 block_input,
                                 baseline_velocity=prefix_velocity_rows[-1],
                                 candidate_blocks=candidate_blocks,

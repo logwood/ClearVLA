@@ -73,6 +73,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Compile only the stable TimeDomainMMDiT action blocks with Inductor.",
     )
     parser.add_argument(
+        "--candidate-prefix-reuse",
+        action="store_true",
+        help="Use the experimental attached training candidate-prefix chart.",
+    )
+    parser.add_argument(
         "--torch-profile-output",
         type=Path,
         help="Write a one-step torch.profiler operator table to this text file.",
@@ -190,6 +195,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     iterator = iter(loader)
     model = ClearVLAMainlinePolicy(config).to(device)
+    if args.candidate_prefix_reuse:
+        model.execution_bottom.decoder._training_candidate_prefix_reuse = True
     compile_seconds = 0.0
     if args.compile_mmdit_blocks:
         compile_seconds = _compile_mmdit_blocks(model)
@@ -307,6 +314,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "repeat_batch": bool(args.repeat_batch),
         "phase_breakdown": bool(args.phase_breakdown),
         "compile_mmdit_blocks": bool(args.compile_mmdit_blocks),
+        "candidate_prefix_reuse": bool(args.candidate_prefix_reuse),
         "compile_setup_seconds": _finite_float(compile_seconds),
         "measured_seconds": _finite_float(measured_seconds),
         "steps_per_second": float(measured_steps / max(measured_seconds, 1e-8)),
