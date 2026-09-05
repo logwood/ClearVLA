@@ -150,6 +150,13 @@ operation diagnostics still fall back to the reference prefix implementation.
 No throughput benefit is claimed before the same-GPU measurement; the first
 implementation deliberately remains a retained checkpoint because it stacks
 the live parameter bank inside every decision and may therefore be slower.
+The follow-up moves that stack and the deterministic-probe module inventory to
+one construction per formal decoder forward.  A separate opt-in terminal-row
+probe also omits the velocity-head evaluation for the identity candidate whose
+result is immediately replaced by the already-computed prefix velocity.  Its
+CPU loss, gradients and update pass the `2e-5` relative / `2e-7` absolute gate;
+it remains a distinct flag because changing the GEMM batch shape may alter
+BF16 rounding and its speed contribution is expected to be small.
 
 The same commit adds an opt-in execution-controller source-lane reuse probe
 (`--reuse-prepared-controller-context`).  It shares the projected

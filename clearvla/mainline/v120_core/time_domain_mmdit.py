@@ -2113,15 +2113,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 candidate_action = candidate_action.index_copy(0, rows, updated)
             candidate_actions.append(candidate_action)
         action_stack = torch.stack(candidate_actions, dim=1)
-        candidate_velocity = self.terminal_controller.predict_candidate_velocity(
-            self.terminal_controller.normalize(
-                action_stack.reshape(-1, *action_stack.shape[2:])
-            )
-        ).reshape(
-            batch,
-            candidate_count,
-            self.horizon,
-            int(self.config.physical_action_dim),
+        candidate_velocity = self._predict_candidate_velocity_chart(
+            action_stack,
+            baseline_velocity=baseline_velocity,
+            candidate_blocks=candidate_blocks,
         )
         # The terminal/no-op candidate is semantically the already committed
         # prefix. Re-evaluating the same action through a differently shaped
@@ -2129,12 +2124,6 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         # so the value target no longer compared an exact identity candidate.
         # Reuse the existing prefix tensor: this changes no operation candidate
         # and preserves its original gradient path exactly.
-        terminal = candidate_blocks == len(self.blocks)
-        candidate_velocity = torch.where(
-            terminal[:, :, None, None],
-            baseline_velocity[:, None].to(dtype=candidate_velocity.dtype),
-            candidate_velocity,
-        )
         return action_stack, candidate_velocity, mask, operation_rows.mean()
 
     def _prepare_batched_candidate_prefix_bank(
@@ -2250,6 +2239,71 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             states=tuple(states),
             cuda_devices=tuple(sorted(cuda_devices)),
         )
+
+    def _predict_candidate_velocity_chart(
+        self,
+        action_stack: Tensor,
+        *,
+        baseline_velocity: Tensor,
+        candidate_blocks: Tensor,
+    ) -> Tensor:
+        """Read operation candidates and splice the already-owned terminal row.
+
+        The final identity candidate is exactly the committed prefix.  Its
+        velocity is already available as ``baseline_velocity``; running the
+        terminal head again creates a forward graph whose gradient is masked
+        away immediately by the terminal replacement.  The canonical chart is
+        block-major followed by one optional identity row, so the operation
+        prefix can be read as one flat batch and the terminal row appended.
+        """
+
+        batch, candidate_count = candidate_blocks.shape
+        if tuple(action_stack.shape[:2]) != (batch, candidate_count):
+            raise ValueError("candidate action and block charts must align")
+        if not bool(getattr(self, "_reuse_terminal_candidate_velocity", False)):
+            candidate_velocity = self.terminal_controller.predict_candidate_velocity(
+                self.terminal_controller.normalize(
+                    action_stack.reshape(-1, *action_stack.shape[2:])
+                )
+            ).reshape(
+                batch,
+                candidate_count,
+                self.horizon,
+                int(self.config.physical_action_dim),
+            )
+            terminal = candidate_blocks == len(self.blocks)
+            return torch.where(
+                terminal[:, :, None, None],
+                baseline_velocity[:, None].to(dtype=candidate_velocity.dtype),
+                candidate_velocity,
+            )
+        operation_count = min(candidate_count, len(self.blocks) * int(self.max_dwell))
+        if operation_count:
+            operation_actions = action_stack[:, :operation_count]
+            operation_velocity = self.terminal_controller.predict_candidate_velocity(
+                self.terminal_controller.normalize(
+                    operation_actions.reshape(-1, *operation_actions.shape[2:])
+                )
+            ).reshape(
+                int(action_stack.shape[0]),
+                operation_count,
+                self.horizon,
+                int(self.config.physical_action_dim),
+            )
+        else:
+            operation_velocity = action_stack.new_empty(
+                int(action_stack.shape[0]),
+                0,
+                self.horizon,
+                int(self.config.physical_action_dim),
+            )
+        terminal_count = candidate_count - operation_count
+        if terminal_count <= 0:
+            return operation_velocity
+        terminal_velocity = baseline_velocity[:, None].to(
+            dtype=operation_velocity.dtype
+        ).expand(-1, terminal_count, -1, -1)
+        return torch.cat((operation_velocity, terminal_velocity), dim=1)
 
     def _run_differentiable_native_candidates_prefix_reuse(
         self,
@@ -2367,21 +2421,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 candidate_index = first_candidate + repeat_index
                 candidate_actions[candidate_index] = current
         action_stack = torch.stack(candidate_actions, dim=1)
-        candidate_velocity = self.terminal_controller.predict_candidate_velocity(
-            self.terminal_controller.normalize(
-                action_stack.reshape(-1, *action_stack.shape[2:])
-            )
-        ).reshape(
-            batch,
-            candidate_count,
-            self.horizon,
-            int(self.config.physical_action_dim),
-        )
-        terminal = candidate_blocks == len(self.blocks)
-        candidate_velocity = torch.where(
-            terminal[:, :, None, None],
-            baseline_velocity[:, None].to(dtype=candidate_velocity.dtype),
-            candidate_velocity,
+        candidate_velocity = self._predict_candidate_velocity_chart(
+            action_stack,
+            baseline_velocity=baseline_velocity,
+            candidate_blocks=candidate_blocks,
         )
         return action_stack, candidate_velocity, mask, operation_rows.mean()
 
@@ -2656,21 +2699,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 if candidate_index < len(candidate_actions):
                     candidate_actions[candidate_index] = current[owner_offset]
         action_stack = torch.stack(candidate_actions, dim=1)
-        candidate_velocity = self.terminal_controller.predict_candidate_velocity(
-            self.terminal_controller.normalize(
-                action_stack.reshape(-1, *action_stack.shape[2:])
-            )
-        ).reshape(
-            int(action.shape[0]),
-            int(candidate_blocks.shape[1]),
-            self.horizon,
-            int(self.config.physical_action_dim),
-        )
-        terminal = candidate_blocks == len(self.blocks)
-        candidate_velocity = torch.where(
-            terminal[:, :, None, None],
-            baseline_velocity[:, None].to(dtype=candidate_velocity.dtype),
-            candidate_velocity,
+        candidate_velocity = self._predict_candidate_velocity_chart(
+            action_stack,
+            baseline_velocity=baseline_velocity,
+            candidate_blocks=candidate_blocks,
         )
         return action_stack, candidate_velocity, candidate_mask, (
             (candidate_mask & (candidate_blocks < len(self.blocks))).float()
@@ -2814,21 +2846,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 ].index_copy(0, rows, current)
 
         action_stack = torch.stack(candidate_actions, dim=1)
-        candidate_velocity = self.terminal_controller.predict_candidate_velocity(
-            self.terminal_controller.normalize(
-                action_stack.reshape(-1, *action_stack.shape[2:])
-            )
-        ).reshape(
-            batch,
-            candidate_count,
-            self.horizon,
-            int(self.config.physical_action_dim),
-        )
-        terminal = candidate_blocks == depth
-        candidate_velocity = torch.where(
-            terminal[:, :, None, None],
-            baseline_velocity[:, None].to(dtype=candidate_velocity.dtype),
-            candidate_velocity,
+        candidate_velocity = self._predict_candidate_velocity_chart(
+            action_stack,
+            baseline_velocity=baseline_velocity,
+            candidate_blocks=candidate_blocks,
         )
         return action_stack, candidate_velocity, mask, operation_rows.mean()
 
