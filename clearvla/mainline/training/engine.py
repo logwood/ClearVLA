@@ -11,6 +11,7 @@ from torch import Tensor
 
 from ..config import ExperimentConfig
 from ..interfaces import TrainingBatch
+from ..model.component_contracts import legacy_named_parameters
 from ..model.policy import (
     ClearVLAMainlinePolicy,
     OnlinePolicyCache,
@@ -25,7 +26,6 @@ from .gradient_audit import (
 )
 from .losses import LossLedger, compose_losses, sample_flow_matching
 from .optimizer import WarmupCosineSchedule, gradient_diagnostics, parameter_role
-from ..model.component_contracts import legacy_named_parameters, modular_to_legacy_name
 
 _R2_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
     (
@@ -320,6 +320,192 @@ class MainlineTrainingEngine:
                 else gradient.detach().float().square().mean().sqrt()
             )
         return metrics
+
+    @staticmethod
+    def _gradient_probe_vector(
+        gradients: tuple[Tensor | None, ...],
+        parameters: tuple[Tensor, ...],
+    ) -> Tensor:
+        """Materialize a finite FP32 vector while preserving unused owners.
+
+        ``autograd.grad(..., allow_unused=True)`` returns ``None`` for an
+        owner that is not on a selected loss path.  Filling those entries with
+        zeros keeps every probe in the same parameter coordinate system, so a
+        cosine or projection is meaningful and does not silently drop an
+        owner.  This helper never returns a tensor attached to the training
+        graph.
+        """
+
+        if len(gradients) != len(parameters):
+            raise ValueError("gradient probe owner and gradient counts differ")
+        pieces: list[Tensor] = []
+        for parameter, gradient in zip(parameters, gradients, strict=True):
+            if gradient is None:
+                pieces.append(
+                    torch.zeros(
+                        parameter.numel(),
+                        device=parameter.device,
+                        dtype=torch.float32,
+                    )
+                )
+            else:
+                pieces.append(gradient.detach().float().reshape(-1))
+        if not pieces:
+            return torch.zeros(0, dtype=torch.float32)
+        return torch.cat(pieces, dim=0)
+
+    def _bspine_gradient_direction_probe(
+        self,
+        ledger: LossLedger,
+    ) -> dict[str, Tensor]:
+        """Observe training-time arm/gripper pulls on the B-spine owner.
+
+        This is deliberately a diagnostic-only ``autograd.grad`` probe.  It
+        runs before the ordinary ``ledger.total.backward()`` and retains the
+        graph until that backward, so it cannot alter accumulated optimizer
+        gradients, loss weights, parameter ownership or the one-forward
+        training contract.  The two channel probes are the differentiable
+        direct physical-flow terms returned by :func:`action_terms`; the
+        group probes use the actual weighted ledger groups.  They therefore
+        answer different questions and are named separately.
+        """
+
+        execution_bottom = getattr(self.model, "execution_bottom", None)
+        decoder = getattr(execution_bottom, "decoder", None)
+        spine = getattr(decoder, "spine", None)
+        if spine is None:
+            return {}
+        arm_private_reader = getattr(decoder, "arm_private_reader", None)
+        spine_parameters = tuple(
+            parameter for parameter in spine.parameters() if parameter.requires_grad
+        )
+        reader_parameters = tuple(
+            parameter
+            for parameter in (
+                arm_private_reader.parameters()
+                if arm_private_reader is not None
+                else ()
+            )
+            if parameter.requires_grad
+        )
+        parameters = spine_parameters + reader_parameters
+        if not parameters:
+            return {}
+
+        spine_width = sum(parameter.numel() for parameter in spine_parameters)
+
+        def probe(loss: Tensor | None) -> Tensor:
+            if loss is None or not loss.requires_grad:
+                return torch.zeros(
+                    sum(parameter.numel() for parameter in parameters),
+                    device=parameters[0].device,
+                    dtype=torch.float32,
+                )
+            gradients = torch.autograd.grad(
+                loss,
+                parameters,
+                retain_graph=True,
+                create_graph=False,
+                allow_unused=True,
+            )
+            return self._gradient_probe_vector(gradients, parameters)
+
+        def split_owner_vector(value: Tensor) -> tuple[Tensor, Tensor]:
+            return value[:spine_width], value[spine_width:]
+
+        def direction_metrics(
+            prefix: str,
+            arm: Tensor,
+            gripper: Tensor,
+            action_group: Tensor,
+            representation_group: Tensor,
+            execution_group: Tensor,
+        ) -> dict[str, Tensor]:
+            """Summarize one owner coordinate system without mixing owners."""
+
+            arm_norm = torch.linalg.vector_norm(arm)
+            gripper_norm = torch.linalg.vector_norm(gripper)
+            dot = torch.dot(arm, gripper)
+            denominator = (arm_norm * gripper_norm).clamp_min(
+                torch.finfo(torch.float32).tiny
+            )
+            cosine = torch.where(
+                (arm_norm > 0.0) & (gripper_norm > 0.0),
+                dot / denominator,
+                torch.zeros_like(dot),
+            )
+            arm_projection = torch.where(
+                arm_norm > 0.0,
+                dot / arm_norm.square().clamp_min(torch.finfo(torch.float32).tiny),
+                torch.zeros_like(dot),
+            )
+            return {
+                f"gradient_probe_{prefix}_arm_flow_l2": arm_norm.detach(),
+                f"gradient_probe_{prefix}_gripper_flow_l2": gripper_norm.detach(),
+                f"gradient_probe_{prefix}_gripper_to_arm_ratio": torch.where(
+                    arm_norm > 0.0,
+                    gripper_norm / arm_norm.clamp_min(torch.finfo(torch.float32).tiny),
+                    torch.zeros_like(gripper_norm),
+                ).detach(),
+                f"gradient_probe_{prefix}_arm_gripper_cosine": cosine.detach(),
+                f"gradient_probe_{prefix}_gripper_on_arm_projection": (
+                    arm_projection.detach()
+                ),
+                f"gradient_probe_{prefix}_action_group_l2": (
+                    torch.linalg.vector_norm(action_group).detach()
+                ),
+                f"gradient_probe_{prefix}_representation_group_l2": (
+                    torch.linalg.vector_norm(representation_group).detach()
+                ),
+                f"gradient_probe_{prefix}_execution_group_l2": (
+                    torch.linalg.vector_norm(execution_group).detach()
+                ),
+            }
+
+        arm_spine, arm_reader = split_owner_vector(
+            probe(ledger.terms.get("action_arm_flow"))
+        )
+        gripper_spine, gripper_reader = split_owner_vector(
+            probe(ledger.terms.get("action_gripper_flow"))
+        )
+        action_spine, action_reader = split_owner_vector(
+            probe(ledger.groups.get("action"))
+        )
+        representation_spine, representation_reader = split_owner_vector(
+            probe(ledger.groups.get("representation"))
+        )
+        execution_spine, execution_reader = split_owner_vector(
+            probe(ledger.groups.get("execution"))
+        )
+
+        result = {
+            "gradient_probe_bottom_spine_active": parameters[0].new_ones(
+                (), dtype=torch.float32
+            ),
+            **direction_metrics(
+                "bottom_spine",
+                arm_spine,
+                gripper_spine,
+                action_spine,
+                representation_spine,
+                execution_spine,
+            ),
+        }
+        if reader_parameters:
+            result["gradient_probe_bottom_spine_private_reader_active"] = (
+                parameters[0].new_ones((), dtype=torch.float32)
+            )
+            result.update(
+                direction_metrics(
+                    "bottom_spine_private_reader",
+                    arm_reader,
+                    gripper_reader,
+                    action_reader,
+                    representation_reader,
+                    execution_reader,
+                )
+            )
+        return result
 
     def _gradient_lifecycle(
         self,
@@ -704,6 +890,11 @@ class MainlineTrainingEngine:
                 generator=self.train_flow_generator,
                 condition_generator=self.train_condition_generator,
             )
+        if collect_diagnostics:
+            # Keep the joint arm/gripper route intact.  These probes expose
+            # where the real training losses pull the B-spine; they do not
+            # detach, reweight or otherwise participate in the update.
+            metrics.update(self._bspine_gradient_direction_probe(ledger))
         ledger.total.backward()
         gradient_norm, gradient_metrics, gradient_norm_scalar = (
             self._gradient_lifecycle(

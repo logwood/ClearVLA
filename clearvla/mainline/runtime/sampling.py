@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Any, Literal, Mapping
 
 import torch
 from torch import Tensor
+
+from clearvla.action_solvers.flow_solver.spec import ScheduleSpec
 
 from ..config import ExperimentConfig
 from ..interfaces import OnlinePolicyInput
 from ..model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
 from ..model.types import PhysicalActionCondition
+from .flow_schedule import (
+    DeploymentFlowSchedule,
+    legacy_uniform_runtime,
+    resolve_deployment_flow_schedule,
+)
 from .numerics import resolve_compute_dtype
 
 
@@ -27,6 +35,11 @@ class SamplingResult:
     gripper_command_logits: Tensor | None = None
     gripper_command: Tensor | None = None
     continuous_action: Tensor | None = None
+    # Appended defaults preserve positional construction of the historical
+    # result ABI while new samplers always fill the explicit schedule fields.
+    step_sizes: tuple[float, ...] = ()
+    flow_schedule_identity: dict[str, Any] | None = None
+    flow_schedule_pass_role: str = "legacy_unspecified"
 
 
 def _integrate_cache(
@@ -41,6 +54,9 @@ def _integrate_cache(
     static_metrics: dict[str, Tensor] | None = None,
     execution_mode: str = "learned",
     deployment_fastpath: bool = False,
+    schedule: ScheduleSpec,
+    flow_schedule_identity: Mapping[str, Any],
+    pass_role: Literal["proposal", "refined"],
 ) -> SamplingResult:
     """Integrate one already materialized static cache."""
 
@@ -66,13 +82,32 @@ def _integrate_cache(
         value = initial_physical_noise.to(device=device)
     noise = value.clone()
     steps = config.runtime.inference_steps
-    dt = 1.0 / float(steps)
-    # V120 evaluates the vector field at [1,.8,.6,.4,.2] on its
-    # noise-to-clean chart.  The mainline chart is reversed, so the exact
-    # corresponding update nodes are [0,.2,.4,.6,.8], not midpoints.
-    times = torch.arange(steps, device=device, dtype=torch.float32) * dt
+    if schedule.interval_count != steps:
+        raise ValueError(
+            f"{pass_role} schedule has {schedule.interval_count} intervals; "
+            f"runtime requires {steps}"
+        )
+    # Preserve the exact historical expression for the default grid.  This is
+    # intentionally separate from the general boundary-difference path:
+    # subtracting decimal Python boundaries would produce slightly different
+    # scalar values for the third through fifth nominal 0.2 updates.
+    if legacy_uniform_runtime(schedule, steps=steps):
+        legacy_dt = 1.0 / float(steps)
+        step_sizes = (legacy_dt,) * steps
+        # V120 evaluates [1,.8,.6,.4,.2] on its noise-to-clean chart.  The
+        # reversed mainline chart therefore queries [0,.2,.4,.6,.8].
+        times = torch.arange(steps, device=device, dtype=torch.float32) * legacy_dt
+    else:
+        # Schedule validation happens once before the loop on CPU.  The hot
+        # path has no tensor-to-Python finite checks or other host syncs.
+        step_sizes = schedule.step_sizes
+        times = torch.tensor(
+            schedule.query_times,
+            device=device,
+            dtype=torch.float32,
+        )
     dynamic_metrics: dict[str, Tensor] = {}
-    for index in range(steps):
+    for index, step_size in enumerate(step_sizes):
         time = times[index].expand(batch)
         with torch.autocast(
             device_type=device.type,
@@ -87,7 +122,9 @@ def _integrate_cache(
                 deployment_fastpath=deployment_fastpath,
                 collect_diagnostics=collect_diagnostics and index == steps - 1,
             )
-        value = value + dt * output.bottom.physical_velocity.to(dtype=value.dtype)
+        value = value + step_size * output.bottom.physical_velocity.to(
+            dtype=value.dtype
+        )
         if collect_diagnostics and index == steps - 1:
             dynamic_metrics = output.metrics
     # V120 evaluates the retained motion head once more at the clean endpoint.
@@ -132,6 +169,9 @@ def _integrate_cache(
         motion_logits=endpoint_output.bottom.motion_logits.float(),
         initial_physical_noise=noise,
         step_times=times,
+        step_sizes=tuple(float(value) for value in step_sizes),
+        flow_schedule_identity=dict(flow_schedule_identity),
+        flow_schedule_pass_role=pass_role,
         metrics=result_metrics,
         gripper_command_logits=outlet_output.command_logits,
         gripper_command=outlet_output.command,
@@ -150,12 +190,12 @@ def refine_cached_world(
 ) -> tuple[OnlinePolicyCache, dict[str, Tensor]]:
     """Re-materialize W once for the decoded outer proposal.
 
-    The first deployment pass produces a concrete 24-row native proposal.
-    This helper converts that proposal to the canonical four-interval action
-    ABI and rebuilds only W from the cached compact belief.  G, S, P1 and all
-    dense source charts remain untouched.  Callers can then run a second
-    integration with the same initial noise, making the refinement explicit
-    without rerunning W at every ODE node.
+    The first deployment pass produces a concrete 24-row outlet proposal.
+    This helper converts its explicitly normalized W view to the canonical
+    four-interval physical ABI and rebuilds only W from the cached compact
+    belief.  G, S, P1 and all dense source charts remain untouched.  Callers
+    can then run a second integration with the same initial noise, making the
+    refinement explicit without rerunning W at every ODE node.
     """
 
     config.validate()
@@ -164,7 +204,7 @@ def refine_cached_world(
         config.dimensions.action_horizon,
         config.dimensions.action_dim,
     ):
-        raise ValueError("outer proposal action must be [B,24,7]")
+        raise ValueError("outer proposal W action must be [B,24,7]")
     if int(proposal_action.shape[0]) != cache.history.batch:
         raise ValueError("outer proposal action batch does not align with cache")
     runtime_dtype = resolve_compute_dtype(config, dtype)
@@ -204,6 +244,7 @@ def sample_refined_cached_action_with_cache(
     dtype: torch.dtype | None = None,
     execution_mode: str = "learned",
     deployment_fastpath: bool = False,
+    flow_schedule: DeploymentFlowSchedule | Mapping[str, Any] | None = None,
 ) -> tuple[SamplingResult, OnlinePolicyCache]:
     """Run one proposal pass, one W rerun, and one refined pass.
 
@@ -215,6 +256,12 @@ def sample_refined_cached_action_with_cache(
 
     config.validate()
     runtime_dtype = resolve_compute_dtype(config, dtype)
+    resolved_flow_schedule = resolve_deployment_flow_schedule(
+        getattr(config.runtime, "deployment_flow_schedule", None)
+        if flow_schedule is None
+        else flow_schedule
+    )
+    schedule_identity = resolved_flow_schedule.identity
     model.eval()
     proposal = _integrate_cache(
         model,
@@ -226,6 +273,9 @@ def sample_refined_cached_action_with_cache(
         dtype=runtime_dtype,
         execution_mode=execution_mode,
         deployment_fastpath=deployment_fastpath,
+        schedule=resolved_flow_schedule.proposal,
+        flow_schedule_identity=schedule_identity,
+        pass_role="proposal",
     )
     refined_cache, refinement_metrics = refine_cached_world(
         model,
@@ -245,6 +295,9 @@ def sample_refined_cached_action_with_cache(
         dtype=runtime_dtype,
         execution_mode=execution_mode,
         deployment_fastpath=deployment_fastpath,
+        schedule=resolved_flow_schedule.refined,
+        flow_schedule_identity=schedule_identity,
+        pass_role="refined",
     )
     proposal_action = proposal.action.detach().float()
     refined_action = refined.action.detach().float()
@@ -302,6 +355,7 @@ def sample_refined_cached_action(
     dtype: torch.dtype | None = None,
     execution_mode: str = "learned",
     deployment_fastpath: bool = False,
+    flow_schedule: DeploymentFlowSchedule | Mapping[str, Any] | None = None,
 ) -> SamplingResult:
     """Run the bounded outer closure and return only its final sample."""
 
@@ -315,6 +369,7 @@ def sample_refined_cached_action(
         dtype=dtype,
         execution_mode=execution_mode,
         deployment_fastpath=deployment_fastpath,
+        flow_schedule=flow_schedule,
     )
     return result
 
@@ -330,6 +385,7 @@ def sample_action(
     collect_diagnostics: bool = False,
     dtype: torch.dtype | None = None,
     deployment_fastpath: bool = False,
+    flow_schedule: DeploymentFlowSchedule | Mapping[str, Any] | None = None,
 ) -> SamplingResult:
     """Integrate five updates, then evaluate heads at the clean endpoint."""
 
@@ -365,6 +421,7 @@ def sample_action(
         collect_diagnostics=collect_diagnostics,
         dtype=dtype,
         deployment_fastpath=deployment_fastpath,
+        flow_schedule=flow_schedule,
     )
     return replace(result, metrics={**static_metrics, **result.metrics})
 
@@ -381,11 +438,25 @@ def sample_cached_action(
     dtype: torch.dtype | None = None,
     execution_mode: str = "learned",
     deployment_fastpath: bool = False,
+    flow_schedule: DeploymentFlowSchedule | Mapping[str, Any] | None = None,
+    pass_role: Literal["proposal", "refined"] = "refined",
 ) -> SamplingResult:
     """Deploy from a cache already built for another read-only consumer."""
 
     config.validate()
     dtype = resolve_compute_dtype(config, dtype)
+    resolved_flow_schedule = resolve_deployment_flow_schedule(
+        getattr(config.runtime, "deployment_flow_schedule", None)
+        if flow_schedule is None
+        else flow_schedule
+    )
+    if pass_role not in {"proposal", "refined"}:
+        raise ValueError("pass_role must be 'proposal' or 'refined'")
+    schedule = (
+        resolved_flow_schedule.proposal
+        if pass_role == "proposal"
+        else resolved_flow_schedule.refined
+    )
     model.eval()
     return _integrate_cache(
         model,
@@ -397,6 +468,9 @@ def sample_cached_action(
         dtype=dtype,
         execution_mode=execution_mode,
         deployment_fastpath=deployment_fastpath,
+        schedule=schedule,
+        flow_schedule_identity=resolved_flow_schedule.identity,
+        pass_role=pass_role,
     )
 
 

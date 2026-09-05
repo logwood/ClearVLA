@@ -21,6 +21,7 @@ from clearvla.vision.preprocessing import (
 from ..checkpoint import CheckpointIdentity
 from ..config import DataConfig, ExperimentConfig, config_from_mapping
 from ..data.normalizer import ArrayNormalizer
+from .flow_schedule import DeploymentFlowSchedule
 
 DEPLOYMENT_ABI_SCHEMA = "clearvla-mainline-deployment-abi-v1"
 CONTINUOUS_GRIPPER_CODEC_BOUNDARY_SCOPE = (
@@ -52,6 +53,17 @@ def deployment_graph_config(config: ExperimentConfig) -> dict[str, object]:
     return {name: payload[name] for name in _GRAPH_SECTIONS}
 
 
+def deployment_flow_schedule(config: ExperimentConfig) -> DeploymentFlowSchedule:
+    """Resolve the two-pass numerical contract without changing training time."""
+
+    raw = config.runtime.deployment_flow_schedule
+    return (
+        DeploymentFlowSchedule.uniform_five()
+        if raw is None
+        else DeploymentFlowSchedule.from_dict(raw)
+    )
+
+
 def build_deployment_abi(
     config: ExperimentConfig,
     identity: CheckpointIdentity,
@@ -73,6 +85,7 @@ def build_deployment_abi(
     }:
         raise ValueError("deployment data profile lacks a gripper codec boundary")
     graph = deployment_graph_config(config)
+    flow_schedule = deployment_flow_schedule(config).to_dict()
     image_preprocess = PreprocessConfig(
         resize_hw=(int(config.data.cache_side), int(config.data.cache_side)),
         crop_hw=None,
@@ -83,6 +96,8 @@ def build_deployment_abi(
         "architecture_manifest": dict(identity.manifest),
         "graph_config": graph,
         "graph_config_sha256": canonical_sha256(graph),
+        "flow_schedule": flow_schedule,
+        "flow_schedule_sha256": canonical_sha256(flow_schedule),
         "observation": {
             "camera_names": list(config.data.camera_names),
             "visual_offsets": [-8, -4, 0],
@@ -143,6 +158,23 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         raise ValueError("deployment ABI graph section ownership differs")
     if str(abi.get("graph_config_sha256", "")) != canonical_sha256(graph):
         raise ValueError("deployment ABI graph digest is inconsistent")
+    runtime = _mapping(graph.get("runtime"), name="graph_config.runtime")
+    configured_schedule = runtime.get("deployment_flow_schedule")
+    expected_schedule = (
+        DeploymentFlowSchedule.uniform_five()
+        if configured_schedule is None
+        else DeploymentFlowSchedule.from_dict(configured_schedule)
+    ).to_dict()
+    if "flow_schedule" not in abi and "flow_schedule_sha256" not in abi:
+        if configured_schedule is not None:
+            raise ValueError("explicit flow schedule requires deployment identity")
+    else:
+        stored_schedule = _mapping(abi.get("flow_schedule"), name="flow_schedule")
+        DeploymentFlowSchedule.from_dict(stored_schedule)
+        if stored_schedule != expected_schedule:
+            raise ValueError("deployment flow schedule differs from graph runtime")
+        if abi.get("flow_schedule_sha256") != canonical_sha256(stored_schedule):
+            raise ValueError("deployment flow schedule digest is inconsistent")
     observation = _mapping(abi.get("observation"), name="observation")
     action = _mapping(abi.get("action"), name="action")
     normalizers = _mapping(abi.get("normalizers"), name="normalizers")

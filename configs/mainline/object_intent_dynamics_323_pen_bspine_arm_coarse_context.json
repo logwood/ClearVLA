@@ -1,0 +1,63 @@
+{
+  "data": {
+    "output_dir": "runs/schema31_pen_bspine_arm_coarse_context"
+  },
+  "bottom": {
+    "bspine_implementation": "fixed_bspline_arm_coarse_context_v1",
+    "bspine_degree": 3,
+    "bspine_control_points": 12,
+    "bspine_basis_digest": "f4d169cdeab9606dfacb92abbbc71bc3dbb7a4abefb8ef5244bc411670caab34",
+    "bspine_spec_fingerprint": "bac76409d2f430da47930d4d851457de011bcf6809ad968590748ab8565026f7",
+    "bspine_action_group_mask": "11000"
+  },
+  "runtime": {
+    "deployment_flow_schedule": {
+      "deployment_flow_schedule": "clearvla.mainline.deployment_flow_schedule",
+      "schema_version": 1,
+      "method": "euler",
+      "endpoint_policy": "external_t1_head",
+      "initial_state_policy": "reuse_exact_initial",
+      "cache_boundary_policy": "one_w_rebuild_no_history",
+      "proposal": {
+        "schedule": "clearvla.flow_schedule",
+        "schema_version": 1,
+        "kind": "custom",
+        "boundaries": [
+          0,
+          0.1337480609952844,
+          0.3181082915068203,
+          0.528067042076036,
+          0.7565932872025407,
+          1
+        ],
+        "parameters": {
+          "candidate_id": "Q5",
+          "exponent": 1.25,
+          "formula": "t_i=(i/5)^exponent",
+          "label": "same-nfe-power-five",
+          "steps": 5
+        }
+      },
+      "refined": {
+        "schedule": "clearvla.flow_schedule",
+        "schema_version": 1,
+        "kind": "custom",
+        "boundaries": [
+          0,
+          0.1337480609952844,
+          0.3181082915068203,
+          0.528067042076036,
+          0.7565932872025407,
+          1
+        ],
+        "parameters": {
+          "candidate_id": "Q5",
+          "exponent": 1.25,
+          "formula": "t_i=(i/5)^exponent",
+          "label": "same-nfe-power-five",
+          "steps": 5
+        }
+      }
+    }
+  }
+}

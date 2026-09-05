@@ -19,7 +19,12 @@ from torch import Tensor, nn
 
 from ..model.component_contracts import TerminalHeadOutput
 from ..model.routing import register_gradient_rms_metric
-from .bspine import BSpineModule, validate_bspine_module
+from .bspine import (
+    BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
+    ArmPrivateBSpineReader,
+    BSpineModule,
+    validate_bspine_module,
+)
 from .codec import NativeTimePhysicalActionTokenLift
 from .controller import EvidenceExecutionController
 from .decoder import ActionOnlyPhysicalVelocityHead
@@ -766,13 +771,56 @@ class TerminalActionController(nn.Module):
     def normalize(self, action: Tensor) -> Tensor:
         return self.action_norm(action)
 
-    def predict_candidate_velocity(self, normalized_terminal_state: Tensor) -> Tensor:
-        return self.velocity_head(normalized_terminal_state)
+    def _apply_arm_private_correction(
+        self,
+        physical_velocity: Tensor,
+        arm_private_correction: Tensor | None,
+    ) -> Tensor:
+        """Apply an optional B-spline correction to arm channels only.
+
+        The gripper readout and its private state are intentionally computed
+        from the unmodified terminal state.  This keeps the comparison
+        candidate from becoming a hidden shared gripper path while allowing
+        every terminal/candidate physical read to see the same arm correction.
+        """
+
+        if arm_private_correction is None:
+            return physical_velocity
+        if arm_private_correction.ndim != 3:
+            raise ValueError("arm-private correction must be [B,T,2*arm_dim]")
+        if tuple(arm_private_correction.shape[:2]) != tuple(
+            physical_velocity.shape[:2]
+        ) or int(arm_private_correction.shape[-1]) != 2 * self.arm_dim:
+            raise ValueError("arm-private correction does not match terminal velocity")
+        correction = arm_private_correction.to(
+            device=physical_velocity.device,
+            dtype=physical_velocity.dtype,
+        )
+        arm_channels = 2 * self.arm_dim
+        return torch.cat(
+            (
+                physical_velocity[..., :arm_channels] + correction,
+                physical_velocity[..., arm_channels:],
+            ),
+            dim=-1,
+        )
+
+    def predict_candidate_velocity(
+        self,
+        normalized_terminal_state: Tensor,
+        *,
+        arm_private_correction: Tensor | None = None,
+    ) -> Tensor:
+        return self._apply_arm_private_correction(
+            self.velocity_head(normalized_terminal_state),
+            arm_private_correction,
+        )
 
     def read_heads(
         self,
         normalized_terminal_state: Tensor,
         *,
+        arm_private_correction: Tensor | None = None,
         collect_diagnostics: bool,
         collect_gripper_diagnostics: bool | None = None,
     ) -> TerminalHeadOutput:
@@ -780,6 +828,10 @@ class TerminalActionController(nn.Module):
             collect_gripper_diagnostics = collect_diagnostics
         pred_velocity, gripper_state, gripper_gate = (
             self.velocity_head.forward_with_gripper_state(normalized_terminal_state)
+        )
+        pred_velocity = self._apply_arm_private_correction(
+            pred_velocity,
+            arm_private_correction,
         )
         command_logits = (
             self.optional_command_head(gripper_state)
@@ -853,6 +905,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         # factory, after every baseline decoder owner has been constructed.
         # Keeping ``None`` here preserves Schema30 registration and RNG exactly.
         self.spine: BSpineModule | None = None
+        # The private-reader candidate keeps the B-spline source out of the
+        # shared MMDiT seed.  It is installed only for its explicit Schema31
+        # implementation; all other selections leave this slot absent.
+        self.arm_private_reader: ArmPrivateBSpineReader | None = None
         self.trajectory_lift = nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h))
         # Retain the legacy module name for checkpoint compatibility.  The
         # proposal is evidence, not a second direct action writer.
@@ -1121,12 +1177,34 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         # recreate the exact-one dead zone even though the head itself is FP32.
         return 1.0 - progress * (1.0 - learned_fp32.clamp(0.0, 1.0))
 
-    def install_spine(self, spine: BSpineModule) -> None:
+    def install_spine(
+        self,
+        spine: BSpineModule,
+        *,
+        arm_private_reader: ArmPrivateBSpineReader | None = None,
+    ) -> None:
         """Install the selected numerical view after baseline construction."""
 
         if self.spine is not None:
             raise RuntimeError("the execution decoder already owns a B-spine")
         self.spine = validate_bspine_module(spine)
+        if arm_private_reader is not None:
+            if not isinstance(arm_private_reader, ArmPrivateBSpineReader):
+                raise TypeError(
+                    "arm-private reader must be an ArmPrivateBSpineReader"
+                )
+            if self.spine.implementation_id != BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION:
+                raise ValueError(
+                    "arm-private reader is valid only for the private-reader B-spine"
+                )
+            if (
+                int(arm_private_reader.hidden_size) != self.hidden_size
+                or int(arm_private_reader.arm_dim) != self.arm_dim
+            ):
+                raise ValueError("arm-private reader dimensions do not match decoder")
+        elif self.spine.implementation_id == BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION:
+            raise ValueError("private-reader B-spine requires an arm-private reader")
+        self.arm_private_reader = arm_private_reader
 
     def set_execution_eval_ablation(
         self,
@@ -1721,6 +1799,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         evidence_scale: float | Tensor,
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
+        arm_private_correction: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Evaluate candidate targets without entering the committed graph.
 
@@ -1800,7 +1879,12 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     prepared_factors=probe_factors,
                 )
                 candidate_velocity = self.terminal_controller.predict_candidate_velocity(
-                    self.terminal_controller.normalize(candidate_action)
+                    self.terminal_controller.normalize(candidate_action),
+                    arm_private_correction=(
+                        None
+                        if arm_private_correction is None
+                        else arm_private_correction.index_select(0, rows)
+                    ),
                 )
                 predictions[:, candidate_index].index_copy_(0, rows, candidate_velocity)
         return predictions.detach(), probe_mask, operation_rows.mean()
@@ -1821,6 +1905,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
+        arm_private_correction: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Run legal candidates as an attached training-time action chart.
 
@@ -1872,10 +1957,18 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 candidate_action = candidate_action.index_copy(0, rows, updated)
             candidate_actions.append(candidate_action)
         action_stack = torch.stack(candidate_actions, dim=1)
+        candidate_private_correction = (
+            None
+            if arm_private_correction is None
+            else arm_private_correction[:, None]
+            .expand(-1, candidate_count, -1, -1)
+            .reshape(-1, *arm_private_correction.shape[1:])
+        )
         candidate_velocity = self.terminal_controller.predict_candidate_velocity(
             self.terminal_controller.normalize(
                 action_stack.reshape(-1, *action_stack.shape[2:])
-            )
+            ),
+            arm_private_correction=candidate_private_correction,
         ).reshape(
             batch,
             candidate_count,
@@ -1912,6 +2005,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
+        arm_private_correction: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Evaluate the canonical eval chart once per block prefix.
 
@@ -2019,10 +2113,18 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 ].index_copy(0, rows, current)
 
         action_stack = torch.stack(candidate_actions, dim=1)
+        candidate_private_correction = (
+            None
+            if arm_private_correction is None
+            else arm_private_correction[:, None]
+            .expand(-1, candidate_count, -1, -1)
+            .reshape(-1, *arm_private_correction.shape[1:])
+        )
         candidate_velocity = self.terminal_controller.predict_candidate_velocity(
             self.terminal_controller.normalize(
                 action_stack.reshape(-1, *action_stack.shape[2:])
-            )
+            ),
+            arm_private_correction=candidate_private_correction,
         ).reshape(
             batch,
             candidate_count,
@@ -2345,6 +2447,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         execution_terminal_probability: Tensor | None = None,
         execution_terminal_uncertainty: Tensor | None = None,
         deployment_fastpath: bool = False,
+        arm_private_correction: Tensor | None = None,
     ) -> dict[str, Any]:
         """Run one continuous monotonic execution contract.
 
@@ -2412,7 +2515,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         hard_terminal_rows: list[Tensor] = []
         prefix_velocity_rows: list[Tensor] = [
             self.terminal_controller.predict_candidate_velocity(
-                self.terminal_controller.normalize(action)
+                self.terminal_controller.normalize(action),
+                arm_private_correction=arm_private_correction,
             )
         ]
         candidate_prediction_rows: list[Tensor] = []
@@ -2466,7 +2570,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         "action_token_norm": action.detach().float().norm(dim=-1).mean(),
                     }
                     idle_velocity = self.terminal_controller.predict_candidate_velocity(
-                        self.terminal_controller.normalize(action)
+                        self.terminal_controller.normalize(action),
+                        arm_private_correction=arm_private_correction,
                     )
                     candidate_prediction_rows.append(
                         idle_velocity[:, None].expand(-1, candidate_count, -1, -1).detach()
@@ -2573,6 +2678,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                                 prepared_factors=prepared_factors,
                                 neutral_action=neutral_action,
                                 decision_index=decision_index,
+                                arm_private_correction=arm_private_correction,
                             )
                         )
                     else:
@@ -2595,6 +2701,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                                 capacity_ratios=capacity_ratios,
                                 identity_boundary=identity_boundary,
                                 prepared_factors=prepared_factors,
+                                arm_private_correction=arm_private_correction,
                             )
                         )
                 (
@@ -2814,6 +2921,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         evidence_scale=evidence_scale,
                         capacity_ratios=capacity_ratios,
                         identity_boundary=identity_boundary,
+                        arm_private_correction=arm_private_correction,
                     )
                 )
                 selected_capacity = capacity_ratios[
@@ -2872,7 +2980,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             block_rows.append(committed_metrics)
             prefix_velocity_rows.append(
                 self.terminal_controller.predict_candidate_velocity(
-                    self.terminal_controller.normalize(action)
+                    self.terminal_controller.normalize(action),
+                    arm_private_correction=arm_private_correction,
                 )
             )
             feedback = action - block_input
@@ -2915,12 +3024,14 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         action_state_factor: Tensor,
         evidence_tokens: Tensor,
         evidence_scale: float | Tensor,
+        arm_private_correction: Tensor | None = None,
         collect_diagnostics: bool = True,
         collect_gripper_diagnostics: bool | None = None,
     ) -> dict[str, Tensor]:
         action = self.terminal_controller.normalize(result["action"])
         terminal = self.terminal_controller.read_heads(
             action,
+            arm_private_correction=arm_private_correction,
             collect_diagnostics=collect_diagnostics,
             collect_gripper_diagnostics=collect_gripper_diagnostics,
         )
@@ -3308,6 +3419,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         action_state_tokens = self.noisy_lift(noisy_physical)
         spine_metrics: dict[str, Tensor] = {}
         spine_tokens: Tensor | None = None
+        arm_private_correction: Tensor | None = None
         if self.spine is not None:
             spine_tokens, spine_metrics = self.spine(
                 noisy_physical,
@@ -3321,6 +3433,15 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     spine_metrics["bottom_spine_update_rms"]
                     / raw_rms.clamp_min(torch.finfo(torch.float32).tiny)
                 )
+            if self.arm_private_reader is not None:
+                arm_private_correction = self.arm_private_reader(spine_tokens)
+                if collect_diagnostics:
+                    spine_metrics["bottom_spine_arm_private_reader_active"] = (
+                        noisy_physical.new_ones((), dtype=torch.float32)
+                    )
+                    spine_metrics["bottom_spine_arm_private_correction_rms"] = (
+                        arm_private_correction.detach().float().square().mean().sqrt()
+                    )
         evidence_tokens = view.tokens
         evidence_value_tokens = view.value_tokens
         evidence_bias = view.key_bias.to(device=evidence_tokens.device)
@@ -3334,6 +3455,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         )
         if spine_tokens is None:
             # Preserve the exact Schema30 expression on the disabled path.
+            action = action + action_state_tokens * action_state_factor
+        elif arm_private_correction is not None:
+            # Keep the B-spline source identity out of the shared action seed;
+            # its arm-only correction is applied by the terminal controller.
             action = action + action_state_tokens * action_state_factor
         else:
             action = action + (action_state_tokens + spine_tokens) * action_state_factor
@@ -3429,6 +3554,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     execution_terminal_uncertainty
                 ),
                 deployment_fastpath=deployment_fastpath,
+                arm_private_correction=arm_private_correction,
             )
             dynamic_output = self._finalize_dynamic_output(
                 result=dynamic_result,
@@ -3438,6 +3564,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 action_state_factor=action_state_factor,
                 evidence_tokens=evidence_tokens,
                 evidence_scale=evidence_scale,
+                arm_private_correction=arm_private_correction,
                 collect_diagnostics=collect_diagnostics,
                 collect_gripper_diagnostics=collect_gripper_diagnostics,
             )
@@ -3477,7 +3604,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         contraction_rows: list[dict[str, Tensor]] = []
         prefix_velocity_rows: list[Tensor] = [
             self.terminal_controller.predict_candidate_velocity(
-                self.terminal_controller.normalize(action)
+                self.terminal_controller.normalize(action),
+                arm_private_correction=arm_private_correction,
             )
         ]
         dwell_candidate_prediction_rows: list[Tensor] = []
@@ -3621,6 +3749,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         ),
                         identity_boundary=identity_boundary,
                         prepared_factors=prepared_operation_factors,
+                        arm_private_correction=arm_private_correction,
                     )
                 )
             contraction_rows.extend(committed_contractions)
@@ -3677,6 +3806,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                             capacity if self.operator_capacity_enabled else None
                         ),
                         identity_boundary=identity_boundary,
+                        arm_private_correction=arm_private_correction,
                     )
                 )
                 selection_entropy_rows.append(torch.zeros((), device=action.device))
@@ -3708,12 +3838,14 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             block_rows.append(committed_metrics)
             prefix_velocity_rows.append(
                 self.terminal_controller.predict_candidate_velocity(
-                    self.terminal_controller.normalize(action)
+                    self.terminal_controller.normalize(action),
+                    arm_private_correction=arm_private_correction,
                 )
             )
         action = self.terminal_controller.normalize(action)
         terminal = self.terminal_controller.read_heads(
             action,
+            arm_private_correction=arm_private_correction,
             collect_diagnostics=collect_diagnostics,
             collect_gripper_diagnostics=collect_gripper_diagnostics,
         )

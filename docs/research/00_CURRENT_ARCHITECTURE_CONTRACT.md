@@ -1,6 +1,30 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-04
+Updated: 2026-09-06
+
+This isolated `codex/pen-bspline-routing-20260906` branch is a Pen-only
+experiment release from `d585417`. It deliberately excludes the root's
+uncommitted CALVIN/data/simulation and training-acceleration work. Its behavior
+baseline is Schema28 core recovery, not the rejected full-rollout hybrid.
+
+The paired opt-in Schema31 candidates are
+`fixed_bspline_arm_coarse_context_v1` (coarse arm tokens added to the shared
+action stream; joint arm/gripper gradient path) and
+`fixed_bspline_arm_private_reader_v1` (same coarse chart, read through a
+non-affine LayerNorm and bias-free arm-only physical correction at every
+candidate/final terminal read). Raw input, codec, labels and loss weights are
+unchanged. Both use seed 0, B8, eight epochs, new weights, and Q5/Q5 deployment
+nodes `t_i=(i/5)^1.25`, with five Euler updates plus the retained endpoint read
+per pass and one W rebuild. Training still has one velocity/loss pass and the
+original mirrored-beta time distribution. Diagnostic owner-VJPs reuse that
+graph; their compute overhead must be measured, not called free.
+
+The default Schema30 selection and implicit uniform grid remain unchanged.
+Schedule config, fingerprint and the distinct B-spline/component identity are
+serialized. Different candidates are never aliases for checkpoint resume.
+The private-reader comparison intentionally has no direct gripper-to-spine
+gradient; its zero gripper probe is not a defect. Candidate benefit remains an
+experiment question, not a release claim.
 
 This is the compact source of truth for the active independent mainline. Read
 it before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,

@@ -877,10 +877,27 @@ def test_bspine_full_loss_reaches_raw_coarse_and_detail_once() -> None:
         "gradient_raw_bottom_spine_l2",
         "gradient_raw_bottom_spine_coarse_l2",
         "gradient_raw_bottom_spine_detail_l2",
+        "gradient_probe_bottom_spine_active",
+        "gradient_probe_bottom_spine_arm_flow_l2",
+        "gradient_probe_bottom_spine_gripper_flow_l2",
+        "gradient_probe_bottom_spine_gripper_to_arm_ratio",
+        "gradient_probe_bottom_spine_arm_gripper_cosine",
+        "gradient_probe_bottom_spine_gripper_on_arm_projection",
+        "gradient_probe_bottom_spine_action_group_l2",
+        "gradient_probe_bottom_spine_representation_group_l2",
+        "gradient_probe_bottom_spine_execution_group_l2",
     ):
         assert name in result.metrics
         assert torch.isfinite(result.metrics[name])
+    for name in (
+        "gradient_probe_bottom_spine_arm_flow_l2",
+        "gradient_probe_bottom_spine_gripper_flow_l2",
+        "gradient_probe_bottom_spine_action_group_l2",
+    ):
         assert result.metrics[name] > 0.0
+    assert result.metrics["gradient_probe_bottom_spine_active"] == 1.0
+    assert result.metrics["gradient_probe_bottom_spine_gripper_to_arm_ratio"] > 0.0
+    assert -1.0 <= result.metrics["gradient_probe_bottom_spine_arm_gripper_cosine"] <= 1.0
 
 
 def test_bspine_full_mainline_cpu_bf16_forward_backward_is_finite() -> None:

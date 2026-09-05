@@ -23,9 +23,11 @@ from .v120_core.bspine import (
     BSPINE0_DEGREE,
     BSPINE0_IMPLEMENTATION,
     BSPINE0_SPEC_FINGERPRINT,
+    BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
     BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
     BSPINE_ARM_ONLY_IMPLEMENTATION,
     BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
+    BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
     BSPINE_DISABLED_IMPLEMENTATION,
 )
 
@@ -466,7 +468,11 @@ class BottomConfig:
                 raise ValueError(
                     "the existing all-field B-spine identity cannot carry a new group mask"
                 )
-        elif self.bspine_implementation == BSPINE_ARM_ONLY_IMPLEMENTATION:
+        elif self.bspine_implementation in {
+            BSPINE_ARM_ONLY_IMPLEMENTATION,
+            BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
+            BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
+        }:
             expected = (
                 BSPINE0_DEGREE,
                 BSPINE0_CONTROL_POINTS,
@@ -483,13 +489,15 @@ class BottomConfig:
             )
             if actual != expected:
                 raise ValueError(
-                    "arm-only B-spine must use the frozen cubic K=12 basis, "
-                    "arm-only spec fingerprint and serialized 11000 group mask"
+                    "arm-scoped B-spine variants must use the frozen cubic K=12 "
+                    "basis, arm-only spec fingerprint and serialized 11000 group mask"
                 )
         else:
             raise ValueError(
                 "bottom.bspine_implementation must be disabled, "
-                f"{BSPINE0_IMPLEMENTATION} or {BSPINE_ARM_ONLY_IMPLEMENTATION}"
+                f"{BSPINE0_IMPLEMENTATION}, {BSPINE_ARM_ONLY_IMPLEMENTATION} "
+                f"{BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION} or "
+                f"{BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION}"
             )
 
 
@@ -584,6 +592,8 @@ class OptimizerConfig:
 class RuntimeConfig:
     compute_dtype: str = "bf16"
     inference_steps: int = 5
+    # Deployment flow time is separate from training t and action time.
+    deployment_flow_schedule: Mapping[str, object] | None = None
     log_every: int = 20
     max_train_batches: int = 0
     max_val_batches: int = 0
@@ -596,6 +606,10 @@ class RuntimeConfig:
             raise ValueError("runtime.compute_dtype must be bf16 or fp32")
         if self.inference_steps != 5:
             raise ValueError("the active deployment contract uses five ODE steps")
+        if self.deployment_flow_schedule is not None:
+            from .runtime.flow_schedule import DeploymentFlowSchedule
+
+            DeploymentFlowSchedule.from_dict(self.deployment_flow_schedule)
         if self.log_every <= 0:
             raise ValueError("log_every must be positive")
         limits = (
@@ -702,6 +716,15 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        runtime = cast(dict[str, object], payload["runtime"])
+        if self.runtime.deployment_flow_schedule is None:
+            runtime.pop("deployment_flow_schedule")
+        else:
+            from .runtime.flow_schedule import DeploymentFlowSchedule
+
+            runtime["deployment_flow_schedule"] = DeploymentFlowSchedule.from_dict(
+                self.runtime.deployment_flow_schedule
+            ).to_dict()
         bottom = cast(dict[str, object], payload["bottom"])
         if self.bottom.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
             for name in (

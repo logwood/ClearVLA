@@ -31,12 +31,13 @@ from .runtime.checkpoints import (
     migrate_bottom_only,
     save_checkpoint,
 )
-from .runtime.deployment import build_deployment_abi
+from .runtime.deployment import build_deployment_abi, deployment_flow_schedule
 from .runtime.evaluation import (
     MatchedCoreAttributionAccumulator,
     MatchedP2InterventionAccumulator,
     ValidationAccumulator,
 )
+from .runtime.flow_schedule import DeploymentFlowSchedule
 from .runtime.identity import (
     dataset_identity,
     language_identity,
@@ -87,6 +88,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--t5-condition", type=Path)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--validate-checkpoint", type=Path)
+    parser.add_argument(
+        "--validation-flow-schedule", type=Path,
+        help="Explicit two-pass schedule JSON for read-only checkpoint replay only.",
+    )
     parser.add_argument("--migrate-bottom", type=Path)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch-size", type=int)
@@ -116,6 +121,10 @@ def _device(value: str) -> torch.device:
 
 
 def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
+    if getattr(args, "validation_flow_schedule", None) is not None and (
+        args.validate_checkpoint is None or args.resume is not None
+    ):
+        raise ValueError("--validation-flow-schedule requires read-only --validate-checkpoint")
     data = config.data
     objectives = config.objectives
     optimizer = config.optimizer
@@ -186,6 +195,24 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
     return result
 
 
+def _validation_sampling_config(
+    config: ExperimentConfig, schedule_path: Path | None,
+) -> ExperimentConfig:
+    """Keep checkpoint identity unchanged and override only deployment replay."""
+    if schedule_path is None:
+        return config
+    payload = json.loads(schedule_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError("validation flow schedule JSON must be a mapping")
+    selected = DeploymentFlowSchedule.from_dict(payload)
+    result = replace(
+        config,
+        runtime=replace(config.runtime, deployment_flow_schedule=selected.to_dict()),
+    )
+    result.validate()
+    return result
+
+
 def _seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -204,6 +231,7 @@ class ValidationReport(Mapping[str, float]):
 
     metrics: dict[str, float]
     multitask: dict[str, object] | None = None
+    flow_schedule_identity: dict[str, object] | None = None
 
     def __getitem__(self, name: str) -> float:
         return self.metrics[name]
@@ -1765,7 +1793,10 @@ def _validate(
                                 rows[f"{surface}_action_delta_mse_{chart}"] ** 0.5
                             )
     multitask = None if task_deployment is None else task_deployment.report(result)
-    return ValidationReport(metrics=result, multitask=multitask)
+    return ValidationReport(
+        metrics=result, multitask=multitask,
+        flow_schedule_identity=deployment_flow_schedule(config).identity,
+    )
 
 
 def main() -> None:
@@ -1773,6 +1804,7 @@ def main() -> None:
     validation_checkpoint = args.validate_checkpoint
     validation_checkpoint_resolved: str | None = None
     config = _overrides(load_config(args.config), args)
+    validation_config = _validation_sampling_config(config, args.validation_flow_schedule)
     _seed(config.data.seed)
     device = _device(args.device)
     dtype = resolve_compute_dtype(config)
@@ -1877,6 +1909,7 @@ def main() -> None:
         )
     context = {
         "config": config.as_dict(),
+        "deployment_flow_schedule": deployment_flow_schedule(config).identity,
         "identity": identity.as_dict(),
         "component_selection": model.selection.as_dict(),
         "component_abi_revision": model.selection.abi_revision,
@@ -1935,6 +1968,8 @@ def main() -> None:
             "rng_loaded": False,
             "checkpoint_writes_enabled": False,
         }
+        context["validation_flow_schedule"] = deployment_flow_schedule(validation_config).identity
+        context["validation_flow_schedule_override"] = args.validation_flow_schedule is not None
     # Preflight uses the deterministic validation sampler and separate RNGs;
     # it must not consume formal training shuffle, condition-dropout or flow
     # randomness.
@@ -1976,7 +2011,7 @@ def main() -> None:
             engine=engine,
             loader=val_loader,
             bundle=bundle,
-            config=config,
+            config=validation_config,
             device=device,
             dtype=dtype,
         )
@@ -1996,6 +2031,7 @@ def main() -> None:
             train={},
             validation=validation,
             multitask_validation=validation_report.multitask,
+            deployment_flow_schedule=validation_report.flow_schedule_identity,
             runtime=runtime,
         )
         planned_batches = _limit(len(val_loader), config.runtime.max_val_batches)
@@ -2196,6 +2232,7 @@ def main() -> None:
             train_task_mix=train_task_mix,
             validation=validation,
             multitask_validation=validation_report.multitask,
+            deployment_flow_schedule=validation_report.flow_schedule_identity,
         )
         runtime_names = (
             "runtime_seconds_per_batch",
