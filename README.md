@@ -139,9 +139,12 @@ B-spine-0 的显式配置、运行命令与放行门槛见
 |---|---|
 | [`clearvla/mainline/`](clearvla/mainline/README.md) | 活动模型、训练与部署实现 |
 | [`clearvla/action_representations/bspline/`](clearvla/action_representations/bspline/README.md) | B-spline 动作表示与验证合同 |
+| [`clearvla/action_representations/composite/`](clearvla/action_representations/composite/README.md) | 异构执行器的独立表示原型 |
+| [`clearvla/action_solvers/flow_solver/`](clearvla/action_solvers/flow_solver/README.md) | 独立 flow solver 数值诊断边界 |
 | [`configs/mainline/`](configs/mainline/) | 可序列化的主线与 outlet 配置 |
 | [`scripts/`](scripts/) | 检查、smoke、训练与只读验证入口 |
 | [`tests/`](tests/) | 单元、结构、运行时与身份回归测试 |
+| [`docs/development/SIMULATION.md`](docs/development/SIMULATION.md) | simulator 与外部 benchmark runbook |
 | [`docs/research/`](docs/research/README.md) | 当前架构合同、问题与研究证据索引 |
 | [`legacy/`](legacy/README.md) | 仅供追溯的旧实现入口 |
 
