@@ -78,6 +78,11 @@ def _parser() -> argparse.ArgumentParser:
         default="default",
     )
     parser.add_argument(
+        "--compile-forward",
+        action="store_true",
+        help="Compile the formal engine forward with graph-break fallback.",
+    )
+    parser.add_argument(
         "--candidate-prefix-reuse",
         action="store_true",
         help="Use the experimental attached training candidate-prefix chart.",
@@ -228,6 +233,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             else DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD
         ),
     )
+    if args.compile_forward:
+        engine._forward = torch.compile(  # type: ignore[method-assign]
+            engine._forward,
+            dynamic=False,
+            fullgraph=False,
+            mode=args.compile_mode,
+        )
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
@@ -319,6 +331,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "repeat_batch": bool(args.repeat_batch),
         "phase_breakdown": bool(args.phase_breakdown),
         "compile_mmdit_blocks": bool(args.compile_mmdit_blocks),
+        "compile_forward": bool(args.compile_forward),
         "compile_mode": str(args.compile_mode),
         "candidate_prefix_reuse": bool(args.candidate_prefix_reuse),
         "compile_setup_seconds": _finite_float(compile_seconds),
