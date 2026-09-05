@@ -16,6 +16,7 @@ makes the cost visible without changing the production default.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 import math
 import random
@@ -70,6 +71,11 @@ def _parser() -> argparse.ArgumentParser:
         "--compile-mmdit-blocks",
         action="store_true",
         help="Compile only the stable TimeDomainMMDiT action blocks with Inductor.",
+    )
+    parser.add_argument(
+        "--torch-profile-output",
+        type=Path,
+        help="Write a one-step torch.profiler operator table to this text file.",
     )
     parser.add_argument("--output", type=Path)
     return parser
@@ -219,6 +225,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     step_losses: list[torch.Tensor] = []
     repeated_batch = None
     measured_started = 0.0
+    torch_profile_table: str | None = None
     for step in range(args.steps):
         if step == args.warmup:
             _sync(device)
@@ -249,12 +256,31 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             # measured, while filesystem/logging latency stays out of it.
             def handler(_report: object) -> None:
                 return None
-        result = engine.train_step(
-            batch,
-            collect_diagnostics=False,
-            gradient_spike_handler=handler,
-            phase_timing=phase if args.phase_breakdown else None,
+        should_profile = args.torch_profile_output is not None and step == args.warmup
+        profile_context = (
+            torch.profiler.profile(
+                activities=(
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ),
+                record_shapes=False,
+                profile_memory=False,
+                with_stack=False,
+            )
+            if should_profile
+            else nullcontext()
         )
+        with profile_context as profiler:
+            result = engine.train_step(
+                batch,
+                collect_diagnostics=False,
+                gradient_spike_handler=handler,
+                phase_timing=phase if args.phase_breakdown else None,
+            )
+        if should_profile and profiler is not None:
+            torch_profile_table = profiler.key_averages().table(
+                sort_by="self_cuda_time_total", row_limit=80
+            )
         data_wait_values.append(_finite_float(wait_seconds))
         conversion_values.append(_finite_float(conversion_seconds))
         step_losses.append(result.loss.detach())
@@ -297,6 +323,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         index = device.index if device.index is not None else torch.cuda.current_device()
         report["cuda_peak_allocated_gib"] = float(torch.cuda.max_memory_allocated(index) / 1024**3)
         report["cuda_peak_reserved_gib"] = float(torch.cuda.max_memory_reserved(index) / 1024**3)
+    if torch_profile_table is not None:
+        if args.torch_profile_output is None:
+            raise RuntimeError("profiler table has no output path")
+        args.torch_profile_output.parent.mkdir(parents=True, exist_ok=True)
+        args.torch_profile_output.write_text(torch_profile_table + "\n", encoding="utf-8")
+        report["torch_profile_output"] = str(args.torch_profile_output)
     return report
 
 
