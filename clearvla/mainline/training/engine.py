@@ -737,7 +737,11 @@ class MainlineTrainingEngine:
         # mainline permanently at the warm-up identity boundary.
         self.model.set_training_step(self.global_step)
         zero_started = time.perf_counter() if phase_timing is not None else 0.0
-        self.optimizer.zero_grad(set_to_none=True)
+        self.optimizer.zero_grad(
+            set_to_none=not bool(
+                getattr(self, "_preserve_static_gradient_buffers", False)
+            )
+        )
         timing_mark("zero_grad_seconds", zero_started)
         forward_started = time.perf_counter() if phase_timing is not None else 0.0
         with _autocast(self.device, self.dtype):

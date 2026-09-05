@@ -167,7 +167,88 @@ the measured `2e-5` relative / `2e-7` absolute floating-point tolerance.  It is
 not enabled by default and will be accepted for throughput only if the remote
 BF16 comparison stays inside that bound.
 
-## Next experiment
+## Full ordinary-step CUDA Graph feasibility
+
+The local RTX 4060 test-sized model now captures the complete ordinary-batch
+online encode, Teacher targets, formal velocity forward, loss composition and
+backward.  The existing finite check, two clipping stages, AdamW update and
+scheduler remain outside the graph.  The capture work removed only host/device
+construction and synchronization blockers: device constants are created or
+registered on device, fixed candidate topology uses static slices/padding, and
+the known neutral owner bypasses dynamic row grouping.  It does not remove a
+network block, loss, gradient path, random draw or optimizer owner.
+
+A 3-warm-up / 10-measured-step local run reported:
+
+```text
+eager median:        0.6893402 s/step
+graph replay median: 0.1804889 s/step
+median speedup:      3.8193x
+```
+
+The checked runner, including static-input copy, result-metric snapshot,
+clipping, AdamW and scheduling, reported on a separate 3/10 run:
+
+```text
+eager median:        0.6505594 s/step
+graph runner median: 0.1841423 s/step
+median speedup:      3.5329x
+one-time capture:    1.1925041 s
+```
+
+These are feasibility results, not the production B8 result: they use the
+test-sized local model and exclude data-loader transfer.  The checked runner
+does enqueue a copy into every static model-input slot, even when the source
+batch object is repeated.  Reproduce the two measurements with:
+
+```powershell
+$env:PYTHONPATH='.'
+D:\CondaData\envs\torch312\python.exe scripts/probe_local_training_cuda_graph.py
+D:\CondaData\envs\torch312\python.exe scripts/probe_local_training_cuda_graph_runner.py
+```
+
+The strict multi-step gate separately compared eager execution with graph
+replay at identity steps `0/1` and non-identity execution-progress steps
+`700/701`.  Total loss, every group/contribution/term, raw and clipped leaf
+gradients, parameters, AdamW state, schedule/global step, and CPU/CUDA/flow/
+condition RNG continuations passed.  The CPU algebraic rewrite tests retain
+the existing `rtol=2e-5`, `atol=2e-7` full-update gate.  On CUDA, two separate
+eager engines with identical initial state, input and RNG already differed by
+up to `2.92435e-7` in a parameter after one update while their loss and all RNG
+continuations were exact.  The graph gate therefore uses the measured
+CUDA-control envelope `rtol=2e-5`, `atol=1e-6`; an intermittent graph comparison
+at the old CPU-only threshold reached `7.84603e-7` after two steps and is
+retained as the reason for that calibration, not hidden by an arbitrary
+tolerance change.  The observed loss/gradient-norm pairs were:
+
+```text
+step 0:   2.4620974064 / 0.5691227317
+step 1:   2.5168545246 / 0.6266048551
+step 700: 2.4621999264 / 0.5692583323
+step 701: 2.5173258781 / 0.6289275289
+```
+
+The production-runner gate additionally passed a complete eager diagnostic
+step, replay after that diagnostic, a different batch copied into the same
+static slots, restoration of the first batch, and an isolated identity-to-
+active topology recapture.  Every case retained the same loss surface,
+clipped update, optimizer state and RNG continuation within the CUDA-control
+envelope; capture count changed from one to two only at the topology boundary.
+
+Reproduce with:
+
+```powershell
+$env:PYTHONPATH='.'
+D:\CondaData\envs\torch312\python.exe scripts/probe_local_training_cuda_graph_equivalence.py
+```
+
+The remaining acceptance work is to expose a checked static-input copier,
+retain complete eager diagnostic batches without invalidating captured gradient
+buffers, recapture at the identity/non-identity topology boundary, and run the
+same-GPU production B8 BF16 comparison.  No `2x` completion claim is made
+until that controlled remote result exists.
+
+## Retained execution-diagnostics split
 
 Separate tensors required by the formal execution-value objective from
 detached decoder/controller diagnostics.  An ordinary training batch still

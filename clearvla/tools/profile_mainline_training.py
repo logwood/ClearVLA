@@ -33,6 +33,7 @@ from clearvla.mainline.config import ExperimentConfig, load_config
 from clearvla.mainline.data.loading import load_mainline_data, to_training_batch
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.runtime.numerics import resolve_compute_dtype
+from clearvla.mainline.training.cuda_graph import CudaGraphTrainingStepRunner
 from clearvla.mainline.training.engine import MainlineTrainingEngine
 from clearvla.mainline.training.gradient_audit import (
     DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD,
@@ -82,6 +83,14 @@ def _parser() -> argparse.ArgumentParser:
         "--phase-breakdown",
         action="store_true",
         help="Synchronize each train-step phase for a diagnostic breakdown.",
+    )
+    parser.add_argument(
+        "--cuda-graph-training",
+        action="store_true",
+        help=(
+            "Capture ordinary-batch online encode, forward, loss and backward; "
+            "keep diagnostics, clipping, AdamW and scheduling eager."
+        ),
     )
     parser.add_argument(
         "--compile-mmdit-blocks",
@@ -343,6 +352,18 @@ def _compile_candidate_prefix(model: ClearVLAMainlinePolicy, *, mode: str) -> fl
 def run(args: argparse.Namespace) -> dict[str, object]:
     if args.steps <= 0 or args.warmup < 0 or args.warmup >= args.steps:
         raise ValueError("require steps > warmup >= 0")
+    compile_probes = (
+        args.compile_mmdit_blocks,
+        args.compile_forward,
+        args.compile_visual_submodules,
+        args.compile_execution_submodules,
+        args.compile_mainline_blocks,
+        args.compile_candidate_prefix,
+    )
+    if args.cuda_graph_training and any(compile_probes):
+        raise ValueError(
+            "CUDA Graph training and torch.compile probes must be measured separately"
+        )
     config = _overrides(load_config(args.config), args)
     _seed(config.data.seed)
     device = _device(args.device)
@@ -425,6 +446,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             fullgraph=False,
             mode=args.compile_mode,
         )
+    step_runner: MainlineTrainingEngine | CudaGraphTrainingStepRunner = engine
+    if args.cuda_graph_training:
+        step_runner = CudaGraphTrainingStepRunner(engine)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
@@ -480,7 +504,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             else nullcontext()
         )
         with profile_context as profiler:
-            result = engine.train_step(
+            result = step_runner.train_step(
                 batch,
                 collect_diagnostics=False,
                 gradient_spike_handler=handler,
@@ -521,6 +545,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "repeat_batch": bool(args.repeat_batch),
         "phase_breakdown": bool(args.phase_breakdown),
+        "cuda_graph_training": bool(args.cuda_graph_training),
+        "cuda_graph_capture_count": int(
+            step_runner.capture_count
+            if isinstance(step_runner, CudaGraphTrainingStepRunner)
+            else 0
+        ),
+        "cuda_graph_capture_setup_seconds": _finite_float(
+            step_runner.capture_setup_seconds
+            if isinstance(step_runner, CudaGraphTrainingStepRunner)
+            else 0.0
+        ),
         "compile_mmdit_blocks": bool(args.compile_mmdit_blocks),
         "compile_forward": bool(args.compile_forward),
         "compile_visual_submodules": bool(args.compile_visual_submodules),
@@ -532,7 +567,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             args.reuse_terminal_candidate_velocity
         ),
         "compile_mode": str(args.compile_mode),
-        "candidate_prefix_reuse": bool(args.candidate_prefix_reuse),
+        "candidate_prefix_reuse": bool(
+            args.candidate_prefix_reuse or args.cuda_graph_training
+        ),
+        "static_neutral_owner": bool(args.cuda_graph_training),
         "reuse_prepared_block_contexts": bool(args.reuse_prepared_block_contexts),
         "reuse_prepared_controller_context": bool(
             args.reuse_prepared_controller_context
