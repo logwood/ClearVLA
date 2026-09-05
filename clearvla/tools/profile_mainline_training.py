@@ -73,6 +73,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Compile only the stable TimeDomainMMDiT action blocks with Inductor.",
     )
     parser.add_argument(
+        "--compile-mode",
+        choices=("default", "reduce-overhead", "max-autotune-no-cudagraphs"),
+        default="default",
+    )
+    parser.add_argument(
         "--candidate-prefix-reuse",
         action="store_true",
         help="Use the experimental attached training candidate-prefix chart.",
@@ -157,7 +162,7 @@ def _finite_float(value: Any) -> float:
     return result
 
 
-def _compile_mmdit_blocks(model: ClearVLAMainlinePolicy) -> float:
+def _compile_mmdit_blocks(model: ClearVLAMainlinePolicy, *, mode: str) -> float:
     """Compile the repeated action blocks without wrapping the parent module."""
 
     started = time.perf_counter()
@@ -172,7 +177,7 @@ def _compile_mmdit_blocks(model: ClearVLAMainlinePolicy) -> float:
             block.forward,
             dynamic=False,
             fullgraph=False,
-            mode="reduce-overhead",
+            mode=mode,
         )
     return time.perf_counter() - started
 
@@ -199,7 +204,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         model.execution_bottom.decoder._training_candidate_prefix_reuse = True
     compile_seconds = 0.0
     if args.compile_mmdit_blocks:
-        compile_seconds = _compile_mmdit_blocks(model)
+        compile_seconds = _compile_mmdit_blocks(model, mode=args.compile_mode)
     optimizer, _ownership = build_optimizer(model, config)
     schedule = WarmupCosineSchedule(
         optimizer,
@@ -314,6 +319,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "repeat_batch": bool(args.repeat_batch),
         "phase_breakdown": bool(args.phase_breakdown),
         "compile_mmdit_blocks": bool(args.compile_mmdit_blocks),
+        "compile_mode": str(args.compile_mode),
         "candidate_prefix_reuse": bool(args.candidate_prefix_reuse),
         "compile_setup_seconds": _finite_float(compile_seconds),
         "measured_seconds": _finite_float(measured_seconds),
