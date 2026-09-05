@@ -1961,6 +1961,28 @@ def main() -> None:
             + " ".join(f"{name}={value:.3f}" for name, value in preflight_memory.items()),
             flush=True,
         )
+    if config.hybrid.enabled:
+        from .runtime.hybrid import role_contract
+
+        context["hybrid_role_boundary"] = dict(role_contract(model).identity)
+        context["hybrid_training"] = {
+            "initialization": (
+                "validation_replay" if validation_checkpoint is not None
+                else "random" if args.resume is None and args.migrate_bottom is None
+                else "restored"
+            ),
+            "pointwise_forward_calls": 1,
+            "rollout_physical_forward_calls": 15,
+            "rollout_endpoint_forward_calls": 2,
+            "rollout_w_rebuilds": 1,
+            "gripper_trajectory_strata": ["hold", "transition", "persistence"],
+            "gripper_trajectory_stratum_weights": [1.0 / 3.0] * 3,
+            "decoded_weight": config.objectives.decoded_action,
+            "gripper_trajectory_weight": config.objectives.gripper_trajectory,
+            "rollout_weight": config.hybrid.rollout_loss_weight,
+            "checkpoint_rollout": config.hybrid.checkpoint_rollout,
+            "checkpoint_recomputation_is_extra_compute": True,
+        }
     (output_dir / "run_context.json").write_text(
         json.dumps(context, indent=2, sort_keys=True),
         encoding="utf-8",

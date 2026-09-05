@@ -88,6 +88,10 @@ class ComponentSelection:
             execution_bottom=_execution_bottom_selection(config),
             terminal_controller=terminal,
             outlet_adapter=outlet,
+            objectives=(
+                "schema32_hybrid_v1_rollout_objectives_v1"
+                if config.hybrid.enabled else "schema30_objectives_v1"
+            ),
         )
         selection.validate(config)
         if (output_mode == "calvin_binary_command") != (
@@ -141,7 +145,13 @@ class ComponentSelection:
                 execution_bottom=_execution_bottom_selection(config),
                 outlet_adapter="rdt_right_arm_7d_v1",
             )
-        return cls(execution_bottom=_execution_bottom_selection(config))
+        return cls(
+            execution_bottom=_execution_bottom_selection(config),
+            objectives=(
+                "schema32_hybrid_v1_rollout_objectives_v1"
+                if config.hybrid.enabled else "schema30_objectives_v1"
+            ),
+        )
 
     def as_dict(self) -> dict[str, str]:
         return {

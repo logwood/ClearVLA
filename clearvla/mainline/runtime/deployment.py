@@ -49,7 +49,10 @@ def canonical_sha256(value: object) -> str:
 
 def deployment_graph_config(config: ExperimentConfig) -> dict[str, object]:
     payload = config.as_dict()
-    return {name: payload[name] for name in _GRAPH_SECTIONS}
+    graph = {name: payload[name] for name in _GRAPH_SECTIONS}
+    if config.hybrid.enabled:
+        graph["hybrid"] = payload["hybrid"]
+    return graph
 
 
 def build_deployment_abi(
@@ -139,10 +142,15 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
             f"got {abi.get('schema')!r}"
         )
     graph = _mapping(abi.get("graph_config"), name="graph_config")
-    if set(graph) != set(_GRAPH_SECTIONS):
+    if set(graph) not in (set(_GRAPH_SECTIONS), set(_GRAPH_SECTIONS) | {"hybrid"}):
         raise ValueError("deployment ABI graph section ownership differs")
     if str(abi.get("graph_config_sha256", "")) != canonical_sha256(graph):
         raise ValueError("deployment ABI graph digest is inconsistent")
+    manifest = _mapping(abi.get("architecture_manifest", {}), name="architecture_manifest")
+    hybrid = graph.get("hybrid")
+    hybrid_enabled = isinstance(hybrid, Mapping) and hybrid.get("enabled") is True
+    if (int(manifest.get("schema", -1)) == 32) != hybrid_enabled:
+        raise ValueError("deployment manifest and hybrid solver lifecycle differ")
     observation = _mapping(abi.get("observation"), name="observation")
     action = _mapping(abi.get("action"), name="action")
     normalizers = _mapping(abi.get("normalizers"), name="normalizers")
@@ -244,9 +252,11 @@ def deployment_config_from_checkpoint(
         raise ValueError("deployment checkpoint config must be a mapping")
     abi = validate_deployment_abi(raw_abi)
     graph = _mapping(abi["graph_config"], name="graph_config")
-    for name in _GRAPH_SECTIONS:
+    for name in graph:
         if raw_config.get(name) != graph[name]:
             raise ValueError(f"checkpoint {name} differs from its deployment ABI")
+    if ("hybrid" in raw_config) != ("hybrid" in graph):
+        raise ValueError("checkpoint hybrid lifecycle is missing from deployment ABI")
     observation = _mapping(abi["observation"], name="observation")
     action = _mapping(abi["action"], name="action")
     dino = _mapping(observation.get("dinov2"), name="observation.dinov2")

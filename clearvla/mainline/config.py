@@ -16,7 +16,7 @@ from typing import Mapping, TypeVar, cast
 
 from clearvla.data.action_chart import resolve_action_state_profile
 
-from .manifest import ARCHITECTURE_MANIFEST
+from .manifest import ARCHITECTURE_MANIFEST, architecture_manifest_for_bspine_implementation
 from .v120_core.bspine import (
     BSPINE0_BASIS_DIGEST,
     BSPINE0_CONTROL_POINTS,
@@ -610,6 +610,34 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class HybridSolverConfig:
+    """Explicit training/deployment contract for the opt-in hybrid run."""
+
+    enabled: bool = False
+    proposal_method: str = "euler"
+    refined_method: str = "heun"
+    rollout_loss_weight: float = 0.0
+    checkpoint_rollout: bool = True
+    rollout_dropout: str = "disabled"
+
+    def validate(self) -> None:
+        if type(self.enabled) is not bool or type(self.checkpoint_rollout) is not bool:
+            raise TypeError("hybrid enabled/checkpoint_rollout must be booleans")
+        if self.rollout_dropout != "disabled":
+            raise ValueError("hybrid rollout uses the deterministic deployment field")
+        if self.proposal_method not in {"euler"}:
+            raise ValueError("hybrid proposal method is fixed to euler")
+        if self.refined_method not in {"heun"}:
+            raise ValueError("hybrid refined method is fixed to heun")
+        if not math.isfinite(float(self.rollout_loss_weight)) or self.rollout_loss_weight < 0.0:
+            raise ValueError("hybrid rollout loss weight must be finite and non-negative")
+        if self.enabled and self.rollout_loss_weight <= 0.0:
+            raise ValueError("enabled hybrid solver requires a positive rollout loss weight")
+        if not self.enabled and self.rollout_loss_weight != 0.0:
+            raise ValueError("disabled hybrid solver must have zero rollout loss weight")
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     data: DataConfig = DataConfig()
     dimensions: ModelDimensions = ModelDimensions()
@@ -619,9 +647,13 @@ class ExperimentConfig:
     objectives: ObjectiveConfig = ObjectiveConfig()
     optimizer: OptimizerConfig = OptimizerConfig()
     runtime: RuntimeConfig = RuntimeConfig()
+    hybrid: HybridSolverConfig = HybridSolverConfig()
 
     def validate(self) -> None:
-        ARCHITECTURE_MANIFEST.validate()
+        architecture_manifest_for_bspine_implementation(
+            self.bottom.bspine_implementation,
+            hybrid_solver=self.hybrid.enabled,
+        ).validate()
         for section in (
             self.data,
             self.dimensions,
@@ -631,6 +663,7 @@ class ExperimentConfig:
             self.objectives,
             self.optimizer,
             self.runtime,
+            self.hybrid,
         ):
             section.validate()
         native_side = round(self.dimensions.patches_per_camera**0.5)
@@ -699,9 +732,15 @@ class ExperimentConfig:
                 raise ValueError(
                     "relative_command_direct is valid only for the CALVIN action profile"
                 )
+        if self.hybrid.enabled and profile.name != "identity_7d_pen":
+            raise ValueError("hybrid-v1 currently supports only the Pen continuous profile")
+        if self.hybrid.enabled and self.bottom.bspine_implementation != BSPINE_ARM_ONLY_IMPLEMENTATION:
+            raise ValueError("hybrid-v1 requires bottom.bspine_implementation=arm-only")
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if not self.hybrid.enabled:
+            payload.pop("hybrid")
         bottom = cast(dict[str, object], payload["bottom"])
         if self.bottom.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
             for name in (
@@ -772,6 +811,7 @@ def config_from_mapping(value: Mapping[str, object]) -> ExperimentConfig:
         "objectives",
         "optimizer",
         "runtime",
+        "hybrid",
     }
     unknown = sorted(set(value) - expected)
     if unknown:
@@ -809,6 +849,7 @@ def config_from_mapping(value: Mapping[str, object]) -> ExperimentConfig:
         objectives=_section(ObjectiveConfig, value.get("objectives", {}), name="objectives"),
         optimizer=_section(OptimizerConfig, value.get("optimizer", {}), name="optimizer"),
         runtime=_section(RuntimeConfig, value.get("runtime", {}), name="runtime"),
+        hybrid=_section(HybridSolverConfig, value.get("hybrid", {}), name="hybrid"),
     )
     config.validate()
     return config

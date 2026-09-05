@@ -1,6 +1,6 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-04
+Updated: 2026-09-05
 
 This is the compact source of truth for the active independent mainline. Read
 it before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
@@ -19,6 +19,7 @@ Historical experiment names never select current semantics.
 ```text
 capability:             object_intent_dynamics_323
 manifest schema:        30
+optional hybrid:        32; explicit hybrid-v1 Pen training/solver contract below
 layout schema:          2 (atomic modular owner layout)
 manifest digest:        c6742c2c5a8a381193a56ed2cf24ba632b472cfde168c021537f2d30b8d69863
 active source identity: Schema28-core recovery plus profile-owned gripper boundary, CALVIN direct relative-command arm chart and binary-command isolation
@@ -191,6 +192,46 @@ encoder compute dtype, and the reference encoder batch shape are serialized and
 validated. The current CALVIN cache uses bf16 with reference batch size 32;
 online history rows are causally padded with the final observed row to reproduce
 that CUDA kernel shape before slicing back to the three real history rows.
+
+### Optional hybrid-v1 training and deployment (this branch)
+
+The explicit Pen config
+`configs/mainline/object_intent_dynamics_323_pen_hybrid_v1.json` selects schema
+32. Schemas 30/31 keep their original training/sampling semantics and default
+config digests. Hybrid is a new randomly initialized experiment, not a replay
+or continuation of an arm-only checkpoint.
+
+Hybrid keeps the 24x18 value/adjacent-difference field. The existing learned
+arm-only B-spine provides cubic K=12 coarse/detail input beside the raw lift;
+all six gripper fields retain raw input. The latest composite role boundary is
+called on the actual clean outputs of each pass. It uses retained raw rows,
+keeps motion logits as a typed endpoint sidecar, checks endpoint freshness and
+leaves Pen gripper action authority with the continuous codec. It is never
+inserted as a chart round-trip inside an ODE stage.
+
+`runtime/hybrid.py` owns the same E5 proposal -> one differentiable W rebuild
+-> H5 refined lifecycle for training and deployment. Each pass starts from the
+same original physical noise. H5 means five Heun intervals / ten field reads;
+both passes retain a separate endpoint read on the final corrected field.
+Rollout field evaluation disables dropout without disabling autograd. Static
+observation augmentation and pointwise-flow training retain their prior roles.
+
+Training composes the existing pointwise flow/objective ledger plus supervision
+on the actually refined rollout action. The extra decoded-action and gripper
+trajectory terms reuse the existing .08/.03 budgets, multiplied by the explicit
+hybrid rollout weight (1 in the selected config). Hold-before/no-event,
+transition, and post-event persistence partition all gripper rows and each own
+one third of the rollout gripper budget. Target masks select loss rows only;
+they never enter the solver or gate execution. The proposal/W path is not
+detached. The no-grad Teacher is still built once, and future observations or
+actions cannot enter the rollout input.
+
+The training forward count is one pointwise call plus 15 rollout physical
+calls plus two endpoint calls. Non-reentrant activation checkpointing is
+serialized and recomputes rollout activations in backward; that extra compute
+is not hidden as an inference speedup. Deployment fastpath/compile/CUDA Graph
+are outside this experiment. Fresh CUDA/BF16 parameter-owner, loss-ledger,
+memory and checkpoint tests are required before the single formal Pen launch.
 
 ## Historical Schema30 semantic delta (not active in recovery)
 

@@ -216,6 +216,29 @@ def sample_refined_cached_action_with_cache(
     config.validate()
     runtime_dtype = resolve_compute_dtype(config, dtype)
     model.eval()
+    if config.hybrid.enabled:
+        if deployment_fastpath:
+            raise ValueError("hybrid-v1 does not enable deployment fastpath")
+        from .hybrid import differentiable_hybrid_rollout
+
+        initial = initial_physical_noise
+        if initial is None:
+            initial = model.outlet_adapter.sample_noise(
+                cache.history.batch,
+                device=cache.history.state.device,
+                dtype=cache.history.action_state.dtype,
+                generator=generator,
+            )
+        else:
+            initial = initial.to(device=cache.history.state.device)
+        rollout = differentiable_hybrid_rollout(
+            model, cache, config, initial, dtype=runtime_dtype,
+            collect_diagnostics=collect_diagnostics, execution_mode=execution_mode,
+        )
+        return replace(
+            rollout.refined,
+            metrics={**rollout.refined.metrics, **rollout.metrics},
+        ), rollout.refined_cache
     proposal = _integrate_cache(
         model,
         cache,
@@ -387,6 +410,26 @@ def sample_cached_action(
     config.validate()
     dtype = resolve_compute_dtype(config, dtype)
     model.eval()
+    if config.hybrid.enabled:
+        if deployment_fastpath:
+            raise ValueError("hybrid-v1 does not enable deployment fastpath")
+        from .hybrid import integrate_hybrid_pass
+
+        initial = initial_physical_noise
+        if initial is None:
+            initial = model.outlet_adapter.sample_noise(
+                cache.history.batch,
+                device=cache.history.state.device,
+                dtype=cache.history.action_state.dtype,
+                generator=generator,
+            )
+        else:
+            initial = initial.to(device=cache.history.state.device)
+        return integrate_hybrid_pass(
+            model, cache, config, initial, method=config.hybrid.refined_method,
+            dtype=dtype, collect_diagnostics=collect_diagnostics,
+            execution_mode=execution_mode,
+        )
     return _integrate_cache(
         model,
         cache,

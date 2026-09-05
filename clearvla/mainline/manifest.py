@@ -21,7 +21,10 @@ from .v120_core.bspine import (
 CAPABILITY_NAME = "object_intent_dynamics_323"
 CAPABILITY_SCHEMA = 30
 BSPINE_CAPABILITY_SCHEMA = 31
-CURRENT_CAPABILITY_SCHEMAS = frozenset({CAPABILITY_SCHEMA, BSPINE_CAPABILITY_SCHEMA})
+HYBRID_CAPABILITY_SCHEMA = 32
+CURRENT_CAPABILITY_SCHEMAS = frozenset(
+    {CAPABILITY_SCHEMA, BSPINE_CAPABILITY_SCHEMA, HYBRID_CAPABILITY_SCHEMA}
+)
 LAYOUT_NAME = "clearvla_mainline"
 # Layout 2 is the atomic component-owner hierarchy.  Layout 1 is readable only
 # for explicit validation/migration; it is never an exact-resume target.
@@ -149,12 +152,37 @@ ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
     ),
 )
 
+HYBRID_ARM_ONLY_ARCHITECTURE_MANIFEST = ArchitectureManifest(
+    schema=HYBRID_CAPABILITY_SCHEMA,
+    components=ComponentABI(
+        bottom=(
+            ComponentABI().bottom
+            + "_parallel_fixed_bspline_arm_only_v1_cubic_k12_fp32_raw_gripper"
+            + "_hybrid_v1_coupled_field"
+        ),
+        training=(
+            ComponentABI().training
+            + "_hybrid_v1_e5_proposal_h5_refined_rollout"
+        ),
+        runtime=(
+            ComponentABI().runtime
+            + "_hybrid_v1_e5_proposal_h5_refined_solver"
+        ),
+    ),
+)
+
 
 def architecture_manifest_for_bspine_implementation(
     implementation: str,
+    *,
+    hybrid_solver: bool = False,
 ) -> ArchitectureManifest:
     """Resolve the behavioral schema without making the baseline Schema31."""
 
+    if hybrid_solver:
+        if str(implementation) != BSPINE_ARM_ONLY_IMPLEMENTATION:
+            raise ValueError("hybrid-v1 requires the arm-only B-spline implementation")
+        return HYBRID_ARM_ONLY_ARCHITECTURE_MANIFEST
     if str(implementation) == BSPINE_DISABLED_IMPLEMENTATION:
         return ARCHITECTURE_MANIFEST
     if str(implementation) == BSPINE0_IMPLEMENTATION:

@@ -11,6 +11,7 @@ import torch
 from torch import Tensor
 
 ACTIVE_PREFIXES = (
+    "hybrid_",
     "loss_",
     "gradient_",
     "condition_",

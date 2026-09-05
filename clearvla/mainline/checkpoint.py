@@ -324,7 +324,8 @@ def build_checkpoint_identity(
 ) -> CheckpointIdentity:
     config.validate()
     manifest = architecture_manifest_for_bspine_implementation(
-        config.bottom.bspine_implementation
+        config.bottom.bspine_implementation,
+        hybrid_solver=config.hybrid.enabled,
     )
     manifest.validate()
     identity = CheckpointIdentity(

@@ -11,11 +11,13 @@ from torch import Tensor
 
 from ..config import ExperimentConfig
 from ..interfaces import TrainingBatch
+from ..model.component_contracts import legacy_named_parameters
 from ..model.policy import (
     ClearVLAMainlinePolicy,
     OnlinePolicyCache,
     OnlineTrainingState,
 )
+from ..runtime.hybrid import differentiable_hybrid_rollout
 from ..runtime.logging import tensor_scalars
 from ..runtime.numerics import resolve_compute_dtype
 from .gradient_audit import (
@@ -23,9 +25,9 @@ from .gradient_audit import (
     FiniteGradientSpikeReport,
     build_finite_gradient_spike_report,
 )
+from .hybrid import hybrid_rollout_terms
 from .losses import LossLedger, compose_losses, sample_flow_matching
 from .optimizer import WarmupCosineSchedule, gradient_diagnostics, parameter_role
-from ..model.component_contracts import legacy_named_parameters, modular_to_legacy_name
 
 _R2_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
     (
@@ -645,6 +647,23 @@ class MainlineTrainingEngine:
             require_execution_supervision=True,
             collect_diagnostics=collect_diagnostics,
         )
+        hybrid_terms = None
+        hybrid_metrics: dict[str, Tensor] = {}
+        if self.config.hybrid.enabled:
+            rollout = differentiable_hybrid_rollout(
+                self.model,
+                encoded.cache,
+                self.config,
+                flow_state.source_physical_noise,
+                dtype=self.dtype,
+            )
+            hybrid_terms = hybrid_rollout_terms(
+                self.config,
+                rollout,
+                batch.action_target,
+                batch.online.history,
+            )
+            hybrid_metrics = dict(rollout.metrics)
         ledger = compose_losses(
             self.config,
             policy_output=output,
@@ -656,8 +675,11 @@ class MainlineTrainingEngine:
             predicted_dynamics=encoded.cache.top.predicted_dynamics,
             action_codec=self.model.outlet_adapter.codec,
             collect_diagnostics=collect_diagnostics,
+            hybrid_terms=hybrid_terms,
         )
-        metrics = {**encoded.metrics, **teacher_metrics, **output.metrics}
+        metrics = {**encoded.metrics, **teacher_metrics, **output.metrics, **hybrid_metrics}
+        if hybrid_terms is not None:
+            metrics.update(hybrid_terms)
         if collect_diagnostics:
             metrics.update(self._audit_progress_metrics(batch, encoded))
         return ledger, metrics

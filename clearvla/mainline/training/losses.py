@@ -1671,7 +1671,10 @@ def compose_losses(
     predicted_dynamics: FutureObjectDynamics,
     action_codec: PhysicalActionFieldCodec,
     collect_diagnostics: bool = False,
+    hybrid_terms: dict[str, Tensor] | None = None,
 ) -> LossLedger:
+    if config.hybrid.enabled != (hybrid_terms is not None):
+        raise ValueError("hybrid enabled state and formal rollout loss must agree")
     action = action_terms(
         config,
         action_codec,
@@ -1707,6 +1710,10 @@ def compose_losses(
         + objective.physical_delta_consistency * action["physical_delta_consistency"]
         + objective.proposal * top_targets.history_proposal_loss
     )
+    if hybrid_terms is not None:
+        action_group = action_group + (
+            config.hybrid.rollout_loss_weight * hybrid_terms["hybrid_rollout"]
+        )
     intent_structure_core = (
         0.25 * top_targets.object_reconstruction_loss
         + 0.35 * top_targets.online_intent_loss
@@ -1793,6 +1800,16 @@ def compose_losses(
             objective.flow_refinement_sequence * geometry["flow_refinement_sequence"]
         ),
     }
+    if hybrid_terms is not None:
+        contributions["hybrid_rollout_decoded_action"] = (
+            config.hybrid.rollout_loss_weight * objective.decoded_action
+            * hybrid_terms["hybrid_rollout_decoded_action"]
+        )
+        for part in ("hold", "transition", "persistence"):
+            contributions[f"hybrid_rollout_{part}"] = (
+                config.hybrid.rollout_loss_weight * objective.gripper_trajectory / 3.0
+                * hybrid_terms[f"hybrid_rollout_{part}"]
+            )
     terms = {
         **action,
         **geometry,
@@ -1804,6 +1821,8 @@ def compose_losses(
         "coarse_action": top_targets.coarse_action_loss,
         "history_action_proposal": top_targets.history_proposal_loss,
     }
+    if hybrid_terms is not None:
+        terms.update(hybrid_terms)
     ledger = LossLedger(
         total=action_group + representation_group + execution_group,
         groups=groups,
