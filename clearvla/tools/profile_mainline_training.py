@@ -61,6 +61,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Retain the baseline audit-only post-global norm on non-diagnostic steps.",
     )
+    parser.add_argument(
+        "--retain-training-execution-diagnostics",
+        action="store_true",
+        help=(
+            "Retain the historical decoder and execution-loss diagnostics on "
+            "every training step for a matched timing baseline."
+        ),
+    )
     parser.add_argument("--repeat-batch", action="store_true")
     parser.add_argument(
         "--phase-breakdown",
@@ -205,6 +213,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     iterator = iter(loader)
     model = ClearVLAMainlinePolicy(config).to(device)
+    if args.retain_training_execution_diagnostics:
+        model.execution_bottom._retain_training_decoder_diagnostics = True
     if args.candidate_prefix_reuse:
         model.execution_bottom.decoder._training_candidate_prefix_reuse = True
     compile_seconds = 0.0
@@ -233,6 +243,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             else DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD
         ),
     )
+    if args.retain_training_execution_diagnostics:
+        engine._retain_training_execution_diagnostics = True
     if args.compile_forward:
         engine._forward = torch.compile(  # type: ignore[method-assign]
             engine._forward,
@@ -328,6 +340,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "warmup": int(args.warmup),
         "gradient_spike_audit": not args.disable_gradient_spike_audit,
         "postglobal_audit": bool(args.retain_postglobal_audit),
+        "training_execution_diagnostics": bool(
+            args.retain_training_execution_diagnostics
+        ),
         "repeat_batch": bool(args.repeat_batch),
         "phase_breakdown": bool(args.phase_breakdown),
         "compile_mmdit_blocks": bool(args.compile_mmdit_blocks),

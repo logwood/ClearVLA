@@ -3079,6 +3079,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         evidence_tokens: Tensor,
         evidence_scale: float | Tensor,
         collect_diagnostics: bool = True,
+        collect_execution_tensors: bool = False,
         collect_gripper_diagnostics: bool | None = None,
     ) -> dict[str, Tensor]:
         action = self.terminal_controller.normalize(result["action"])
@@ -3098,6 +3099,23 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 "motion_logits": motion_logits,
                 "evidence_latent": organized["latent"],
             }
+            if collect_execution_tensors:
+                output.update(
+                    {
+                        "evidence_mmd_it_execution_baseline_pred_velocity": torch.stack(
+                            result["prefix_velocity_rows"][:-1], dim=1
+                        ),
+                        "evidence_mmd_it_dwell_candidate_pred_velocity": torch.stack(
+                            result["dwell_candidate_prediction_rows"], dim=1
+                        ),
+                        "evidence_mmd_it_execution_candidate_value_field": torch.stack(
+                            result["execution_value_field_rows"], dim=1
+                        ),
+                        "evidence_mmd_it_execution_candidate_value_mask": torch.stack(
+                            result["execution_value_mask_rows"], dim=1
+                        ),
+                    }
+                )
             if event_logits is not None:
                 output["event_logits"] = event_logits
             if gripper_command_logits is not None:
@@ -3371,6 +3389,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         visual_value_tokens: Tensor | None = None,
         visual_key_bias: Tensor | None = None,
         collect_diagnostics: bool = True,
+        collect_execution_tensors: bool = False,
         collect_gripper_diagnostics: bool | None = None,
         evidence_scale: float | Tensor = 1.0,
         noisy_scale: float | Tensor = 1.0,
@@ -3602,6 +3621,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 evidence_tokens=evidence_tokens,
                 evidence_scale=evidence_scale,
                 collect_diagnostics=collect_diagnostics,
+                collect_execution_tensors=collect_execution_tensors,
                 collect_gripper_diagnostics=collect_gripper_diagnostics,
             )
             if not collect_diagnostics:
@@ -3891,6 +3911,23 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 "motion_logits": motion_logits,
                 "evidence_latent": organized["latent"],
             }
+            if collect_execution_tensors:
+                output.update(
+                    {
+                        "evidence_mmd_it_execution_baseline_pred_velocity": torch.stack(
+                            prefix_velocity_rows[:-1], dim=1
+                        ),
+                        "evidence_mmd_it_dwell_candidate_pred_velocity": torch.stack(
+                            dwell_candidate_prediction_rows, dim=1
+                        ),
+                        "evidence_mmd_it_execution_candidate_value_field": torch.stack(
+                            execution_value_field_rows, dim=1
+                        ),
+                        "evidence_mmd_it_execution_candidate_value_mask": torch.stack(
+                            execution_value_mask_rows, dim=1
+                        ),
+                    }
+                )
             if event_logits is not None:
                 output["event_logits"] = event_logits
             if gripper_command_logits is not None:

@@ -63,10 +63,19 @@ cross-GPU values are not treated as controlled speedups.
 | `reduce-overhead` block compile/CUDAGraph path | `4a706e0` | B1 / GPU4 | 0.488623 samples/s | negative result | `runs/profile_compile_mmdit_g4.json` |
 | Retain audit-only post-global norm | `f1b40b9` | B1 / GPU3 | 0.815009 samples/s | reference | `runs/profile_postglobal_baseline_g3.json` |
 | Skip audit-only post-global norm on ordinary batches | `a9fda45` | B1 / GPU3 | 0.854483 samples/s | `1.0484x` | `runs/profile_skip_postglobal_g3.json` |
+| Retain all training execution diagnostics, long matched run | pending execution-only commit | B8 / GPU5 | 4.01939 samples/s | reference | `runs/profile_execution_diag_baseline_long_b8_g5.json` |
+| Keep only formal execution tensors on ordinary batches, long matched run | pending execution-only commit | B8 / GPU5 | 4.28224 samples/s | `1.0654x` | `runs/profile_execution_only_long_b8_g5.json` |
 
 The current best controlled combination is therefore only about `1.20x`, not
 the required `2.0x`.  Its peak allocated memory was 10.224 GiB versus 11.269
 GiB for the same-GPU baseline.
+
+The execution-only split also has a deliberately retained short-run reversal:
+`runs/profile_execution_diag_baseline_b8_g5.json` measured 4.59502 samples/s,
+while `runs/profile_execution_only_b8_g5.json` measured 4.42582 samples/s
+(`0.9632x`).  Reversing run order and increasing the measured window from five
+to ten steps produced the `1.0654x` result above.  The short pair is treated as
+timing noise, not discarded evidence.
 
 ## Operator evidence
 
@@ -100,3 +109,16 @@ baseline velocity, but it does not need attention entropy, norm dictionaries,
 capacity/dwell audit reductions, hard-policy audit selection, quantiles or
 correlations.  A logging batch must continue to compute all of them.
 
+The first implementation of this split passed an exact CPU update gate: total
+loss, all loss groups and contributions, raw leaf gradients captured during
+backward, clipped gradients, parameters after the optimizer step, complete
+optimizer state and the global/flow/conditioning RNG continuations were equal
+at zero tolerance.  The bounded diagnostic call retained its complete metric
+surface.  Reproduce with:
+
+```bash
+PYTHONPATH=.:/data/senwang/envs/clearvla-schema30-test/lib/python3.12/site-packages \
+  /data/senwang/envs/clearvla-schema30-boundary/bin/python -m pytest -q \
+  tests/test_training_acceleration_execution_diagnostics.py \
+  tests/test_training_acceleration_prefix_reuse.py
+```

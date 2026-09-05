@@ -744,6 +744,8 @@ def execution_value_terms(
     codec: PhysicalActionFieldCodec,
     output: PolicyStepOutput,
     flow_state: FlowMatchingState,
+    *,
+    collect_diagnostics: bool = False,
 ) -> dict[str, Tensor]:
     """Restore V120's centered physical candidate-value supervision.
 
@@ -875,6 +877,9 @@ def execution_value_terms(
     ) * physical_weight
     value_rows = value_field.sum(dim=(2, 3, 4)) / row_denominator
     value_loss = (value_rows * reliability).sum() / reliability_denominator
+
+    if not collect_diagnostics:
+        return {"execution_value": value_loss}
 
     predicted_scalar = (
         (predicted * component_weight[None, None, None, None])
@@ -1671,6 +1676,7 @@ def compose_losses(
     predicted_dynamics: FutureObjectDynamics,
     action_codec: PhysicalActionFieldCodec,
     collect_diagnostics: bool = False,
+    collect_execution_diagnostics: bool | None = None,
 ) -> LossLedger:
     action = action_terms(
         config,
@@ -1681,11 +1687,14 @@ def compose_losses(
         flow_state,
         collect_diagnostics=collect_diagnostics,
     )
+    if collect_execution_diagnostics is None:
+        collect_execution_diagnostics = collect_diagnostics
     execution = execution_value_terms(
         config,
         action_codec,
         policy_output,
         flow_state,
+        collect_diagnostics=collect_execution_diagnostics,
     )
     geometry = flow_geometry_terms(observation)
     if top_targets.teacher_dynamics is None:

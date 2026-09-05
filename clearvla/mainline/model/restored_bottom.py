@@ -647,9 +647,14 @@ class RestoredV120EvidenceBottom(nn.Module):
         event_evidence = layer_contracts[-1]["event_logits"]
         run_diagnostics = bool(
             collect_diagnostics
-            or self.training
-            or require_execution_supervision
             or execution_mode != "learned"
+            or (require_execution_supervision and not self.training)
+            or getattr(self, "_retain_training_decoder_diagnostics", False)
+        )
+        collect_execution_tensors = bool(
+            self.training
+            or require_execution_supervision
+            or run_diagnostics
         )
 
         self._set_eval_intervention(execution_mode)
@@ -678,6 +683,7 @@ class RestoredV120EvidenceBottom(nn.Module):
                 visual_value_tokens=None,
                 visual_key_bias=None,
                 collect_diagnostics=run_diagnostics,
+                collect_execution_tensors=collect_execution_tensors,
                 # Execution-value supervision needs the decoder's candidate
                 # tensors on every training batch, but the R2 gripper state/
                 # VJP observation is an outer logging concern.  Keep that

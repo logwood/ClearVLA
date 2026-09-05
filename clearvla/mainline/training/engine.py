@@ -676,6 +676,15 @@ class MainlineTrainingEngine:
             predicted_dynamics=encoded.cache.top.predicted_dynamics,
             action_codec=self.model.outlet_adapter.codec,
             collect_diagnostics=collect_diagnostics,
+            collect_execution_diagnostics=(
+                collect_diagnostics
+                or not self.model.training
+                or getattr(
+                    self,
+                    "_retain_training_execution_diagnostics",
+                    False,
+                )
+            ),
         )
         metrics = {**encoded.metrics, **teacher_metrics, **output.metrics}
         if collect_diagnostics:
