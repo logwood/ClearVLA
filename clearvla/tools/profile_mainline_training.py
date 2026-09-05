@@ -55,6 +55,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dino-cache", type=Path)
     parser.add_argument("--t5-condition", type=Path)
     parser.add_argument("--disable-gradient-spike-audit", action="store_true")
+    parser.add_argument(
+        "--retain-postglobal-audit",
+        action="store_true",
+        help="Retain the baseline audit-only post-global norm on non-diagnostic steps.",
+    )
     parser.add_argument("--repeat-batch", action="store_true")
     parser.add_argument(
         "--phase-breakdown",
@@ -170,6 +175,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         dtype=dtype,
         train_flow_generator=_owned_generator(device, config.data.seed + 102),
         train_condition_generator=_owned_generator(device, config.data.seed + 103),
+        skip_postglobal_audit=not args.retain_postglobal_audit,
         gradient_spike_audit_threshold=(
             None
             if args.disable_gradient_spike_audit
@@ -243,6 +249,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "steps": int(args.steps),
         "warmup": int(args.warmup),
         "gradient_spike_audit": not args.disable_gradient_spike_audit,
+        "postglobal_audit": bool(args.retain_postglobal_audit),
         "repeat_batch": bool(args.repeat_batch),
         "phase_breakdown": bool(args.phase_breakdown),
         "measured_seconds": _finite_float(measured_seconds),

@@ -206,6 +206,7 @@ class MainlineTrainingEngine:
         dtype: torch.dtype | None = None,
         train_flow_generator: torch.Generator | None = None,
         train_condition_generator: torch.Generator | None = None,
+        skip_postglobal_audit: bool = True,
         gradient_spike_audit_threshold: float | None = (
             DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD
         ),
@@ -219,6 +220,7 @@ class MainlineTrainingEngine:
         self.dtype = resolve_compute_dtype(config, dtype)
         self.train_flow_generator = train_flow_generator
         self.train_condition_generator = train_condition_generator
+        self.skip_postglobal_audit = bool(skip_postglobal_audit)
         # Parameter ownership is structural and does not change during a
         # training run.  Materialize the ordered legacy view once instead of
         # rebuilding/modular-name resolving it on every optimizer step.
@@ -438,7 +440,8 @@ class MainlineTrainingEngine:
             postlocal_norm,
             foreach=True,
         )
-        if collect_diagnostics:
+        postglobal_norm: Tensor | None = None
+        if collect_diagnostics or not self.skip_postglobal_audit:
             # The post-global norm is an audit-only value.  Clipping has
             # already consumed ``postlocal_norm`` and no later mathematical
             # operation reads this reduction.  Avoiding it on ordinary
@@ -450,6 +453,9 @@ class MainlineTrainingEngine:
                 error_if_nonfinite=True,
                 foreach=True,
             )
+        if collect_diagnostics:
+            if postglobal_norm is None:
+                raise RuntimeError("diagnostic gradient lifecycle lost post-global norm")
             metrics.update(gradient_diagnostics(self.model, stage="postglobal"))
             metrics["gradient_raw_global_l2"] = total_norm.detach().float()
             metrics["gradient_postlocal_global_l2"] = postlocal_norm.detach().float()
