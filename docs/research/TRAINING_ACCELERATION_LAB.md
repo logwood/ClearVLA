@@ -196,6 +196,16 @@ median speedup:      3.5329x
 one-time capture:    1.1925041 s
 ```
 
+The same checked runner started at step `700` (execution progress about `0.5`,
+so the real contraction/controller path is active) reported:
+
+```text
+eager median:        0.7050974 s/step
+graph runner median: 0.1860824 s/step
+median speedup:      3.7892x
+one-time capture:    1.2919135 s
+```
+
 These are feasibility results, not the production B8 result: they use the
 test-sized local model and exclude data-loader transfer.  The checked runner
 does enqueue a copy into every static model-input slot, even when the source
@@ -205,6 +215,7 @@ batch object is repeated.  Reproduce the two measurements with:
 $env:PYTHONPATH='.'
 D:\CondaData\envs\torch312\python.exe scripts/probe_local_training_cuda_graph.py
 D:\CondaData\envs\torch312\python.exe scripts/probe_local_training_cuda_graph_runner.py
+D:\CondaData\envs\torch312\python.exe scripts/probe_local_training_cuda_graph_runner.py --start-step 700
 ```
 
 The strict multi-step gate separately compared eager execution with graph

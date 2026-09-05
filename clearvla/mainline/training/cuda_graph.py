@@ -258,6 +258,11 @@ class CudaGraphTrainingStepRunner:
             engine.optimizer.zero_grad(set_to_none=False)
             del warm_ledger, warm_metrics
             torch.cuda.synchronize(engine.device)
+            # Warm-up activations belong to the ordinary allocator pool and
+            # cannot back the private graph pool.  Release only those cached,
+            # unreferenced blocks before recording to avoid a transient near-
+            # duplicate activation footprint on 24 GiB training GPUs.
+            torch.cuda.empty_cache()
 
             graph = torch.cuda.CUDAGraph()
             for generator in (

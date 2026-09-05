@@ -147,6 +147,7 @@ def main() -> None:
     # AccumulateGrad nodes on the private capture stream.
     del warm_ledger, warm_metrics
     torch.cuda.synchronize()
+    torch.cuda.empty_cache()
 
     graph = torch.cuda.CUDAGraph()
     graph.register_generator_state(engine.train_flow_generator)
