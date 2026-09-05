@@ -99,6 +99,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Compile the formal engine forward with graph-break fallback.",
     )
     parser.add_argument(
+        "--compile-visual-submodules",
+        action="store_true",
+        help=(
+            "Compile stable Flow-DINO/raw-flow visual submodules individually "
+            "(experimental; keeps the outer Python graph unchanged)."
+        ),
+    )
+    parser.add_argument(
         "--candidate-prefix-reuse",
         action="store_true",
         help="Use the experimental attached training candidate-prefix chart.",
@@ -211,6 +219,26 @@ def _compile_mmdit_blocks(model: ClearVLAMainlinePolicy, *, mode: str) -> float:
     return time.perf_counter() - started
 
 
+def _compile_visual_submodules(model: ClearVLAMainlinePolicy, *, mode: str) -> float:
+    """Compile repeated visual tensor kernels without wrapping the outer graph."""
+
+    started = time.perf_counter()
+    encoder = model.observation.compiler.encoder
+    modules: list[torch.nn.Module] = [encoder.flow]
+    if encoder.raw_flow is not None:
+        modules.append(encoder.raw_flow)
+    for module in modules:
+        # Keep module registration, parameter ownership and checkpoint names
+        # unchanged; only replace the callable used by this profiler process.
+        module.forward = torch.compile(  # type: ignore[method-assign]
+            module.forward,
+            dynamic=False,
+            fullgraph=False,
+            mode=mode,
+        )
+    return time.perf_counter() - started
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     if args.steps <= 0 or args.warmup < 0 or args.warmup >= args.steps:
         raise ValueError("require steps > warmup >= 0")
@@ -240,6 +268,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     compile_seconds = 0.0
     if args.compile_mmdit_blocks:
         compile_seconds = _compile_mmdit_blocks(model, mode=args.compile_mode)
+    visual_compile_seconds = 0.0
+    if args.compile_visual_submodules:
+        visual_compile_seconds = _compile_visual_submodules(model, mode=args.compile_mode)
     optimizer, _ownership = build_optimizer(model, config)
     schedule = WarmupCosineSchedule(
         optimizer,
@@ -370,10 +401,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "phase_breakdown": bool(args.phase_breakdown),
         "compile_mmdit_blocks": bool(args.compile_mmdit_blocks),
         "compile_forward": bool(args.compile_forward),
+        "compile_visual_submodules": bool(args.compile_visual_submodules),
         "compile_mode": str(args.compile_mode),
         "candidate_prefix_reuse": bool(args.candidate_prefix_reuse),
         "reuse_prepared_block_contexts": bool(args.reuse_prepared_block_contexts),
         "compile_setup_seconds": _finite_float(compile_seconds),
+        "visual_compile_setup_seconds": _finite_float(visual_compile_seconds),
         "measured_seconds": _finite_float(measured_seconds),
         "steps_per_second": float(measured_steps / max(measured_seconds, 1e-8)),
         "samples_per_second": float(measured_samples / max(measured_seconds, 1e-8)),

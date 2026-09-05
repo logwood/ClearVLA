@@ -117,6 +117,11 @@ misalign precomputed rows after repeated active-row filtering.  Same-GPU CUDA
 throughput is intentionally still pending; no speedup is claimed until matched
 baseline and optimized runs are completed on one idle GPU.
 
+The profiler also now has an opt-in `--compile-visual-submodules` probe.  It
+compiles only the recurrent Flow-DINO and raw-flow tensor modules, leaving the
+outer dataclass/mask/progressive-routing graph in Python.  This is a separate
+measurement path and has no production-default effect.
+
 ## Next experiment
 
 Separate tensors required by the formal execution-value objective from
