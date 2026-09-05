@@ -100,6 +100,23 @@ cannot publish a speed result.  The intended artifact name was
 `runs/profile_compile_forward_b1_g4.json`; the code remains at `1303dc8` as a
 reproducible negative experiment.
 
+## Static MMDiT context reuse (third experiment)
+
+Commit `0ab1864` adds an opt-in common-subexpression path.  For each decoder
+call it computes the action-independent global modulation, evidence K/V
+projections and causal self mask once per MMDiT block, then reuses those tensors
+for candidate/repeat operations.  The tensors remain attached to the autograd
+graph; no detach, checkpoint, optimizer, RNG or sampling contract is changed.
+The default path remains unchanged unless the profiler flag
+`--reuse-prepared-block-contexts` is supplied.
+
+The strict CPU training-step gate passed at zero tolerance for loss, parameter
+updates and gradients (`tests/test_training_acceleration_prefix_reuse.py`).  A
+hard-routing subset-indexing guard was also added so the opt-in path cannot
+misalign precomputed rows after repeated active-row filtering.  Same-GPU CUDA
+throughput is intentionally still pending; no speedup is claimed until matched
+baseline and optimized runs are completed on one idle GPU.
+
 ## Next experiment
 
 Separate tensors required by the formal execution-value objective from
