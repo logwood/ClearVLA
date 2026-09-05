@@ -134,6 +134,11 @@ grounding, P1, world, transition and layer-contract blocks.  It is deliberately
 independent from all other flags so a numerical or graph-break failure remains
 an attributable experiment.
 
+`--compile-candidate-prefix` finally probes the attached candidate-prefix
+chart as one compiled boundary.  This targets Python dispatch between the
+already validated prefix operations; it is opt-in because the chart contains
+attached gradients and must pass its own update gate.
+
 The same commit adds an opt-in execution-controller source-lane reuse probe
 (`--reuse-prepared-controller-context`).  It shares the projected
 global/time/evidence lanes across the three recurrent decisions.  The forward

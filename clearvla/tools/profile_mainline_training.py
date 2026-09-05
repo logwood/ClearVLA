@@ -123,6 +123,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--compile-candidate-prefix",
+        action="store_true",
+        help=(
+            "Compile the attached training candidate-prefix chart as one "
+            "experimental subgraph."
+        ),
+    )
+    parser.add_argument(
         "--candidate-prefix-reuse",
         action="store_true",
         help="Use the experimental attached training candidate-prefix chart.",
@@ -302,6 +310,20 @@ def _compile_mainline_blocks(model: ClearVLAMainlinePolicy, *, mode: str) -> flo
     return time.perf_counter() - started
 
 
+def _compile_candidate_prefix(model: ClearVLAMainlinePolicy, *, mode: str) -> float:
+    """Compile the prefix chart boundary while leaving decoder dispatch intact."""
+
+    started = time.perf_counter()
+    decoder = model.execution_bottom.decoder
+    decoder._run_differentiable_native_candidates_prefix_reuse = torch.compile(  # type: ignore[method-assign]
+        decoder._run_differentiable_native_candidates_prefix_reuse,
+        dynamic=False,
+        fullgraph=False,
+        mode=mode,
+    )
+    return time.perf_counter() - started
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     if args.steps <= 0 or args.warmup < 0 or args.warmup >= args.steps:
         raise ValueError("require steps > warmup >= 0")
@@ -344,6 +366,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     mainline_compile_seconds = 0.0
     if args.compile_mainline_blocks:
         mainline_compile_seconds = _compile_mainline_blocks(
+            model, mode=args.compile_mode
+        )
+    candidate_compile_seconds = 0.0
+    if args.compile_candidate_prefix:
+        candidate_compile_seconds = _compile_candidate_prefix(
             model, mode=args.compile_mode
         )
     optimizer, _ownership = build_optimizer(model, config)
@@ -479,6 +506,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "compile_visual_submodules": bool(args.compile_visual_submodules),
         "compile_execution_submodules": bool(args.compile_execution_submodules),
         "compile_mainline_blocks": bool(args.compile_mainline_blocks),
+        "compile_candidate_prefix": bool(args.compile_candidate_prefix),
         "compile_mode": str(args.compile_mode),
         "candidate_prefix_reuse": bool(args.candidate_prefix_reuse),
         "reuse_prepared_block_contexts": bool(args.reuse_prepared_block_contexts),
@@ -489,6 +517,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "visual_compile_setup_seconds": _finite_float(visual_compile_seconds),
         "execution_compile_setup_seconds": _finite_float(execution_compile_seconds),
         "mainline_compile_setup_seconds": _finite_float(mainline_compile_seconds),
+        "candidate_compile_setup_seconds": _finite_float(candidate_compile_seconds),
         "measured_seconds": _finite_float(measured_seconds),
         "steps_per_second": float(measured_steps / max(measured_seconds, 1e-8)),
         "samples_per_second": float(measured_samples / max(measured_seconds, 1e-8)),
