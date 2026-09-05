@@ -2150,6 +2150,33 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         minimum_owner = int(minimum_owner)
         if minimum_owner < 0 or minimum_owner >= len(self.blocks):
             raise ValueError("candidate prefix minimum owner is invalid")
+        if (
+            bool(getattr(self, "_batched_candidate_prefix", False))
+            and not bool(getattr(self, "_retain_candidate_operation_diagnostics", False))
+            and (
+                not self.operator_capacity_enabled
+                or identity_boundary
+                or prepared_factors is not None
+            )
+            and prepared_block_contexts is not None
+        ):
+            return self._run_differentiable_native_candidates_prefix_batched(
+                action,
+                baseline_velocity=baseline_velocity,
+                candidate_blocks=candidate_blocks,
+                candidate_repeats=candidate_repeats,
+                candidate_mask=mask,
+                evidence_tokens=evidence_tokens,
+                evidence_value_tokens=evidence_value_tokens,
+                global_condition=global_condition,
+                evidence_key_bias=evidence_key_bias,
+                evidence_scale=evidence_scale,
+                capacity_ratios=capacity_ratios,
+                identity_boundary=identity_boundary,
+                prepared_factors=prepared_factors,
+                minimum_owner=minimum_owner,
+                prepared_block_contexts=prepared_block_contexts,
+            )
         for owner in range(minimum_owner, len(self.blocks)):
             first_candidate = owner * dwell
             if first_candidate >= candidate_count:
@@ -2205,6 +2232,254 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             candidate_velocity,
         )
         return action_stack, candidate_velocity, mask, operation_rows.mean()
+
+    def _run_differentiable_native_candidates_prefix_batched(
+        self,
+        action: Tensor,
+        *,
+        baseline_velocity: Tensor,
+        candidate_blocks: Tensor,
+        candidate_repeats: Tensor,
+        candidate_mask: Tensor,
+        evidence_tokens: Tensor,
+        evidence_value_tokens: Tensor,
+        global_condition: Tensor,
+        evidence_key_bias: Tensor,
+        evidence_scale: float | Tensor,
+        capacity_ratios: Tensor | None,
+        identity_boundary: bool,
+        prepared_factors: tuple[Tensor, ...] | None,
+        minimum_owner: int,
+        prepared_block_contexts: tuple[_PreparedMMDiTBlockContext, ...],
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Batch independent owner chains while preserving attached gradients.
+
+        The regular prefix chart executes one Python/module call per owner and
+        dwell step.  At the identity contraction boundary those owner chains
+        are independent, so a functional owner-vmap is algebraically the same
+        operation with one larger batch.  Parameters are stacked from the
+        original live tensors (rather than detached ensemble state), keeping
+        gradients connected to the registered block parameters.  The path is
+        opt-in and falls back whenever diagnostics or a non-identity
+        contraction would add an unbatched semantic branch.
+        """
+        from torch.func import functional_call, vmap
+
+        owners = tuple(range(int(minimum_owner), len(self.blocks)))
+        if not owners:
+            raise ValueError("batched candidate prefix requires at least one owner")
+        template = self.blocks[owners[0]]
+        parameter_maps = tuple(dict(self.blocks[index].named_parameters()) for index in owners)
+        buffer_maps = tuple(dict(self.blocks[index].named_buffers()) for index in owners)
+        parameter_names = tuple(name for name, _ in template.named_parameters())
+        buffer_names = tuple(name for name, _ in template.named_buffers())
+        stacked_parameters = {
+            name: torch.stack(
+                tuple(values[name] for values in parameter_maps), dim=0
+            )
+            for name in parameter_names
+        }
+        stacked_buffers = {
+            name: torch.stack(tuple(values[name] for values in buffer_maps), dim=0)
+            for name in buffer_names
+        }
+        contraction_template = None
+        stacked_contraction_parameters: dict[str, Tensor] | None = None
+        stacked_contraction_buffers: dict[str, Tensor] | None = None
+        stacked_contraction_factors: Tensor | None = None
+        if self.operator_capacity_enabled and not identity_boundary:
+            contractions = tuple(self.operator_contractions[index] for index in owners)
+            contraction_template = contractions[0]
+            contraction_parameter_maps = tuple(
+                dict(module.named_parameters()) for module in contractions
+            )
+            contraction_buffer_maps = tuple(
+                dict(module.named_buffers()) for module in contractions
+            )
+            contraction_parameter_names = tuple(
+                name for name, _ in contraction_template.named_parameters()
+            )
+            contraction_buffer_names = tuple(
+                name for name, _ in contraction_template.named_buffers()
+            )
+            stacked_contraction_parameters = {
+                name: torch.stack(
+                    tuple(values[name] for values in contraction_parameter_maps), dim=0
+                )
+                for name in contraction_parameter_names
+            }
+            stacked_contraction_buffers = {
+                name: torch.stack(
+                    tuple(values[name] for values in contraction_buffer_maps), dim=0
+                )
+                for name in contraction_buffer_names
+            }
+            factor_rows = (
+                tuple(
+                    module.prepare_factors()
+                    for module in contractions
+                )
+                if prepared_factors is None
+                else tuple(prepared_factors[index] for index in owners)
+            )
+            stacked_contraction_factors = torch.stack(factor_rows, dim=0)
+        stacked_context = _PreparedMMDiTBlockContext(
+            global_modulation=torch.stack(
+                [prepared_block_contexts[index].global_modulation for index in owners]
+            ),
+            evidence_key=torch.stack(
+                [prepared_block_contexts[index].evidence_key for index in owners]
+            ),
+            evidence_value=torch.stack(
+                [prepared_block_contexts[index].evidence_value for index in owners]
+            ),
+            self_mask=prepared_block_contexts[owners[0]].self_mask,
+        )
+        owner_count = len(owners)
+        owner_evidence = evidence_tokens.unsqueeze(0).expand(owner_count, -1, -1, -1)
+        owner_evidence_value = evidence_value_tokens.unsqueeze(0).expand(
+            owner_count, -1, -1, -1
+        )
+        owner_condition = global_condition.unsqueeze(0).expand(owner_count, -1, -1)
+        if isinstance(evidence_scale, Tensor) and evidence_scale.ndim == 1:
+            owner_scale = evidence_scale.unsqueeze(0).expand(owner_count, -1)
+        elif isinstance(evidence_scale, Tensor) and evidence_scale.ndim == 0:
+            owner_scale = evidence_scale.expand(owner_count, int(action.shape[0]))
+        else:
+            owner_scale = torch.full(
+                (owner_count, int(action.shape[0])),
+                float(evidence_scale),
+                device=action.device,
+                dtype=action.dtype,
+            )
+
+        def apply_owner(
+            parameters: dict[str, Tensor],
+            buffers: dict[str, Tensor],
+            owner_action: Tensor,
+            owner_evidence_row: Tensor,
+            owner_condition_row: Tensor,
+            owner_value_row: Tensor,
+            owner_scale_row: Tensor | float,
+            owner_global_modulation: Tensor,
+            owner_evidence_key: Tensor,
+            owner_evidence_value: Tensor,
+        ) -> Tensor:
+            context = _PreparedMMDiTBlockContext(
+                global_modulation=owner_global_modulation,
+                evidence_key=owner_evidence_key,
+                evidence_value=owner_evidence_value,
+                self_mask=stacked_context.self_mask,
+            )
+            return functional_call(
+                template,
+                (parameters, buffers),
+                (owner_action, owner_evidence_row, owner_condition_row),
+                {
+                    "evidence_value_tokens": owner_value_row,
+                    "evidence_key_bias": evidence_key_bias,
+                    "evidence_scale": owner_scale_row,
+                    "collect_diagnostics": False,
+                    "prepared_static": context,
+                },
+            )[0]
+
+        def apply_contraction(
+            parameters: dict[str, Tensor],
+            buffers: dict[str, Tensor],
+            base_update: Tensor,
+            owner_condition_row: Tensor,
+            owner_capacity_row: Tensor,
+            owner_factor_row: Tensor,
+        ) -> Tensor:
+            if contraction_template is None:
+                return base_update
+            return functional_call(
+                contraction_template,
+                (parameters, buffers),
+                (
+                    base_update,
+                    owner_condition_row,
+                    torch.zeros(
+                        int(base_update.shape[0]),
+                        device=base_update.device,
+                        dtype=torch.long,
+                    ),
+                ),
+                {
+                    "contraction_progress": self.execution_progress,
+                    "prepared_factors": owner_factor_row,
+                    "depth_ratio_override": owner_capacity_row,
+                    "binary_group_selection": False,
+                    "identity_bypass": False,
+                    "collect_diagnostics": False,
+                },
+            )[0]
+
+        current = action.unsqueeze(0).expand(owner_count, -1, -1, -1)
+        candidate_actions: list[Tensor] = [action.clone() for _ in range(int(candidate_blocks.shape[1]))]
+        dwell = int(self.max_dwell)
+        for repeat_index in range(dwell):
+            before = current
+            current = vmap(apply_owner)(
+                stacked_parameters,
+                stacked_buffers,
+                current,
+                owner_evidence,
+                owner_condition,
+                owner_evidence_value,
+                owner_scale,
+                stacked_context.global_modulation,
+                stacked_context.evidence_key,
+                stacked_context.evidence_value,
+            )
+            if contraction_template is not None:
+                if capacity_ratios is None:
+                    owner_capacity = torch.ones(
+                        owner_count,
+                        int(action.shape[0]),
+                        device=action.device,
+                        dtype=torch.float32,
+                    )
+                elif capacity_ratios.ndim == 1:
+                    owner_capacity = capacity_ratios.unsqueeze(0).expand(owner_count, -1)
+                else:
+                    owner_capacity = torch.stack(
+                        tuple(capacity_ratios[:, owner] for owner in owners), dim=0
+                    )
+                current = before + vmap(apply_contraction)(
+                    stacked_contraction_parameters,
+                    stacked_contraction_buffers,
+                    current - before,
+                    owner_condition,
+                    owner_capacity,
+                    stacked_contraction_factors,
+                )
+            for owner_offset, owner in enumerate(owners):
+                candidate_index = owner * dwell + repeat_index
+                if candidate_index < len(candidate_actions):
+                    candidate_actions[candidate_index] = current[owner_offset]
+        action_stack = torch.stack(candidate_actions, dim=1)
+        candidate_velocity = self.terminal_controller.predict_candidate_velocity(
+            self.terminal_controller.normalize(
+                action_stack.reshape(-1, *action_stack.shape[2:])
+            )
+        ).reshape(
+            int(action.shape[0]),
+            int(candidate_blocks.shape[1]),
+            self.horizon,
+            int(self.config.physical_action_dim),
+        )
+        terminal = candidate_blocks == len(self.blocks)
+        candidate_velocity = torch.where(
+            terminal[:, :, None, None],
+            baseline_velocity[:, None].to(dtype=candidate_velocity.dtype),
+            candidate_velocity,
+        )
+        return action_stack, candidate_velocity, candidate_mask, (
+            (candidate_mask & (candidate_blocks < len(self.blocks))).float()
+            * (candidate_repeats.detach().float() + 1.0)
+        ).sum(dim=-1).mean()
 
     def _run_deployment_candidate_prefix_reuse(
         self,

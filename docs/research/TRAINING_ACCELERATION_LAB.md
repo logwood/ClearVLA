@@ -139,6 +139,18 @@ chart as one compiled boundary.  This targets Python dispatch between the
 already validated prefix operations; it is opt-in because the chart contains
 attached gradients and must pass its own update gate.
 
+The `--batched-candidate-prefix` probe uses `torch.func.vmap` over independent
+owner chains at the exact identity-contraction boundary.  It stacks live
+parameters (not detached ensemble state), so gradients still reach every
+registered block.  The local CPU gate is bitwise equal at the identity
+boundary when controller source reuse is off.  A separate contraction-bank
+vmap and a complete training update at execution progress `0.5` also pass the
+`2e-5` relative / `2e-7` absolute floating-point gate.  Full candidate
+operation diagnostics still fall back to the reference prefix implementation.
+No throughput benefit is claimed before the same-GPU measurement; the first
+implementation deliberately remains a retained checkpoint because it stacks
+the live parameter bank inside every decision and may therefore be slower.
+
 The same commit adds an opt-in execution-controller source-lane reuse probe
 (`--reuse-prepared-controller-context`).  It shares the projected
 global/time/evidence lanes across the three recurrent decisions.  The forward

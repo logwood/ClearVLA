@@ -131,6 +131,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--batched-candidate-prefix",
+        action="store_true",
+        help=(
+            "Batch independent candidate-prefix owners with torch.func.vmap "
+            "at the identity contraction boundary (experimental)."
+        ),
+    )
+    parser.add_argument(
         "--candidate-prefix-reuse",
         action="store_true",
         help="Use the experimental attached training candidate-prefix chart.",
@@ -352,6 +360,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         model.execution_bottom.decoder._reuse_prepared_block_contexts = True
     if args.reuse_prepared_controller_context:
         model.execution_bottom.decoder._reuse_prepared_controller_context = True
+    if args.batched_candidate_prefix:
+        model.execution_bottom.decoder._batched_candidate_prefix = True
     compile_seconds = 0.0
     if args.compile_mmdit_blocks:
         compile_seconds = _compile_mmdit_blocks(model, mode=args.compile_mode)
@@ -507,6 +517,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "compile_execution_submodules": bool(args.compile_execution_submodules),
         "compile_mainline_blocks": bool(args.compile_mainline_blocks),
         "compile_candidate_prefix": bool(args.compile_candidate_prefix),
+        "batched_candidate_prefix": bool(args.batched_candidate_prefix),
         "compile_mode": str(args.compile_mode),
         "candidate_prefix_reuse": bool(args.candidate_prefix_reuse),
         "reuse_prepared_block_contexts": bool(args.reuse_prepared_block_contexts),
