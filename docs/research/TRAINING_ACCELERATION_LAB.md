@@ -1,0 +1,102 @@
+# Training acceleration lab
+
+Updated: 2026-09-06
+
+This ledger records controlled training-throughput experiments on branch
+`codex/training-acceleration`.  It is deliberately separate from the current
+architecture contract: no experiment here changes the accepted model
+semantics.  Small JSON reports and profiler tables remain in the authorized
+remote lab directory; checkpoints, tensor caches, Inductor caches and raw logs
+must not be copied into repository memory.
+
+## Acceptance contract
+
+- Primary target: at least `2.0x` training throughput on the same GPU, batch,
+  data, seed, dtype, warm-up and audit settings.
+- Values below `2.0x` are retained as intermediate evidence, not described as
+  completion.
+- The total loss, every weighted contribution, raw and clipped gradients,
+  parameter update, optimizer state and continuation RNG state must remain
+  equivalent.  Diagnostic batches must retain the complete metric surface.
+- Positive and negative experiments are kept as individual commits with their
+  reproduction command and result artifact.
+- TF32 is excluded because it changes the numerical contract.
+
+## Environment
+
+```text
+remote host: senwang-server
+remote lab:  /data/senwang/clearvla-vlm-sidecar/bases/clearvla-schema29-d8a77a1/.codex_training_acceleration
+python:      /data/senwang/envs/clearvla-schema30-boundary/bin/python
+PyTorch:     2.11.0+cu130
+dtype:       bfloat16
+production profiling batch: 8
+available experiment GPUs at the time of measurement: physical 3-6
+```
+
+The profiler entry point is `python -m
+clearvla.tools.profile_mainline_training`.  A representative controlled run is:
+
+```bash
+CUDA_VISIBLE_DEVICES=5 PYTHONPATH=. \
+  /data/senwang/envs/clearvla-schema30-boundary/bin/python \
+  -m clearvla.tools.profile_mainline_training \
+  --device cuda --batch-size 8 --num-workers 0 \
+  --steps 6 --warmup 2 --repeat-batch \
+  --disable-gradient-spike-audit \
+  --output runs/profile_baseline_v2_b8_g5.json
+```
+
+## Retained results
+
+The percentages below use the matched baseline named in the same row or note;
+cross-GPU values are not treated as controlled speedups.
+
+| Experiment | Commit | Batch / GPU | Throughput | Controlled result | Remote artifact |
+|---|---:|---:|---:|---:|---|
+| Original paired baseline | `c6ebe4c` era | B8 / GPU5 | 4.67223 samples/s | reference | `runs/profile_baseline_v2_b8_g5.json` |
+| Candidate-prefix reuse v2 | `c6ebe4c` | B8 / GPU5 | 4.95966 samples/s | `1.0615x` | `runs/profile_candidate_prefix_v2_b8_g5.json` |
+| Same-GPU compile baseline | `2e6a234` era | B8 / GPU6 | 4.30986 samples/s | reference | `runs/profile_compile_match_baseline_b8_g6.json` |
+| Default Inductor on MMDiT blocks | `4a706e0` / `2e6a234` | B8 / GPU6 | 4.82328 samples/s | `1.1191x` | `runs/profile_compile_default_b8_g6.json` |
+| Prefix reuse plus default block compile | `c6ebe4c` / `2e6a234` | B8 / GPU6 | 5.16131 samples/s | `1.1976x` | `runs/profile_compile_prefix_b8_g6.json` |
+| Prefix reuse v1 with per-candidate GPU-to-CPU checks | `8d82ee2` | B8 / GPU5 | 1.92252 samples/s | `0.4115x` versus GPU5 baseline | `runs/profile_candidate_prefix_b8_g5.json` |
+| `reduce-overhead` block compile/CUDAGraph path | `4a706e0` | B1 / GPU4 | 0.488623 samples/s | negative result | `runs/profile_compile_mmdit_g4.json` |
+| Retain audit-only post-global norm | `f1b40b9` | B1 / GPU3 | 0.815009 samples/s | reference | `runs/profile_postglobal_baseline_g3.json` |
+| Skip audit-only post-global norm on ordinary batches | `a9fda45` | B1 / GPU3 | 0.854483 samples/s | `1.0484x` | `runs/profile_skip_postglobal_g3.json` |
+
+The current best controlled combination is therefore only about `1.20x`, not
+the required `2.0x`.  Its peak allocated memory was 10.224 GiB versus 11.269
+GiB for the same-GPU baseline.
+
+## Operator evidence
+
+The one-step operator profile at `runs/operator_profile_g4.txt` observed about
+9,625 `copy_`, 5,700 `mul`, 3,304 `div`, 2,318 `mm`, and 2,243 `sum` calls.
+Its summed GPU operator time was about 229 ms while profiler-mode wall time was
+about 4.7 s.  The actionable interpretation is many small kernels plus
+Python/dispatch overhead, not one dominant matrix multiply.
+
+## Rejected full-forward compile
+
+Commit `1303dc8` added an opt-in compilation of the complete formal forward
+with graph-break fallback.  The 2026-09-06 GPU4 run generated more than 100
+graph fragments.  The first material graph break was the Python truth test of
+`torch.isfinite(...).all()` in `grounded_intent_effect.py:261`.  The first
+training step then failed before the optimizer update with a non-finite global
+gradient; `observation.encoder.raw_mask_token` had finite fraction `0.0` and
+the global norm was `NaN`.
+
+No throughput JSON was written, because a failed mathematical-equivalence gate
+cannot publish a speed result.  The intended artifact name was
+`runs/profile_compile_forward_b1_g4.json`; the code remains at `1303dc8` as a
+reproducible negative experiment.
+
+## Next experiment
+
+Separate tensors required by the formal execution-value objective from
+detached decoder/controller diagnostics.  An ordinary training batch still
+needs the candidate value field, candidate velocity chart, validity mask and
+baseline velocity, but it does not need attention entropy, norm dictionaries,
+capacity/dwell audit reductions, hard-policy audit selection, quantiles or
+correlations.  A logging batch must continue to compute all of them.
+
