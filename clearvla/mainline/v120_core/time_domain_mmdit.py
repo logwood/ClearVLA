@@ -83,6 +83,31 @@ class _DeploymentCandidatePrefixChart:
     dwell: int
 
 
+@dataclass(frozen=True)
+class _PreparedMMDiTBlockContext:
+    """Action-independent tensors shared by one block's candidate calls.
+
+    A dynamic execution decision evaluates several candidates and dwell
+    prefixes against the same evidence and global condition.  These tensors
+    have no dependence on the candidate action, so rebuilding them for every
+    candidate is a pure common-subexpression miss.  The tensors remain
+    attached to autograd; this is a graph rewrite, not a detached cache.
+    """
+
+    global_modulation: Tensor
+    evidence_key: Tensor
+    evidence_value: Tensor
+    self_mask: Tensor
+
+    def index_select(self, rows: Tensor) -> "_PreparedMMDiTBlockContext":
+        return _PreparedMMDiTBlockContext(
+            global_modulation=self.global_modulation.index_select(0, rows),
+            evidence_key=self.evidence_key.index_select(0, rows),
+            evidence_value=self.evidence_value.index_select(0, rows),
+            self_mask=self.self_mask,
+        )
+
+
 class EvidenceViewAdapter(nn.Module):
     """Register current trunk outputs into a single typed evidence bank."""
 
@@ -644,6 +669,65 @@ class TimeDomainMMDiTBlock(nn.Module):
         weights = torch.softmax(scores, dim=-1).to(dtype=q.dtype)
         return torch.matmul(weights, v), weights
 
+    def prepare_static_context(
+        self,
+        global_condition: Tensor,
+        evidence_tokens: Tensor,
+        evidence_value_tokens: Tensor | None = None,
+        *,
+        action_length: int,
+    ) -> _PreparedMMDiTBlockContext:
+        """Prepare action-independent block inputs once per execution node.
+
+        Candidate/repeat operations differ only in their action-token state.
+        Global modulation, evidence normalization/KV projections and the
+        causal self mask are therefore safe to share while retaining the
+        original autograd edges.
+        """
+        if evidence_value_tokens is None:
+            evidence_value_tokens = evidence_tokens
+        if tuple(evidence_value_tokens.shape) != tuple(evidence_tokens.shape):
+            raise ValueError("evidence selector and value tokens must be shape-aligned")
+        if global_condition.ndim != 2 or int(global_condition.shape[0]) != int(
+            evidence_tokens.shape[0]
+        ):
+            raise ValueError("global condition and evidence batch dimensions must align")
+        if int(action_length) < 1:
+            raise ValueError("action token length must be positive")
+        global_modulation = self.action_mod(self.global_norm(global_condition))
+        evidence_selector = self.evidence_norm(evidence_tokens)
+        evidence_value = self.evidence_norm(evidence_value_tokens)
+        h = self.hidden_size
+        evidence_key = self._split(
+            F.linear(
+                evidence_selector,
+                self.evidence_kv.weight[:h],
+                None if self.evidence_kv.bias is None else self.evidence_kv.bias[:h],
+            )
+        )
+        evidence_value = self._split(
+            F.linear(
+                evidence_value,
+                self.evidence_kv.weight[h:],
+                None if self.evidence_kv.bias is None else self.evidence_kv.bias[h:],
+            )
+        )
+        self_mask = torch.triu(
+            torch.ones(
+                int(action_length),
+                int(action_length),
+                device=global_condition.device,
+                dtype=torch.bool,
+            ),
+            diagonal=1,
+        )
+        return _PreparedMMDiTBlockContext(
+            global_modulation=global_modulation,
+            evidence_key=evidence_key,
+            evidence_value=evidence_value,
+            self_mask=self_mask,
+        )
+
     def forward(
         self,
         action: Tensor,
@@ -655,6 +739,7 @@ class TimeDomainMMDiTBlock(nn.Module):
         evidence_scale: float | Tensor = 1.0,
         execution_gate: float | Tensor | None = None,
         collect_diagnostics: bool = True,
+        prepared_static: _PreparedMMDiTBlockContext | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Apply one host block with an optional capacity gate at its input.
 
@@ -665,28 +750,26 @@ class TimeDomainMMDiTBlock(nn.Module):
         already written a full update.
         """
         before = action
-        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = self.action_mod(
-            self.global_norm(global_condition)
-        ).chunk(6, dim=-1)
+        if prepared_static is None:
+            prepared_static = self.prepare_static_context(
+                global_condition,
+                evidence_tokens,
+                evidence_value_tokens,
+                action_length=int(action.shape[1]),
+            )
+        if int(prepared_static.global_modulation.shape[0]) != int(action.shape[0]):
+            raise ValueError("prepared block context batch does not match action")
+        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = (
+            prepared_static.global_modulation.chunk(6, dim=-1)
+        )
         action_value = self.action_norm(action)
         modulated_action = action_value * (1.0 + scale_a[:, None]) + shift_a[:, None]
         aq, ak, av = (
             self._split(part) for part in self.action_qkv(modulated_action).chunk(3, dim=-1)
         )
-        action_len = int(action.shape[1])
-        self_mask = torch.triu(
-            torch.ones(action_len, action_len, device=action.device, dtype=torch.bool),
-            diagonal=1,
-        )
-        self_attended, _ = self._attention(aq, ak, av, self_mask)
+        self_attended, _ = self._attention(aq, ak, av, prepared_static.self_mask)
         self_direction = self._unit_rms(self.self_out(self._merge(self_attended)))
 
-        if evidence_value_tokens is None:
-            evidence_value_tokens = evidence_tokens
-        if tuple(evidence_value_tokens.shape) != tuple(evidence_tokens.shape):
-            raise ValueError("evidence selector and value tokens must be shape-aligned")
-        evidence_selector = self.evidence_norm(evidence_tokens)
-        evidence_value = self.evidence_norm(evidence_value_tokens)
         eq = self._split(self.evidence_query(modulated_action))
         # The two halves of the shared projection have stable semantics across
         # every block: selector -> K and value -> V.  Previously both halves
@@ -694,25 +777,10 @@ class TimeDomainMMDiTBlock(nn.Module):
         # shape-checked and never participated in retrieval.
         # Slice the checkpoint-compatible shared projection instead of running
         # the full 2H projection twice and discarding half of each result.
-        h = self.hidden_size
-        ek = self._split(
-            F.linear(
-                evidence_selector,
-                self.evidence_kv.weight[:h],
-                None if self.evidence_kv.bias is None else self.evidence_kv.bias[:h],
-            )
-        )
-        ev = self._split(
-            F.linear(
-                evidence_value,
-                self.evidence_kv.weight[h:],
-                None if self.evidence_kv.bias is None else self.evidence_kv.bias[h:],
-            )
-        )
         evidence_attended, evidence_weights = self._attention(
             eq,
-            ek,
-            ev,
+            prepared_static.evidence_key,
+            prepared_static.evidence_value,
             None,
             key_bias=evidence_key_bias,
         )
@@ -1568,6 +1636,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None = None,
         collect_diagnostics: bool = True,
+        prepared_block_contexts: tuple[_PreparedMMDiTBlockContext, ...] | None = None,
     ) -> tuple[Tensor, dict[str, Tensor], list[dict[str, Tensor]]]:
         """Execute one typed host operation for one owner per sample.
 
@@ -1588,6 +1657,10 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             raise ValueError("native operation capacity ratios must be [B] or [B,depth]")
         if prepared_factors is not None and len(prepared_factors) != len(self.blocks):
             raise ValueError("native operation factors must match the block repertoire")
+        if prepared_block_contexts is not None and len(prepared_block_contexts) != len(
+            self.blocks
+        ):
+            raise ValueError("native block contexts must match the block repertoire")
         result = torch.empty_like(action)
         metric_rows: list[dict[str, Tensor]] = []
         contraction_rows: list[dict[str, Tensor]] = []
@@ -1625,6 +1698,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     identity_boundary=identity_boundary,
                     prepared_factors=prepared_factors,
                     collect_diagnostics=collect_diagnostics,
+                    prepared_static=(
+                        None
+                        if prepared_block_contexts is None
+                        else prepared_block_contexts[owner].index_select(rows)
+                    ),
                 )
             )
             result.index_copy_(0, rows, owned_action)
@@ -1656,6 +1734,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
         collect_diagnostics: bool = True,
+        prepared_static: _PreparedMMDiTBlockContext | None = None,
     ) -> tuple[Tensor, dict[str, Tensor], list[dict[str, Tensor]]]:
         """Execute one statically known block owner without row dispatch."""
 
@@ -1673,6 +1752,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             evidence_scale=evidence_scale,
             execution_gate=None,
             collect_diagnostics=collect_diagnostics,
+            prepared_static=prepared_static,
         )
         if not self.operator_capacity_enabled:
             return owned_action, block_metrics, []
@@ -1751,6 +1831,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
         collect_diagnostics: bool = True,
+        prepared_block_contexts: tuple[_PreparedMMDiTBlockContext, ...] | None = None,
     ) -> tuple[Tensor, dict[str, Tensor], list[dict[str, Tensor]]]:
         """Execute only the hard operation selected for each sample.
 
@@ -1770,6 +1851,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             rows = torch.nonzero(repeat_count > repeat_index, as_tuple=False).flatten()
             if int(rows.numel()) == 0:
                 continue
+            row_block_contexts = (
+                None
+                if prepared_block_contexts is None
+                else tuple(context.index_select(rows) for context in prepared_block_contexts)
+            )
             row_capacity = (
                 None if capacity_ratios is None else capacity_ratios.index_select(0, rows)
             )
@@ -1787,6 +1873,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 identity_boundary=identity_boundary,
                 prepared_factors=prepared_factors,
                 collect_diagnostics=collect_diagnostics,
+                prepared_block_contexts=row_block_contexts,
             )
             result = result.index_copy(0, rows, updated)
             if collect_diagnostics:
@@ -1811,6 +1898,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         evidence_scale: float | Tensor,
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
+        prepared_block_contexts: tuple[_PreparedMMDiTBlockContext, ...] | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Evaluate candidate targets without entering the committed graph.
 
@@ -1867,6 +1955,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 ).flatten()
                 if int(rows.numel()) == 0:
                     continue
+                row_block_contexts = (
+                    None
+                    if prepared_block_contexts is None
+                    else tuple(context.index_select(rows) for context in prepared_block_contexts)
+                )
                 row_capacity = (
                     None
                     if capacity_ratios is None
@@ -1895,6 +1988,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                             False,
                         )
                     ),
+                    prepared_block_contexts=row_block_contexts,
                 )
                 candidate_velocity = self.terminal_controller.predict_candidate_velocity(
                     self.terminal_controller.normalize(candidate_action)
@@ -1918,6 +2012,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
+        prepared_block_contexts: tuple[_PreparedMMDiTBlockContext, ...] | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Run legal candidates as an attached training-time action chart.
 
@@ -1944,6 +2039,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             ).flatten()
             candidate_action = action.clone()
             if int(rows.numel()) > 0:
+                row_block_contexts = (
+                    None
+                    if prepared_block_contexts is None
+                    else tuple(context.index_select(rows) for context in prepared_block_contexts)
+                )
                 row_capacity = (
                     None
                     if capacity_ratios is None
@@ -1972,6 +2072,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                             False,
                         )
                     ),
+                    prepared_block_contexts=row_block_contexts,
                 )
                 candidate_action = candidate_action.index_copy(0, rows, updated)
             candidate_actions.append(candidate_action)
@@ -2017,6 +2118,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
         minimum_owner: int,
+        prepared_block_contexts: tuple[_PreparedMMDiTBlockContext, ...] | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Build the attached training chart by reusing each dwell prefix.
 
@@ -2077,6 +2179,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                             False,
                         )
                     ),
+                    prepared_static=(
+                        None
+                        if prepared_block_contexts is None
+                        else prepared_block_contexts[owner]
+                    ),
                 )
                 candidate_index = first_candidate + repeat_index
                 candidate_actions[candidate_index] = current
@@ -2115,6 +2222,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
+        prepared_block_contexts: tuple[_PreparedMMDiTBlockContext, ...] | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Evaluate the canonical eval chart once per block prefix.
 
@@ -2184,6 +2292,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             selected_evidence = evidence_tokens.index_select(0, rows)
             selected_evidence_value = evidence_value_tokens.index_select(0, rows)
             selected_condition = global_condition.index_select(0, rows)
+            selected_block_contexts = (
+                None
+                if prepared_block_contexts is None
+                else tuple(context.index_select(rows) for context in prepared_block_contexts)
+            )
             selected_capacity = (
                 None
                 if capacity_ratios is None
@@ -2222,6 +2335,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                             False,
                         )
                     ),
+                    prepared_block_contexts=selected_block_contexts,
                 )
                 candidate_index = first_candidate + repeat_index
                 candidate_actions[candidate_index] = candidate_actions[
@@ -2638,6 +2752,17 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             if not self.operator_capacity_enabled
             else tuple(bank.prepare_factors() for bank in self.operator_contractions)
         )
+        prepared_block_contexts = None
+        if bool(getattr(self, "_reuse_prepared_block_contexts", False)):
+            prepared_block_contexts = tuple(
+                block.prepare_static_context(
+                    global_condition,
+                    evidence_tokens,
+                    evidence_value_tokens,
+                    action_length=int(action.shape[1]),
+                )
+                for block in self.blocks
+            )
         if soft_contract:
             # Pointer occupancy is policy state, not an action feature.  Keep it
             # FP32 across every decision even when the sampled action is BF16.
@@ -2758,6 +2883,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         capacity_ratios=capacity_ratios,
                         identity_boundary=identity_boundary,
                         prepared_factors=prepared_factors,
+                        prepared_block_contexts=prepared_block_contexts,
                         collect_diagnostics=collect_diagnostics,
                     )
                 )
@@ -2785,6 +2911,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                                 capacity_ratios=capacity_ratios,
                                 identity_boundary=identity_boundary,
                                 prepared_factors=prepared_factors,
+                                prepared_block_contexts=prepared_block_contexts,
                                 neutral_action=neutral_action,
                                 decision_index=decision_index,
                             )
@@ -2816,6 +2943,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                                     capacity_ratios=capacity_ratios,
                                     identity_boundary=identity_boundary,
                                     prepared_factors=prepared_factors,
+                                    prepared_block_contexts=prepared_block_contexts,
                                     minimum_owner=decision_index,
                                 )
                             )
@@ -2834,6 +2962,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                                 capacity_ratios=capacity_ratios,
                                 identity_boundary=identity_boundary,
                                 prepared_factors=prepared_factors,
+                                prepared_block_contexts=prepared_block_contexts,
                             )
                         candidate_action_stack, candidate_velocity_stack, probe_mask, probe_operation_count = (
                             candidate_result
@@ -3007,6 +3136,14 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 active_rows = torch.nonzero(operation_active, as_tuple=False).flatten()
                 action = block_input.clone()
                 if int(active_rows.numel()) > 0:
+                    active_block_contexts = (
+                        None
+                        if prepared_block_contexts is None
+                        else tuple(
+                            context.index_select(active_rows)
+                            for context in prepared_block_contexts
+                        )
+                    )
                     updated, committed_metrics, committed_contractions = (
                         self._apply_selected_native_operations(
                             block_input.index_select(0, active_rows),
@@ -3022,6 +3159,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                             capacity_ratios=capacity_ratios.index_select(0, active_rows),
                             identity_boundary=identity_boundary,
                             prepared_factors=prepared_factors,
+                            prepared_block_contexts=active_block_contexts,
                             collect_diagnostics=collect_diagnostics,
                         )
                     )
@@ -3056,6 +3194,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         evidence_scale=evidence_scale,
                         capacity_ratios=capacity_ratios,
                         identity_boundary=identity_boundary,
+                        prepared_block_contexts=prepared_block_contexts,
                     )
                 )
                 selected_capacity = capacity_ratios[

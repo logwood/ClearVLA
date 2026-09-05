@@ -78,3 +78,55 @@ def test_training_candidate_prefix_reuse_preserves_update_within_tolerance() -> 
                 rtol=5e-4,
                 atol=5e-5,
             )
+
+
+def test_prepared_block_contexts_preserve_training_update_exactly() -> None:
+    """Common-subexpression reuse must not change the formal training update."""
+
+    config = _config()
+    torch.manual_seed(9110)
+    reference = ClearVLAMainlinePolicy(config).train()
+    initial = copy.deepcopy(reference.state_dict())
+    optimized = ClearVLAMainlinePolicy(config).train()
+    optimized.load_state_dict(initial)
+    optimized.execution_bottom.decoder._reuse_prepared_block_contexts = True
+
+    reference_engine = _engine(reference, config)
+    optimized_engine = _engine(optimized, config)
+    batch = _batch(config, batch=2)
+
+    torch.manual_seed(9114)
+    reference_result = reference_engine.train_step(batch, collect_diagnostics=False)
+    torch.manual_seed(9114)
+    optimized_result = optimized_engine.train_step(batch, collect_diagnostics=False)
+
+    torch.testing.assert_close(
+        optimized_result.loss,
+        reference_result.loss,
+        rtol=0.0,
+        atol=0.0,
+    )
+    for (reference_name, reference_parameter), (
+        optimized_name,
+        optimized_parameter,
+    ) in zip(
+        reference.named_parameters(), optimized.named_parameters(), strict=True
+    ):
+        assert optimized_name == reference_name
+        torch.testing.assert_close(
+            optimized_parameter,
+            reference_parameter,
+            rtol=0.0,
+            atol=0.0,
+            msg=reference_name,
+        )
+        if reference_parameter.grad is None or optimized_parameter.grad is None:
+            assert reference_parameter.grad is optimized_parameter.grad
+        else:
+            torch.testing.assert_close(
+                optimized_parameter.grad,
+                reference_parameter.grad,
+                rtol=0.0,
+                atol=0.0,
+                msg=f"gradient: {reference_name}",
+            )
