@@ -1582,44 +1582,23 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 )
             else:
                 capacity = None
-            owned_action, block_metrics = block(
-                owned_input,
-                evidence_tokens.index_select(0, rows),
-                global_condition.index_select(0, rows),
-                evidence_value_tokens=evidence_value_tokens.index_select(0, rows),
-                evidence_key_bias=evidence_key_bias,
-                evidence_scale=evidence_scale,
-                execution_gate=None,
-            )
-            raw_update = owned_action - owned_input
-            if self.operator_capacity_enabled:
-                assert capacity is not None
-                contraction = self.operator_contractions[owner]
-                contracted_update, contraction_metrics = contraction(
-                    raw_update,
-                    global_condition.index_select(0, rows),
-                    torch.zeros(int(rows.numel()), device=action.device, dtype=torch.long),
-                    contraction_progress=self.execution_progress,
-                    prepared_factors=(
-                        None
-                        if identity_boundary
-                        else (
-                            contraction.prepare_factors()
-                            if prepared_factors is None
-                            else prepared_factors[owner]
-                        )
-                    ),
-                    depth_ratio_override=capacity,
-                    # Keep the ordered capacity continuous in the training
-                    # graph. Hardware-sized hard groups are an evaluation
-                    # concern, not the native gradient contract.
-                    binary_group_selection=False,
-                    identity_bypass=identity_boundary,
+            owned_action, block_metrics, owned_contractions = (
+                self._apply_owned_native_operation(
+                    owned_input,
+                    owner=owner,
+                    evidence_tokens=evidence_tokens.index_select(0, rows),
+                    evidence_value_tokens=evidence_value_tokens.index_select(0, rows),
+                    global_condition=global_condition.index_select(0, rows),
+                    evidence_key_bias=evidence_key_bias,
+                    evidence_scale=evidence_scale,
+                    capacity_ratios=capacity,
+                    identity_boundary=identity_boundary,
+                    prepared_factors=prepared_factors,
                 )
-                owned_action = owned_input + contracted_update
-                contraction_rows.append(contraction_metrics)
+            )
             result.index_copy_(0, rows, owned_action)
             metric_rows.append(block_metrics)
+            contraction_rows.extend(owned_contractions)
         if not metric_rows:
             raise RuntimeError("native operation has no valid block owner")
         names = tuple(metric_rows[0])
@@ -1628,6 +1607,71 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             for name in names
         }
         return result, metrics, contraction_rows
+
+    def _apply_owned_native_operation(
+        self,
+        action: Tensor,
+        *,
+        owner: int,
+        evidence_tokens: Tensor,
+        evidence_value_tokens: Tensor,
+        global_condition: Tensor,
+        evidence_key_bias: Tensor,
+        evidence_scale: float | Tensor,
+        capacity_ratios: Tensor | None,
+        identity_boundary: bool,
+        prepared_factors: tuple[Tensor, ...] | None,
+    ) -> tuple[Tensor, dict[str, Tensor], list[dict[str, Tensor]]]:
+        """Execute one statically known block owner without row dispatch."""
+
+        owner = int(owner)
+        if owner < 0 or owner >= len(self.blocks):
+            raise ValueError("native operation owner is outside the block repertoire")
+        batch = int(action.shape[0])
+        block = self.blocks[owner]
+        owned_action, block_metrics = block(
+            action,
+            evidence_tokens,
+            global_condition,
+            evidence_value_tokens=evidence_value_tokens,
+            evidence_key_bias=evidence_key_bias,
+            evidence_scale=evidence_scale,
+            execution_gate=None,
+        )
+        if not self.operator_capacity_enabled:
+            return owned_action, block_metrics, []
+        if capacity_ratios is None:
+            capacity = torch.ones(
+                batch,
+                device=action.device,
+                dtype=torch.float32,
+            )
+        elif capacity_ratios.ndim == 1:
+            capacity = capacity_ratios.float()
+        elif tuple(capacity_ratios.shape) == (batch, len(self.blocks)):
+            capacity = capacity_ratios[:, owner].float()
+        else:
+            raise ValueError("owned operation capacity must be [B] or [B,depth]")
+        contraction = self.operator_contractions[owner]
+        contracted_update, contraction_metrics = contraction(
+            owned_action - action,
+            global_condition,
+            torch.zeros(batch, device=action.device, dtype=torch.long),
+            contraction_progress=self.execution_progress,
+            prepared_factors=(
+                None
+                if identity_boundary
+                else (
+                    contraction.prepare_factors()
+                    if prepared_factors is None
+                    else prepared_factors[owner]
+                )
+            ),
+            depth_ratio_override=capacity,
+            binary_group_selection=False,
+            identity_bypass=identity_boundary,
+        )
+        return action + contracted_update, block_metrics, [contraction_metrics]
 
     @staticmethod
     def _select_scale_rows(
@@ -1912,6 +1956,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
+        minimum_owner: int,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Build the attached training chart by reusing each dwell prefix.
 
@@ -1940,64 +1985,34 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             action.clone() for _ in range(candidate_count)
         ]
         dwell = int(self.max_dwell)
-        for owner in range(len(self.blocks)):
+        minimum_owner = int(minimum_owner)
+        if minimum_owner < 0 or minimum_owner >= len(self.blocks):
+            raise ValueError("candidate prefix minimum owner is invalid")
+        for owner in range(minimum_owner, len(self.blocks)):
             first_candidate = owner * dwell
             if first_candidate >= candidate_count:
                 break
-            rows = torch.nonzero(
-                operation_mask[:, first_candidate], as_tuple=False
-            ).flatten()
-            if int(rows.numel()) == 0:
-                continue
-            # The global chart is block-major/dwell-major; all dwell entries
-            # for one owner have the same legal rows and owner id.  Fail fast
-            # if a future caller supplies a non-canonical chart.
+            # This chart is created internally by
+            # ``_global_execution_candidate_chart`` and every legal candidate
+            # therefore contains the full batch.  Keep all validation at the
+            # shape/owner entry boundary; a GPU boolean check here would force
+            # a host synchronization for every candidate.
+            current = action
             for repeat_index in range(dwell):
-                candidate_index = first_candidate + repeat_index
-                if candidate_index >= candidate_count:
-                    break
-                expected_rows = torch.nonzero(
-                    operation_mask[:, candidate_index], as_tuple=False
-                ).flatten()
-                if not torch.equal(rows, expected_rows):
-                    raise ValueError(
-                        "prefix reuse requires a canonical block/dwell candidate chart"
-                    )
-                owner_ids = candidate_blocks.index_select(0, rows)[:, candidate_index]
-                if not bool((owner_ids == owner).all()):
-                    raise ValueError("prefix reuse candidate owner ids are inconsistent")
-
-            selected_evidence = evidence_tokens.index_select(0, rows)
-            selected_evidence_value = evidence_value_tokens.index_select(0, rows)
-            selected_condition = global_condition.index_select(0, rows)
-            selected_capacity = (
-                None
-                if capacity_ratios is None
-                else capacity_ratios.index_select(0, rows)
-            )
-            selected_scale = self._select_scale_rows(
-                evidence_scale, rows, batch=batch
-            )
-            current = action.index_select(0, rows)
-            one_repeat = torch.ones_like(rows)
-            for repeat_index in range(dwell):
-                current, _, _ = self._apply_selected_native_operations(
+                current, _, _ = self._apply_owned_native_operation(
                     current,
-                    block_index=torch.full_like(rows, owner),
-                    repeat_count=one_repeat,
-                    evidence_tokens=selected_evidence,
-                    evidence_value_tokens=selected_evidence_value,
-                    global_condition=selected_condition,
+                    owner=owner,
+                    evidence_tokens=evidence_tokens,
+                    evidence_value_tokens=evidence_value_tokens,
+                    global_condition=global_condition,
                     evidence_key_bias=evidence_key_bias,
-                    evidence_scale=selected_scale,
-                    capacity_ratios=selected_capacity,
+                    evidence_scale=evidence_scale,
+                    capacity_ratios=capacity_ratios,
                     identity_boundary=identity_boundary,
                     prepared_factors=prepared_factors,
                 )
                 candidate_index = first_candidate + repeat_index
-                candidate_actions[candidate_index] = candidate_actions[
-                    candidate_index
-                ].index_copy(0, rows, current)
+                candidate_actions[candidate_index] = current
         action_stack = torch.stack(candidate_actions, dim=1)
         candidate_velocity = self.terminal_controller.predict_candidate_velocity(
             self.terminal_controller.normalize(
@@ -2701,19 +2716,33 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                             (candidate_blocks >= decision_index)
                             & (candidate_blocks <= depth)
                         )
-                        candidate_runner = (
-                            self._run_differentiable_native_candidates_prefix_reuse
-                            if bool(
-                                getattr(
-                                    self,
-                                    "_training_candidate_prefix_reuse",
-                                    False,
+                        if bool(
+                            getattr(
+                                self,
+                                "_training_candidate_prefix_reuse",
+                                False,
+                            )
+                        ):
+                            candidate_result = (
+                                self._run_differentiable_native_candidates_prefix_reuse(
+                                    block_input,
+                                    baseline_velocity=prefix_velocity_rows[-1],
+                                    candidate_blocks=candidate_blocks,
+                                    candidate_repeats=candidate_repeats,
+                                    candidate_mask=legal_candidate_mask,
+                                    evidence_tokens=evidence_tokens,
+                                    evidence_value_tokens=evidence_value_tokens,
+                                    global_condition=global_condition,
+                                    evidence_key_bias=evidence_bias,
+                                    evidence_scale=evidence_scale,
+                                    capacity_ratios=capacity_ratios,
+                                    identity_boundary=identity_boundary,
+                                    prepared_factors=prepared_factors,
+                                    minimum_owner=decision_index,
                                 )
                             )
-                            else self._run_differentiable_native_candidates
-                        )
-                        candidate_action_stack, candidate_velocity_stack, probe_mask, probe_operation_count = (
-                            candidate_runner(
+                        else:
+                            candidate_result = self._run_differentiable_native_candidates(
                                 block_input,
                                 baseline_velocity=prefix_velocity_rows[-1],
                                 candidate_blocks=candidate_blocks,
@@ -2728,6 +2757,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                                 identity_boundary=identity_boundary,
                                 prepared_factors=prepared_factors,
                             )
+                        candidate_action_stack, candidate_velocity_stack, probe_mask, probe_operation_count = (
+                            candidate_result
                         )
                 (
                     learned_probabilities,
