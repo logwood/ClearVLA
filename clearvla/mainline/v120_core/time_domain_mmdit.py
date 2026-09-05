@@ -9,7 +9,7 @@ workspace/controller paths.
 from __future__ import annotations
 
 import math
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -120,6 +120,28 @@ class _BatchedMMDiTParameterBank:
     contraction_buffers: dict[str, Tensor] | None
     contraction_factors: Tensor | None
     prepared_context: _PreparedMMDiTBlockContext
+
+
+@dataclass(frozen=True)
+class _DeterministicProbePlan:
+    """Cached module/RNG state traversal for repeated candidate probes."""
+
+    states: tuple[tuple[nn.Module, bool], ...]
+    cuda_devices: tuple[int, ...]
+
+
+@contextmanager
+def _deterministic_probe_plan(plan: _DeterministicProbePlan):
+    """Run a candidate probe without rebuilding its module state inventory."""
+
+    with torch.random.fork_rng(devices=list(plan.cuda_devices), enabled=True):
+        try:
+            for module, _training in plan.states:
+                module.training = False
+            yield
+        finally:
+            for module, training in plan.states:
+                module.training = training
 
 
 class EvidenceViewAdapter(nn.Module):
@@ -2207,6 +2229,28 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             prepared_context=stacked_context,
         )
 
+    @staticmethod
+    def _build_deterministic_probe_plan(
+        modules: tuple[nn.Module, ...],
+    ) -> _DeterministicProbePlan:
+        """Inventory probe modules once for all decisions in one forward."""
+
+        states: list[tuple[nn.Module, bool]] = []
+        seen: set[int] = set()
+        cuda_devices: set[int] = set()
+        for root in modules:
+            for module in root.modules():
+                if id(module) not in seen:
+                    seen.add(id(module))
+                    states.append((module, bool(module.training)))
+            for value in (*tuple(root.parameters()), *tuple(root.buffers())):
+                if value.device.type == "cuda" and value.device.index is not None:
+                    cuda_devices.add(int(value.device.index))
+        return _DeterministicProbePlan(
+            states=tuple(states),
+            cuda_devices=tuple(sorted(cuda_devices)),
+        )
+
     def _run_differentiable_native_candidates_prefix_reuse(
         self,
         action: Tensor,
@@ -3209,6 +3253,13 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 evidence_tokens=evidence_tokens,
                 evidence_value_tokens=evidence_value_tokens,
             )
+        candidate_probe_plan = (
+            self._build_deterministic_probe_plan(
+                (*self.blocks, *self.operator_contractions)
+            )
+            if soft_contract
+            else None
+        )
         if soft_contract:
             # Pointer occupancy is policy state, not an action feature.  Keep it
             # FP32 across every decision even when the sampled action is BF16.
@@ -3335,11 +3386,12 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     )
                 )
                 contraction_rows.extend(neutral_contractions)
-                modules: list[nn.Module] = [*self.blocks, *self.operator_contractions]
                 # Candidate evaluation is a differentiable chart, not a source
                 # of extra dropout noise or host RNG drift.  The neutral branch
                 # therefore remains bitwise identical at progress zero.
-                with deterministic_module_probe(*modules):
+                if candidate_probe_plan is None:
+                    raise RuntimeError("soft execution requires a candidate probe plan")
+                with _deterministic_probe_plan(candidate_probe_plan):
                     if deployment_fastpath:
                         if deployment_candidate_chart is None:
                             raise RuntimeError(
