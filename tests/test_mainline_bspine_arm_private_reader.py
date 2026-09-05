@@ -148,9 +148,7 @@ def _batch(config: ExperimentConfig, *, batch: int = 1) -> TrainingBatch:
             raw_units=torch.randn(batch, dims.action_horizon, dims.action_dim),
             current_raw_units=torch.randn(batch, dims.action_dim),
             gripper_transition_boundary=torch.zeros(batch, dims.action_dim),
-            gripper_transition_boundary_raw_units=torch.zeros(
-                batch, dims.action_dim
-            ),
+            gripper_transition_boundary_raw_units=torch.zeros(batch, dims.action_dim),
         ),
         future=FutureSupervision(
             dino_supports=torch.randn(
@@ -280,10 +278,7 @@ def test_private_reader_factory_preserves_raw_path_and_optimizer_ownership() -> 
     torch.manual_seed(6110)
     private = ClearVLAMainlinePolicy(private_config).eval()
     assert torch.equal(torch.get_rng_state(), baseline_rng)
-    assert (
-        private.selection.execution_bottom
-        == BSPINE_ARM_PRIVATE_READER_EXECUTION_BOTTOM
-    )
+    assert private.selection.execution_bottom == BSPINE_ARM_PRIVATE_READER_EXECUTION_BOTTOM
     assert isinstance(private.execution_bottom.decoder.spine, ArmPrivateReaderBSpine)
     assert isinstance(private.execution_bottom.decoder.arm_private_reader, ArmPrivateBSpineReader)
     baseline_parameters = dict(baseline.named_parameters())
@@ -380,10 +375,7 @@ def test_private_reader_config_and_manifest_are_explicit() -> None:
     )
     assert config.bottom.bspine_implementation == BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION
     assert "bspine_action_group_mask" in config.as_dict()["bottom"]
-    manifest = architecture_manifest_for_bspine_implementation(
-        config.bottom.bspine_implementation
-    )
+    manifest = architecture_manifest_for_bspine_implementation(config.bottom.bspine_implementation)
     assert manifest is ARM_PRIVATE_READER_BSPINE_ARCHITECTURE_MANIFEST
     assert manifest.schema == 31
     assert "private_reader" in manifest.components.bottom
-

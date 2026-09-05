@@ -117,9 +117,7 @@ def _learn(spine: ArmCoarseContextBSpine, *, seed: int = 1201) -> None:
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for parameter in spine.parameters():
-            parameter.copy_(
-                torch.randn(parameter.shape, generator=generator) * 1.0e-2
-            )
+            parameter.copy_(torch.randn(parameter.shape, generator=generator) * 1.0e-2)
 
 
 def test_arm_coarse_context_is_zero_rng_stable_and_has_no_detail_owner() -> None:
@@ -255,10 +253,7 @@ def test_arm_coarse_context_factory_preserves_raw_path_rng_and_owner_boundary() 
     candidate_rng = torch.get_rng_state().clone()
 
     assert torch.equal(candidate_rng, baseline_rng)
-    assert (
-        candidate.selection.execution_bottom
-        == BSPINE_ARM_COARSE_CONTEXT_EXECUTION_BOTTOM
-    )
+    assert candidate.selection.execution_bottom == BSPINE_ARM_COARSE_CONTEXT_EXECUTION_BOTTOM
     assert isinstance(
         candidate.execution_bottom.decoder.spine,
         ArmCoarseContextBSpine,
@@ -313,4 +308,3 @@ def test_arm_coarse_context_factory_preserves_raw_path_rng_and_owner_boundary() 
     assert "bottom_spine" not in baseline_ownership.role_counts
     assert len(spine_group) == 2
     assert all(".spine.coarse_lifts." in name for name in spine_group)
-
