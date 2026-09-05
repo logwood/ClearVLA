@@ -107,6 +107,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--compile-execution-submodules",
+        action="store_true",
+        help=(
+            "Compile the execution controller/value reader tensor subgraphs "
+            "individually (experimental)."
+        ),
+    )
+    parser.add_argument(
         "--candidate-prefix-reuse",
         action="store_true",
         help="Use the experimental attached training candidate-prefix chart.",
@@ -247,6 +255,23 @@ def _compile_visual_submodules(model: ClearVLAMainlinePolicy, *, mode: str) -> f
     return time.perf_counter() - started
 
 
+def _compile_execution_submodules(model: ClearVLAMainlinePolicy, *, mode: str) -> float:
+    """Compile recurrent execution tensor subgraphs without wrapping the decoder."""
+
+    started = time.perf_counter()
+    controller = model.execution_bottom.decoder.execution_controller
+    if controller is None:
+        raise RuntimeError("execution controller is disabled in this profile")
+    for module in (controller, controller.value_reader):
+        module.forward = torch.compile(  # type: ignore[method-assign]
+            module.forward,
+            dynamic=False,
+            fullgraph=False,
+            mode=mode,
+        )
+    return time.perf_counter() - started
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     if args.steps <= 0 or args.warmup < 0 or args.warmup >= args.steps:
         raise ValueError("require steps > warmup >= 0")
@@ -281,6 +306,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     visual_compile_seconds = 0.0
     if args.compile_visual_submodules:
         visual_compile_seconds = _compile_visual_submodules(model, mode=args.compile_mode)
+    execution_compile_seconds = 0.0
+    if args.compile_execution_submodules:
+        execution_compile_seconds = _compile_execution_submodules(
+            model, mode=args.compile_mode
+        )
     optimizer, _ownership = build_optimizer(model, config)
     schedule = WarmupCosineSchedule(
         optimizer,
@@ -412,6 +442,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "compile_mmdit_blocks": bool(args.compile_mmdit_blocks),
         "compile_forward": bool(args.compile_forward),
         "compile_visual_submodules": bool(args.compile_visual_submodules),
+        "compile_execution_submodules": bool(args.compile_execution_submodules),
         "compile_mode": str(args.compile_mode),
         "candidate_prefix_reuse": bool(args.candidate_prefix_reuse),
         "reuse_prepared_block_contexts": bool(args.reuse_prepared_block_contexts),
@@ -420,6 +451,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         ),
         "compile_setup_seconds": _finite_float(compile_seconds),
         "visual_compile_setup_seconds": _finite_float(visual_compile_seconds),
+        "execution_compile_setup_seconds": _finite_float(execution_compile_seconds),
         "measured_seconds": _finite_float(measured_seconds),
         "steps_per_second": float(measured_steps / max(measured_seconds, 1e-8)),
         "samples_per_second": float(measured_samples / max(measured_seconds, 1e-8)),

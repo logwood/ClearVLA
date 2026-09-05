@@ -122,6 +122,11 @@ compiles only the recurrent Flow-DINO and raw-flow tensor modules, leaving the
 outer dataclass/mask/progressive-routing graph in Python.  This is a separate
 measurement path and has no production-default effect.
 
+For the same reason, `--compile-execution-submodules` probes the recurrent
+controller and candidate value reader independently.  It is kept separate
+from the earlier whole-forward compile failure so a graph break in one small
+submodule does not contaminate the accepted baseline.
+
 The same commit adds an opt-in execution-controller source-lane reuse probe
 (`--reuse-prepared-controller-context`).  It shares the projected
 global/time/evidence lanes across the three recurrent decisions.  The forward
