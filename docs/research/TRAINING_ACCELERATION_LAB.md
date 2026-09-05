@@ -122,6 +122,15 @@ compiles only the recurrent Flow-DINO and raw-flow tensor modules, leaving the
 outer dataclass/mask/progressive-routing graph in Python.  This is a separate
 measurement path and has no production-default effect.
 
+The same commit adds an opt-in execution-controller source-lane reuse probe
+(`--reuse-prepared-controller-context`).  It shares the projected
+global/time/evidence lanes across the three recurrent decisions.  The forward
+loss remains bitwise equal in the CPU gate; because the attached autograd graph
+accumulates the shared lane in a different order, the update gate allows only
+the measured `2e-5` relative / `2e-7` absolute floating-point tolerance.  It is
+not enabled by default and will be accepted for throughput only if the remote
+BF16 comparison stays inside that bound.
+
 ## Next experiment
 
 Separate tensors required by the formal execution-value objective from

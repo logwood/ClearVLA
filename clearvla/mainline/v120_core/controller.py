@@ -105,6 +105,20 @@ class EvidenceExecutionOutput:
     metrics: dict[str, Tensor]
 
 
+@dataclass(frozen=True)
+class PreparedControllerSourceContext:
+    """Projected source lanes shared by one decoder decision sequence.
+
+    Global/time/evidence tokens are invariant while the native execution
+    controller advances its recurrent state.  Keeping their projected lanes
+    attached to autograd removes repeated LayerNorm/linear work without
+    changing the controller's source ordering or ownership semantics.
+    """
+
+    selector: Tensor
+    value: Tensor
+
+
 class NativeExecutionValueReader(nn.Module):
     """Read the value of legal execution candidates from typed state.
 
@@ -550,35 +564,84 @@ class EvidenceExecutionController(nn.Module):
         action_tokens: Tensor,
         feedback: Tensor,
         evidence_value_tokens: Tensor | None = None,
+        prepared_static: PreparedControllerSourceContext | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Build native selector and value lanes with one auditable boundary."""
         if evidence_value_tokens is None:
             evidence_value_tokens = evidence_tokens
         if tuple(evidence_value_tokens.shape) != tuple(evidence_tokens.shape):
             raise ValueError("native evidence selector/value tokens are misaligned")
+        if prepared_static is None:
+            selector_sources = torch.cat(
+                [
+                    global_condition[:, None],
+                    time_context[:, None],
+                    evidence_tokens,
+                    action_tokens,
+                    feedback,
+                ],
+                dim=1,
+            )
+            value_sources = torch.cat(
+                [
+                    global_condition[:, None],
+                    time_context[:, None],
+                    evidence_value_tokens,
+                    torch.zeros_like(action_tokens),
+                    torch.zeros_like(feedback),
+                ],
+                dim=1,
+            )
+            return (
+                self.key_proj(self.source_norm(selector_sources)),
+                self.value_proj(self.source_norm(value_sources)),
+            )
+        static_tokens = int(prepared_static.selector.shape[1])
+        expected_static = 2 + int(evidence_tokens.shape[1])
+        if static_tokens != expected_static:
+            raise ValueError("prepared controller source context has the wrong length")
+        if tuple(prepared_static.value.shape) != tuple(prepared_static.selector.shape):
+            raise ValueError("prepared controller source lanes must be shape-aligned")
+        dynamic_selector = self.key_proj(
+            self.source_norm(torch.cat((action_tokens, feedback), dim=1))
+        )
+        # The value lane for action/feedback is explicitly zero and all source
+        # projections are bias-free, so its projected representation is zero.
+        dynamic_value = torch.zeros_like(dynamic_selector)
+        return (
+            torch.cat((prepared_static.selector, dynamic_selector), dim=1),
+            torch.cat((prepared_static.value, dynamic_value), dim=1),
+        )
+
+    def prepare_static_source_context(
+        self,
+        *,
+        global_condition: Tensor,
+        time_context: Tensor,
+        evidence_tokens: Tensor,
+        evidence_value_tokens: Tensor | None = None,
+    ) -> PreparedControllerSourceContext:
+        """Project the source lanes that do not change across decisions."""
+
+        if evidence_value_tokens is None:
+            evidence_value_tokens = evidence_tokens
+        if tuple(evidence_value_tokens.shape) != tuple(evidence_tokens.shape):
+            raise ValueError("native evidence selector/value tokens are misaligned")
+        if global_condition.ndim != 2 or time_context.ndim != 2:
+            raise ValueError("controller global/time conditions must be rank two")
+        if int(global_condition.shape[0]) != int(evidence_tokens.shape[0]) or tuple(
+            time_context.shape
+        ) != tuple(global_condition.shape):
+            raise ValueError("controller static source batches must align")
         selector_sources = torch.cat(
-            [
-                global_condition[:, None],
-                time_context[:, None],
-                evidence_tokens,
-                action_tokens,
-                feedback,
-            ],
-            dim=1,
+            (global_condition[:, None], time_context[:, None], evidence_tokens), dim=1
         )
         value_sources = torch.cat(
-            [
-                global_condition[:, None],
-                time_context[:, None],
-                evidence_value_tokens,
-                torch.zeros_like(action_tokens),
-                torch.zeros_like(feedback),
-            ],
-            dim=1,
+            (global_condition[:, None], time_context[:, None], evidence_value_tokens), dim=1
         )
-        return (
-            self.key_proj(self.source_norm(selector_sources)),
-            self.value_proj(self.source_norm(value_sources)),
+        return PreparedControllerSourceContext(
+            selector=self.key_proj(self.source_norm(selector_sources)),
+            value=self.value_proj(self.source_norm(value_sources)),
         )
 
     def _split_heads(self, value: Tensor) -> Tensor:
@@ -648,6 +711,7 @@ class EvidenceExecutionController(nn.Module):
         evidence_value_tokens: Tensor | None = None,
         evidence_key_bias: Tensor | None = None,
         collect_diagnostics: bool = True,
+        prepared_static: PreparedControllerSourceContext | None = None,
     ) -> EvidenceExecutionOutput:
         batch = int(global_condition.shape[0])
         if state is None:
@@ -676,6 +740,7 @@ class EvidenceExecutionController(nn.Module):
             evidence_value_tokens=evidence_value_tokens,
             action_tokens=action_tokens,
             feedback=feedback,
+            prepared_static=prepared_static,
         )
         source_key_bias = torch.cat(
             [

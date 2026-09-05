@@ -120,6 +120,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--reuse-prepared-controller-context",
+        action="store_true",
+        help=(
+            "Reuse action-independent execution-controller source projections "
+            "across decisions (experimental equivalence-gated path)."
+        ),
+    )
+    parser.add_argument(
         "--torch-profile-output",
         type=Path,
         help="Write a one-step torch.profiler operator table to this text file.",
@@ -265,6 +273,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         model.execution_bottom.decoder._training_candidate_prefix_reuse = True
     if args.reuse_prepared_block_contexts:
         model.execution_bottom.decoder._reuse_prepared_block_contexts = True
+    if args.reuse_prepared_controller_context:
+        model.execution_bottom.decoder._reuse_prepared_controller_context = True
     compile_seconds = 0.0
     if args.compile_mmdit_blocks:
         compile_seconds = _compile_mmdit_blocks(model, mode=args.compile_mode)
@@ -405,6 +415,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "compile_mode": str(args.compile_mode),
         "candidate_prefix_reuse": bool(args.candidate_prefix_reuse),
         "reuse_prepared_block_contexts": bool(args.reuse_prepared_block_contexts),
+        "reuse_prepared_controller_context": bool(
+            args.reuse_prepared_controller_context
+        ),
         "compile_setup_seconds": _finite_float(compile_seconds),
         "visual_compile_setup_seconds": _finite_float(visual_compile_seconds),
         "measured_seconds": _finite_float(measured_seconds),

@@ -2763,6 +2763,14 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 )
                 for block in self.blocks
             )
+        prepared_controller_context = None
+        if bool(getattr(self, "_reuse_prepared_controller_context", False)):
+            prepared_controller_context = self.execution_controller.prepare_static_source_context(
+                global_condition=global_condition,
+                time_context=time_hidden,
+                evidence_tokens=evidence_tokens,
+                evidence_value_tokens=evidence_value_tokens,
+            )
         if soft_contract:
             # Pointer occupancy is policy state, not an action feature.  Keep it
             # FP32 across every decision even when the sampled action is BF16.
@@ -2846,6 +2854,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 feedback=feedback,
                 block_index=controller_block,
                 collect_diagnostics=collect_diagnostics,
+                prepared_static=prepared_controller_context,
             )
             controller_state = control.state
             if collect_diagnostics:
@@ -3902,6 +3911,17 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             if not self.operator_capacity_enabled or identity_boundary
             else tuple(bank.prepare_factors() for bank in self.operator_contractions)
         )
+        prepared_controller_context = None
+        if (
+            self.execution_controller is not None
+            and bool(getattr(self, "_reuse_prepared_controller_context", False))
+        ):
+            prepared_controller_context = self.execution_controller.prepare_static_source_context(
+                global_condition=global_condition,
+                time_context=time_hidden,
+                evidence_tokens=evidence_tokens,
+                evidence_value_tokens=evidence_value_tokens,
+            )
         for block_index in range(len(self.blocks)):
             block_input = action
             control = None
@@ -3917,6 +3937,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     feedback=feedback,
                     block_index=block_index,
                     collect_diagnostics=collect_diagnostics,
+                    prepared_static=prepared_controller_context,
                 )
                 controller_state = control.state
                 if collect_diagnostics:
