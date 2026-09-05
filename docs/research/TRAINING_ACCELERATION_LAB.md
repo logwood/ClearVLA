@@ -65,6 +65,8 @@ cross-GPU values are not treated as controlled speedups.
 | Skip audit-only post-global norm on ordinary batches | `a9fda45` | B1 / GPU3 | 0.854483 samples/s | `1.0484x` | `runs/profile_skip_postglobal_g3.json` |
 | Retain all training execution diagnostics, long matched run | pending execution-only commit | B8 / GPU5 | 4.01939 samples/s | reference | `runs/profile_execution_diag_baseline_long_b8_g5.json` |
 | Keep only formal execution tensors on ordinary batches, long matched run | pending execution-only commit | B8 / GPU5 | 4.28224 samples/s | `1.0654x` | `runs/profile_execution_only_long_b8_g5.json` |
+| Fresh same-GPU baseline | `1c58d89` era | B8 / GPU4 | 4.26010 samples/s | reference | `runs/profile_pre_context_baseline_g4.json` |
+| Fresh same-GPU prefix reuse + block compile | `1c58d89` era | B8 / GPU4 | 4.80396 samples/s | `1.1277x` | `runs/profile_pre_context_prefix_compile_g4.json` |
 
 The current best controlled combination is therefore only about `1.20x`, not
 the required `2.0x`.  Its peak allocated memory was 10.224 GiB versus 11.269
