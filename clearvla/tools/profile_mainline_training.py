@@ -16,12 +16,12 @@ makes the cost visible without changing the production default.
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import json
 import math
 import random
 import statistics
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
