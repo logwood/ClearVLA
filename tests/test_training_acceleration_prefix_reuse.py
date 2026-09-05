@@ -131,3 +131,42 @@ def test_prepared_block_contexts_preserve_training_update_exactly() -> None:
                 atol=2e-7,
                 msg=f"gradient: {reference_name}",
             )
+
+
+def test_prepared_controller_source_lanes_preserve_forward_values() -> None:
+    config = _config()
+    torch.manual_seed(9120)
+    controller = ClearVLAMainlinePolicy(config).execution_bottom.decoder.execution_controller
+    assert controller is not None
+    batch = 2
+    evidence = torch.randn(batch, 7, config.dimensions.hidden_size)
+    evidence_value = torch.randn_like(evidence)
+    global_condition = torch.randn(batch, config.dimensions.hidden_size)
+    time_context = torch.randn_like(global_condition)
+    action = torch.randn(batch, config.dimensions.action_horizon, config.dimensions.hidden_size)
+    feedback = torch.randn_like(action)
+    reference = controller._source_lanes(
+        global_condition=global_condition,
+        time_context=time_context,
+        evidence_tokens=evidence,
+        evidence_value_tokens=evidence_value,
+        action_tokens=action,
+        feedback=feedback,
+    )
+    prepared = controller.prepare_static_source_context(
+        global_condition=global_condition,
+        time_context=time_context,
+        evidence_tokens=evidence,
+        evidence_value_tokens=evidence_value,
+    )
+    optimized = controller._source_lanes(
+        global_condition=global_condition,
+        time_context=time_context,
+        evidence_tokens=evidence,
+        evidence_value_tokens=evidence_value,
+        action_tokens=action,
+        feedback=feedback,
+        prepared_static=prepared,
+    )
+    for left, right in zip(reference, optimized, strict=True):
+        torch.testing.assert_close(left, right, rtol=0.0, atol=0.0)
