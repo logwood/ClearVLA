@@ -108,6 +108,20 @@ class _PreparedMMDiTBlockContext:
         )
 
 
+@dataclass(frozen=True)
+class _BatchedMMDiTParameterBank:
+    """One-forward owner bank for the experimental candidate vmap path."""
+
+    block_template: nn.Module
+    block_parameters: dict[str, Tensor]
+    block_buffers: dict[str, Tensor]
+    contraction_template: nn.Module | None
+    contraction_parameters: dict[str, Tensor] | None
+    contraction_buffers: dict[str, Tensor] | None
+    contraction_factors: Tensor | None
+    prepared_context: _PreparedMMDiTBlockContext
+
+
 class EvidenceViewAdapter(nn.Module):
     """Register current trunk outputs into a single typed evidence bank."""
 
@@ -2101,6 +2115,98 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         )
         return action_stack, candidate_velocity, mask, operation_rows.mean()
 
+    def _prepare_batched_candidate_prefix_bank(
+        self,
+        *,
+        prepared_factors: tuple[Tensor, ...] | None,
+        identity_boundary: bool,
+        prepared_block_contexts: tuple[_PreparedMMDiTBlockContext, ...],
+    ) -> _BatchedMMDiTParameterBank:
+        """Stack live owner parameters once for one formal decoder forward.
+
+        Candidate-prefix reuse may be called once per execution decision.  The
+        owner parameters and action-independent static contexts are unchanged
+        across those decisions, so rebuilding their stack in every call only
+        adds copies and autograd nodes.  This bank is local to the enclosing
+        forward (never module state), preserving optimizer ownership and the
+        continuation/checkpoint contract.
+        """
+
+        if not prepared_block_contexts or len(prepared_block_contexts) != len(self.blocks):
+            raise ValueError("batched candidate-prefix contexts must match the block repertoire")
+        template = self.blocks[0]
+        parameter_maps = tuple(dict(block.named_parameters()) for block in self.blocks)
+        buffer_maps = tuple(dict(block.named_buffers()) for block in self.blocks)
+        parameter_names = tuple(name for name, _ in template.named_parameters())
+        buffer_names = tuple(name for name, _ in template.named_buffers())
+        stacked_parameters = {
+            name: torch.stack(tuple(values[name] for values in parameter_maps), dim=0)
+            for name in parameter_names
+        }
+        stacked_buffers = {
+            name: torch.stack(tuple(values[name] for values in buffer_maps), dim=0)
+            for name in buffer_names
+        }
+        contraction_template: nn.Module | None = None
+        stacked_contraction_parameters: dict[str, Tensor] | None = None
+        stacked_contraction_buffers: dict[str, Tensor] | None = None
+        stacked_contraction_factors: Tensor | None = None
+        if self.operator_capacity_enabled and not identity_boundary:
+            contractions = tuple(self.operator_contractions)
+            contraction_template = contractions[0]
+            contraction_parameter_maps = tuple(
+                dict(module.named_parameters()) for module in contractions
+            )
+            contraction_buffer_maps = tuple(
+                dict(module.named_buffers()) for module in contractions
+            )
+            contraction_parameter_names = tuple(
+                name for name, _ in contraction_template.named_parameters()
+            )
+            contraction_buffer_names = tuple(
+                name for name, _ in contraction_template.named_buffers()
+            )
+            stacked_contraction_parameters = {
+                name: torch.stack(
+                    tuple(values[name] for values in contraction_parameter_maps), dim=0
+                )
+                for name in contraction_parameter_names
+            }
+            stacked_contraction_buffers = {
+                name: torch.stack(
+                    tuple(values[name] for values in contraction_buffer_maps), dim=0
+                )
+                for name in contraction_buffer_names
+            }
+            factor_rows = (
+                tuple(module.prepare_factors() for module in contractions)
+                if prepared_factors is None
+                else prepared_factors
+            )
+            stacked_contraction_factors = torch.stack(factor_rows, dim=0)
+        stacked_context = _PreparedMMDiTBlockContext(
+            global_modulation=torch.stack(
+                [context.global_modulation for context in prepared_block_contexts]
+            ),
+            evidence_key=torch.stack(
+                [context.evidence_key for context in prepared_block_contexts]
+            ),
+            evidence_value=torch.stack(
+                [context.evidence_value for context in prepared_block_contexts]
+            ),
+            self_mask=prepared_block_contexts[0].self_mask,
+        )
+        return _BatchedMMDiTParameterBank(
+            block_template=template,
+            block_parameters=stacked_parameters,
+            block_buffers=stacked_buffers,
+            contraction_template=contraction_template,
+            contraction_parameters=stacked_contraction_parameters,
+            contraction_buffers=stacked_contraction_buffers,
+            contraction_factors=stacked_contraction_factors,
+            prepared_context=stacked_context,
+        )
+
     def _run_differentiable_native_candidates_prefix_reuse(
         self,
         action: Tensor,
@@ -2119,6 +2225,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         prepared_factors: tuple[Tensor, ...] | None,
         minimum_owner: int,
         prepared_block_contexts: tuple[_PreparedMMDiTBlockContext, ...] | None = None,
+        batched_parameter_bank: _BatchedMMDiTParameterBank | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Build the attached training chart by reusing each dwell prefix.
 
@@ -2176,6 +2283,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 prepared_factors=prepared_factors,
                 minimum_owner=minimum_owner,
                 prepared_block_contexts=prepared_block_contexts,
+                batched_parameter_bank=batched_parameter_bank,
             )
         for owner in range(minimum_owner, len(self.blocks)):
             first_candidate = owner * dwell
@@ -2251,6 +2359,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         prepared_factors: tuple[Tensor, ...] | None,
         minimum_owner: int,
         prepared_block_contexts: tuple[_PreparedMMDiTBlockContext, ...],
+        batched_parameter_bank: _BatchedMMDiTParameterBank | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Batch independent owner chains while preserving attached gradients.
 
@@ -2268,73 +2377,116 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         owners = tuple(range(int(minimum_owner), len(self.blocks)))
         if not owners:
             raise ValueError("batched candidate prefix requires at least one owner")
-        template = self.blocks[owners[0]]
-        parameter_maps = tuple(dict(self.blocks[index].named_parameters()) for index in owners)
-        buffer_maps = tuple(dict(self.blocks[index].named_buffers()) for index in owners)
-        parameter_names = tuple(name for name, _ in template.named_parameters())
-        buffer_names = tuple(name for name, _ in template.named_buffers())
-        stacked_parameters = {
-            name: torch.stack(
-                tuple(values[name] for values in parameter_maps), dim=0
+        if batched_parameter_bank is None:
+            template = self.blocks[owners[0]]
+            parameter_maps = tuple(
+                dict(self.blocks[index].named_parameters()) for index in owners
             )
-            for name in parameter_names
-        }
-        stacked_buffers = {
-            name: torch.stack(tuple(values[name] for values in buffer_maps), dim=0)
-            for name in buffer_names
-        }
-        contraction_template = None
-        stacked_contraction_parameters: dict[str, Tensor] | None = None
-        stacked_contraction_buffers: dict[str, Tensor] | None = None
-        stacked_contraction_factors: Tensor | None = None
-        if self.operator_capacity_enabled and not identity_boundary:
-            contractions = tuple(self.operator_contractions[index] for index in owners)
-            contraction_template = contractions[0]
-            contraction_parameter_maps = tuple(
-                dict(module.named_parameters()) for module in contractions
+            buffer_maps = tuple(
+                dict(self.blocks[index].named_buffers()) for index in owners
             )
-            contraction_buffer_maps = tuple(
-                dict(module.named_buffers()) for module in contractions
-            )
-            contraction_parameter_names = tuple(
-                name for name, _ in contraction_template.named_parameters()
-            )
-            contraction_buffer_names = tuple(
-                name for name, _ in contraction_template.named_buffers()
-            )
-            stacked_contraction_parameters = {
+            parameter_names = tuple(name for name, _ in template.named_parameters())
+            buffer_names = tuple(name for name, _ in template.named_buffers())
+            stacked_parameters = {
                 name: torch.stack(
-                    tuple(values[name] for values in contraction_parameter_maps), dim=0
+                    tuple(values[name] for values in parameter_maps), dim=0
                 )
-                for name in contraction_parameter_names
+                for name in parameter_names
             }
-            stacked_contraction_buffers = {
-                name: torch.stack(
-                    tuple(values[name] for values in contraction_buffer_maps), dim=0
-                )
-                for name in contraction_buffer_names
+            stacked_buffers = {
+                name: torch.stack(tuple(values[name] for values in buffer_maps), dim=0)
+                for name in buffer_names
             }
-            factor_rows = (
-                tuple(
-                    module.prepare_factors()
-                    for module in contractions
+            contraction_template = None
+            stacked_contraction_parameters: dict[str, Tensor] | None = None
+            stacked_contraction_buffers: dict[str, Tensor] | None = None
+            stacked_contraction_factors: Tensor | None = None
+            if self.operator_capacity_enabled and not identity_boundary:
+                contractions = tuple(self.operator_contractions[index] for index in owners)
+                contraction_template = contractions[0]
+                contraction_parameter_maps = tuple(
+                    dict(module.named_parameters()) for module in contractions
                 )
-                if prepared_factors is None
-                else tuple(prepared_factors[index] for index in owners)
+                contraction_buffer_maps = tuple(
+                    dict(module.named_buffers()) for module in contractions
+                )
+                contraction_parameter_names = tuple(
+                    name for name, _ in contraction_template.named_parameters()
+                )
+                contraction_buffer_names = tuple(
+                    name for name, _ in contraction_template.named_buffers()
+                )
+                stacked_contraction_parameters = {
+                    name: torch.stack(
+                        tuple(values[name] for values in contraction_parameter_maps), dim=0
+                    )
+                    for name in contraction_parameter_names
+                }
+                stacked_contraction_buffers = {
+                    name: torch.stack(
+                        tuple(values[name] for values in contraction_buffer_maps), dim=0
+                    )
+                    for name in contraction_buffer_names
+                }
+                factor_rows = (
+                    tuple(module.prepare_factors() for module in contractions)
+                    if prepared_factors is None
+                    else tuple(prepared_factors[index] for index in owners)
+                )
+                stacked_contraction_factors = torch.stack(factor_rows, dim=0)
+            stacked_context = _PreparedMMDiTBlockContext(
+                global_modulation=torch.stack(
+                    [prepared_block_contexts[index].global_modulation for index in owners]
+                ),
+                evidence_key=torch.stack(
+                    [prepared_block_contexts[index].evidence_key for index in owners]
+                ),
+                evidence_value=torch.stack(
+                    [prepared_block_contexts[index].evidence_value for index in owners]
+                ),
+                self_mask=prepared_block_contexts[owners[0]].self_mask,
             )
-            stacked_contraction_factors = torch.stack(factor_rows, dim=0)
-        stacked_context = _PreparedMMDiTBlockContext(
-            global_modulation=torch.stack(
-                [prepared_block_contexts[index].global_modulation for index in owners]
-            ),
-            evidence_key=torch.stack(
-                [prepared_block_contexts[index].evidence_key for index in owners]
-            ),
-            evidence_value=torch.stack(
-                [prepared_block_contexts[index].evidence_value for index in owners]
-            ),
-            self_mask=prepared_block_contexts[owners[0]].self_mask,
-        )
+        else:
+            if batched_parameter_bank.block_template is not self.blocks[0]:
+                raise ValueError("batched candidate-prefix parameter bank belongs to another decoder")
+            template = batched_parameter_bank.block_template
+            stacked_parameters = {
+                name: value[int(minimum_owner) :]
+                for name, value in batched_parameter_bank.block_parameters.items()
+            }
+            stacked_buffers = {
+                name: value[int(minimum_owner) :]
+                for name, value in batched_parameter_bank.block_buffers.items()
+            }
+            contraction_template = batched_parameter_bank.contraction_template
+            stacked_contraction_parameters = (
+                None
+                if batched_parameter_bank.contraction_parameters is None
+                else {
+                    name: value[int(minimum_owner) :]
+                    for name, value in batched_parameter_bank.contraction_parameters.items()
+                }
+            )
+            stacked_contraction_buffers = (
+                None
+                if batched_parameter_bank.contraction_buffers is None
+                else {
+                    name: value[int(minimum_owner) :]
+                    for name, value in batched_parameter_bank.contraction_buffers.items()
+                }
+            )
+            stacked_contraction_factors = (
+                None
+                if batched_parameter_bank.contraction_factors is None
+                else batched_parameter_bank.contraction_factors[int(minimum_owner) :]
+            )
+            full_context = batched_parameter_bank.prepared_context
+            stacked_context = _PreparedMMDiTBlockContext(
+                global_modulation=full_context.global_modulation[int(minimum_owner) :],
+                evidence_key=full_context.evidence_key[int(minimum_owner) :],
+                evidence_value=full_context.evidence_value[int(minimum_owner) :],
+                self_mask=full_context.self_mask,
+            )
         owner_count = len(owners)
         owner_evidence = evidence_tokens.unsqueeze(0).expand(owner_count, -1, -1, -1)
         owner_evidence_value = evidence_value_tokens.unsqueeze(0).expand(
@@ -3038,6 +3190,17 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 )
                 for block in self.blocks
             )
+        prepared_batched_parameter_bank = None
+        if (
+            bool(getattr(self, "_batched_candidate_prefix", False))
+            and bool(getattr(self, "_training_candidate_prefix_reuse", False))
+            and prepared_block_contexts is not None
+        ):
+            prepared_batched_parameter_bank = self._prepare_batched_candidate_prefix_bank(
+                prepared_factors=prepared_factors,
+                identity_boundary=identity_boundary,
+                prepared_block_contexts=prepared_block_contexts,
+            )
         prepared_controller_context = None
         if bool(getattr(self, "_reuse_prepared_controller_context", False)):
             prepared_controller_context = self.execution_controller.prepare_static_source_context(
@@ -3229,6 +3392,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                                     prepared_factors=prepared_factors,
                                     prepared_block_contexts=prepared_block_contexts,
                                     minimum_owner=decision_index,
+                                    batched_parameter_bank=prepared_batched_parameter_bank,
                                 )
                             )
                         else:
