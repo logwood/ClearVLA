@@ -123,10 +123,15 @@ def main():
     optimizer.zero_grad(set_to_none=True)
     # The ordinary Teacher loss has now opened W's zero-initialized output
     # matrices. This probe isolates rollout loss from the pointwise anchor.
-    model.eval()
+    model.train()
     model.set_training_step(1200)
     with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
-        cache, training_state, _ = model.encode_online(batch.online, geometry_supervision=False)
+        # Keep static P1's training activation-checkpoint path. Eval-mode
+        # static encoding with autograd bypasses it and is not a train gate.
+        cache, training_state, _ = model.encode_online(
+            batch.online, training_mask=True, geometry_supervision=False,
+            condition_generator=torch.Generator(device=device).manual_seed(32004),
+        )
         noise = model.outlet_adapter.sample_noise(
             8,
             device=device,
