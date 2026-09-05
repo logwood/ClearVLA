@@ -129,6 +129,11 @@ controller and candidate value reader independently.  It is kept separate
 from the earlier whole-forward compile failure so a graph break in one small
 submodule does not contaminate the accepted baseline.
 
+`--compile-mainline-blocks` is a third compile probe for the repeated
+grounding, P1, world, transition and layer-contract blocks.  It is deliberately
+independent from all other flags so a numerical or graph-break failure remains
+an attributable experiment.
+
 The same commit adds an opt-in execution-controller source-lane reuse probe
 (`--reuse-prepared-controller-context`).  It shares the projected
 global/time/evidence lanes across the three recurrent decisions.  The forward

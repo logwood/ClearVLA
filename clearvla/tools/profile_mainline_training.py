@@ -115,6 +115,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--compile-mainline-blocks",
+        action="store_true",
+        help=(
+            "Compile repeated grounding/P1/world/transition tensor blocks "
+            "individually (experimental; may graph-break)."
+        ),
+    )
+    parser.add_argument(
         "--candidate-prefix-reuse",
         action="store_true",
         help="Use the experimental attached training candidate-prefix chart.",
@@ -272,6 +280,28 @@ def _compile_execution_submodules(model: ClearVLAMainlinePolicy, *, mode: str) -
     return time.perf_counter() - started
 
 
+def _compile_mainline_blocks(model: ClearVLAMainlinePolicy, *, mode: str) -> float:
+    """Compile the repeated tensor-only blocks around the online graph."""
+
+    started = time.perf_counter()
+    modules: list[torch.nn.Module] = [
+        *tuple(model.grounding.blocks),
+        model.p1.dynamic_policy_block,
+        model.world.dynamics.w1,
+        model.world.dynamics.w2,
+        model.transition.v120_transition,
+        *tuple(model.execution_bottom.layer_contract_heads),
+    ]
+    for module in modules:
+        module.forward = torch.compile(  # type: ignore[method-assign]
+            module.forward,
+            dynamic=False,
+            fullgraph=False,
+            mode=mode,
+        )
+    return time.perf_counter() - started
+
+
 def run(args: argparse.Namespace) -> dict[str, object]:
     if args.steps <= 0 or args.warmup < 0 or args.warmup >= args.steps:
         raise ValueError("require steps > warmup >= 0")
@@ -309,6 +339,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     execution_compile_seconds = 0.0
     if args.compile_execution_submodules:
         execution_compile_seconds = _compile_execution_submodules(
+            model, mode=args.compile_mode
+        )
+    mainline_compile_seconds = 0.0
+    if args.compile_mainline_blocks:
+        mainline_compile_seconds = _compile_mainline_blocks(
             model, mode=args.compile_mode
         )
     optimizer, _ownership = build_optimizer(model, config)
@@ -443,6 +478,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "compile_forward": bool(args.compile_forward),
         "compile_visual_submodules": bool(args.compile_visual_submodules),
         "compile_execution_submodules": bool(args.compile_execution_submodules),
+        "compile_mainline_blocks": bool(args.compile_mainline_blocks),
         "compile_mode": str(args.compile_mode),
         "candidate_prefix_reuse": bool(args.candidate_prefix_reuse),
         "reuse_prepared_block_contexts": bool(args.reuse_prepared_block_contexts),
@@ -452,6 +488,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "compile_setup_seconds": _finite_float(compile_seconds),
         "visual_compile_setup_seconds": _finite_float(visual_compile_seconds),
         "execution_compile_setup_seconds": _finite_float(execution_compile_seconds),
+        "mainline_compile_setup_seconds": _finite_float(mainline_compile_seconds),
         "measured_seconds": _finite_float(measured_seconds),
         "steps_per_second": float(measured_steps / max(measured_seconds, 1e-8)),
         "samples_per_second": float(measured_samples / max(measured_seconds, 1e-8)),
