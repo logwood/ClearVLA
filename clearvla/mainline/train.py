@@ -61,6 +61,7 @@ from .training.engine import (
     validate_finite_training_batch,
 )
 from .training.gradient_audit import (
+    DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD,
     FiniteGradientSpikeReport,
     GradientPreclipWindowAccumulator,
 )
@@ -93,6 +94,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--max-train-batches", type=int)
     parser.add_argument("--max-val-batches", type=int)
+    parser.add_argument(
+        "--disable-gradient-spike-audit",
+        action="store_true",
+        help=(
+            "Skip the read-only finite-gradient spike attribution scan. "
+            "This changes diagnostics only; clipping, gradients, optimizer "
+            "updates and RNG state remain unchanged."
+        ),
+    )
     parser.add_argument(
         "--gripper-event-threshold",
         type=float,
@@ -1817,6 +1827,11 @@ def main() -> None:
         dtype=dtype,
         train_flow_generator=train_flow_generator,
         train_condition_generator=train_condition_generator,
+        gradient_spike_audit_threshold=(
+            None
+            if args.disable_gradient_spike_audit
+            else DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD
+        ),
     )
     identity = build_checkpoint_identity(
         config,
@@ -2077,12 +2092,16 @@ def main() -> None:
                 result = engine.train_step(
                     batch,
                     collect_diagnostics=emit,
-                    gradient_spike_handler=lambda report: _write_gradient_spike(
-                        logger,
-                        report,
-                        epoch=epoch,
-                        batch=batch_index,
-                        step=engine.global_step,
+                    gradient_spike_handler=(
+                        None
+                        if args.disable_gradient_spike_audit
+                        else lambda report: _write_gradient_spike(
+                            logger,
+                            report,
+                            epoch=epoch,
+                            batch=batch_index,
+                            step=engine.global_step,
+                        )
                     ),
                 )
             except NonFiniteGradientError as error:
