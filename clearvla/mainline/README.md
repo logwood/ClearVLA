@@ -74,35 +74,25 @@ continuation contracts.
 
 ## Stable entry points
 
-Resolve config and dataset identity before launch; do not infer them from a
-run tag. Use a fresh output directory for every formal run.
+Remote new runs use `workspace launch` with an explicit commit, config,
+interpreter and GPU. Its `--smoke` mode uses a separate run ID from formal
+training. The single command/path contract is in the
+[operational handoff](../../docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md#commands).
+Do not use checkout-local `runs/` examples as a competing remote convention.
 
-```bash
-# Pen baseline smoke
-CUDA_VISIBLE_DEVICES=0 OUT_DIR=runs/pen_smoke bash scripts/smoke_mainline.sh
-
-# Pen baseline training
-CUDA_VISIBLE_DEVICES=0 OUT_DIR=runs/pen_formal bash scripts/train_mainline.sh
-
-# RDT-8 smoke/training
-CUDA_VISIBLE_DEVICES=1 OUT_DIR=runs/rdt8_smoke bash scripts/smoke_rdt_multitask.sh
-CUDA_VISIBLE_DEVICES=1 OUT_DIR=runs/rdt8_formal bash scripts/train_rdt_multitask.sh
-
-# Read-only checkpoint validation
-CHECKPOINT=/path/to/checkpoint bash scripts/validate_mainline_checkpoint.sh
-```
-
-The opt-in B-spine candidate requires
-`MAINLINE_CONFIG=configs/mainline/object_intent_dynamics_323_pen_bspine0.json`;
-omitting it selects the baseline. Override data/cache/T5 paths, batch size or
-workers only when the resolved environment differs, and serialize the result.
+The shell launchers remain low-level/historical interfaces. Read-only checkpoint
+validation must use the checkpoint's matching source/config and a distinct
+output directory. Experiment-specific representation/outlet selection belongs
+to that source revision and serialized context, not a stale version label in
+this README. No historical checkpoint becomes an initialization merely because
+its files are accessible from the new namespace.
 
 ## Audit and change policy
 
 Audit a run directory, not a copied console tail:
 
 ```bash
-python -m clearvla.tools.audit_policy_logs runs/<run> --format text
+python -m clearvla.tools.audit_policy_logs /data/senwang/clearvla/active/pen --format text
 ```
 
 A complete curve outranks a best checkpoint. Smoke, interface checks and

@@ -168,3 +168,43 @@ def test_launch_environment_does_not_allow_auth_tokens():
     assert "ANTHROPIC_AUTH_TOKEN" not in workspace.ENVIRONMENT
     assert "OPENAI_API_KEY" not in workspace.ENVIRONMENT
     assert "HF_TOKEN" not in workspace.ENVIRONMENT
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux process identity boundary")
+def test_unreadable_live_process_is_not_treated_as_stopped(monkeypatch):
+    entry = {"process": {"pid": os.getpid(), "start_ticks": "known", "cwd": "/known"}}
+    monkeypatch.setattr(workspace, "process_identity", lambda _: None)
+    assert workspace.process_unverified(entry)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="remote virtualenv symlink boundary")
+def test_launch_preserves_virtualenv_python_path(tmp_path, monkeypatch):
+    root = workspace.layout(tmp_path / "managed")
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "config.json").write_text("{}")
+    interpreter = tmp_path / "venv-python"
+    interpreter.symlink_to(sys.executable)
+    monkeypatch.setattr(workspace, "checkout", lambda *_: code)
+    seen = {}
+
+    def capture(command, _code, _output, _env, _metadata):
+        seen["command"] = command
+        return 0
+
+    monkeypatch.setattr(workspace, "run_logged", capture)
+    args = argparse.Namespace(
+        python=str(interpreter),
+        ref="ref",
+        config="config.json",
+        outlet="pen",
+        name="test",
+        dtype="bf16",
+        batch_size=8,
+        workers=4,
+        epochs=None,
+        smoke=False,
+        gpu="GPU-test",
+    )
+    assert workspace.launch(root, args) == 0
+    assert seen["command"][0] == str(interpreter)

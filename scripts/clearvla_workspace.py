@@ -129,6 +129,13 @@ def is_running(entry: dict) -> bool:
     return bool(saved and process_identity(saved["pid"]) == saved)
 
 
+def process_unverified(entry: dict) -> bool:
+    saved = entry.get("process")
+    if not saved:
+        return entry.get("status") not in {"complete", "failed"}
+    return process_identity(saved["pid"]) is None and (Path("/proc") / str(saved["pid"])).exists()
+
+
 def activate(root: Path, outlet: str, name: str) -> None:
     target = run_path(root, outlet, name)
     if not (target / "run_context.json").is_file():
@@ -140,11 +147,7 @@ def activate(root: Path, outlet: str, name: str) -> None:
         if not pointer.is_symlink():
             raise ValueError("active entry is not a managed pointer")
         previous = read_entry(pointer)
-        unverified = not previous.get("process") and previous.get("status") not in {
-            "complete",
-            "failed",
-        }
-        if not previous or unverified or is_running(previous):
+        if not previous or process_unverified(previous) or is_running(previous):
             raise ValueError("previous active run is running or unverified; do not replace it")
     temporary = pointer.with_name(f".{outlet}-{os.getpid()}")
     link(temporary, target)
@@ -276,7 +279,9 @@ def run_logged(command: list[str], code: Path, output: Path, env: dict, metadata
 def launch(root: Path, args: argparse.Namespace) -> int:
     if os.name != "posix":
         raise ValueError("remote launches require a POSIX host")
-    python = Path(args.python).resolve(strict=True)
+    # Preserve a virtualenv interpreter's path. Resolving its symlink to the
+    # base binary can select the wrong pyvenv.cfg and a different environment.
+    python = Path(args.python).expanduser().absolute()
     if not python.is_file() or not os.access(python, os.X_OK):
         raise ValueError("--python must be an executable interpreter")
     code = checkout(root, args.ref)
@@ -399,7 +404,15 @@ def main() -> int:
     else:
         for path in sorted((root / "experiments").glob("*/*")):
             entry = read_entry(path)
-            state = "running" if is_running(entry) else entry.get("status", "unverified/inactive")
+            state = (
+                "running"
+                if is_running(entry)
+                else (
+                    "unverified" if process_unverified(entry) else entry.get("status", "inactive")
+                )
+            )
+            if state == "running" and not is_running(entry):
+                state = "inactive"
             selected = root / "active" / path.parent.name
             current = selected.is_symlink() and selected.resolve() == path.resolve()
             print(

@@ -115,35 +115,15 @@ checkpoint。正式运行至少需要：
 
 ## 运行主线
 
-先执行有限批次 smoke：
+远端新实验统一使用 `workspace launch`，从明确 Git 提交建立工作树，输出直接
+写入统一实验目录。先以独立 run ID 执行 `--smoke`，确认数据身份、forward/backward、
+参数所有权和显存，再授权正式训练；不要在各版本 checkout 下面另建输出迷宫。
+命令和路径只维护在 [运行交接](docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md#commands)。
 
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/clearvla_mainline_smoke \
-bash scripts/smoke_mainline.sh
-```
-
-确认数据身份、forward/backward、参数所有权和显存门槛后，再从全新目录启动
-正式训练：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/clearvla_mainline \
-bash scripts/train_mainline.sh
-```
-
-现有 checkpoint 只能先走只读验证入口：
-
-```bash
-CHECKPOINT=/path/to/checkpoint \
-bash scripts/validate_mainline_checkpoint.sh
-```
-
-RDT-8 使用独立的
-[`scripts/smoke_rdt_multitask.sh`](scripts/smoke_rdt_multitask.sh) 和
-[`scripts/train_rdt_multitask.sh`](scripts/train_rdt_multitask.sh)。Schema31
-B-spine-0 的显式配置、运行命令与放行门槛见
-[`clearvla/mainline/README.md`](clearvla/mainline/README.md)。
+已有的 `scripts/train_mainline.sh`、outlet 启动器和
+`scripts/validate_mainline_checkpoint.sh` 保留为底层/历史复现入口，不是服务器
+新实验的第二套目录规则。只读验证仍必须使用 checkpoint 对应的源码与配置；
+不借目录整理迁移或恢复权重，也不从 smoke checkpoint 初始化正式训练。
 
 ## 仓库导航
 
