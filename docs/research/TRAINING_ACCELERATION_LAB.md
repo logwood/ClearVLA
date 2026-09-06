@@ -555,3 +555,14 @@ On the 2026-09-06 worktrees it classified the active acceleration branch as
 `legacy-surface-needs-bridge`.  This is intentionally a compatibility
 preflight, not a speed or behavior claim.  It tells us which thin adapter is
 needed before a branch is sent to the GPU gate.
+
+### Adapter refactor verification
+
+Commit `7a8a52f` passed the new contract tests, Python compilation and Ruff
+checks.  On the local RTX 4060 Laptop (PyTorch `2.11.0+cu126`), the existing
+short CUDA-Graph gate still ended with `cuda_graph_equivalence_ok`.  The local
+synthetic B2/FP32 feasibility profile measured eager median `0.7252 s/step`
+versus Graph replay median `0.1810 s/step` (`4.01x`); this is a regression
+check for the refactor, not a replacement for the production B8/BF16 number
+(`7.54 samples/s` on the authorized RTX 3090 lab).  The remote production
+profile was not overwritten or rerun by this commit.
