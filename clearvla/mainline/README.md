@@ -9,6 +9,17 @@ for unresolved behavior, and the [handoff](../../docs/research/auxiliary/ACTIVE_
 for live process state. This file keeps only package boundaries and stable entry
 points.
 
+## Remote workspace
+
+The only human-facing server root is `/data/senwang/clearvla`. Formal outputs
+belong under `experiments/<outlet>/<run-id>/`; `active/<outlet>` is a pointer,
+not model identity. New runs use a fixed repository plus commit-specific Git
+worktrees under `checkouts/` instead of another full clone per experiment.
+
+The [active handoff](../../docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md)
+owns the complete path contract, current imported-run mapping and protection
+boundary. Do not duplicate those volatile paths here.
+
 ## Package boundary
 
 ```text

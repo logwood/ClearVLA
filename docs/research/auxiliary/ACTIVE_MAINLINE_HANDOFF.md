@@ -1,77 +1,155 @@
 # ClearVLA active operational handoff
 
-Snapshot: 2026-09-06 20:11 +08:00 on `senwang-server`.
+Snapshot: 2026-09-06 20:53 +08:00 on `senwang-server`.
 
-This file is a volatile process and storage map, not an architecture record.
-Recheck every PID, checkout, output path and serialized run context before
-acting. Architecture lives in
+This file is the single path contract and volatile process map. It does not
+define model architecture. Recheck each PID, `/proc/PID/cwd`, output target and
+serialized `run_context.json` before acting. Architecture lives in
 [../00_CURRENT_ARCHITECTURE_CONTRACT.md](../00_CURRENT_ARCHITECTURE_CONTRACT.md);
 open decisions live in
 [../CURRENT_MAINLINE_ISSUES.md](../CURRENT_MAINLINE_ISSUES.md).
 
-## Protected active jobs
+## Canonical remote namespace
 
-| Job | Parent PID | Checkout | Output |
-|---|---:|---|---|
-| CALVIN ABC-D selective | 613786 | `/home/sen.wang/workspace/robotics/clear/clearvla_sim_mainline` | `/data/senwang/data/calvin/runs/clearvla_calvin_abc_d_expanded_selective_v1_20260906` |
-| Pen hybrid v1 | 4030788 | `/home/sen.wang/workspace/robotics/clear/hybrid-v1-pen-20260905` | `runs/hybrid_v1_pen_b8_formal_final_20260905` |
-| Pen raw-W q5 | 2549150 | `/home/sen.wang/workspace/robotics/clear/pen-core-q5-20260906` | `runs/pen_raw_ws_p2_q5_5dbe5ee_20260906_formal` |
-
-The corresponding DataLoader workers are children of these parent processes.
-Do not interrupt them, edit their checkout, or clean their output/cache while
-they are active. Identify a job from both its command line and `/proc/PID/cwd`.
-
-The CALVIN run uses
-`configs/mainline/calvin_abc_d_expanded_selective_v1.json`; the hybrid run uses
-`configs/mainline/object_intent_dynamics_323_pen_hybrid_v1.json`; the q5 run
-uses `configs/mainline/object_intent_dynamics_323_pen_w_interval_q5.json`.
-Read each `run_context.json` before comparing or resuming it.
-
-## Retired process records
-
-PIDs `919391`, `2344176`, `2972941`, `618348`, and `618376` were absent at this
-snapshot. They are historical process identities, not protected active jobs.
-Their evidence remains in run directories, local `new_logs/`, and Git history.
-
-## Storage layout
-
-Heavy completed runs belong on `/data`; checkout-local `runs` paths may be
-symlinks so old commands and references continue to resolve. The following
-completed runs were moved without deleting checkpoints or metrics:
+The only human-facing ClearVLA root is:
 
 ```text
-/home/sen.wang/workspace/robotics/clear/schema31-bspine-pen-20260904/runs
-/home/sen.wang/workspace/robotics/clear/schema31-arm-only-pen-20260905/runs
-/home/sen.wang/workspace/robotics/clear/schema28-core-recovery-rdt8-formal-20260904/runs
-/home/sen.wang/workspace/robotics/clear/schema28-core-recovery-pen-20260903/runs
-/home/sen.wang/workspace/robotics/clear/schema29-rdt-multitask/runs
+/data/senwang/clearvla/
+├── repo/          fixed repository used to manage source
+├── checkouts/     commit-specific Git worktrees
+├── experiments/   canonical outlet/run views and future outputs
+├── active/        one current formal-run pointer per outlet
+└── archive/       retained inactive evidence
 ```
 
-All five resolve under
-`/data/senwang/archive/clearvla-runs/2026-09-06/` and total about 27.03 GB.
-Two inactive, lockfile-rebuildable environments were removed from
-`rdt-multitask-prep/.venv` and `clearvla_v112_fix_belongings/.venv`, releasing
-about 5.68 GB. Recreate either environment from its `pyproject.toml` and
-`uv.lock` if that checkout is reused.
+- `repo/` and `checkouts/<commit>/` own code. Do not create another full clone
+  for every experiment or version label.
+- `experiments/<outlet>/<short-run-id>/` is the canonical run location shown
+  to people and tools.
+- `active/<outlet>` is only a convenience pointer to the selected formal run.
+  It is never a model-version, source or checkpoint identity.
+- `archive/` retains inactive evidence. Archiving does not merge model
+  versions or authorize checkpoint deletion.
 
-## Cleanup boundary
+Legacy `/home/sen.wang/workspace/robotics/clear/...` paths and existing
+`/data/senwang/...` run roots remain physical storage details, not competing
+human entry points.
 
-- Never delete a broad workspace, data root, active run, dataset, formal
-  checkpoint, serialized context, or cache used by an active process.
-- Before moving a completed run, verify the parent PID is absent, inspect its
-  checkout status and latest file time, then preserve the old absolute path
-  with a symlink.
-- Treat dirty checkouts and unknown ownership as retained state, even when
-  their run directories are large.
-- Keep raw logs out of Git. Retain decision-making summaries and reproducible
-  audit commands in documentation.
-- Recheck remote disk space and process identity before every cleanup batch.
+## Experiment view contract
 
-Useful read-only checks:
+Each experiment exposes these stable data names (plus operational `entry.json`):
+
+```text
+experiments/<outlet>/<short-run-id>/
+├── console.log
+├── metrics.jsonl
+├── run_context.json
+├── checkpoints/
+└── code
+```
+
+For the three already-running jobs these entries are links to the
+existing physical files and checkout; no live source, output, log or checkpoint
+is moved or deleted. Resolve `console.log` from the target of
+`/proc/PID/fd/1`; do not guess it from a run name. A view does not rewrite paths
+serialized inside `run_context.json`. Treat the views as read-only: a symbolic
+link is not a permission barrier, and writing through it changes the original.
+
+Future formal launches write directly to their canonical `experiments/` run
+directory and use a commit-specific worktree under `checkouts/`. Model and
+resume identity still comes from manifest, resolved config, source digest,
+data identity and `run_context.json`, never from the directory name.
+
+## Commands
+
+The root `workspace` entry points to the standard-library tool in the fixed
+repository. It neither imports the model nor assumes a training Python path.
 
 ```bash
-df -h / /data
-ps -eo pid,ppid,stat,etimes,args | grep -E 'clearvla|torchrun|python'
-readlink -f /proc/PID/cwd
-du -x -d 1 -B 1 /home/sen.wang/workspace/robotics/clear | sort -n
+/data/senwang/clearvla/workspace list
+/data/senwang/clearvla/workspace show --outlet pen --name 20260906-ws-p2-q5
+tail -n 80 /data/senwang/clearvla/active/pen/console.log
 ```
+
+For a **separately authorized future run**, first fetch the selected source
+branch into `repo`, then pass its verified commit explicitly. Example argument
+names below are placeholders, not a queued experiment:
+
+```bash
+git -C /data/senwang/clearvla/repo fetch origin "$SOURCE_BRANCH"
+/data/senwang/clearvla/workspace checkout --ref "$VERIFIED_COMMIT"
+/data/senwang/clearvla/workspace launch --outlet pen --name "$RUN_ID" \
+  --ref "$VERIFIED_COMMIT" --config "$CONFIG_IN_COMMIT" \
+  --python "$TRAINING_PYTHON" --gpu "$FREE_GPU_UUID"
+```
+
+`launch` runs in the foreground; an explicitly requested detached run can use
+`nohup ... >/dev/null 2>&1 &`. The tool captures trainer output itself. During
+startup stdout briefly occupies a uniquely named staging file beside the run;
+after the trainer writes `run_context.json`, the same open file is atomically
+published as `console.log` inside the run. Failed startup also retains its log
+and exit code there. This preserves the trainer's empty-output-directory check.
+An existing run ID or dirty checkout is rejected; no resume or migration is
+implicit. `activate --outlet pen --name "$RUN_ID"` explicitly selects a verified
+run and refuses to displace a running or unverified active entry. Launch does
+not silently switch the user's active pointer.
+
+`import-run --outlet ... --name ... --output ... --console ... --code ... --pid ...`
+adds an existing run without moving it. It verifies context output, PID/cwd and
+the live stdout path. `entry.json` records only operational paths/process identity;
+it does not replace the model's `run_context.json` or save the shell environment.
+
+## Protected active jobs
+
+| Status | Job | Parent PID | Canonical experiment view | Physical checkout/output |
+|---|---|---:|---|---|
+| current Pen | Pen raw-W q5 | 2549150 | `experiments/pen/20260906-ws-p2-q5` | `/home/sen.wang/workspace/robotics/clear/pen-core-q5-20260906`; `runs/pen_raw_ws_p2_q5_5dbe5ee_20260906_formal` |
+| current CALVIN | CALVIN ABC-D selective | 613786 | `experiments/calvin/20260906-abc-d-selective` | `/home/sen.wang/workspace/robotics/clear/clearvla_sim_mainline`; `/data/senwang/data/calvin/runs/clearvla_calvin_abc_d_expanded_selective_v1_20260906` |
+| running historical | Pen hybrid v1 | 4030788 | `experiments/pen/20260905-hybrid` | `/home/sen.wang/workspace/robotics/clear/hybrid-v1-pen-20260905`; `runs/hybrid_v1_pen_b8_formal_final_20260905` |
+
+The outlet pointers are:
+
+```text
+active/pen    -> ../experiments/pen/20260906-ws-p2-q5
+active/calvin -> ../experiments/calvin/20260906-abc-d-selective
+```
+
+The hybrid job remains protected while it runs, but it is historical and must
+not become `active/pen`. Preserve every DataLoader worker belonging to the
+three parent processes. Do not edit their checkouts or clean their outputs and
+caches while active.
+
+## Existing retained runs
+
+Five completed run trees, about 27.03 GB total, remain physically under
+`/data/senwang/archive/clearvla-runs/2026-09-06/`. Their old checkout-local
+`runs` paths are compatibility symlinks:
+
+```text
+schema31-bspine-pen-20260904
+schema31-arm-only-pen-20260905
+schema28-core-recovery-rdt8-formal-20260904
+schema28-core-recovery-pen-20260903
+schema29-rdt-multitask
+```
+
+Expose retained evidence through the canonical `archive/` namespace without
+copying it again. Two inactive environments previously removed from
+`rdt-multitask-prep/.venv` and `clearvla_v112_fix_belongings/.venv` can be
+recreated from their `pyproject.toml` and `uv.lock`.
+
+## Transition and cleanup boundary
+
+- Import an existing active run as a link-only view; never relocate it during
+  execution.
+- Create future runs directly in `experiments/` and select a tested fixed
+  checkout from `checkouts/`.
+- Keep one human-facing namespace. Documentation must link here instead of
+  publishing another current-path table.
+- Treat dirty checkouts, unknown ownership, datasets, caches used by an active
+  process, formal checkpoints and serialized contexts as retained state.
+- Before any archive or cleanup, verify process identity, checkout status,
+  latest file time and destination capacity. Preserve old absolute paths when
+  compatibility requires them.
+- Keep raw logs and binary artifacts out of Git; document only identity,
+  decisions, source references and reproducible audit information.

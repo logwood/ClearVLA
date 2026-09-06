@@ -11,6 +11,18 @@ checkpoint 身份。
 > [`clearvla/mainline/`](clearvla/mainline/README.md) 是唯一活动实现；旧的
 > `Vxx` 启动器、设计稿与日志只用于复现和归因，不能代表当前模型语义。
 
+## 远端工作区入口
+
+`senwang-server` 上唯一面向人的 ClearVLA 入口是
+`/data/senwang/clearvla`。正式实验从 `experiments/<outlet>/<run-id>/`
+读取，`active/pen` 与 `active/calvin` 只指向各 outlet 当前正式实验；路径名称不
+定义模型版本或 checkpoint 身份。
+
+未来训练直接写入该统一实验空间，代码由固定仓库和按提交隔离的 Git 工作树
+管理，不再为每个版本复制完整 clone。活动进程、旧实验接入方式和完整路径合同
+见
+[`ACTIVE_MAINLINE_HANDOFF.md`](docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md)。
+
 ## 架构一览
 
 ```mermaid
