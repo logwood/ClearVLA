@@ -383,6 +383,12 @@ failed at step 5 for the recommended context-reuse graph path: a tiny raw-flow
 gradient element differed by `1.359e-6` absolute.  The pure graph path showed a
 similar step-5 difference of `1.673e-6`.
 
+The non-aborting collect run completed all 256 updates.  The context-reuse
+graph path reported strict-envelope mismatches on `253/256` updates and
+recaptured exactly twice (identity plus active).  This count is a diagnostic,
+not an acceptance failure by itself, because the reference control below has
+the same long-run issue.
+
 This is not yet evidence that CUDA Graph changes the algorithm.  A paired
 control using two independent eager engines and the same changing batches also
 failed the old `rtol=2e-5, atol=1e-6` rule at step 3, with a `4.222e-6` absolute
@@ -392,6 +398,13 @@ The long-run gate therefore needs calibration against an eager-vs-eager
 control (and preferably deterministic-kernel settings) before it can be used
 as an acceptance criterion.  The short repeated-batch result must not be
 described as 1000-sample long-horizon proof.
+
+For the same 256-update/B4 sequence, two independent eager engines (no graph)
+completed all `1024` slots and reported strict-envelope mismatches on `247/256`
+updates.  Thus the graph count is close to the natural eager-vs-eager CUDA
+variation at this granularity; the current per-element gate is a useful
+tripwire, but not a calibrated long-run equivalence metric.  A real-data B8
+long run without `--repeat-batch` is still a separate pending test.
 
 ## Retained execution-diagnostics split
 

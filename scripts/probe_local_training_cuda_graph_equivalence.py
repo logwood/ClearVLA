@@ -622,6 +622,7 @@ def _run_long_stress_gate(*, steps: int, rtol: float, atol: float) -> None:
     device = torch.device("cuda")
     batch_size = 4
     eager_control = os.environ.get("CLEARVLA_EQUIV_LONG_EAGER_CONTROL") == "1"
+    collect_failures = os.environ.get("CLEARVLA_EQUIV_LONG_COLLECT") == "1"
     eager_engine, _unused_eager_batch = _engine(device)
     graph_engine, _unused_graph_batch = _engine(device)
     if not eager_control:
@@ -651,6 +652,8 @@ def _run_long_stress_gate(*, steps: int, rtol: float, atol: float) -> None:
     eager_rng = {name: value.clone() for name, value in base_rng.items()}
     graph_rng = {name: value.clone() for name, value in base_rng.items()}
     previous_capture_count = runner.capture_count if runner is not None else 0
+    mismatch_steps = 0
+    first_mismatches: list[str] = []
 
     for index in range(steps):
         eager_batch, graph_batch = (
@@ -682,35 +685,44 @@ def _run_long_stress_gate(*, steps: int, rtol: float, atol: float) -> None:
             actual = runner.train_step(graph_batch, collect_diagnostics=False)
         graph_rng = _rng_state(graph_engine, device)
 
-        _assert_step_result_close(actual, expected, rtol=rtol, atol=atol)
-        _assert_gradients_close(
-            _named_gradients(graph_engine.model),
-            _named_gradients(eager_engine.model),
-            path=f"long.step_{index}.clipped_gradient",
-            rtol=rtol,
-            atol=atol,
-        )
-        _assert_parameters_close(
-            graph_engine.model,
-            eager_engine.model,
-            rtol=rtol,
-            atol=atol,
-        )
-        _assert_optimizer_close(
-            graph_engine,
-            eager_engine,
-            rtol=rtol,
-            atol=atol,
-        )
-        assert graph_engine.global_step == eager_engine.global_step
-        assert graph_engine.schedule.step_index == eager_engine.schedule.step_index
-        _assert_tensor_mapping_close(
-            graph_rng,
-            eager_rng,
-            path=f"long.step_{index}.rng",
-            rtol=0.0,
-            atol=0.0,
-        )
+        try:
+            _assert_step_result_close(actual, expected, rtol=rtol, atol=atol)
+            _assert_gradients_close(
+                _named_gradients(graph_engine.model),
+                _named_gradients(eager_engine.model),
+                path=f"long.step_{index}.clipped_gradient",
+                rtol=rtol,
+                atol=atol,
+            )
+            _assert_parameters_close(
+                graph_engine.model,
+                eager_engine.model,
+                rtol=rtol,
+                atol=atol,
+            )
+            _assert_optimizer_close(
+                graph_engine,
+                eager_engine,
+                rtol=rtol,
+                atol=atol,
+            )
+            assert graph_engine.global_step == eager_engine.global_step
+            assert graph_engine.schedule.step_index == eager_engine.schedule.step_index
+            _assert_tensor_mapping_close(
+                graph_rng,
+                eager_rng,
+                path=f"long.step_{index}.rng",
+                rtol=0.0,
+                atol=0.0,
+            )
+        except AssertionError as error:
+            if not collect_failures:
+                raise
+            mismatch_steps += 1
+            if len(first_mismatches) < 8:
+                summary = str(error).splitlines()
+                first_mismatches.append(summary[0] if summary else repr(error))
+                print("long_mismatch", index, first_mismatches[-1])
         capture_count = runner.capture_count if runner is not None else 0
         if capture_count != previous_capture_count:
             print(
@@ -731,7 +743,7 @@ def _run_long_stress_gate(*, steps: int, rtol: float, atol: float) -> None:
                 expected.gradient_norm_scalar,
             )
     print(
-        "long_equivalence_ok",
+        "long_stress_completed" if collect_failures else "long_equivalence_ok",
         "steps",
         steps,
         "batch_size",
@@ -740,6 +752,8 @@ def _run_long_stress_gate(*, steps: int, rtol: float, atol: float) -> None:
         steps * batch_size,
         "capture_count",
         runner.capture_count if runner is not None else 0,
+        "mismatch_steps",
+        mismatch_steps,
     )
 
 
