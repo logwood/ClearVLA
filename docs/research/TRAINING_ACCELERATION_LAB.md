@@ -406,6 +406,69 @@ variation at this granularity; the current per-element gate is a useful
 tripwire, but not a calibrated long-run equivalence metric.  A real-data B8
 long run without `--repeat-batch` is still a separate pending test.
 
+### Cause isolation and calibrated envelope (2026-09-06)
+
+The strict tripwire was not enough to explain the long-run result, so the probe
+now collects every result, gradient, parameter, optimizer-state and RNG tensor
+even after the first failed comparison.  It also verifies that the independently
+generated eager/graph batches are elementwise equal and do not share storage.
+The two full runs below use PyTorch `2.11.0+cu130` on an RTX 3090 (GPU 2),
+`B=4`, `256` updates, and the same `1024` synthetic sample slots:
+
+| Comparison | First gradient/result step outside `rtol=2e-5, atol=1e-6` | Steps outside (gradient / result) | Worst gradient `max_abs` | Final parameter `max_abs` | RNG |
+|---|---:|---:|---:|---:|---|
+| eager vs independent eager | 3 / 10 | 252 / 244 | `2.86523e-3` | `1.58325e-4` | exact |
+| context-reuse CUDA Graph vs eager | 3 / 10 | 253 / 236 | `2.86074e-3` | `1.60743e-4` | exact |
+
+The corresponding worst gradient relative-L2 envelopes were `0.02410` and
+`0.02455`; loss absolute maxima were `2.26498e-5` and `1.43051e-5`.  Both
+paths recaptured the identity/active topology exactly as intended (Graph:
+`capture_count=2`), and both kept global step and scheduler index equal.  The
+near-identical envelopes mean the Graph is not the source of the long-run
+drift; it is within the natural CUDA eager-vs-eager variation on this stack.
+The complete logs are retained in the authorized lab as
+`runs/long_drift_stats_eager_b4_g2_e8b4ef2_20260906.log` and
+`runs/long_drift_stats_graph_context_b4_g2_e8b4ef2_20260906.log`.
+
+The operator cause is now identified rather than inferred.  Enabling
+`torch.use_deterministic_algorithms(True)` fails during the first training
+backward with:
+
+```text
+grid_sampler_2d_backward_cuda does not have a deterministic implementation
+```
+
+With `warn_only=True`, the same run reports the active non-deterministic
+backward paths as `grid_sampler_2d_backward_cuda`,
+`adaptive_avg_pool2d_backward_cuda`, and (when enabled) memory-efficient
+attention backward.  The active observation compiler contains many CUDA
+`grid_sample`/pooling sites in the Flow-DINO/raw-flow path.  As a causal
+control, freezing only `model.observation` and forcing math attention reduces
+the 16-step eager-vs-eager envelope to at most `5.68e-14` gradient difference,
+zero loss/parameter/RNG drift at the configured gate.  Freezing observation
+while leaving the default attention kernel gives only about `3e-8` gradient
+differences.  Therefore the dominant source is the trainable observation
+compiler's CUDA sampling/pooling backward, not Graph replay, random-number
+misalignment, or AdamW.
+
+This does not invalidate the speed result or imply a semantic change: it means
+that exact bitwise long-horizon equality is impossible for the current CUDA
+operator contract unless the observation backward is replaced by a deterministic
+implementation (or its training path is deliberately excluded).  The safe
+acceptance rule is consequently: retain the short strict graph gate, report the
+eager-vs-eager envelope beside every long run, and do not call the `1.76x`
+path bitwise-equivalent over 1000 samples until a real-data B8 envelope is
+measured.
+
+The extended collector is reproducible with:
+
+```bash
+PYTHONPATH=.:/data/senwang/envs/clearvla-schema30-test/lib/python3.12/site-packages \
+  CLEARVLA_EQUIV_LONG_STATS=1 CLEARVLA_EQUIV_LONG_STEPS=256 \
+  /data/senwang/envs/clearvla-schema30-boundary/bin/python \
+  scripts/probe_local_training_cuda_graph_equivalence.py
+```
+
 ## Retained execution-diagnostics split
 
 Separate tensors required by the formal execution-value objective from
