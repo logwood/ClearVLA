@@ -352,17 +352,24 @@ def _compile_candidate_prefix(model: ClearVLAMainlinePolicy, *, mode: str) -> fl
 def run(args: argparse.Namespace) -> dict[str, object]:
     if args.steps <= 0 or args.warmup < 0 or args.warmup >= args.steps:
         raise ValueError("require steps > warmup >= 0")
-    compile_probes = (
-        args.compile_mmdit_blocks,
+    other_compile_probes = (
         args.compile_forward,
         args.compile_visual_submodules,
         args.compile_execution_submodules,
         args.compile_mainline_blocks,
         args.compile_candidate_prefix,
     )
-    if args.cuda_graph_training and any(compile_probes):
+    if args.cuda_graph_training and any(other_compile_probes):
         raise ValueError(
-            "CUDA Graph training and torch.compile probes must be measured separately"
+            "CUDA Graph training only supports the isolated MMDiT block compile probe"
+        )
+    if (
+        args.cuda_graph_training
+        and args.compile_mmdit_blocks
+        and args.compile_mode == "reduce-overhead"
+    ):
+        raise ValueError(
+            "manual CUDA Graph training cannot nest reduce-overhead CUDA Graphs"
         )
     config = _overrides(load_config(args.config), args)
     _seed(config.data.seed)

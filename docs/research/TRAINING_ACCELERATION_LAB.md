@@ -259,6 +259,72 @@ buffers, recapture at the identity/non-identity topology boundary, and run the
 same-GPU production B8 BF16 comparison.  No `2x` completion claim is made
 until that controlled remote result exists.
 
+## Remote 16-file sync and production B8 gate (2026-09-06)
+
+The user-authorized sync was performed into the isolated remote lab
+`/data/senwang/clearvla-vlm-sidecar/bases/clearvla-schema29-d8a77a1/.codex_training_acceleration`.
+The incoming archive contains exactly the 16 approved paths and has SHA-256
+`50f72cce4f14a04a4ec68f444af1b7acc5ea48c57d5f6d8d60153b8a5edf768b` on both
+the local and remote hosts.  The 11 pre-existing remote source files were
+saved, without overwrite, as
+`runs/source_snapshots/pre_sync_7fee2ac_20260906_103428.tar.gz` (SHA-256
+`7bee716ecd1e65db2e343663b66996510e6a323407c1b48431198e3e66ee2b58`).
+
+The strict remote CUDA equivalence probe passed on GPU 4 with the boundary
+`rtol=2e-5, atol=1e-6`:
+
+```text
+equivalent_step 0/1
+equivalent_step 700/701
+runner_equivalent eager_diagnostic
+runner_equivalent post_diagnostic_replay
+runner_equivalent copied_input
+runner_equivalent restored_input
+runner_equivalent active_recapture
+cuda_graph_equivalence_ok
+```
+
+The probe emitted one PyTorch `AccumulateGrad` stream-mismatch warning during
+backward.  It did not fail the gate, but it is retained as a possible
+synchronization cost and is not silently treated as a correctness proof.
+
+Matched production B8/BF16 profiles used the same code, config, repeated batch,
+15 steps with 5 warmup steps, and GPU 4.  The eager and graph artifacts are:
+
+| Run | Throughput | Step time | Relative to matched eager | Artifact |
+|---|---:|---:|---:|---|
+| eager | 4.29264 samples/s | 1.86365 s | 1.000x | `runs/profile_cuda_graph_eager_b8_g4_7fee2ac_20260906_103428.json` |
+| CUDA Graph | 7.43241 samples/s | 1.07637 s | 1.731x | `runs/profile_cuda_graph_graph_b8_g4_7fee2ac_20260906_103428.json` |
+| reverse-order graph | 7.26746 samples/s | 1.10080 s | — | `runs/profile_cuda_graph_reverse_graph_b8_g4_7fee2ac_20260906_103428.json` |
+| reverse-order eager | 4.26092 samples/s | 1.87753 s | — | `runs/profile_cuda_graph_reverse_eager_b8_g4_7fee2ac_20260906_103428.json` |
+
+The two orderings average about `1.718x`, so the result is robust but below the
+requested `2x` gate (`8.58529 samples/s`, or `0.93183 s/step` for this eager
+baseline).  The graph capture setup is one-time (`7.42--8.69 s`) and is not
+included in steady-state throughput.
+
+Three already equivalence-gated reuse paths add only a small positive result:
+`7.54055 samples/s` (`1.756x`), artifact
+`runs/profile_cuda_graph_context_reuse_b8_g4_7fee2ac_20260906_103428.json`.
+The batched candidate-prefix variant is slightly negative at `7.50229
+samples/s`; artifact
+`runs/profile_cuda_graph_batched_context_b8_g4_7fee2ac_20260906_103428.json`.
+It is therefore not recommended for the production combination.
+
+Default (non-CUDA-Graph) MMDiT block compilation layered onto the reuse graph
+reaches `7.60491 samples/s` (`1.774x`), with `26.69 s` compile setup and
+`100.86 s` graph capture; artifact
+`runs/profile_cuda_graph_compile_mmdit_context_b8_g4_7fee2ac_20260906_103428.json`.
+This is a performance observation only until a matching compiled-path
+equivalence gate is added; it is not yet an accepted mathematical-preservation
+claim.
+
+A short operator profile (`runs/operator_cuda_graph_context_b8_g4_7fee2ac_20260906_103428.txt`)
+measured about `1.031 s` CUDA time per profiled step.  The largest class was
+72 SGEMM launches (`168.9 ms`), followed by thousands of elementwise and
+reduction kernels.  This explains why dispatch capture alone plateaus around
+`1.75x`: the remaining gap is mostly real GPU compute, not Python scheduling.
+
 ## Retained execution-diagnostics split
 
 Separate tensors required by the formal execution-value objective from
