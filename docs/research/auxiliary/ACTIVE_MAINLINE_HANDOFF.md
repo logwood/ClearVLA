@@ -1,157 +1,77 @@
-# ClearVLA Schema30 rolling handoff
+# ClearVLA active operational handoff
 
-Snapshot: 2026-09-02 13:14 +08:00
+Snapshot: 2026-09-06 20:11 +08:00 on `senwang-server`.
 
-This file is the volatile operational snapshot. It does not define
-architecture; read
-[`../00_CURRENT_ARCHITECTURE_CONTRACT.md`](../00_CURRENT_ARCHITECTURE_CONTRACT.md)
-first, then
-[`../CURRENT_MAINLINE_ISSUES.md`](../CURRENT_MAINLINE_ISSUES.md) and
-[`../CURRENT_MAINLINE_REPAIR_PLAN.md`](../CURRENT_MAINLINE_REPAIR_PLAN.md).
-Recheck remote state before acting because PIDs and steps below will age.
+This file is a volatile process and storage map, not an architecture record.
+Recheck every PID, checkout, output path and serialized run context before
+acting. Architecture lives in
+[../00_CURRENT_ARCHITECTURE_CONTRACT.md](../00_CURRENT_ARCHITECTURE_CONTRACT.md);
+open decisions live in
+[../CURRENT_MAINLINE_ISSUES.md](../CURRENT_MAINLINE_ISSUES.md).
 
-## Identity
+## Protected active jobs
 
-```text
-capability:             object_intent_dynamics_323
-manifest schema:        30
-manifest digest:        1323dcff095cbddb8da02c0e263c3e9865fbae39add9af4e539d38e9745f9c46
-Schema30 source commit: 3fef2fc0dce297f600c813307c998f587cca1ca3
-release-doc checkout:   f60bd808becabd882b10ad7b07e74242fe49a881
-Linux source digest:    0d0957a75ab22e37f552ccf9a4505049876af5785837cb9787edde181b04c1c2
-local branch name:      codex/schema29-mainline (historical name only)
-```
+| Job | Parent PID | Checkout | Output |
+|---|---:|---|---|
+| CALVIN ABC-D selective | 613786 | `/home/sen.wang/workspace/robotics/clear/clearvla_sim_mainline` | `/data/senwang/data/calvin/runs/clearvla_calvin_abc_d_expanded_selective_v1_20260906` |
+| Pen hybrid v1 | 4030788 | `/home/sen.wang/workspace/robotics/clear/hybrid-v1-pen-20260905` | `runs/hybrid_v1_pen_b8_formal_final_20260905` |
+| Pen raw-W q5 | 2549150 | `/home/sen.wang/workspace/robotics/clear/pen-core-q5-20260906` | `runs/pen_raw_ws_p2_q5_5dbe5ee_20260906_formal` |
 
-The remote formal workspace is a detached checkout of `f60bd80`:
+The corresponding DataLoader workers are children of these parent processes.
+Do not interrupt them, edit their checkout, or clean their output/cache while
+they are active. Identify a job from both its command line and `/proc/PID/cwd`.
 
-```text
-/home/sen.wang/workspace/robotics/clear/schema30-mainline-3fef2fc
-```
+The CALVIN run uses
+`configs/mainline/calvin_abc_d_expanded_selective_v1.json`; the hybrid run uses
+`configs/mainline/object_intent_dynamics_323_pen_hybrid_v1.json`; the q5 run
+uses `configs/mainline/object_intent_dynamics_323_pen_w_interval_q5.json`.
+Read each `run_context.json` before comparing or resuming it.
 
-Its only observed untracked path is `diagnostics/`; active source identity is
-serialized in each run context. Branch and directory names never override the
-manifest or source digest.
+## Retired process records
 
-## Release gates already passed
+PIDs `919391`, `2344176`, `2972941`, `618348`, and `618376` were absent at this
+snapshot. They are historical process identities, not protected active jobs.
+Their evidence remains in run directories, local `new_logs/`, and Git history.
 
-- local regression/static: 223 passed, 2 CUDA-only skipped; changed-file Ruff
-  and compileall passed;
-- fresh checkpoint save/load and Schema29 exact-resume rejection;
-- real Pen B8 CUDA BF16 cache0/cache1 parameter VJP;
-- fresh Pen B8 and task-balanced RDT-8 smokes with finite backward, exact loss
-  ledger, deploy-style validation and atomic checkpoints;
-- read-only checkpoint validation for both outlets with
-  `source_delta_files=0`, no optimizer/scheduler/RNG load and no write.
+## Storage layout
 
-These are release/interface gates only. They do not establish learned
-performance.
-
-## Active formal runs
-
-### Pen core-behavior outlet
+Heavy completed runs belong on `/data`; checkout-local `runs` paths may be
+symlinks so old commands and references continue to resolve. The following
+completed runs were moved without deleting checkpoints or metrics:
 
 ```text
-GPU / PID:    0 / 2004608
-run tag:      schema30_pen_b8_20260902_115644
-run dir:      runs/schema30_pen_b8_20260902_115644
-console log:  schema30_pen_b8_20260902_115644.log
-config:       configs/mainline/object_intent_dynamics_323.json
-batch/workers: 8 / 4
+/home/sen.wang/workspace/robotics/clear/schema31-bspine-pen-20260904/runs
+/home/sen.wang/workspace/robotics/clear/schema31-arm-only-pen-20260905/runs
+/home/sen.wang/workspace/robotics/clear/schema28-core-recovery-rdt8-formal-20260904/runs
+/home/sen.wang/workspace/robotics/clear/schema28-core-recovery-pen-20260903/runs
+/home/sen.wang/workspace/robotics/clear/schema29-rdt-multitask/runs
 ```
 
-At the snapshot, the process was alive and the last completed compact window
-was epoch 1 step 2000. No validation row had completed. Ledger and finite-value
-scans were clean. Seven threshold-5 crossings occurred through step 106, all
-dominated by the output head; no further Pen crossing appeared through step
-2000. This is early health evidence, not a behavior result.
+All five resolve under
+`/data/senwang/archive/clearvla-runs/2026-09-06/` and total about 27.03 GB.
+Two inactive, lockfile-rebuildable environments were removed from
+`rdt-multitask-prep/.venv` and `clearvla_v112_fix_belongings/.venv`, releasing
+about 5.68 GB. Recreate either environment from its `pyproject.toml` and
+`uv.lock` if that checkout is reused.
 
-### RDT-8 adapter/multitask outlet
+## Cleanup boundary
 
-```text
-GPU / PID:    1 / 2005400
-run tag:      schema30_rdt8_b8_20260902_115726
-run dir:      runs/schema30_rdt8_b8_20260902_115726
-console log:  schema30_rdt8_b8_20260902_115726.log
-config:       configs/mainline/rdt_multitask8_data_v1.json
-batch/workers: 8 / 4
-validation:   at most 64 batches per task-facing panel
-```
+- Never delete a broad workspace, data root, active run, dataset, formal
+  checkpoint, serialized context, or cache used by an active process.
+- Before moving a completed run, verify the parent PID is absent, inspect its
+  checkout status and latest file time, then preserve the old absolute path
+  with a symlink.
+- Treat dirty checkouts and unknown ownership as retained state, even when
+  their run directories are large.
+- Keep raw logs out of Git. Retain decision-making summaries and reproducible
+  audit commands in documentation.
+- Recheck remote disk space and process identity before every cleanup batch.
 
-At the snapshot, the process was alive and the last completed compact window
-was step 1500. No validation row had completed. The first three finite
-crossings were output-head events. Three later observation-side crossings
-appeared at steps 954/1251/1317: the maximum was
-`target_dino_key.1.weight` owner L2 `19.28`, global preclip `22.60`, with
-later ownership split between `target_dino_key` and `flow.delta_head`.
-There was no non-finite, traceback, lineage or ledger failure. This recurrence
-deserves checkpoint/validation review but does not yet prove the proposed
-address-chain root cause.
-
-The earlier `schema30_pen_b8_20260902_115507` directory is a zero-step launch
-failure caused by a non-interactive PATH that could not locate Python. It
-contains no training or checkpoint evidence.
-
-## Immediate next action
-
-1. Verify both PIDs and read the newest compact train/validation rows.
-2. Continue both runs unless a hard-stop condition in the current plan fires.
-3. At the first completed validation, audit the run directory rather than only
-   the console log.
-4. Compare Pen with the complete Schema28 anchor and RDT-8 task by task.
-5. Do not edit the graph from early train loss, event F1, geometry magnitude or
-   one finite spike.
-
-Useful read-only commands on the server:
+Useful read-only checks:
 
 ```bash
-cd /home/sen.wang/workspace/robotics/clear/schema30-mainline-3fef2fc
-ps -p 2004608,2005400 -o pid,etimes,stat,%cpu,%mem,cmd
-tail -n 80 schema30_pen_b8_20260902_115644.log
-tail -n 80 schema30_rdt8_b8_20260902_115726.log
-python -m clearvla.tools.audit_policy_logs +  runs/schema30_pen_b8_20260902_115644 --format text
+df -h / /data
+ps -eo pid,ppid,stat,etimes,args | grep -E 'clearvla|torchrun|python'
+readlink -f /proc/PID/cwd
+du -x -d 1 -B 1 /home/sen.wang/workspace/robotics/clear | sort -n
 ```
-
-For RDT-8, pass its run directory to the same auditor and inspect all per-task
-rows. A compact aggregate is insufficient.
-
-## Checkpoint and continuation boundary
-
-- Both formal runs started fresh in new directories.
-- Schema29 and earlier checkpoints are not Schema30 exact-resume or migration
-  inputs.
-- Smoke checkpoints are gate artifacts, not formal initialization sources.
-- Resume only from a checkpoint whose run context matches the complete
-  Schema30 source/config/manifest/data/optimizer identity.
-- Validation-only checkpoint loading must remain read-only.
-
-## Local documentation state
-
-The local branch is `codex/schema29-mainline`. Its current HEAD contains the
-documentation compaction on top of formal-run checkout `f60bd80`: active
-truth is shortened, replay/design evidence is archived, legacy README files
-are consolidated, and raw logs are excluded from Git while retained on disk.
-Verify the exact HEAD with `git rev-parse HEAD` rather than copying a stale
-hash into this rolling file.
-
-Separate CALVIN/data-adapter source and test edits may remain unstaged in the
-same worktree. They are not part of the documentation commit. Preserve and
-review them independently; do not reset or accidentally fold them into a
-documentation-only change.
-
-The pre-compaction documents and retired R1/R2 worksheets remain recoverable at
-`f60bd80`. No checkpoint, tensor cache or raw probe dump should be added to
-the documentation commit.
-
-## Historical retrieval
-
-- compact R1/R2 decisions:
-  [`R1_R2_CLOSURE_INDEX.md`](R1_R2_CLOSURE_INDEX.md);
-- replay provenance:
-  [`../archive/replay/`](../archive/replay/README.md);
-- older research evidence:
-  [`../archive/legacy_evidence/`](../archive/legacy_evidence/README.md);
-- RDT interface boundary:
-  [`RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md`](RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md).
-
-Open those only for ancestry, an old log or the reason for an earlier repair.
-Never reconstruct the current graph from a historical experiment name.
