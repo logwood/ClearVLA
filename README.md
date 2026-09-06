@@ -51,17 +51,18 @@ flowchart LR
 | Capability | `object_intent_dynamics_323` |
 | 活动实现 | `clearvla/mainline/` |
 | 基线 manifest | Schema30，Schema28-core recovery 语义 |
-| 可选实验 | Schema31 B-spine-0；尚未替代 Schema30 基线 |
+| 表示组件 | Schema30/raw-only；历史 Schema31 B-spine 不属于活动图 |
 | 逻辑拓扑 | `G1 G2 G3 / W1 W2 / P1 P2 P3` |
 | 对象空间 | `K=4`，另有显式 null mass |
 | 世界区间 | `4-8 / 8-16 / 16-32 / 32-48` |
 | 动作输出 | 24 步 × 7 维 |
 | 训练方式 | fresh、single-stage、end-to-end |
 
-Schema31 只通过专用配置显式启用；它仍需完成真实 CUDA/BF16、运行时显存和
-只读生产 checkpoint 回放等远端门槛。分支名、run tag 和旧实验编号都不是模型
-身份，真正的恢复边界由 manifest、解析后的配置、源码摘要和 `run_context.json`
-共同决定。
+主线只接受 Schema30 manifest，并通过原生 raw physical-field lift 处理完整
+动作场。旧 Schema31/B-spine 的源码、配置和指标只保留在 Git 历史中供审计，
+不会被主线配置或 checkpoint 身份选择。分支名、run tag 和旧实验编号都不是
+模型身份，真正的恢复边界由 manifest、解析后的配置、源码摘要和
+`run_context.json` 共同决定。
 
 ## 快速开始
 
@@ -129,16 +130,13 @@ bash scripts/validate_mainline_checkpoint.sh
 
 RDT-8 使用独立的
 [`scripts/smoke_rdt_multitask.sh`](scripts/smoke_rdt_multitask.sh) 和
-[`scripts/train_rdt_multitask.sh`](scripts/train_rdt_multitask.sh)。Schema31
-B-spine-0 的显式配置、运行命令与放行门槛见
-[`clearvla/mainline/README.md`](clearvla/mainline/README.md)。
+[`scripts/train_rdt_multitask.sh`](scripts/train_rdt_multitask.sh)。
 
 ## 仓库导航
 
 | 路径 | 用途 |
 |---|---|
 | [`clearvla/mainline/`](clearvla/mainline/README.md) | 活动模型、训练与部署实现 |
-| [`clearvla/action_representations/bspline/`](clearvla/action_representations/bspline/README.md) | B-spline 动作表示与验证合同 |
 | [`clearvla/action_representations/composite/`](clearvla/action_representations/composite/README.md) | 异构执行器的独立表示原型 |
 | [`clearvla/action_solvers/flow_solver/`](clearvla/action_solvers/flow_solver/README.md) | 独立 flow solver 数值诊断边界 |
 | [`configs/mainline/`](configs/mainline/) | 可序列化的主线与 outlet 配置 |
@@ -147,6 +145,9 @@ B-spine-0 的显式配置、运行命令与放行门槛见
 | [`docs/development/SIMULATION.md`](docs/development/SIMULATION.md) | simulator 与外部 benchmark runbook |
 | [`docs/research/`](docs/research/README.md) | 当前架构合同、问题与研究证据索引 |
 | [`legacy/`](legacy/README.md) | 仅供追溯的旧实现入口 |
+
+Schema31/B-spine 的历史实现不在当前文件树中；需要复核旧日志时请使用 Git
+历史和审计技能的历史指标说明，不要把它当作可导入的主线包。
 
 ## 文档阅读顺序
 

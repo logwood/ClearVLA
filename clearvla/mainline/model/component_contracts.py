@@ -14,13 +14,6 @@ from typing import TYPE_CHECKING, Mapping, Protocol
 
 from torch import Tensor, nn
 
-from ..v120_core.bspine import (
-    BSPINE0_IMPLEMENTATION,
-    BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
-    BSPINE_ARM_ONLY_IMPLEMENTATION,
-    BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
-    BSPINE_DISABLED_IMPLEMENTATION,
-)
 from .action_contract import V120SeedContext
 from .compiler import ObjectPolicyPlanDeltaBank
 from .observation_contract import ObservationEvidence
@@ -37,25 +30,6 @@ if TYPE_CHECKING:
 
 COMPONENT_ABI_REVISION = "mainline-modular-v1"
 BASELINE_EXECUTION_BOTTOM = "v120_evidence_mmdit_v1"
-BSPINE0_EXECUTION_BOTTOM = "v120_evidence_mmdit_bspine0_v1"
-BSPINE_ARM_ONLY_EXECUTION_BOTTOM = "v120_evidence_mmdit_bspine_arm_only_v1"
-BSPINE_ARM_COARSE_CONTEXT_EXECUTION_BOTTOM = "v120_evidence_mmdit_bspine_arm_coarse_context_v1"
-BSPINE_ARM_PRIVATE_READER_EXECUTION_BOTTOM = "v120_evidence_mmdit_bspine_arm_private_reader_v1"
-
-
-def _execution_bottom_selection(config: "ExperimentConfig") -> str:
-    implementation = str(config.bottom.bspine_implementation)
-    if implementation == BSPINE_DISABLED_IMPLEMENTATION:
-        return BASELINE_EXECUTION_BOTTOM
-    if implementation == BSPINE0_IMPLEMENTATION:
-        return BSPINE0_EXECUTION_BOTTOM
-    if implementation == BSPINE_ARM_ONLY_IMPLEMENTATION:
-        return BSPINE_ARM_ONLY_EXECUTION_BOTTOM
-    if implementation == BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION:
-        return BSPINE_ARM_COARSE_CONTEXT_EXECUTION_BOTTOM
-    if implementation == BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION:
-        return BSPINE_ARM_PRIVATE_READER_EXECUTION_BOTTOM
-    raise ValueError(f"unsupported B-spine implementation: {implementation!r}")
 
 
 @dataclass(frozen=True)
@@ -66,9 +40,9 @@ class ComponentSelection:
     observation: str = "restored_v120_observation_v1"
     role_query_bridge: str = "v120_shared_role_query_v1"
     grounding: str = "progressive_g123_dense_v1"
-    intent: str = "stateless_object_intent_v1"
-    world: str = "object_candidate_w12_v1"
-    p1: str = "v120_factual_dynamic_p1_v1"
+    intent: str = "stateless_object_intent_current_once_diag_invariant_v1"
+    world: str = "object_candidate_w12_typed_interval_qk_v1"
+    p1: str = "v120_factual_policy_relative_precision_dynamic_p1_v1"
     policy_compiler: str = "object_p2_p3_v1"
     transition: str = "controlled_transition_v1"
     execution_bottom: str = BASELINE_EXECUTION_BOTTOM
@@ -93,7 +67,6 @@ class ComponentSelection:
             terminal = "continuous_physical_v1"
             outlet = "pen_7d_continuous_v1"
         selection = cls(
-            execution_bottom=_execution_bottom_selection(config),
             terminal_controller=terminal,
             outlet_adapter=outlet,
         )
@@ -140,16 +113,14 @@ class ComponentSelection:
         profile = str(config.data.data_profile)
         if profile == "calvin_relative_7d_v1":
             return cls(
-                execution_bottom=_execution_bottom_selection(config),
                 terminal_controller="calvin_binary_command_v1",
                 outlet_adapter="calvin_7d_binary_v1",
             )
         if profile == "rdt_right_arm_action_chart_v1":
             return cls(
-                execution_bottom=_execution_bottom_selection(config),
                 outlet_adapter="rdt_right_arm_7d_v1",
             )
-        return cls(execution_bottom=_execution_bottom_selection(config))
+        return cls()
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -395,9 +366,6 @@ def map_legacy_state_dict(
 
 
 __all__ = [
-    "BSPINE_ARM_ONLY_EXECUTION_BOTTOM",
-    "BSPINE_ARM_COARSE_CONTEXT_EXECUTION_BOTTOM",
-    "BSPINE_ARM_PRIVATE_READER_EXECUTION_BOTTOM",
     "COMPONENT_ABI_REVISION",
     "ComponentSelection",
     "DynamicQueryBundle",

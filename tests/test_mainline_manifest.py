@@ -1,24 +1,15 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import replace
 
 import torch
 
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.manifest import (
     ARCHITECTURE_MANIFEST,
-    ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST,
-    BSPINE_ARCHITECTURE_MANIFEST,
     ArchitectureManifest,
     ComponentABI,
-    architecture_manifest_for_bspine_implementation,
     manifest_from_mapping,
-)
-from clearvla.mainline.model.component_contracts import (
-    BSPINE_ARM_ONLY_EXECUTION_BOTTOM,
-    BSPINE0_EXECUTION_BOTTOM,
-    ComponentSelection,
 )
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.runtime.deployment import (
@@ -29,16 +20,6 @@ from clearvla.mainline.runtime.deployment import (
     validate_deployment_abi,
 )
 from clearvla.mainline.training.optimizer import build_optimizer
-from clearvla.mainline.v120_core.bspine import (
-    BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
-    BSPINE_ARM_ONLY_IMPLEMENTATION,
-    BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
-    BSPINE0_BASIS_DIGEST,
-    BSPINE0_CONTROL_POINTS,
-    BSPINE0_DEGREE,
-    BSPINE0_IMPLEMENTATION,
-    BSPINE0_SPEC_FINGERPRINT,
-)
 
 
 def test_mainline_manifest_round_trip_is_stable() -> None:
@@ -47,66 +28,6 @@ def test_mainline_manifest_round_trip_is_stable() -> None:
     assert restored.layout_schema == 2
     assert restored.digest() == ARCHITECTURE_MANIFEST.digest()
     assert len(restored.digest()) == 64
-
-
-def test_bspine_selects_schema31_without_relabeling_the_baseline() -> None:
-    base = ExperimentConfig()
-    config = replace(
-        base,
-        bottom=replace(
-            base.bottom,
-            bspine_implementation=BSPINE0_IMPLEMENTATION,
-            bspine_degree=BSPINE0_DEGREE,
-            bspine_control_points=BSPINE0_CONTROL_POINTS,
-            bspine_basis_digest=BSPINE0_BASIS_DIGEST,
-            bspine_spec_fingerprint=BSPINE0_SPEC_FINGERPRINT,
-        ),
-    )
-    config.validate()
-    manifest = architecture_manifest_for_bspine_implementation(
-        config.bottom.bspine_implementation
-    )
-    assert ARCHITECTURE_MANIFEST.schema == 30
-    assert manifest is BSPINE_ARCHITECTURE_MANIFEST
-    assert manifest.schema == 31
-    assert manifest.digest() != ARCHITECTURE_MANIFEST.digest()
-    assert manifest_from_mapping(manifest.as_dict()) == manifest
-    selection = ComponentSelection.from_config(config)
-    assert selection.execution_bottom == BSPINE0_EXECUTION_BOTTOM
-
-
-def test_arm_only_bspine_has_distinct_manifest_and_component_identity() -> None:
-    base = ExperimentConfig()
-    config = replace(
-        base,
-        bottom=replace(
-            base.bottom,
-            bspine_implementation=BSPINE_ARM_ONLY_IMPLEMENTATION,
-            bspine_degree=BSPINE0_DEGREE,
-            bspine_control_points=BSPINE0_CONTROL_POINTS,
-            bspine_basis_digest=BSPINE0_BASIS_DIGEST,
-            bspine_spec_fingerprint=BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
-            bspine_action_group_mask=BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
-        ),
-    )
-    config.validate()
-    manifest = architecture_manifest_for_bspine_implementation(
-        config.bottom.bspine_implementation
-    )
-    assert manifest is ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST
-    assert manifest.schema == BSPINE_ARCHITECTURE_MANIFEST.schema == 31
-    assert len(
-        {
-            ARCHITECTURE_MANIFEST.digest(),
-            BSPINE_ARCHITECTURE_MANIFEST.digest(),
-            ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST.digest(),
-        }
-    ) == 3
-    assert manifest.components.bottom != BSPINE_ARCHITECTURE_MANIFEST.components.bottom
-    assert manifest_from_mapping(manifest.as_dict()) == manifest
-    selection = ComponentSelection.from_config(config)
-    assert selection.execution_bottom == BSPINE_ARM_ONLY_EXECUTION_BOTTOM
-    assert selection.execution_bottom != BSPINE0_EXECUTION_BOTTOM
 
 
 def test_mainline_manifest_rejects_version_or_component_drift() -> None:
@@ -118,6 +39,15 @@ def test_mainline_manifest_rejects_version_or_component_drift() -> None:
         assert "capability identity" in str(error)
     else:
         raise AssertionError("schema-3 top must not enter the mainline")
+
+    retired_schema = dict(ARCHITECTURE_MANIFEST.as_dict())
+    retired_schema["schema"] = 31
+    try:
+        manifest_from_mapping(retired_schema)
+    except ValueError as error:
+        assert "capability identity" in str(error)
+    else:
+        raise AssertionError("Schema31 must remain archive-only")
 
     incompatible = ArchitectureManifest(components=ComponentABI(bottom="historical_bottom"))
     # A syntactically valid different component identity is allowed to exist
@@ -141,7 +71,7 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
     assert (
         components.top
-        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3_schema28_core_recovery"
+        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3_schema28_core_recovery_s_current_once_diag_invariant_p2_policy_relative_precision_v1_typed_interval_qk_v1"
     )
     assert (
         components.bottom
@@ -149,10 +79,10 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
     assert (
         components.training
-        == "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_persistence_gripper_trajectory_v120_decay_local_global_clip_physical_w_ingress_gradient_probes_schema28_core_recovery_profile_owned_full_horizon_gripper_codec_boundary"
+        == "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_persistence_gripper_trajectory_v120_decay_local_global_clip_physical_w_ingress_gradient_probes_schema28_core_recovery_profile_owned_full_horizon_gripper_codec_boundary_finite_loss_before_backward_v1"
     )
     assert components.runtime == (
-        "cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics_schema28_core_recovery_profile_owned_full_horizon_gripper_codec_boundary_source_native_metrics"
+        "cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics_schema28_core_recovery_profile_owned_full_horizon_gripper_codec_boundary_source_native_metrics_active_manifest_checked_v1"
     )
 
 
@@ -177,6 +107,7 @@ def test_deployment_abi_rejects_pre_boundary_scope_checkpoints() -> None:
     }
     abi = {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        "architecture_manifest": ARCHITECTURE_MANIFEST.as_dict(),
         "graph_config": graph,
         "graph_config_sha256": canonical_sha256(graph),
         "observation": {
@@ -249,4 +180,6 @@ def test_schema_30_parameter_inventory_is_explained_by_active_modules() -> None:
     assert len(optimizer.param_groups) == 23
     assert len(ownership.trainable_names) == 1_063
     assert model.execution_bottom.decoder.terminal_controller.optional_event_head is None
+    assert not hasattr(model.execution_bottom.decoder, "spine")
+    assert model.selection.execution_bottom == "v120_evidence_mmdit_v1"
     assert not hasattr(model, "decoded_gripper_event_head")

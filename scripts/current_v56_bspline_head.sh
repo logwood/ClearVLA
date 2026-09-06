@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
+# HISTORICAL ONLY: this V56 launcher is outside the active Schema30 source closure.
 # V56 B-SPLINE HEAD: keep the V54/V55 healthy denoise geometry, only change the
 # arm output writer from a global DCT basis to a local clamped B-spline basis.
 #

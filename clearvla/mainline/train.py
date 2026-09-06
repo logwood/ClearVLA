@@ -67,7 +67,6 @@ from .training.gradient_audit import (
 )
 from .training.losses import sample_flow_matching
 from .training.optimizer import WarmupCosineSchedule, build_optimizer, role_lr_scale
-from .v120_core.bspine import BSPINE_DISABLED_IMPLEMENTATION
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1114,19 +1113,13 @@ def _validation_action_estimator_match(
 
 @torch.no_grad()
 def _execution_ablation_modes(config: ExperimentConfig) -> tuple[str, ...]:
-    modes = (
+    del config
+    return (
         "hard",
         "neutral",
         "full_capacity",
         "three_basis_reduction",
     )
-    if config.bottom.bspine_implementation != BSPINE_DISABLED_IMPLEMENTATION:
-        return (
-            *modes,
-            "spine_zero_refined_pass",
-            "spine_zero_full_lifecycle",
-        )
-    return modes
 
 
 def _validate(
@@ -1562,34 +1555,13 @@ def _validate(
                 ).square().mean(),
             }
             for mode in _execution_ablation_modes(config):
-                if mode == "spine_zero_full_lifecycle":
-                    # Re-run proposal, the single W rebuild and the refined
-                    # pass with B-spine removed throughout.  This is the
-                    # deployment-lifecycle intervention; it intentionally
-                    # starts from the original observation cache.
-                    execution = sample_refined_cached_action(
-                        engine.model,
-                        cache,
-                        config,
-                        execution_mode="spine_zero",
-                        **common_sampling,
-                    )
-                else:
-                    # Ordinary execution interventions hold the already
-                    # rebuilt W cache fixed.  Keep that useful diagnostic for
-                    # B-spine too, but name it as a refined-pass-only result.
-                    execution_mode = (
-                        "spine_zero"
-                        if mode == "spine_zero_refined_pass"
-                        else mode
-                    )
-                    execution = sample_cached_action(
-                        engine.model,
-                        refined_cache,
-                        config,
-                        execution_mode=execution_mode,
-                        **common_sampling,
-                    )
+                execution = sample_cached_action(
+                    engine.model,
+                    refined_cache,
+                    config,
+                    execution_mode=mode,
+                    **common_sampling,
+                )
                 error = execution.action.float() - target
                 delta = execution.action.float() - primary
                 stem = f"execution_{mode}"
@@ -1603,44 +1575,6 @@ def _validate(
                 execution_rows[f"{stem}_action_delta_mse_physical"] = (
                     delta / action_scale
                 ).square().mean()
-                if mode.startswith("spine_zero_"):
-                    physical_primary_error = primary_error / action_scale
-                    physical_error = error / action_scale
-                    physical_delta = delta / action_scale
-                    for band_name, band_slice in (
-                        ("1_4", slice(0, 4)),
-                        ("5_12", slice(4, 12)),
-                        ("13_24", slice(12, 24)),
-                    ):
-                        for owner, channel_slice in (
-                            ("arm", slice(None, -1)),
-                            ("gripper", slice(-1, None)),
-                        ):
-                            surface = f"{stem}_{owner}_band_{band_name}"
-                            for chart, primary_value, value, delta_value in (
-                                (
-                                    "normalized",
-                                    primary_error,
-                                    error,
-                                    delta,
-                                ),
-                                (
-                                    "physical",
-                                    physical_primary_error,
-                                    physical_error,
-                                    physical_delta,
-                                ),
-                            ):
-                                selection = (slice(None), band_slice, channel_slice)
-                                execution_rows[
-                                    f"{surface}_primary_mse_{chart}"
-                                ] = primary_value[selection].square().mean()
-                                execution_rows[f"{surface}_mse_{chart}"] = (
-                                    value[selection].square().mean()
-                                )
-                                execution_rows[
-                                    f"{surface}_action_delta_mse_{chart}"
-                                ] = delta_value[selection].square().mean()
                 del execution
             execution_ablations.update(
                 execution_rows,
@@ -1771,27 +1705,6 @@ def _validate(
             result[f"validation_{name}_action_delta_rmse_physical"] = float(
                 rows[f"{name}_action_delta_mse_physical"] ** 0.5
             )
-            if mode.startswith("spine_zero_"):
-                for band_name in ("1_4", "5_12", "13_24"):
-                    for owner in ("arm", "gripper"):
-                        surface = f"{name}_{owner}_band_{band_name}"
-                        for chart in ("normalized", "physical"):
-                            primary_surface = rows[f"{surface}_primary_mse_{chart}"]
-                            counterfactual_surface = rows[f"{surface}_mse_{chart}"]
-                            result[f"validation_{surface}_primary_rmse_{chart}"] = float(
-                                primary_surface**0.5
-                            )
-                            result[f"validation_{surface}_rmse_{chart}"] = float(
-                                counterfactual_surface**0.5
-                            )
-                            result[
-                                f"validation_{surface}_mse_gain_vs_primary_{chart}"
-                            ] = float(primary_surface - counterfactual_surface)
-                            result[
-                                f"validation_{surface}_action_delta_rmse_{chart}"
-                            ] = float(
-                                rows[f"{surface}_action_delta_mse_{chart}"] ** 0.5
-                            )
     multitask = None if task_deployment is None else task_deployment.report(result)
     return ValidationReport(
         metrics=result, multitask=multitask,

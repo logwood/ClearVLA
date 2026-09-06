@@ -40,17 +40,13 @@
 - `clearvla/mainline/runtime/evaluation.py`, `logging.py`, `sampling.py`
   - deploy-style normalized/physical validation, separate decoded/event/motion
     semantics, lossless `metrics.jsonl` and console projections;
-- `clearvla/mainline/v120_core/bspine.py`,
-  `model/restored_bottom.py`, `model/components.py`, `training/optimizer.py`,
-  `train.py`, and `runtime/logging.py`
-  - the opt-in Schema31 fixed cubic `T=24/K=12` coarse/detail view beside the
-  unchanged raw action lift, its sole optimizer owner, evaluation-only
-  `spine_zero` route, and the separately named fixed-W refined-pass versus
-  complete proposal/W/refined lifecycle band/channel validation surfaces;
-  - the spline reads only the deployed noisy physical field. It adds no loss,
-    top carrier, action codec, output head, ODE step or W rebuild;
 - `clearvla/tools/audit_policy_logs.py`
   - parser for both mainline and historical logs.
+
+Schema31/B-spine source is not in the active closure. Old Schema31 logs may
+still contain the `bottom_spine_*` and `spine_zero*` fields documented in the
+metric catalog below; interpret those rows against the historical Git source
+and never use them to infer the current Schema30 graph.
 
 Do not begin an independent-mainline diagnosis in `policy_runtime_v39.py` or
 `trunk.py`.  Those files are ancestry/comparison evidence only.  Conversely,

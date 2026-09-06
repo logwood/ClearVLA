@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .routing import smooth_rms_contract
@@ -18,6 +19,41 @@ from .types import (
 )
 
 TYPED_INTENT_NAMES = ("semantic", "appearance", "geometry")
+
+
+@torch.no_grad()
+def _attention_probabilities(
+    attention: nn.MultiheadAttention,
+    query: Tensor,
+    key: Tensor,
+    padding_mask: Tensor | None = None,
+) -> Tensor:
+    """Detached Q/K audit; never switch the online SDPA value kernel."""
+
+    width = int(attention.embed_dim)
+    heads = int(attention.num_heads)
+    projection = attention.in_proj_weight
+    if projection is None or attention.in_proj_bias is not None:
+        raise ValueError("S attention audit requires its shared bias-free QKV chart")
+    with torch.autocast(device_type=query.device.type, enabled=False):
+        projected_q = F.linear(query.float(), projection[:width].float())
+        projected_k = F.linear(key.float(), projection[width : 2 * width].float())
+        batch, rows = projected_q.shape[:2]
+        memory_rows = int(projected_k.shape[1])
+        q = projected_q.reshape(batch, rows, heads, width // heads).transpose(1, 2)
+        k = projected_k.reshape(batch, memory_rows, heads, width // heads).transpose(1, 2)
+        score = (q @ k.transpose(-2, -1)) / ((width // heads) ** 0.5)
+        if padding_mask is not None:
+            mask = padding_mask.to(device=score.device, dtype=torch.bool)
+            if tuple(mask.shape) != (batch, memory_rows):
+                raise ValueError("S attention audit padding mask is misaligned")
+            score = score.masked_fill(mask[:, None, None], -torch.inf)
+            # An entirely masked row is an unavailable audit, not NaN evidence.
+            score = torch.where(mask.all(dim=-1)[:, None, None, None], 0.0, score)
+        probability = score.softmax(dim=-1)
+        if padding_mask is not None:
+            probability = probability.masked_fill(mask[:, None, None], 0.0)
+        return probability.mean(dim=1)
 
 
 def _causal_mask(length: int, device: torch.device) -> Tensor:
@@ -71,21 +107,26 @@ class _CrossRead(nn.Module):
         padding_mask: Tensor | None = None,
         diagnostics: bool = False,
     ) -> tuple[Tensor, Tensor, Tensor]:
+        normalized_query = self.query_norm(query)
         normalized_memory = self.memory_norm(memory)
-        update, weights = self.attention(
-            self.query_norm(query),
+        update, _ = self.attention(
+            normalized_query,
             normalized_memory,
             normalized_memory,
             key_padding_mask=padding_mask,
-            need_weights=diagnostics,
-            average_attn_weights=True,
+            need_weights=False,
         )
         update, _ = smooth_rms_contract(update, self.maximum_rms)
         value = query + update
         ffn, _ = smooth_rms_contract(self.ffn(value), self.maximum_rms)
         value = value + ffn
-        if weights is None:
-            weights = query.new_zeros(query.shape[0], query.shape[1], memory.shape[1])
+        weights = (
+            _attention_probabilities(
+                self.attention, normalized_query, normalized_memory, padding_mask
+            )
+            if diagnostics
+            else query.new_zeros(query.shape[0], query.shape[1], memory.shape[1])
+        )
         return value, update + ffn, weights
 
 
@@ -185,7 +226,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         if state_history.ndim != 3 or state.ndim != 2 or executed_history.ndim != 3:
             raise ValueError("intent history requires state/action sequences")
-        state_sequence = torch.cat((state_history, state[:, None]), dim=1)
+        if (
+            state_history.shape[0] != state.shape[0]
+            or state_history.shape[2] != state.shape[1]
+        ):
+            raise ValueError("intent state history and current state do not align")
+        if executed_history.shape[0] != state.shape[0]:
+            raise ValueError("intent action history and current state do not align")
+        if state_history.shape[1] < 1 or executed_history.shape[1] < 1:
+            raise ValueError("intent histories must contain at least one causal row")
+        # The input chart is [-8,-4,0], not three strictly past states.
+        # Replace its final row from the authoritative current state; appending
+        # it duplicates time zero and shifts the last real delta one row back.
+        state_sequence = torch.cat((state_history[:, :-1], state[:, None]), dim=1)
         length = max(int(state_sequence.shape[1]), int(executed_history.shape[1]))
 
         def left_pad(value: Tensor, target: int) -> Tensor:
@@ -346,19 +399,25 @@ class StatelessObjectIntentOrganizer(nn.Module):
             temporal_base, public_intervals, diagnostics=False
         )
         state_change_values = self.state_change_input(observed_state_delta)
-        state_change_history, state_change_attention = self.state_change_read(
-            self.state_change_query_norm(
-                self.state_change_query.to(
-                    device=history.device, dtype=history.dtype
-                ).expand(batch, -1, -1)
-            ),
-            self.state_change_key_norm(history),
-            state_change_values,
-            need_weights=collect_diagnostics,
-            average_attn_weights=True,
+        state_change_query = self.state_change_query_norm(
+            self.state_change_query.to(
+                device=history.device, dtype=history.dtype
+            ).expand(batch, -1, -1)
         )
-        if state_change_attention is None:
-            state_change_attention = history.new_zeros(batch, 1, history.shape[1])
+        state_change_key = self.state_change_key_norm(history)
+        state_change_history, _ = self.state_change_read(
+            state_change_query,
+            state_change_key,
+            state_change_values,
+            need_weights=False,
+        )
+        state_change_attention = (
+            _attention_probabilities(
+                self.state_change_read, state_change_query, state_change_key
+            )
+            if collect_diagnostics
+            else history.new_zeros(batch, 1, history.shape[1])
+        )
         state_change_history = state_change_history[:, 0]
         transport_tokens = self.state_change_transport(facts.transport_prior)
         transport_validity = facts.validity.to(

@@ -11,10 +11,7 @@ from pathlib import Path
 from typing import Mapping, cast
 
 from .config import ExperimentConfig
-from .manifest import (
-    architecture_manifest_for_bspine_implementation,
-    manifest_from_mapping,
-)
+from .manifest import ARCHITECTURE_MANIFEST, manifest_from_mapping
 
 
 def _canonical(value: object) -> bytes:
@@ -323,13 +320,10 @@ def build_checkpoint_identity(
     commit: str | None = None,
 ) -> CheckpointIdentity:
     config.validate()
-    manifest = architecture_manifest_for_bspine_implementation(
-        config.bottom.bspine_implementation
-    )
-    manifest.validate()
+    ARCHITECTURE_MANIFEST.validate()
     identity = CheckpointIdentity(
-        manifest=manifest.as_dict(),
-        manifest_digest=manifest.digest(),
+        manifest=ARCHITECTURE_MANIFEST.as_dict(),
+        manifest_digest=ARCHITECTURE_MANIFEST.digest(),
         config_digest=config.digest(include_paths=False),
         source=active_source_snapshot(repo_root),
         git_commit=git_commit(repo_root) if commit is None else str(commit),

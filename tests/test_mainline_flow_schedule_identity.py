@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from clearvla.mainline.config import ExperimentConfig, config_from_mapping
+from clearvla.mainline.manifest import ARCHITECTURE_MANIFEST
 from clearvla.mainline.runtime.deployment import (
     CONTINUOUS_GRIPPER_CODEC_BOUNDARY_SCOPE,
     DEPLOYMENT_ABI_SCHEMA,
@@ -35,6 +36,7 @@ def _abi(config: ExperimentConfig, *, legacy: bool = False) -> dict:
     graph = deployment_graph_config(config)
     abi = {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        "architecture_manifest": ARCHITECTURE_MANIFEST.as_dict(),
         "graph_config": graph,
         "graph_config_sha256": canonical_sha256(graph),
         "observation": {

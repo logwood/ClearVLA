@@ -760,14 +760,49 @@ class _FunctionalOwnershipLocalRefiner(nn.Module):
 
 
 class _UtilityPrecisionLocalRefiner(_FunctionalOwnershipLocalRefiner):
-    """P2 reader with exact RGB/detail base and precision ownership.
+    """Protected factual read with policy-relative typed precision innovations.
 
     The four factual lanes are outside the optional owner router. Coordinates
     affect queries and keys only, so zero RGB plus zero learned detail still
-    gives an exact-zero policy update. This class intentionally reuses the
-    V113 parameter layout, allowing a V113 checkpoint to initialize the new
-    graph without inventing an unrelated local reader.
+    gives an exact-zero policy update. Optional queries refine the existing
+    policy query; optional values contain only their same-lane read difference
+    relative to that policy. This retains the parameter layout, not the old
+    checkpoint's behavior identity.
     """
+
+    refinement_contract = "policy_relative_typed_precision_v1"
+
+    def _policy_relative_queries(self, owner_inputs: dict[str, Tensor]) -> Tensor:
+        policy_query = self.owner_conditions["policy"](owner_inputs["policy"])
+        queries = [policy_query]
+        for name in self.DELTA_NAMES:
+            offset = self.owner_conditions[name](owner_inputs[name])
+            if name == "geometry":
+                offset = offset + self.geometry_key(owner_inputs[name])
+            queries.append(policy_query + offset)
+        return torch.stack(queries, dim=2)
+
+    @staticmethod
+    def _typed_innovation_reads(lane_reads: Tensor) -> dict[str, Tensor]:
+        """Remove the same-lane policy read before each typed projection.
+
+        No projected values, norms, scales or targets are manufactured here.
+        Equal policy/typed reads give zero independently of owner weights;
+        metadata alone cannot synthesize an optional value from empty pixels.
+        """
+        if lane_reads.ndim != 5 or tuple(lane_reads.shape[2:4]) != (2, 5):
+            raise ValueError("typed precision reads must retain [N,G,RGB/detail,5,H]")
+        # Do not round the small innovation a second time in the BF16 chart.
+        # Projections below still use ordinary active autocast. This cannot
+        # recover detail already rounded by attention, nor claims to do so.
+        reads_f = lane_reads.float()
+        relative = reads_f - reads_f[:, :, :, :1, :]
+        return {
+            "semantic": relative[:, :, 1, 1],
+            "appearance": relative[:, :, 0, 2],
+            "geometry": (relative[:, :, 0, 3] + relative[:, :, 1, 3]) / math.sqrt(2.0),
+            "horizon": (relative[:, :, 0, 4] - relative[:, :, 1, 4]) / math.sqrt(2.0),
+        }
 
     def forward(
         self,
@@ -887,13 +922,9 @@ class _UtilityPrecisionLocalRefiner(_FunctionalOwnershipLocalRefiner):
             "geometry": geometry,
             "horizon": future_transport,
         }
-        owner_query_rows: list[Tensor] = []
-        for name in self.OWNER_NAMES:
-            row = self.owner_conditions[name](owner_inputs[name])
-            if name == "geometry":
-                row = row + self.geometry_key(geometry)
-            owner_query_rows.append(row)
-        owner_queries = torch.stack(owner_query_rows, dim=2)
+        # Keep the protected policy query unchanged. Each optional query is
+        # a typed refinement of that query, not an unrelated absolute read.
+        owner_queries = self._policy_relative_queries(owner_inputs)
         lane_queries = owner_queries[:, :, None].expand(-1, -1, 2, -1, -1)
         lane_queries = lane_queries + self.modality_key.reshape(
             1, 1, 2, 1, self.width
@@ -916,30 +947,7 @@ class _UtilityPrecisionLocalRefiner(_FunctionalOwnershipLocalRefiner):
         owner_index = {
             name: index for index, name in enumerate(self.OWNER_NAMES)
         }
-        typed_reads = {
-
-            "policy": (
-                typed_lane_reads[:, :, 0, owner_index["policy"]]
-                + typed_lane_reads[:, :, 1, owner_index["policy"]]
-            )
-            / math.sqrt(2.0),
-            "semantic": typed_lane_reads[
-                :, :, 1, owner_index["semantic"]
-            ],
-            "appearance": typed_lane_reads[
-                :, :, 0, owner_index["appearance"]
-            ],
-            "geometry": (
-                typed_lane_reads[:, :, 0, owner_index["geometry"]]
-                + typed_lane_reads[:, :, 1, owner_index["geometry"]]
-            )
-            / math.sqrt(2.0),
-            "horizon": (
-                typed_lane_reads[:, :, 0, owner_index["horizon"]]
-                - typed_lane_reads[:, :, 1, owner_index["horizon"]]
-            )
-            / math.sqrt(2.0),
-        }
+        typed_reads = self._typed_innovation_reads(typed_lane_reads)
 
         policy_output = self.owner_outputs["policy"]
         rgb_base_carrier = policy_output(rgb_base)

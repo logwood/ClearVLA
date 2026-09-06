@@ -1042,13 +1042,6 @@ class ExecutionBottomStage(nn.Module):
             return
         if self.training:
             raise ValueError("V120 execution interventions are evaluation-only")
-        if mode == "spine_zero":
-            if getattr(self.decoder, "spine", None) is None:
-                raise ValueError(
-                    "spine_zero requires the selected Schema31 B-spine execution bottom"
-                )
-            self.decoder.clear_execution_eval_ablation()
-            return
         if mode == "no_updates":
             self.decoder.set_execution_eval_ablation(
                 policy="neutral",
@@ -1085,7 +1078,7 @@ class ExecutionBottomStage(nn.Module):
             return
         raise ValueError(
             "bottom execution_mode must be learned/no_updates/hard/neutral/"
-            "full_capacity/three_basis_reduction/spine_zero"
+            "full_capacity/three_basis_reduction"
         )
 
     def compile_evidence_view(
@@ -1192,7 +1185,6 @@ class ExecutionBottomStage(nn.Module):
                 collect_gripper_diagnostics=collect_diagnostics,
                 evidence_scale=1.0,
                 noisy_scale=1.0,
-                spine_zero=execution_mode == "spine_zero",
                 deployment_fastpath=deployment_fastpath,
             )
         finally:

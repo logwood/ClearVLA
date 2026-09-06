@@ -78,6 +78,7 @@ class _ObjectIntervalBlock(nn.Module):
         *,
         causal_interval: bool,
         typed: Literal[False] = False,
+        interval_position: Tensor | None = None,
         collect_diagnostics: bool = False,
     ) -> Tensor: ...
 
@@ -88,6 +89,7 @@ class _ObjectIntervalBlock(nn.Module):
         *,
         causal_interval: bool,
         typed: Literal[True],
+        interval_position: Tensor | None = None,
         collect_diagnostics: bool = False,
     ) -> tuple[Tensor, dict[str, Tensor]]: ...
 
@@ -97,14 +99,18 @@ class _ObjectIntervalBlock(nn.Module):
         *,
         causal_interval: bool,
         typed: bool = False,
+        interval_position: Tensor | None = None,
         collect_diagnostics: bool = False,
     ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         if typed:
             return self.forward_typed(
                 value,
                 causal_interval=causal_interval,
+                interval_position=interval_position,
                 collect_diagnostics=collect_diagnostics,
             )
+        if interval_position is not None:
+            raise ValueError("interval_position is owned by the typed W path")
         batch, intervals, objects, hidden = value.shape
         object_view = value.reshape(batch * intervals, objects, hidden)
         normalized = self.object_norm(object_view)
@@ -172,11 +178,26 @@ class _ObjectIntervalBlock(nn.Module):
         value: Tensor,
         *,
         causal_interval: bool,
+        interval_position: Tensor | None = None,
         collect_diagnostics: bool,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Run one typed W block without changing the generic W operator."""
 
         batch, intervals, objects, hidden = value.shape
+        if interval_position is not None:
+            if tuple(interval_position.shape) != (
+                1,
+                intervals,
+                1,
+                hidden,
+            ):
+                raise ValueError(
+                    "typed W interval position must be [1,I,1,H]"
+                )
+            interval_position = interval_position.to(
+                device=value.device,
+                dtype=value.dtype,
+            )
         statistics: list[tuple[Tensor, Tensor, Tensor]] = []
 
         object_view = value.reshape(batch * intervals, objects, hidden)
@@ -227,9 +248,20 @@ class _ObjectIntervalBlock(nn.Module):
             if causal_interval
             else None
         )
+        # Interval identity is selector-only: add it to Q/K, never V.  A
+        # zero typed value therefore remains exactly zero while nonzero typed
+        # states receive an explicit near/mid/far coordinate.
+        interval_query_key = normalized
+        if interval_position is not None:
+            position = interval_position[:, :, 0, :].expand(
+                batch * objects,
+                -1,
+                -1,
+            )
+            interval_query_key = interval_query_key + position
         update, _ = self.interval_attention(
-            normalized,
-            normalized,
+            interval_query_key,
+            interval_query_key,
             normalized,
             attn_mask=mask,
             need_weights=False,
@@ -387,6 +419,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         value: Tensor,
         *,
         causal_interval: bool,
+        interval_position: Tensor | None = None,
         collect_diagnostics: bool,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         if value.ndim != 5 or int(value.shape[3]) != 3:
@@ -399,6 +432,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             typed_batch,
             causal_interval=causal_interval,
             typed=True,
+            interval_position=interval_position,
             collect_diagnostics=collect_diagnostics,
         )
         if not isinstance(result, tuple):
@@ -785,6 +819,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             self.w1,
             near_input,
             causal_interval=True,
+            interval_position=self.interval_identity[:, :2],
             collect_diagnostics=collect_diagnostics,
         )
         field: FutureObjectDynamics | None = None
@@ -883,6 +918,27 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .permute(0, 2, 3, 1, 4)
             .reshape(batch * objects * 3, 3, hidden)
         )
+        interval_position = self.interval_identity[:, :, 0].to(
+            device=typed_far_query.device, dtype=typed_far_query.dtype
+        )
+        far_position = interval_position[:, 2:4].expand(
+            batch * objects * 3,
+            -1,
+            -1,
+        )
+        # Memory rows are [common, near0, near1], not intervals [0,1,2].
+        # Common has no temporal position and must not acquire a near/far label.
+        memory_position = torch.cat(
+            (torch.zeros_like(interval_position[:, :1]), interval_position[:, :2]),
+            dim=1,
+        ).expand(
+            batch * objects * 3,
+            -1,
+            -1,
+        )
+        # Normalize content once, then add positions to selectors only, just
+        # as in the typed interval self-attention. Value and its diagnostics
+        # remain the original normalized memory; no extra normalization pass.
         normalized_typed_query, typed_query_denominator = (
             self.typed_w2_query_norm.forward_with_denominator(typed_far_query)
         )
@@ -890,8 +946,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             self.typed_w1_memory_norm.forward_with_denominator(typed_memory)
         )
         typed_read, _ = self.w1_to_w2(
-            normalized_typed_query,
-            normalized_memory,
+            normalized_typed_query + far_position,
+            normalized_memory + memory_position,
             normalized_memory,
             need_weights=False,
         )
@@ -906,6 +962,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             self.w2,
             far_input,
             causal_interval=True,
+            interval_position=self.interval_identity[:, 2:4],
             collect_diagnostics=collect_diagnostics,
         )
         completed_innovation = torch.cat(

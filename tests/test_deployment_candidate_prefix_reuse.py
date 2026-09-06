@@ -17,14 +17,6 @@ from clearvla.mainline.interfaces import (
 )
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.runtime.sampling import sample_refined_cached_action
-from clearvla.mainline.v120_core.bspine import (
-    BSPINE0_BASIS_DIGEST,
-    BSPINE0_CONTROL_POINTS,
-    BSPINE0_DEGREE,
-    BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
-    BSPINE_ARM_ONLY_IMPLEMENTATION,
-    BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
-)
 from clearvla.mainline.v120_core.time_domain_mmdit import (
     EvidenceLatentMMDiTActionDecoder,
 )
@@ -409,24 +401,6 @@ def _tiny_config() -> ExperimentConfig:
     return config
 
 
-def _tiny_arm_only_config() -> ExperimentConfig:
-    base = _tiny_config()
-    config = replace(
-        base,
-        bottom=replace(
-            base.bottom,
-            bspine_implementation=BSPINE_ARM_ONLY_IMPLEMENTATION,
-            bspine_degree=BSPINE0_DEGREE,
-            bspine_control_points=BSPINE0_CONTROL_POINTS,
-            bspine_basis_digest=BSPINE0_BASIS_DIGEST,
-            bspine_spec_fingerprint=BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
-            bspine_action_group_mask=BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
-        ),
-    )
-    config.validate()
-    return config
-
-
 def _online_input(config: ExperimentConfig) -> OnlinePolicyInput:
     dims = config.dimensions
     batch = 1
@@ -468,19 +442,10 @@ def _online_input(config: ExperimentConfig) -> OnlinePolicyInput:
     )
 
 
-@pytest.mark.parametrize("arm_only", (False, True), ids=("raw", "arm-only-spine"))
-def test_full_two_pass_action_parity_and_default_opt_in_boundary(
-    arm_only: bool,
-) -> None:
+def test_full_two_pass_action_parity_and_candidate_prefix_boundary() -> None:
     torch.manual_seed(5101)
-    config = _tiny_arm_only_config() if arm_only else _tiny_config()
+    config = _tiny_config()
     model = ClearVLAMainlinePolicy(config).eval()
-    if arm_only:
-        spine = model.execution_bottom.decoder.spine
-        assert spine is not None
-        with torch.no_grad():
-            for parameter in spine.parameters():
-                parameter.fill_(0.01)
     model.set_training_step(1200)
     with torch.no_grad():
         cache, _, _ = model.encode_online(_online_input(config))

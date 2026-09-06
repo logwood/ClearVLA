@@ -2,29 +2,29 @@
 
 Updated: 2026-09-06
 
-This isolated `codex/pen-bspline-routing-20260906` branch is a Pen-only
-experiment release from `d585417`. It deliberately excludes the root's
-uncommitted CALVIN/data/simulation and training-acceleration work. Its behavior
-baseline is Schema28 core recovery, not the rejected full-rollout hybrid.
+This checkout is the Schema30/raw-only consolidation line. Its behavior
+baseline is Schema28-core recovery, carried by the Schema30 manifest/ABI and
+the modular component layout. The active execution bottom receives the complete
+physical field through the native raw lift; no alternate temporal action
+representation is selectable from the mainline config or manifest. Historical
+representation experiments remain recoverable from Git history, but are not
+part of the active source closure or release identity.
 
-The paired opt-in Schema31 candidates are
-`fixed_bspline_arm_coarse_context_v1` (coarse arm tokens added to the shared
-action stream; joint arm/gripper gradient path) and
-`fixed_bspline_arm_private_reader_v1` (same coarse chart, read through a
-non-affine LayerNorm and bias-free arm-only physical correction at every
-candidate/final terminal read). Raw input, codec, labels and loss weights are
-unchanged. Both use seed 0, B8, eight epochs, new weights, and Q5/Q5 deployment
-nodes `t_i=(i/5)^1.25`, with five Euler updates plus the retained endpoint read
-per pass and one W rebuild. Training still has one velocity/loss pass and the
-original mirrored-beta time distribution. Diagnostic owner-VJPs reuse that
-graph; their compute overhead must be measured, not called free.
+This local candidate additionally carries the W `typed_interval_qk_v1` repair,
+S current-row/diagnostic-invariance fixes and the policy-relative typed local
+precision candidate below. It also rejects non-finite loss before backward and
+requires deployment manifests to match the active implementation. It has not
+been deployed and is not a learned-performance release. The prior recovery
+remains the behavior baseline. Current coverage and limitations are in
+[`auxiliary/MAINLINE_END_TO_END_AUDIT.md`](auxiliary/MAINLINE_END_TO_END_AUDIT.md).
 
-The default Schema30 selection and implicit uniform grid remain unchanged.
-Schedule config, fingerprint and the distinct B-spline/component identity are
-serialized. Different candidates are never aliases for checkpoint resume.
-The private-reader comparison intentionally has no direct gripper-to-spine
-gradient; its zero gripper probe is not a defect. Candidate benefit remains an
-experiment question, not a release claim.
+The user-selected Pen candidate combines these local repairs with Q5/Q5 in
+`configs/mainline/object_intent_dynamics_323_pen_w_interval_q5.json`.
+The generic config retains implicit uniform E5 for the original replay
+contract; this is not a restriction on using Q5 in the new Pen candidate.
+Training time sampling, losses and the single-velocity-pass lifecycle are
+unchanged. Prior Pen replay showed small RMSE gains with a small event-F1
+tradeoff; benefit of the combined freshly trained candidate is not yet known.
 
 This is the compact source of truth for the active independent mainline. Read
 it before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
@@ -44,11 +44,10 @@ Historical experiment names never select current semantics.
 capability:             object_intent_dynamics_323
 manifest schema:        30
 layout schema:          2 (atomic modular owner layout)
-manifest digest:        c6742c2c5a8a381193a56ed2cf24ba632b472cfde168c021537f2d30b8d69863
-active source identity: Schema28-core recovery plus profile-owned gripper boundary, CALVIN direct relative-command arm chart and binary-command isolation
+manifest digest:        183045c232d64d4169f551fae5a7665835d3069174895b3b02188478e8953675
+active source identity: Schema28-core recovery + local raw/W/S/P2 candidate; not a deployed release
 historical Schema30 source: 3fef2fc0dce297f600c813307c998f587cca1ca3
-formal CALVIN checkout:  f9cee96a14dfb328830aa5c1fd4fd54cb33d4181
-branch:                 codex/schema29-mainline (historical branch name only)
+branch:                 codex/remove-bspine-keep-solver-20260906 (local integration candidate)
 behavior reference:     Schema28, commit 097330a894d948d66c419f8af07325a5b0ff712e
 recovery reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
@@ -64,21 +63,14 @@ checkpoint validation: scripts/validate_mainline_checkpoint.sh (read-only)
 config:                 configs/mainline/object_intent_dynamics_323.json
 ```
 
-Release state: the source carries a conservative Schema28-core recovery overlay
-under the Schema30 ABI, a profile-owned continuous-gripper codec boundary, and
-an outlet-scoped CALVIN action repair. CALVIN's six arm values are already
-relative TCP commands, so its two six-dimensional arm-field branches now both
-encode that command directly and decode by the existing `0.75/0.25` blend;
-neither branch is temporally differenced or integrated. Its explicit binary
-command head remains isolated from the six compatibility-only future-gripper
-coordinates, which are replaced by exact zeros before every dynamic model
-consumer. These changes preserve the network blocks, parameter topology,
-controller and complete 18-D output ABI. Focused tests, a real CUDA smoke, the
-strict gripper-noise causal probe and read-only checkpoint replay passed. A
-fresh CALVIN run from commit `f9cee96a` is active; no historical checkpoint was
-resumed or migrated. These are interface observations, not an accepted
-behavior release; live Pen, RDT and CALVIN process state remains in the rolling
-handoff.
+Release state: local implementation/testing only; no current candidate commit,
+push, checkpoint migration or training launch. This isolated checkout still
+contains the earlier CALVIN `relative_command_direct` adapter. The independently
+dirty root has newer shared-codec/W-facing CALVIN adapter and data repairs; this
+checkout is not their replacement or the authority on remote process state.
+Integrating the Pen core candidate must preserve those newer outlet changes,
+not overwrite the root with this older branch. Historical CUDA evidence does
+not certify the current W/S/P2 source revision.
 
 ## Authority order
 
@@ -148,6 +140,31 @@ action. Semantic successors remain `[B,4,K,D]`; transport/covariance and
 camera support remain camera-resolved `[B,4,K,C,*]` until P2. W predicts no
 visibility, status or validity authority.
 
+The `typed_interval_qk_v1` candidate reuses W's existing learned interval
+identity as a Q/K-only coordinate on typed temporal attention. W1 near uses
+identities 0/1; W2 far self-attention and cross-attention queries use 2/3.
+W2 typed memory is ordered `[common, near0, near1]`, so its key positions are
+`[zero, identity0, identity1]`. Common processing has no interval position.
+Positions are added after the existing content normalization; V remains the
+unaltered normalized typed state. The generic path, causal masks, value
+formulae, loss weights, parameter inventory and W/model call counts remain
+unchanged. Zero typed evidence still produces zero semantic/transport values.
+
+This fixes missing explicit selector metadata, not a demonstrated cause of
+all common-mode behavior: a positional selector cannot synthesize temporal
+differences from identical values or open a zero-valued innovation by itself.
+No forced temporal separation, entropy target or extra loss is introduced.
+Top component ABI and world selection have new identifiers despite unchanged
+tensor shapes, so the old recovery checkpoint is not an exact-resume alias.
+
+S consumes state history ending at time zero. It replaces that final row with
+the authoritative current state instead of appending another current row; the
+last observed delta is consequently current minus the preceding state. The
+existing positional state/action history packing remains unchanged otherwise;
+it is not a claim of exact sparse-frame timestamp alignment. All S online
+attention uses the same `need_weights=False` value kernel irrespective of
+diagnostic cadence. Detached FP32 Q/K probabilities are audit-only.
+
 ### P1, P2, P3, transition and bottom
 
 ```text
@@ -174,6 +191,17 @@ Protected consequence and raw dynamic P1 precision are no-null carriers.
 Only temporal and state-change P3 lanes own zero-null choices, through separate
 invocations of one shared reader. The Evidence MMDiT, continuous capacity and
 execution-value machinery remain intact.
+
+Inside the static factual reader, the local typed-precision candidate uses
+`q_typed = q_policy + typed_offset` and projects `read_typed - read_policy`
+within each modality before the existing optional router. Semantic reads only
+detail differences; appearance only RGB; geometry combines both; horizon
+uses their contrast. Protected factual mean and policy precision reads remain
+outside the router and unchanged. Equal reads or zero typed offsets give zero
+optional innovation, and empty RGB/detail gives exact-zero output. This adds
+no attention call or parameter. Differences are formed in FP32 before ordinary
+autocast projections. It does not change the separate W-effect P2 reader in
+`compiler.py`, nor prove that learned action/gripper RMSE will improve.
 
 ### Training-only Teacher and training call graph
 
@@ -430,134 +458,13 @@ dual-source gate compared 15,014 tensors / 10,443,735 shared elements with zero
 difference across initialization/RNG, static and six-time dynamic boundaries,
 raw and post-clip gradients, one optimizer step, sidecars and the two-pass
 five-update deployment lifecycle. The combined mainline,
-policy/runtime/structural, checkpoint/layout, AMP/data/interface/action-field,
-RDT preparation and standalone B-spline suite passes 284 tests with three
-environment-dependent tests skipped.
+policy/runtime/structural, checkpoint/layout, AMP/data/interface/action-field
+and RDT preparation suites pass with the environment-dependent tests skipped.
 The final registered state inventory remains 1,391 keys with digest
 `846b1edd7933b796882bcb5a8422816f768110fe9741282ba4435ac45927b7ca`.
-The separately owned B-spine source is now integrated into the modular tree and
-the local merge/identity gates below are closed. Real CUDA/BF16 and a real
-read-only production-checkpoint replay remain release gates; no new training is
-authorized from this source before those remote gates close.
-
-### Provisional Schema31 B-spine candidate
-
-Schema30 remains the accepted disabled-path baseline.  The opt-in Pen candidate
-uses manifest schema 31 with digest
-`a10eabe896acc214ea04338de7f85f568a4a9a13c0447212f96b15aecdf6edf6`,
-component selection `execution_bottom=v120_evidence_mmdit_bspine0_v1`, and
-config [`configs/mainline/object_intent_dynamics_323_pen_bspine0.json`](../../configs/mainline/object_intent_dynamics_323_pen_bspine0.json).
-The resolved path-independent config digest is
-`0a73c0a1f5c847227629fb7867834c8e1cba01ddf53bf4f3909fcaf16773fbfc`.
-It is an experiment identity, not an accepted replacement for Schema30.
-
-The only new calculation is a bottom-internal parallel numerical view of the
-same deployed noisy physical field:
-
-```text
-u_raw   = unchanged NativeTimePhysicalActionTokenLift(x_t)
-u_spine = BSpine0(x_t)
-action += (u_raw + u_spine) * action_state_factor
-```
-
-`BSpine0` is fixed at `T=24`, cubic degree 3 and `K=12`. Its production basis
-identity hashes the exact FP32 analysis/synthesis operators actually registered
-by the bottom, excluding the unused backend-dependent lossless-detail QR chart;
-that runtime-operator digest is
-`f4d169cdeab9606dfacb92abbbc71bc3dbb7a4abefb8ef5244bc411670caab34`,
-and its complete spec fingerprint is
-`a2234eb6c9f553c47e793e11c8734d8cfadfbaaf86c5b950dab8f672965a8c10`.
-Fixed analysis/synthesis run in FP32.  Independent zero-initialized, bias-free
-coarse/detail maps preserve the five physical-field roles and add 18,432
-trainable weights at hidden width 512; no knot, gain, normalizer, loss, clip,
-top carrier, ODE step, W rebuild or output ABI changes.
-
-The full Schema31 inventory is 168,435,611 parameters / 1,395 parameter
-tensors, 152,064,880 trainable parameters / 1,073 trainable tensors, 1,403
-state keys and 24 optimizer groups.  All ten new parameter tensors have the
-single `bottom_spine` owner at the existing bottom-decoder `0.7x` LR and normal
-decay. `spine_zero` is the evaluation-only model intervention and preserves
-the learned computation for diagnostics while zeroing only its action-stream
-contribution. Validation names its two uses separately:
-`spine_zero_refined_pass` holds the learned-proposal W cache fixed, while
-`spine_zero_full_lifecycle` applies it to proposal and refined passes so the
-intervened proposal owns the single W rebuild. Both reuse the primary initial
-physical noise; only the latter is complete deployment attribution.
-
-The disabled Schema30 graph is still certified against the immutable
-pre-modular capture at `atol=0`, `rtol=0`: 15,014 tensors / 10,443,735 values
-and 206,237 metadata paths have zero differences. The candidate source-tree
-digest recorded by the post-lifecycle report is
-`ad226fd56bcc7ec3eb1d19e08791e095a5526866d00ef3f043cfa6275b350ba9`;
-the checkout-newline-independent executable source-closure digest is
-`ababb7ce0a87973de273e5d69bda94d91339ad217b9ccd658f54ecf68cc64ddc`.
-Local B-spine gates cover fixed-basis rank/partition/endpoints, exact
-coarse-plus-detail closure, independent raw/coarse/detail JVP/VJP, complete
-loss-side owner gradients, CPU BF16, zero-init bit identity, matched learned
-fixed-cache and full-lifecycle `spine_zero`, one formal decoder call, twelve
-deployed calls, optimizer ownership and Schema31 checkpoint round trip with
-Schema30 exact-resume
-rejection.  Real Pen CUDA/BF16 VJP, smoke, runtime/memory and read-only
-checkpoint replay remain mandatory before the single fresh Pen run starts.
-
-### Feasibility audit (2026-09-04)
-
-This decision was checked against the live CPU source, rather than inferred from
-file names. A structural probe instantiated the baseline selection with seed 0,
-then attached the same already-constructed child modules under the proposed
-owners. The result was:
-
-```text
-baseline inventory:       168,417,179 parameters / 1,385 tensors
-trainable / optimizer:    152,046,448 / 1,063 parameters
-state keys / groups:      1,391 / 23
-state-key digest:         70a8a5be21de40c460de6cff899942d5331837700db289350a0b1920c133b053
-post-init RNG digest:     d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21
-legacy-key collisions:    0
-mapped missing/unexpected: 0 / 0
-mapped values/storage:    equal / shared
-attachment RNG change:    none
-module/parameter aliases: 0 / 0
-```
-
-The same probe on the CALVIN binary selection materialized only its command
-head (1,389 parameter tensors, 1,395 state keys, 1,067 trainable parameters),
-which confirms that outlet selection can remain lazy rather than retaining
-inactive trainable alternatives. The current `encode_online` and `velocity`
-functions are straight-line orchestrators; their component-call order is
-stable and the deployment lifecycle test passes the expected two five-update
-passes, one W rebuild and twelve bottom calls. The focused policy/runtime/
-structural suite currently passes 149 tests on CPU. Reproduce it with:
-
-```powershell
-.venv\Scripts\python.exe -m pytest -q tests/test_mainline_policy.py tests/test_mainline_runtime.py tests/test_mainline_structural_contracts.py
-```
-
-This proves structural feasibility, not completed equivalence. Two implementation
-gates were exposed and are mandatory in the atomic source unit:
-
-1. A logical hierarchy changes the raw `model.parameters()` traversal order even
-   when every mapped tensor is identical (the proposed hierarchy had 1,385
-   positional differences). The rewrite must carry an explicit legacy parameter
-   order for optimizer construction, global norm/clipping and any diagnostic
-   reduction, or prove an exactly equivalent registered order. Matching only
-   optimizer group membership is insufficient.
-2. `EvidenceLatentMMDiTActionDecoder` still has seven direct candidate reads of
-   `velocity_head` (probe, differentiable candidate, prefix/idle and both
-   execution paths). They must all be routed through the injected terminal
-   controller; moving only `_read_output_heads` would leave a hidden old exit.
-
-The harness must also cover non-tensor sidecar state: execution warm-up/progress,
-evaluation interventions and non-persistent query/position buffers are not
-represented by the ordinary state-key map. Their setters, load behavior and
-runtime values are part of the equivalence surface.
-
-Therefore the answer is **feasible with a strict topology-preserving relocation**:
-the source can be rearranged in one atomic unit while preserving the same
-calculation DAG, operation order, tensor references, RNG draws and stateful
-execution lifecycle. The behavior gate must additionally compare the explicit
-parameter order, all seven terminal sites, raw gradients and the post-step
-optimizer result before the new hierarchy becomes authoritative.
+The Schema30/raw-only source closure is the sole active release surface. Real
+CUDA/BF16 and a real read-only production-checkpoint replay remain release
+gates; no new training is authorized from an unverified source revision.
 
 ## Loss, gradient and optimizer ownership
 
@@ -579,6 +486,10 @@ remains unmodified.
 Diagnostics and matched interventions are audit-only unless the source shows
 an explicit positive objective weight. Every train window must keep the ledger
 closed, raw owner gradients finite and each named optimizer role present.
+
+A non-finite total loss is rejected before backward and before optimizer or
+scheduler mutation, even if its derivative would be finite. This is a failure
+check, not a replacement value, new objective or clipping rule.
 
 Schema30 retains the Schema28 inventory:
 
@@ -677,6 +588,10 @@ defines a physical full-scale contract.
   checkpoints are rejected for exact resume/deployment by the component and
   deployment ABI. RDT must start a fresh checkpoint after this repair. Smoke
   checkpoints are gate artifacts, not formal initialization sources.
+- Deployment validates the saved architecture manifest against the active
+  implementation, not just the checkpoint's own metadata or state shapes.
+  Historical semantic identities require their matching source checkout;
+  the new W/S/local-precision identity is not an old-checkpoint replay alias.
 - `validate_mainline_checkpoint.sh` is read-only: optimizer, scheduler and RNG
   load are disabled and no checkpoint is written.
 - Formal output directories must be new and empty. Checkpoint writes are atomic;

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
+# HISTORICAL ONLY: this V58 launcher is outside the active Schema30 source closure.
 # V58 DETAIL MICRO: v57 query-spline writer + full-action-token detail unfolding.
 #
 # This keeps the B-spline writer as an output/action-space parameterization and

@@ -22,7 +22,7 @@ It does not choose a chart or numerical method per role.
 
 | Role | Initial view | Hard boundary |
 |---|---|---|
-| smooth arm motion | fixed B-spline beside raw rows | rotations need an explicit geometry chart |
+| smooth arm motion | identity/raw | rotations need an explicit geometry chart |
 | continuous gripper | identity/raw | do not smooth away switch timing |
 | binary command/contact | typed endpoint sidecar | never an ODE coordinate |
 | dexterous joints/synergies | role-sized chart plus exact detail | compact synergy cannot claim native recovery |
@@ -40,19 +40,10 @@ does not own codec math, normalizers, robot limits or safety control.
 
 ## Mainline relationship
 
-The opt-in B-spine component uses this package only as an outer representation
-boundary. It keeps the current raw lift and adds a fixed B-spline view:
-
-```text
-x_t [B,24,18]
-  -> raw lift
-  -> fixed B-spline view
-action seed + (raw + spine) * action_state_factor
-```
-
-This package cannot remove the raw path, alter source/target support, add a
-loss, or add an ODE/W pass. Mainline identity and task gates live in the
-architecture contract and run context.
+The Schema30 mainline does not import this standalone prototype. Its active
+execution bottom uses the native raw physical-field lift; any future structured
+chart must be introduced as a separately identified component with an explicit
+compatibility and checkpoint contract.
 
 ## Minimal construction
 

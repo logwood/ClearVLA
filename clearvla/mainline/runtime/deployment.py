@@ -21,6 +21,7 @@ from clearvla.vision.preprocessing import (
 from ..checkpoint import CheckpointIdentity
 from ..config import DataConfig, ExperimentConfig, config_from_mapping
 from ..data.normalizer import ArrayNormalizer
+from ..manifest import ARCHITECTURE_MANIFEST, manifest_from_mapping
 from .flow_schedule import DeploymentFlowSchedule
 
 DEPLOYMENT_ABI_SCHEMA = "clearvla-mainline-deployment-abi-v1"
@@ -78,6 +79,7 @@ def build_deployment_abi(
 
     config.validate()
     identity.validate()
+    _validate_architecture_manifest(identity.manifest)
     gripper_codec_boundary = str(data_profile.get("gripper_transition_boundary", ""))
     if gripper_codec_boundary not in {
         "current_action_state",
@@ -146,6 +148,17 @@ def _mapping(value: object, *, name: str) -> dict[str, object]:
     return {str(key): item for key, item in value.items()}
 
 
+def _validate_architecture_manifest(value: object) -> None:
+    """Shape compatibility is not permission to execute different semantics."""
+
+    manifest = manifest_from_mapping(_mapping(value, name="architecture_manifest"))
+    if manifest != ARCHITECTURE_MANIFEST:
+        raise ValueError(
+            "deployment architecture manifest differs from the active implementation; "
+            "use the checkpoint's matching source for historical replay"
+        )
+
+
 def validate_deployment_abi(value: object) -> dict[str, object]:
     abi = _mapping(value, name="root")
     if abi.get("schema") != DEPLOYMENT_ABI_SCHEMA:
@@ -153,6 +166,7 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
             f"formal deployment requires {DEPLOYMENT_ABI_SCHEMA}, "
             f"got {abi.get('schema')!r}"
         )
+    _validate_architecture_manifest(abi.get("architecture_manifest"))
     graph = _mapping(abi.get("graph_config"), name="graph_config")
     if set(graph) != set(_GRAPH_SECTIONS):
         raise ValueError("deployment ABI graph section ownership differs")

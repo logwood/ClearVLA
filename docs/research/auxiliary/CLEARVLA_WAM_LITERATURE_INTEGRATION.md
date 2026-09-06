@@ -120,14 +120,17 @@ Consider one isolated hypothesis at a time:
 - Teacher-only phase/contact target only if future bandwidth is the bottleneck;
 - direct action head or MIP only if action computation is the bottleneck;
 - history/chunk treatment only if seam replay shows exposure error;
-- B-spine only as a representation-only study with its raw path retained.
+- A structured/B-spine representation is archive-only in the current line;
+  it is not an active P1 lane. Any future study must start as a new explicitly
+  identified component against the Schema30/raw-only baseline.
 
 ### P2 — new schema
 
 Only after a P1 result selects one owner may a new schema test add a terminal
 controller choice, MIP stages, trajectory-consistent training, native outlet
-dimensions, a new visual target, or a cache policy. Never combine B-spine, MIP,
-solver, Teacher and native-RDT changes in one run.
+dimensions, a new visual target, or a cache policy. Historical B-spine code is
+not part of the current source closure; never combine a newly proposed
+representation with MIP, solver, Teacher or native-RDT changes in one run.
 
 ## Decision rule
 

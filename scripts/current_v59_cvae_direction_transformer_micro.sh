@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
+# HISTORICAL ONLY: this V59 launcher is outside the active Schema30 source closure.
 # V59 CVAE-DIRECTION + TRANSFORMER MICRO
 #
 # Coarse query-spline direction writer is explicitly conditioned by the CVAE

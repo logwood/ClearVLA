@@ -31,13 +31,6 @@ from clearvla.mainline.runtime.checkpoints import (
     save_checkpoint,
 )
 from clearvla.mainline.training.optimizer import WarmupCosineSchedule, build_optimizer
-from clearvla.mainline.v120_core.bspine import (
-    BSPINE0_BASIS_DIGEST,
-    BSPINE0_CONTROL_POINTS,
-    BSPINE0_DEGREE,
-    BSPINE0_IMPLEMENTATION,
-    BSPINE0_SPEC_FINGERPRINT,
-)
 
 
 def _dataset() -> DatasetIdentity:
@@ -94,23 +87,6 @@ def _reduced_modular_config() -> ExperimentConfig:
     return config
 
 
-def _reduced_bspine_config() -> ExperimentConfig:
-    base = _reduced_modular_config()
-    config = replace(
-        base,
-        bottom=replace(
-            base.bottom,
-            bspine_implementation=BSPINE0_IMPLEMENTATION,
-            bspine_degree=BSPINE0_DEGREE,
-            bspine_control_points=BSPINE0_CONTROL_POINTS,
-            bspine_basis_digest=BSPINE0_BASIS_DIGEST,
-            bspine_spec_fingerprint=BSPINE0_SPEC_FINGERPRINT,
-        ),
-    )
-    config.validate()
-    return config
-
-
 def test_active_source_snapshot_excludes_legacy_version_graph() -> None:
     root = Path(__file__).resolve().parents[1]
     snapshot = active_source_snapshot(root)
@@ -142,6 +118,9 @@ def test_active_source_snapshot_excludes_legacy_version_graph() -> None:
     assert not any("policy_runtime_v39.py" in path for path in paths)
     assert not any("train_v40_policy.py" in path for path in paths)
     assert not any("scripts/current_v" in path for path in paths)
+    assert not any(
+        token in path.lower() for path in paths for token in ("bspine", "bspline")
+    )
 
 
 def test_active_source_snapshot_canonicalizes_checkout_newlines(tmp_path: Path) -> None:
@@ -1003,130 +982,3 @@ def test_modular_checkpoint_round_trip_and_legacy_layout_gate(tmp_path: Path) ->
     assert not report.dtype_mismatch
     for name in expected_bottom_names:
         assert torch.equal(migration_target.state_dict()[name], source.state_dict()[name])
-
-
-def test_schema31_bspine_round_trip_and_schema30_exact_resume_rejection(
-    tmp_path: Path,
-) -> None:
-    root = Path(__file__).resolve().parents[1]
-    condition = tmp_path / "goal.pt"
-    condition.write_bytes(b"t5-condition")
-    language = ArtifactIdentity.from_file("t5_goal", condition)
-    schema30_config = _reduced_modular_config()
-    schema31_config = _reduced_bspine_config()
-    schema30_identity = build_checkpoint_identity(
-        schema30_config,
-        repo_root=root,
-        dataset=_dataset(),
-        language=language,
-        commit="1" * 40,
-    )
-    schema31_identity = build_checkpoint_identity(
-        schema31_config,
-        repo_root=root,
-        dataset=_dataset(),
-        language=language,
-        commit="1" * 40,
-    )
-    assert schema30_identity.manifest["schema"] == 30
-    assert schema31_identity.manifest["schema"] == 31
-    assert schema30_identity.manifest_digest != schema31_identity.manifest_digest
-
-    torch.manual_seed(31)
-    source = ClearVLAMainlinePolicy(schema31_config)
-    source_spine = source.execution_bottom.decoder.spine
-    assert source_spine is not None
-    generator = torch.Generator().manual_seed(32)
-    with torch.no_grad():
-        for parameter in source_spine.parameters():
-            parameter.copy_(
-                torch.randn(
-                    parameter.shape,
-                    generator=generator,
-                    dtype=parameter.dtype,
-                )
-                * 1.0e-2
-            )
-    source_optimizer, _ = build_optimizer(source, schema31_config)
-    source_schedule = WarmupCosineSchedule(
-        source_optimizer,
-        warmup_steps=2,
-        total_steps=4,
-        minimum_ratio=0.1,
-    )
-    for _ in range(3):
-        source_schedule.step()
-    schema31_path = tmp_path / "schema31-bspine.pt"
-    save_checkpoint(
-        schema31_path,
-        model=source,
-        optimizer=source_optimizer,
-        schedule=source_schedule,
-        config=schema31_config,
-        identity=schema31_identity,
-        epoch=2,
-        global_step=3,
-        best_metric=0.25,
-    )
-
-    torch.manual_seed(33)
-    restored_model = ClearVLAMainlinePolicy(schema31_config)
-    restored_optimizer, _ = build_optimizer(restored_model, schema31_config)
-    restored_schedule = WarmupCosineSchedule(
-        restored_optimizer,
-        warmup_steps=2,
-        total_steps=4,
-        minimum_ratio=0.1,
-    )
-    restored = load_checkpoint_exact(
-        schema31_path,
-        model=restored_model,
-        optimizer=restored_optimizer,
-        schedule=restored_schedule,
-        config=schema31_config,
-        identity=schema31_identity,
-    )
-    assert restored.epoch == 2 and restored.global_step == 3
-    for name, value in source.state_dict().items():
-        assert torch.equal(restored_model.state_dict()[name], value), name
-
-    torch.manual_seed(34)
-    schema30_model = ClearVLAMainlinePolicy(schema30_config)
-    schema30_optimizer, _ = build_optimizer(schema30_model, schema30_config)
-    schema30_schedule = WarmupCosineSchedule(
-        schema30_optimizer,
-        warmup_steps=2,
-        total_steps=4,
-        minimum_ratio=0.1,
-    )
-    schema30_path = tmp_path / "schema30.pt"
-    save_checkpoint(
-        schema30_path,
-        model=schema30_model,
-        optimizer=schema30_optimizer,
-        schedule=schema30_schedule,
-        config=schema30_config,
-        identity=schema30_identity,
-        epoch=0,
-        global_step=0,
-        best_metric=None,
-    )
-    before = {
-        name: value.detach().clone()
-        for name, value in restored_model.state_dict().items()
-    }
-    try:
-        load_checkpoint_exact(
-            schema30_path,
-            model=restored_model,
-            optimizer=restored_optimizer,
-            schedule=restored_schedule,
-            config=schema31_config,
-            identity=schema31_identity,
-        )
-    except ValueError as error:
-        assert "component selection differs" in str(error)
-    else:
-        raise AssertionError("Schema30 must not exact-resume into Schema31")
-    for name, value in restored_model.state_dict().items():
-        assert torch.equal(value, before[name]), name

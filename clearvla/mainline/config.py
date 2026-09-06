@@ -17,19 +17,6 @@ from typing import Mapping, TypeVar, cast
 from clearvla.data.action_chart import resolve_action_state_profile
 
 from .manifest import ARCHITECTURE_MANIFEST
-from .v120_core.bspine import (
-    BSPINE0_BASIS_DIGEST,
-    BSPINE0_CONTROL_POINTS,
-    BSPINE0_DEGREE,
-    BSPINE0_IMPLEMENTATION,
-    BSPINE0_SPEC_FINGERPRINT,
-    BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
-    BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
-    BSPINE_ARM_ONLY_IMPLEMENTATION,
-    BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
-    BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
-    BSPINE_DISABLED_IMPLEMENTATION,
-)
 
 
 @dataclass(frozen=True)
@@ -361,16 +348,6 @@ class BottomConfig:
     # the continuous physical field; CALVIN owns an explicit two-class
     # command-state head whose argmax is mapped to {-1,+1} by the adapter.
     gripper_output_mode: str = "continuous"
-    # B-spine is a separately identified execution-bottom implementation.
-    # Disabled configs serialize none of these fields, preserving the exact
-    # Schema30 baseline config payload.  The enabled Schema31 config must name
-    # every fixed-chart identity field explicitly.
-    bspine_implementation: str = BSPINE_DISABLED_IMPLEMENTATION
-    bspine_degree: int = 0
-    bspine_control_points: int = 0
-    bspine_basis_digest: str = ""
-    bspine_spec_fingerprint: str = ""
-    bspine_action_group_mask: str = ""
 
     def validate(self) -> None:
         if self.flow_time_distribution != "v120_mirrored_beta_1_5_1":
@@ -433,71 +410,6 @@ class BottomConfig:
         if self.gripper_output_mode not in {"continuous", "calvin_binary_command"}:
             raise ValueError(
                 "bottom.gripper_output_mode must be continuous or calvin_binary_command"
-            )
-        if self.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
-            if (
-                int(self.bspine_degree) != 0
-                or int(self.bspine_control_points) != 0
-                or self.bspine_basis_digest
-                or self.bspine_spec_fingerprint
-                or self.bspine_action_group_mask
-            ):
-                raise ValueError(
-                    "disabled B-spine cannot carry an inactive degree, control count, "
-                    "basis digest, spec fingerprint or action-group mask"
-                )
-        elif self.bspine_implementation == BSPINE0_IMPLEMENTATION:
-            expected = (
-                BSPINE0_DEGREE,
-                BSPINE0_CONTROL_POINTS,
-                BSPINE0_BASIS_DIGEST,
-                BSPINE0_SPEC_FINGERPRINT,
-            )
-            actual = (
-                int(self.bspine_degree),
-                int(self.bspine_control_points),
-                str(self.bspine_basis_digest),
-                str(self.bspine_spec_fingerprint),
-            )
-            if actual != expected:
-                raise ValueError(
-                    "B-spine-0 must use the frozen cubic K=12 basis digest and "
-                    "spec fingerprint"
-                )
-            if self.bspine_action_group_mask:
-                raise ValueError(
-                    "the existing all-field B-spine identity cannot carry a new group mask"
-                )
-        elif self.bspine_implementation in {
-            BSPINE_ARM_ONLY_IMPLEMENTATION,
-            BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
-            BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
-        }:
-            expected = (
-                BSPINE0_DEGREE,
-                BSPINE0_CONTROL_POINTS,
-                BSPINE0_BASIS_DIGEST,
-                BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
-                BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
-            )
-            actual = (
-                int(self.bspine_degree),
-                int(self.bspine_control_points),
-                str(self.bspine_basis_digest),
-                str(self.bspine_spec_fingerprint),
-                str(self.bspine_action_group_mask),
-            )
-            if actual != expected:
-                raise ValueError(
-                    "arm-scoped B-spine variants must use the frozen cubic K=12 "
-                    "basis, arm-only spec fingerprint and serialized 11000 group mask"
-                )
-        else:
-            raise ValueError(
-                "bottom.bspine_implementation must be disabled, "
-                f"{BSPINE0_IMPLEMENTATION}, {BSPINE_ARM_ONLY_IMPLEMENTATION} "
-                f"{BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION} or "
-                f"{BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION}"
             )
 
 
@@ -725,21 +637,6 @@ class ExperimentConfig:
             runtime["deployment_flow_schedule"] = DeploymentFlowSchedule.from_dict(
                 self.runtime.deployment_flow_schedule
             ).to_dict()
-        bottom = cast(dict[str, object], payload["bottom"])
-        if self.bottom.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
-            for name in (
-                "bspine_implementation",
-                "bspine_degree",
-                "bspine_control_points",
-                "bspine_basis_digest",
-                "bspine_spec_fingerprint",
-                "bspine_action_group_mask",
-            ):
-                bottom.pop(name)
-        elif self.bottom.bspine_implementation == BSPINE0_IMPLEMENTATION:
-            # Preserve the existing Schema31 all-field config/checkpoint
-            # identity; its implementation ID already fixes the legacy mask.
-            bottom.pop("bspine_action_group_mask")
         return payload
 
     def digest(self, *, include_paths: bool = False) -> str:

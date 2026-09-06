@@ -21,12 +21,15 @@ ARGS=(
   --batch-size "${MAINLINE_BATCH_SIZE:-8}"
   --num-workers "${MAINLINE_NUM_WORKERS:-4}"
   --output-dir "${OUT_DIR:-runs/clearvla_mainline_validation}"
-  --data-root "${DATA_ROOT:-/data/liang.zhang/dataset/grab_pen_single/grab_pen_single}"
-  --decoded-cache "${CACHE_DIR:-/data/senwang/data/cache_336}"
-  --dino-cache "${DINO_CACHE_DIR:-/data/senwang/data/dinov2_cache_336}"
-  --t5-condition "${T5_CONDITION_PATH:-/data/senwang/checkpoint/grasp_pen_embed.pt}"
   --validate-checkpoint "${CHECKPOINT}"
 )
+# Match training: the selected config owns data/cache/language paths unless
+# the caller explicitly relocates one. Never turn another outlet's validation
+# into a Pen read through an implicit shell default.
+if [[ -n "${DATA_ROOT:-}" ]]; then ARGS+=(--data-root "${DATA_ROOT}"); fi
+if [[ -n "${CACHE_DIR:-}" ]]; then ARGS+=(--decoded-cache "${CACHE_DIR}"); fi
+if [[ -n "${DINO_CACHE_DIR:-}" ]]; then ARGS+=(--dino-cache "${DINO_CACHE_DIR}"); fi
+if [[ -n "${T5_CONDITION_PATH:-}" ]]; then ARGS+=(--t5-condition "${T5_CONDITION_PATH}"); fi
 
 printf '[mainline-validation-only] checkpoint=%s batch=%s out=%s\n' \
   "${CHECKPOINT}" \

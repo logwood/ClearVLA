@@ -5,8 +5,11 @@
     "decoded_cache": "/data/senwang/data/cache_336",
     "dino_cache": "/data/senwang/data/dinov2_cache_336",
     "t5_condition": "/data/senwang/checkpoint/grasp_pen_embed.pt",
-    "output_dir": "runs/schema31_pen_bspine_arm_only",
-    "camera_names": ["top", "wrist"],
+    "output_dir": "runs/pen_raw_w_interval_q5",
+    "camera_names": [
+      "top",
+      "wrist"
+    ],
     "action_key": "action",
     "state_key": "qpos",
     "top_camera_key": "observations/images/cam_high",
@@ -63,7 +66,7 @@
     "grounder_iterations": 3,
     "teacher_key_dim": 64,
     "role_host_depth": 3,
-    "role_host_ffn_expansion": 4.0,
+    "role_host_ffn_expansion": 4,
     "role_host_dropout": 0.05,
     "proposal_depth": 2,
     "proposal_recent_tokens": 4,
@@ -75,7 +78,7 @@
     "flow_time_distribution": "v120_mirrored_beta_1_5_1",
     "evidence_depth": 3,
     "latent_dim": 64,
-    "ffn_expansion": 2.0,
+    "ffn_expansion": 2,
     "dropout": 0.05,
     "residual_scale_max": 0.25,
     "residual_scale_init": 0.05,
@@ -93,15 +96,9 @@
     "initial_exit_probability": 0.1,
     "controlled_delta_rank": 8,
     "controlled_action_tokens": 8,
-    "controlled_delta_dropout": 0.0,
+    "controlled_delta_dropout": 0,
     "gripper_field_dim": 6,
-    "physical_decode_delta_blend": 0.25,
-    "bspine_implementation": "fixed_bspline_arm_only_v1",
-    "bspine_degree": 3,
-    "bspine_control_points": 12,
-    "bspine_basis_digest": "f4d169cdeab9606dfacb92abbbc71bc3dbb7a4abefb8ef5244bc411670caab34",
-    "bspine_spec_fingerprint": "bac76409d2f430da47930d4d851457de011bcf6809ad968590748ab8565026f7",
-    "bspine_action_group_mask": "11000"
+    "physical_decode_delta_blend": 0.25
   },
   "objectives": {
     "future_dynamics": 0.1,
@@ -129,17 +126,17 @@
   "optimizer": {
     "epochs": 8,
     "batch_size": 8,
-    "learning_rate": 8e-5,
+    "learning_rate": 0.00008,
     "weight_decay": 0.01,
     "beta1": 0.9,
     "beta2": 0.999,
     "epsilon": 1e-8,
-    "grad_clip": 1.0,
+    "grad_clip": 1,
     "warmup_steps": 500,
     "min_lr_ratio": 0.1,
     "history_proposal_lr_scale": 0.625,
     "bottom_decoder_lr_scale": 0.7,
-    "bottom_capacity_relative_lr_scale": 2.0
+    "bottom_capacity_relative_lr_scale": 2
   },
   "runtime": {
     "compute_dtype": "bf16",
@@ -149,6 +146,54 @@
     "max_val_batches": 0,
     "eval_sampling_diagnostic_batches": 16,
     "eval_proposal_ablation_batches": 16,
-    "eval_execution_ablation_batches": 8
+    "eval_execution_ablation_batches": 8,
+    "deployment_flow_schedule": {
+      "deployment_flow_schedule": "clearvla.mainline.deployment_flow_schedule",
+      "schema_version": 1,
+      "method": "euler",
+      "endpoint_policy": "external_t1_head",
+      "initial_state_policy": "reuse_exact_initial",
+      "cache_boundary_policy": "one_w_rebuild_no_history",
+      "proposal": {
+        "schedule": "clearvla.flow_schedule",
+        "schema_version": 1,
+        "kind": "custom",
+        "boundaries": [
+          0,
+          0.1337480609952844,
+          0.3181082915068203,
+          0.528067042076036,
+          0.7565932872025407,
+          1
+        ],
+        "parameters": {
+          "candidate_id": "Q5",
+          "exponent": 1.25,
+          "formula": "t_i=(i/5)^exponent",
+          "label": "same-nfe-power-five",
+          "steps": 5
+        }
+      },
+      "refined": {
+        "schedule": "clearvla.flow_schedule",
+        "schema_version": 1,
+        "kind": "custom",
+        "boundaries": [
+          0,
+          0.1337480609952844,
+          0.3181082915068203,
+          0.528067042076036,
+          0.7565932872025407,
+          1
+        ],
+        "parameters": {
+          "candidate_id": "Q5",
+          "exponent": 1.25,
+          "formula": "t_i=(i/5)^exponent",
+          "label": "same-nfe-power-five",
+          "steps": 5
+        }
+      }
+    }
   }
 }

@@ -100,9 +100,9 @@ A solver candidate stays diagnostic until it has:
 5. full action, arm, gripper, horizon and contact behavior;
 6. no checkpoint, ABI, cache or endpoint regression.
 
-B-spine, representation, Teacher, MIP and solver changes remain factorially
-separate. Literature evidence can motivate a probe but cannot promote a
-production schedule.
+Representation, Teacher, MIP and solver changes remain factorially separate.
+Literature evidence can motivate a probe but cannot promote a production
+schedule.
 
 ## Validation
 

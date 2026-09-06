@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
+# HISTORICAL ONLY: this V57 launcher is outside the active Schema30 source closure.
 # V57 QUERY-SPLINE MICRO: fix the V56 coordinate mismatch.
 #
 # B-spline remains an output/action-space writer, not a hidden-token compressor:

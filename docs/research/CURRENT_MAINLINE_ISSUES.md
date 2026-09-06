@@ -1,6 +1,6 @@
 # ClearVLA Schema30 / Schema28-core recovery current issues
 
-Updated: 2026-09-04
+Updated: 2026-09-06
 
 This ledger contains only unresolved questions that can change the next source
 unit or the release decision. The active graph and invariants live in
@@ -72,6 +72,41 @@ resumed, and repaired RDT runs must also start fresh.
   interface but say nothing about learned behavior.
 
 ## Current decision order
+
+### End-to-end static audit candidate (2026-09-06)
+
+The local Pen integration candidate now includes S's duplicate-current-row
+repair, diagnostic-invariant S attention, the existing W interval-Q/K repair,
+policy-relative optional local precision, a pre-backward finite-loss check and
+active-manifest deployment validation. It has not been deployed. Source
+coverage, reverse-regression evidence and exact limitations are maintained in
+[`auxiliary/MAINLINE_END_TO_END_AUDIT.md`](auxiliary/MAINLINE_END_TO_END_AUDIT.md).
+Static repairs do not wait on another checkpoint/shuffle panel. The local P2
+representation change is a candidate, not proven RMSE recovery. Its behavior,
+the 24-to-48 action-conditioning coverage and residual action/W mismatch remain
+open. The sparse S history packing still does not claim exact frame alignment.
+
+The E4 and CALVIN process descriptions elsewhere below are historical comparison
+snapshots, not current run status or instructions to wait for E8. Recovery E8
+is already the behavior baseline. The isolated branch must not overwrite the
+newer CALVIN adapter/data work in the root during integration.
+
+### Local W typed-interval selector repair (2026-09-06)
+
+Source review identified no direct interval-position input to typed temporal
+Q/K; temporal identity already reaches the generic conditioning path, so this
+is not a claim that W previously had no temporal information. The local
+`typed_interval_qk_v1` candidate reuses identities 0/1 for W1, 2/3 for W2,
+and `[zero,0,1]` for the `[common,near0,near1]` memory. V, all loss weights,
+parameter counts and training/deployment call counts are unchanged.
+
+Structural acceptance must cover real W1/W2 wiring, zero-value preservation,
+Q/K versus V separation, causal masking and finite FP32/BF16 owner gradients.
+Whether this improves learned interval differentiation remains open; low
+typed-value amplitude or identical values are not resolved merely by Q/K
+positions. No running CALVIN source or simulator was edited. The optional P2
+local candidate is reviewed separately in the end-to-end audit above.
+The baseline/repair top ABI differs intentionally; no silent checkpoint resume.
 
 | Priority | Unresolved behavior | Latest compact observation | What selects source work |
 |---|---|---|---|
@@ -243,36 +278,6 @@ sample/event counts and action/camera profile. Native three-camera consumption,
 depth and 14-D bimanual modeling remain later explicit ABI units; the adapter
 must not be described as already solving them.
 
-## S30-07 — B-spine is a conditional bottom representation question
-
-The active bottom already receives the complete `x_t [B,24,18]` physical field,
-but its `NativeTimePhysicalActionTokenLift` is a per-row component projection
-followed by `LayerNorm -> MLP`. Source review therefore supports testing a
-parallel fixed temporal chart, not replacing the lift or changing the flow
-field. B-spline Policy and Spline Policy motivate local-support control points,
-continuous resampling and local correction; they do not establish that an
-internal spine should become the action output or add an inference loop.
-
-The open behavior decision is now Pen-scoped: whether the fixed B-spline
-coarse/detail view reaches the bottom action path and preserves far-horizon,
-gripper-event and detail information without a near/arm trade. Gate A selected
-one cubic `T=24/K=12` chart from the shared Pen/RDT dataset traversal; that RDT
-chart evidence is not a request to start an RDT training job. Gate B is the
-zero-initialized, bias-free bottom-only branch beside `noisy_lift`, fused under
-the existing `action_state_factor`. Its Schema31 config/manifest identity is
-fixed, and the combined local forward/reverse/checkpoint/RNG/optimizer/runtime
-gate is closed. Real CUDA/BF16 owner-VJP, one Pen B8 smoke and read-only
-checkpoint validation remain before Gate D starts one fresh Pen run with the
-matched `spine_zero` evaluation intervention. RDT and CALVIN are explicitly
-outside this first training experiment.
-
-Reject the proposal if the chart is rank-deficient/non-finite, strongly
-amplifying, the learned view stays unused, or it improves only by suppressing
-far/event detail. Do not rescue it with a gain,
-clip, quota, entropy target, extra loss or an additional ODE/W pass. The active
-field codec is `clearvla/mainline/model/action_codec.py`; legacy DCTFlowCodec and
-historical output spline heads are comparison evidence only.
-
 ## S30-08 — CALVIN needs a direct relative-command arm chart and an isolated binary command head
 
 The first `open_drawer` formal run reached epoch 2 with arm physical RMSE
@@ -336,6 +341,12 @@ evidence only and must never be resumed into this ABI.
   cache/VJP repair remain accepted. Its disputed S fusion, W chronology,
   camera-support semantics and gripper boundary are historical only; the local
   recovery source restores Schema28 behavior for those owners.
+- The Schema31/B-spine bottom experiment is rejected from the active source
+  closure. Schema30 is the sole manifest/config path and uses the complete
+  physical field through the native raw lift. The old representation code,
+  configs and intervention metrics remain Git-history evidence for old-log
+  audits only; they are not a deferred training lane or a reason to change the
+  solver, schedule, codec, loss or deployment ABI.
 - Capacity near full width is not a release failure or a hardware-rank claim.
 
 ## Stop and closure rules

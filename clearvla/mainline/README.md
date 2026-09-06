@@ -45,8 +45,9 @@ the typed boundaries above.
   with arm value, arm adjacent-difference and continuous-gripper branches.
 - Outlet semantics stay in adapters: Pen continuous, RDT-8 right-arm/two-view,
   CALVIN relative-command sampler/W adaptation plus isolated binary command.
-- Optional B-spine adds a bottom-internal view beside the unchanged raw lift;
-  it is not the default codec or an accepted behavior upgrade.
+- The active execution bottom is raw-only.  Temporal representation experiments
+  are outside the Schema30 runtime and cannot be selected by the mainline
+  manifest or config.
 
 ## Lifecycle vocabulary
 
@@ -81,10 +82,9 @@ CUDA_VISIBLE_DEVICES=1 OUT_DIR=runs/rdt8_formal bash scripts/train_rdt_multitask
 CHECKPOINT=/path/to/checkpoint bash scripts/validate_mainline_checkpoint.sh
 ```
 
-The opt-in B-spine candidate requires
-`MAINLINE_CONFIG=configs/mainline/object_intent_dynamics_323_pen_bspine0.json`;
-omitting it selects the baseline. Override data/cache/T5 paths, batch size or
-workers only when the resolved environment differs, and serialize the result.
+The mainline accepts only the Schema30 manifest. Override data/cache/T5 paths,
+batch size or workers only when the resolved environment differs, and serialize
+the result.
 
 ## Audit and change policy
 

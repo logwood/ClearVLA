@@ -958,12 +958,18 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
   checkpoint identity.  Do not compare V120's short MD5 directly with the
   SHA-256 and call the data contract different.
 
-### Provisional Schema31 bottom B-spine
+### Historical Schema31 bottom B-spine (archive-only)
+
+These fields are retained solely so the audit tool can explain old Schema31
+artifacts. The current mainline emits no B-spine tensors, gradients or
+`spine_zero` interventions; Schema30/raw-only is the only active baseline.
+Identify an old row from its serialized manifest/source context, not from a
+run-name substring, and do not compare it as a current mainline result.
 
 - Identify this experiment from manifest schema 31, execution-bottom selection
   `v120_evidence_mmdit_bspine0_v1`, and the serialized basis/spec identities;
-  a run name containing `bspine` is not sufficient. Schema30 remains the
-  disabled-path baseline.
+  a run name containing `bspine` is not sufficient. The active Schema30 path
+  has no disabled B-spine branch; it is raw-only.
 - `bottom_spine_coarse_field_rms` and `bottom_spine_detail_field_rms` describe
   the exact fixed decomposition of the noisy 18-D flow field.
   `bottom_spine_decomposition_max_abs` is a numerical closure invariant, not a

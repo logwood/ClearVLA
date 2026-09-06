@@ -93,21 +93,11 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
-OPTIONAL_ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (
-        "bottom_spine",
-        (
-            "bottom.decoder.spine.",
-            "bottom.decoder.arm_private_reader.",
-        ),
-    ),
-)
-ALL_ROLE_PREFIXES = (*OPTIONAL_ROLE_PREFIXES, *ROLE_PREFIXES)
+ALL_ROLE_PREFIXES = ROLE_PREFIXES
 
 BOTTOM_DECODER_ROLES = frozenset(
     {
         "bottom_query",
-        "bottom_spine",
         "bottom_evidence_adapter",
         "bottom_policy_bridge",
         "bottom_organizer",
@@ -236,10 +226,6 @@ def build_optimizer(
         role: sum(len(grouped.get((role, decay), ())) for decay in (False, True))
         for role, _ in ROLE_PREFIXES
     }
-    for role, _ in OPTIONAL_ROLE_PREFIXES:
-        count = sum(len(grouped.get((role, decay), ())) for decay in (False, True))
-        if count:
-            role_counts[role] = count
     return optimizer, OptimizerOwnership(
         trainable_names=tuple(trainable),
         frozen_names=tuple(frozen),
@@ -325,30 +311,11 @@ def gradient_diagnostics(
 
     named_parameters = legacy_named_parameters(model)
     rows: dict[str, list[Tensor]] = {role: [] for role, _ in ROLE_PREFIXES}
-    for role, _ in OPTIONAL_ROLE_PREFIXES:
-        if any(
-            parameter.requires_grad and parameter_role(name) == role
-            for name, parameter in named_parameters
-        ):
-            rows[role] = []
-    spine_branches: dict[str, list[Tensor]] = {
-        "coarse": [],
-        "detail": [],
-        "private_reader": [],
-    }
     for name, parameter in named_parameters:
         if not parameter.requires_grad or parameter.grad is None:
             continue
         role = parameter_role(name)
         rows[role].append(parameter.grad.detach())
-        if role == "bottom_spine":
-            for branch in spine_branches:
-                if branch == "private_reader":
-                    matches = name.startswith("bottom.decoder.arm_private_reader.")
-                else:
-                    matches = name.startswith(f"bottom.decoder.spine.{branch}_lifts.")
-                if matches:
-                    spine_branches[branch].append(parameter.grad.detach())
     reference = next(model.parameters())
     result: dict[str, Tensor] = {}
     for role, values in rows.items():
@@ -364,30 +331,6 @@ def gradient_diagnostics(
             if values
             else reference.new_zeros((), dtype=torch.float32)
         )
-    if "bottom_spine" in rows:
-        for branch, values in spine_branches.items():
-            # The private-reader metric is emitted only for the explicit
-            # arm-private variant.  Keeping it absent on legacy B-spine runs
-            # avoids turning a newly introduced owner into a misleading zero
-            # in historical logs.
-            if branch == "private_reader" and not values and not any(
-                name.startswith("bottom.decoder.arm_private_reader.")
-                for name, parameter in named_parameters
-                if parameter.requires_grad
-            ):
-                continue
-            result[f"gradient_{stage}_bottom_spine_{branch}_l2"] = (
-                torch.nn.utils.get_total_norm(
-                    values,
-                    norm_type=2.0,
-                    error_if_nonfinite=False,
-                    foreach=True,
-                )
-                .detach()
-                .float()
-                if values
-                else reference.new_zeros((), dtype=torch.float32)
-            )
     return result
 
 

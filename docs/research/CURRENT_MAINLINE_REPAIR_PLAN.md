@@ -1,6 +1,6 @@
 # ClearVLA current mainline consolidation and refactor plan
 
-Updated: 2026-09-04
+Updated: 2026-09-06
 
 Status: planning only.  This file orders future repository and source work; it
 does not authorize a merge, branch/worktree deletion, checkpoint migration,
@@ -13,7 +13,7 @@ open behavior questions are in
 [`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md), and volatile
 process state is in
 [`auxiliary/ACTIVE_MAINLINE_HANDOFF.md`](auxiliary/ACTIVE_MAINLINE_HANDOFF.md).
-The former 1,500-line recovery/modularization/B-spine execution narrative is
+The former 1,500-line recovery/modularization/representation execution narrative is
 recoverable at Git commit `b8163cb`; completed proof steps are not repeated
 here.
 
@@ -26,8 +26,8 @@ here.
 | Pen evidence | The recovery Pen E8 curve is complete and is the current comparable behavior baseline. | The old “wait for E8” phase is closed.  Remaining far-horizon/event weakness stays in the issue ledger and does not automatically select a mechanism. |
 | RDT evidence | The recovery artifact at `0973f192` declared a previous-command gripper boundary but used current qpos in loss/evaluation. | Its event/F1 surface cannot close the RDT contract.  Only a newly initialized run from the corrected boundary can replace it. |
 | CALVIN evidence | The current outlet-scoped sampler/W adapter has local and isolated smoke/VJP evidence but no accepted complete formal curve or closed-loop result. | Keep it outside released capability claims until formal behavior and `open_drawer` closure exist. |
-| Optional B-spine | The B-spine implementation is opt-in and its detailed feasibility narrative is historical evidence. | It is a deferred experiment, not the next automatic mainline version and not a reason to retain migration-only golden constraints. |
-| Working tree | The root contains several WIP lanes, including CALVIN outlet work, benchmark/simulation work, physical/B-spline assets, dependency/script changes and history cleanup. | Isolate distinct behavior changes, while allowing behavior-neutral cleanup to accompany the owner it clarifies.  Never promote an unclassified dirty tree as one commit. |
+| Representation experiments | The former Schema31/B-spine implementation is archived evidence only; the active checkout is Schema30/raw-only. | Do not restore the deleted component or treat old metrics as a current behavior lane. A new structured representation needs an explicitly selected design, ABI and matched experiment. |
+| Working tree | The root contains several WIP lanes, including CALVIN outlet work, benchmark/simulation work, physical-chart/robot assets, dependency/script changes and history cleanup. | Isolate distinct behavior changes, while allowing behavior-neutral cleanup to accompany the owner it clarifies.  Never promote an unclassified dirty tree as one commit. |
 | Protected provenance | The `pre-schema29-root-promotion-20260901` stash is based on `codex/v94-latent-ownership-execution`. | Keep the branch and stash untouched until the stash is explicitly inventoried and resolved. |
 
 ## Repository convergence
@@ -41,7 +41,7 @@ Classify the root changes into review lanes:
 
 1. CALVIN sampler, outlet-action and world-conditioning semantics;
 2. benchmark and simulation packages plus their tests;
-3. physical chart, B-spline and robot/URDF assets;
+3. physical chart and robot/URDF assets; historical representation artifacts are archive-only;
 4. dependencies, launchers and operational scripts;
 5. architecture-memory and historical-document cleanup.
 
@@ -144,7 +144,7 @@ The target rule is one name per semantic axis and one owner per lifecycle.
 | Overloaded surface | Problem | Target |
 |---|---|---|
 | `bottom.arm_flow_mode` | Names CALVIN source semantics, evaluation motion semantics and the extracted V120 internal field chart, although the core is forced back to `legacy_independent`. | Split core representation, outlet action semantics and W projection.  Evaluation derives its definition from the outlet contract. |
-| `BottomConfig` | Mixes core action field, terminal gripper behavior, outlet semantics and optional B-spine selection. | Compose separate core-action, outlet-action and execution-bottom configuration records. |
+| `BottomConfig` | Mixes core action field, terminal gripper behavior and outlet semantics. | Compose separate core-action, outlet-action and execution-bottom configuration records. |
 | `OutletAdapter` | Owns codec proxying, normalizer sidecar, native conversion, W projection, dynamic sanitization, terminal finalization and metrics. | Give these to the canonical codec, outlet chart, `WorldConditionAdapter`, outlet finalizer and outlet-aware metrics respectively.  A facade may coordinate but owns no formula. |
 | Schema labels | Mix behavior, manifest format, layout, ABI, experiment lineage and branch names. | Serialize `behavior_contract`, `manifest_format`, `component_layout`, `component_abi`, `outlet_profile` and `source_revision` independently. |
 | `CheckpointIdentity` / `source.digest` | Mix provenance with resume compatibility; canonical source-text changes are a hard veto even when the semantic contract is unchanged. | Separate `ProvenanceRecord`, `ResumeContract`, `DeploymentABI` and `DataIdentity`.  Source text is audit evidence, not the sole compatibility decision. |
@@ -181,7 +181,8 @@ smaller:
    checkpoints have a tested reader or explicit archive-only status.
 
 This is a behavior-preserving structural unit.  It must not carry a CALVIN
-semantic change, B-spine enablement, loss adjustment or numerical gain.
+semantic change, representation reintroduction, loss adjustment or numerical
+gain.
 
 ### 5. Historicalize migration-only controls
 
@@ -201,23 +202,17 @@ Neither “source digest changed” nor “the output directory is non-empty” 
 itself, a statement about model architecture.  This separation does not weaken
 fail-closed resume validation or permit output overwrite.
 
-## Deferred work
+## Archived representation experiments
 
-### B-spine
-
-B-spine remains an optional `execution_bottom` experiment.  Do not name it a
-new mainline schema or run a training sweep until the repository has one clean
-trunk, the active outlet contracts are closed and the user explicitly selects
-the experiment.  If resumed, use only this compact ladder:
-
-1. one read-only cross-outlet chart/locality probe;
-2. one opt-in bottom implementation with the original full-resolution path
-   retained;
-3. focused forward/reverse, checkpoint, real CUDA and lifecycle gates;
-4. one matched Pen pair, rejecting gains caused by event/detail suppression.
-
-No learned knots, output-space spline writer, extra ODE/W loop, hand-tuned
-gain, quota or smoothing objective belongs to that first experiment.
+The Schema31/B-spine implementation and its dedicated configs/tests were
+removed from the active checkout in the raw-only consolidation. The old source
+and logs remain recoverable from Git history for audit or reproducibility, but
+they are not a selectable `execution_bottom`, a current schema, or a deferred
+mainline task. If a structured temporal representation is revisited, start a
+new isolated design with a fresh manifest/component ABI and a matched
+raw-only comparison; do not resurrect the deleted path implicitly. The shared
+flow solver, Q5 schedule, codec, loss and two-pass deployment contract remain
+independent of that historical experiment.
 
 ### Benchmark and simulation
 
@@ -276,8 +271,9 @@ This plan is complete when:
 7. golden/fresh-run/source-text controls have their intended historical,
    provenance, continuation or filesystem-safety roles rather than
    architectural authority;
-8. optional B-spine, benchmark and simulation work remains clearly separated
-   from the accepted default until its own gates close.
+8. historical representation experiments, benchmark work and simulation work
+   remain clearly separated from the accepted default; none is an active
+   Schema30 component.
 
 At each closure, update the architecture contract only when accepted behavior
 actually changes, update the issue ledger in place, and rely on Git history

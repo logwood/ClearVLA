@@ -378,41 +378,6 @@ class JsonlRunLogger:
                     ),
                 ),
                 (
-                    "b-spine",
-                    (
-                        "bottom_spine_coarse_field_rms",
-                        "bottom_spine_detail_field_rms",
-                        "bottom_spine_coarse_token_rms",
-                        "bottom_spine_detail_token_rms",
-                        "bottom_spine_update_rms",
-                        "bottom_spine_raw_token_rms",
-                        "bottom_spine_to_raw_token_rms_ratio",
-                        "bottom_spine_decomposition_max_abs",
-                        "bottom_spine_arm_private_reader_active",
-                        "bottom_spine_arm_private_correction_rms",
-                        "gradient_raw_bottom_spine_coarse_l2",
-                        "gradient_raw_bottom_spine_detail_l2",
-                        "gradient_probe_bottom_spine_active",
-                        "gradient_probe_bottom_spine_arm_flow_l2",
-                        "gradient_probe_bottom_spine_gripper_flow_l2",
-                        "gradient_probe_bottom_spine_gripper_to_arm_ratio",
-                        "gradient_probe_bottom_spine_arm_gripper_cosine",
-                        "gradient_probe_bottom_spine_gripper_on_arm_projection",
-                        "gradient_probe_bottom_spine_action_group_l2",
-                        "gradient_probe_bottom_spine_representation_group_l2",
-                        "gradient_probe_bottom_spine_execution_group_l2",
-                        "gradient_probe_bottom_spine_private_reader_active",
-                        "gradient_probe_bottom_spine_private_reader_arm_flow_l2",
-                        "gradient_probe_bottom_spine_private_reader_gripper_flow_l2",
-                        "gradient_probe_bottom_spine_private_reader_gripper_to_arm_ratio",
-                        "gradient_probe_bottom_spine_private_reader_arm_gripper_cosine",
-                        "gradient_probe_bottom_spine_private_reader_gripper_on_arm_projection",
-                        "gradient_probe_bottom_spine_private_reader_action_group_l2",
-                        "gradient_probe_bottom_spine_private_reader_representation_group_l2",
-                        "gradient_probe_bottom_spine_private_reader_execution_group_l2",
-                    ),
-                ),
-                (
                     "grad-owner",
                     (
                         "gradient_raw_observation_l2",
@@ -428,8 +393,6 @@ class JsonlRunLogger:
                         "gradient_raw_bottom_mmdit_l2",
                         "gradient_raw_bottom_execution_l2",
                         "gradient_raw_bottom_heads_l2",
-                        "gradient_raw_bottom_spine_l2",
-                        "gradient_raw_bottom_spine_private_reader_l2",
                         "gradient_raw_global_l2",
                         "gradient_postlocal_global_l2",
                         "gradient_postglobal_global_l2",
@@ -607,26 +570,6 @@ class JsonlRunLogger:
                         "validation_execution_full_capacity_action_delta_rmse_physical",
                         "validation_execution_three_basis_reduction_mse_gain_vs_primary_physical",
                         "validation_execution_three_basis_reduction_action_delta_rmse_physical",
-                        "validation_execution_spine_zero_refined_pass_mse_gain_vs_primary_physical",
-                        "validation_execution_spine_zero_refined_pass_action_delta_rmse_physical",
-                        "validation_execution_spine_zero_full_lifecycle_mse_gain_vs_primary_physical",
-                        "validation_execution_spine_zero_full_lifecycle_action_delta_rmse_physical",
-                    ),
-                ),
-                (
-                    "b-spine-ablation",
-                    tuple(
-                        name
-                        for mode in (
-                            "spine_zero_refined_pass",
-                            "spine_zero_full_lifecycle",
-                        )
-                        for band in ("1_4", "5_12", "13_24")
-                        for owner in ("arm", "gripper")
-                        for name in (
-                            f"validation_execution_{mode}_{owner}_band_{band}_mse_gain_vs_primary_physical",
-                            f"validation_execution_{mode}_{owner}_band_{band}_action_delta_rmse_physical",
-                        )
                     ),
                 ),
                 (
