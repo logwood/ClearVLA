@@ -331,7 +331,8 @@ probe (not only the earlier CPU rewrite gate).  With
 fallback, copied/restored static inputs, optimizer state, RNG continuation and
 topology recapture all passed; the probe again ended in
 `cuda_graph_equivalence_ok`.  This makes the `7.54055 samples/s` combination
-the accepted recommended path under the current numerical contract.
+the accepted short-run path under the current numerical contract; the long
+varying-batch envelope below remains a separate acceptance item.
 
 ## Inductor submodule-combination results (not accepted)
 
@@ -367,6 +368,30 @@ order, not a host-dispatch issue.  These runs are useful speed ceilings, but no
 compiled submodule path is accepted as mathematically equivalent until a future
 deterministic/fused kernel implementation reproduces the current reduction
 contract.
+
+## Long varying-batch stress (2026-09-06)
+
+The short gate deliberately reuses a batch, so an additional long probe was
+added.  It creates two independent but elementwise-identical copies of a new
+synthetic batch at every update, uses B4 for 256 updates (`1024` sample slots),
+and crosses the step-200 identity-to-active recapture boundary.  The first
+version accidentally passed the same Python batch object through eager and
+graph; that aliasing was fixed before interpreting the result.
+
+With the corrected independent inputs, the strict per-tensor CUDA gate first
+failed at step 5 for the recommended context-reuse graph path: a tiny raw-flow
+gradient element differed by `1.359e-6` absolute.  The pure graph path showed a
+similar step-5 difference of `1.673e-6`.
+
+This is not yet evidence that CUDA Graph changes the algorithm.  A paired
+control using two independent eager engines and the same changing batches also
+failed the old `rtol=2e-5, atol=1e-6` rule at step 3, with a `4.222e-6` absolute
+gradient difference.  A relaxed diagnostic envelope (`rtol=1e-3,
+atol=1e-5`) reached step 20 before seeing a `2.356e-5` absolute difference.
+The long-run gate therefore needs calibration against an eager-vs-eager
+control (and preferably deterministic-kernel settings) before it can be used
+as an acceptance criterion.  The short repeated-batch result must not be
+described as 1000-sample long-horizon proof.
 
 ## Retained execution-diagnostics split
 

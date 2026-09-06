@@ -595,6 +595,154 @@ def _run_topology_recapture_gate(*, rtol: float, atol: float) -> None:
     print("runner_equivalent active_recapture loss", float(expected.loss))
 
 
+def _fresh_long_batch(
+    config: Any,
+    device: torch.device,
+    *,
+    batch_size: int,
+    index: int,
+) -> Any:
+    """Create a deterministic new batch without perturbing training RNG."""
+
+    cpu_state = torch.get_rng_state()
+    cuda_state = torch.cuda.get_rng_state(device)
+    try:
+        torch.manual_seed(150000 + int(index))
+        return _move(_batch(config, batch=batch_size), device)
+    finally:
+        torch.set_rng_state(cpu_state)
+        torch.cuda.set_rng_state(cuda_state, device)
+
+
+def _run_long_stress_gate(*, steps: int, rtol: float, atol: float) -> None:
+    """Compare many distinct batches, including the step-200 topology switch."""
+
+    if steps <= 0:
+        raise ValueError("long equivalence steps must be positive")
+    device = torch.device("cuda")
+    batch_size = 4
+    eager_control = os.environ.get("CLEARVLA_EQUIV_LONG_EAGER_CONTROL") == "1"
+    eager_engine, _unused_eager_batch = _engine(device)
+    graph_engine, _unused_graph_batch = _engine(device)
+    if not eager_control:
+        _configure_compiled_graph_engine(graph_engine)
+    _assert_parameters_close(graph_engine.model, eager_engine.model, rtol=0.0, atol=0.0)
+    first_eager_batch = _fresh_long_batch(
+        eager_engine.config,
+        device,
+        batch_size=batch_size,
+        index=0,
+    )
+    first_graph_batch = _fresh_long_batch(
+        graph_engine.config,
+        device,
+        batch_size=batch_size,
+        index=0,
+    )
+    runner: CudaGraphTrainingStepRunner | None = None
+    if eager_control:
+        graph_engine.model.train()
+    else:
+        runner = CudaGraphTrainingStepRunner(graph_engine)
+        graph_engine.model.train()
+        graph_engine.model.set_training_step(graph_engine.global_step)
+        runner._ensure_capture(first_graph_batch)
+    base_rng = _rng_state(graph_engine, device)
+    eager_rng = {name: value.clone() for name, value in base_rng.items()}
+    graph_rng = {name: value.clone() for name, value in base_rng.items()}
+    previous_capture_count = runner.capture_count if runner is not None else 0
+
+    for index in range(steps):
+        eager_batch, graph_batch = (
+            (first_eager_batch, first_graph_batch)
+            if index == 0
+            else (
+                _fresh_long_batch(
+                    eager_engine.config,
+                    device,
+                    batch_size=batch_size,
+                    index=index,
+                ),
+                _fresh_long_batch(
+                    graph_engine.config,
+                    device,
+                    batch_size=batch_size,
+                    index=index,
+                ),
+            )
+        )
+        _set_rng_state(eager_engine, device, eager_rng)
+        expected = eager_engine.train_step(eager_batch, collect_diagnostics=False)
+        eager_rng = _rng_state(eager_engine, device)
+
+        _set_rng_state(graph_engine, device, graph_rng)
+        if runner is None:
+            actual = graph_engine.train_step(graph_batch, collect_diagnostics=False)
+        else:
+            actual = runner.train_step(graph_batch, collect_diagnostics=False)
+        graph_rng = _rng_state(graph_engine, device)
+
+        _assert_step_result_close(actual, expected, rtol=rtol, atol=atol)
+        _assert_gradients_close(
+            _named_gradients(graph_engine.model),
+            _named_gradients(eager_engine.model),
+            path=f"long.step_{index}.clipped_gradient",
+            rtol=rtol,
+            atol=atol,
+        )
+        _assert_parameters_close(
+            graph_engine.model,
+            eager_engine.model,
+            rtol=rtol,
+            atol=atol,
+        )
+        _assert_optimizer_close(
+            graph_engine,
+            eager_engine,
+            rtol=rtol,
+            atol=atol,
+        )
+        assert graph_engine.global_step == eager_engine.global_step
+        assert graph_engine.schedule.step_index == eager_engine.schedule.step_index
+        _assert_tensor_mapping_close(
+            graph_rng,
+            eager_rng,
+            path=f"long.step_{index}.rng",
+            rtol=0.0,
+            atol=0.0,
+        )
+        capture_count = runner.capture_count if runner is not None else 0
+        if capture_count != previous_capture_count:
+            print(
+                "long_recapture",
+                "step",
+                index,
+                "capture_count",
+                capture_count,
+            )
+            previous_capture_count = capture_count
+        if index == 0 or (index + 1) % 32 == 0 or index + 1 == steps:
+            print(
+                "long_equivalent_step",
+                index,
+                "loss",
+                float(expected.loss),
+                "gradient_norm",
+                expected.gradient_norm_scalar,
+            )
+    print(
+        "long_equivalence_ok",
+        "steps",
+        steps,
+        "batch_size",
+        batch_size,
+        "sample_slots",
+        steps * batch_size,
+        "capture_count",
+        runner.capture_count if runner is not None else 0,
+    )
+
+
 def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
@@ -604,6 +752,16 @@ def main() -> None:
     # gate; the tighter 2e-7 bound remains the CPU rewrite gate.
     gpu_rtol = 2e-5
     gpu_atol = 1e-6
+    long_steps = int(os.environ.get("CLEARVLA_EQUIV_LONG_STEPS", "0"))
+    if os.environ.get("CLEARVLA_EQUIV_LONG_ONLY") == "1":
+        long_rtol = float(os.environ.get("CLEARVLA_EQUIV_LONG_RTOL", gpu_rtol))
+        long_atol = float(os.environ.get("CLEARVLA_EQUIV_LONG_ATOL", gpu_atol))
+        _run_long_stress_gate(
+            steps=long_steps or 256,
+            rtol=long_rtol,
+            atol=long_atol,
+        )
+        return
     # Identity and non-identity execution use different Python topology and
     # therefore intentionally own separate captures.
     # CUDA reduction order may differ at the final few FP32 mantissa bits when
