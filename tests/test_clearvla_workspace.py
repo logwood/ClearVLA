@@ -30,6 +30,14 @@ def test_readonly_list_creates_nothing(tmp_path, monkeypatch):
     assert not root.exists()
 
 
+def test_clone_requires_explicit_branch_before_creating_directories(tmp_path, monkeypatch):
+    root = tmp_path / "absent"
+    monkeypatch.setattr(sys, "argv", ["workspace", "--root", str(root), "init", "--clone"])
+    with pytest.raises(ValueError, match="requires --branch"):
+        workspace.main()
+    assert not root.exists()
+
+
 def require_symlinks(tmp_path):
     trial = tmp_path / "link-test"
     try:

@@ -36,6 +36,7 @@ ENVIRONMENT = {
     "XDG_CACHE_HOME",
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
+    "PYTORCH_CUDA_ALLOC_CONF",
 }
 
 
@@ -231,7 +232,7 @@ def run_logged(command: list[str], code: Path, output: Path, env: dict, metadata
         nonlocal published
         if published:
             return
-        if (output / "console.log").exists():
+        if (output / "console.log").exists() or (output / "console.log").is_symlink():
             raise FileExistsError("trainer unexpectedly owns console.log")
         os.replace(staged, output / "console.log")
         link(output / "code", code)
@@ -311,6 +312,8 @@ def launch(root: Path, args: argparse.Namespace) -> int:
     environment.update(
         CUDA_VISIBLE_DEVICES=args.gpu, PYTHONUNBUFFERED="1", PYTHONDONTWRITEBYTECODE="1"
     )
+    if not environment.get("PYTORCH_CUDA_ALLOC_CONF"):
+        environment["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     print(output, flush=True)
     return run_logged(
         command,
@@ -330,6 +333,7 @@ def main() -> int:
     )
     init.add_argument("--clone", action="store_true")
     init.add_argument("--remote", default=DEFAULT_REMOTE)
+    init.add_argument("--branch", help="explicit management branch for a fresh central clone")
     cp = sub.add_parser("checkout", help="create/reuse a clean detached worktree at a fetched ref")
     cp.add_argument("--ref", required=True)
     sub.add_parser("list", help="list all canonical experiments without guessing process status")
@@ -350,6 +354,8 @@ def main() -> int:
             cmd.add_argument("--dtype", choices=("fp32", "bf16"), default="bf16")
             cmd.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
+    if args.command == "init" and args.clone and not args.branch:
+        raise ValueError("init --clone requires --branch; do not silently choose a model/version")
     if args.command in ("list", "show"):
         root = args.root.expanduser().absolute()
     else:
@@ -360,7 +366,18 @@ def main() -> int:
                 if git(root / "repo", "remote", "get-url", "origin") != args.remote:
                     raise ValueError("central repo already has a different origin")
             else:
-                subprocess.run(["git", "clone", "--", args.remote, str(root / "repo")], check=True)
+                subprocess.run(
+                    [
+                        "git",
+                        "clone",
+                        "--branch",
+                        args.branch,
+                        "--",
+                        args.remote,
+                        str(root / "repo"),
+                    ],
+                    check=True,
+                )
         if (root / "repo/scripts/clearvla_workspace.py").is_file():
             link(root / "workspace", root / "repo/scripts/clearvla_workspace.py")
             link(

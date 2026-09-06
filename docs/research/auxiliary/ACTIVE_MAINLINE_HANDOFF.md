@@ -1,6 +1,6 @@
 # ClearVLA active operational handoff
 
-Snapshot: 2026-09-06 20:53 +08:00 on `senwang-server`.
+Snapshot: 2026-09-06, canonical namespace and live import verified on `senwang-server`.
 
 This file is the single path contract and volatile process map. It does not
 define model architecture. Recheck each PID, `/proc/PID/cwd`, output target and
@@ -83,8 +83,10 @@ git -C /data/senwang/clearvla/repo fetch origin "$SOURCE_BRANCH"
   --python "$TRAINING_PYTHON" --gpu "$FREE_GPU_UUID"
 ```
 
-`launch` runs in the foreground; an explicitly requested detached run can use
-`nohup ... >/dev/null 2>&1 &`. The tool captures trainer output itself. During
+`launch` runs in the foreground. For an explicitly requested detached run,
+retain launcher stderr as well; do not discard it into `/dev/null`, because
+an invalid ref/config/interpreter fails before the experiment is reserved.
+The tool captures trainer output itself. During
 startup stdout briefly occupies a uniquely named staging file beside the run;
 after the trainer writes `run_context.json`, the same open file is atomically
 published as `console.log` inside the run. Failed startup also retains its log
