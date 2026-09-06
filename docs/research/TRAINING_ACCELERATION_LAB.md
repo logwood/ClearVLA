@@ -451,6 +451,15 @@ differences.  Therefore the dominant source is the trainable observation
 compiler's CUDA sampling/pooling backward, not Graph replay, random-number
 misalignment, or AdamW.
 
+Two narrower 8-step controls identify the submodule: freezing only
+`encoder.flow` still reaches `4.12e-5` gradient difference by step 7, whereas
+freezing only `encoder.raw_flow` keeps the maximum gradient difference at
+`1.91e-7` and never crosses the strict gate.  The first control leaves the
+raw-pyramid/refinement path active; the second removes its trainable backward.
+The practical suspect is therefore `_RawPyramidFlow` (its dense refiners and
+cycle/warp `grid_sample` plus resize/pooling operations), not the coarse
+latent Sea-RAFT branch.
+
 This does not invalidate the speed result or imply a semantic change: it means
 that exact bitwise long-horizon equality is impossible for the current CUDA
 operator contract unless the observation backward is replaced by a deterministic
