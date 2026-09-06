@@ -352,16 +352,13 @@ def _compile_candidate_prefix(model: ClearVLAMainlinePolicy, *, mode: str) -> fl
 def run(args: argparse.Namespace) -> dict[str, object]:
     if args.steps <= 0 or args.warmup < 0 or args.warmup >= args.steps:
         raise ValueError("require steps > warmup >= 0")
-    other_compile_probes = (
+    unsupported_graph_compile = (
         args.compile_forward,
-        args.compile_visual_submodules,
-        args.compile_execution_submodules,
-        args.compile_mainline_blocks,
         args.compile_candidate_prefix,
     )
-    if args.cuda_graph_training and any(other_compile_probes):
+    if args.cuda_graph_training and any(unsupported_graph_compile):
         raise ValueError(
-            "CUDA Graph training only supports the isolated MMDiT block compile probe"
+            "CUDA Graph training does not support whole-forward or candidate-prefix compile"
         )
     if (
         args.cuda_graph_training

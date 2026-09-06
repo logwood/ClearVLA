@@ -325,6 +325,49 @@ measured about `1.031 s` CUDA time per profiled step.  The largest class was
 reduction kernels.  This explains why dispatch capture alone plateaus around
 `1.75x`: the remaining gap is mostly real GPU compute, not Python scheduling.
 
+The three reuse flags were then re-run through the complete remote equivalence
+probe (not only the earlier CPU rewrite gate).  With
+`CLEARVLA_EQUIV_CONTEXT_REUSE=1`, identity and active steps, diagnostic eager
+fallback, copied/restored static inputs, optimizer state, RNG continuation and
+topology recapture all passed; the probe again ended in
+`cuda_graph_equivalence_ok`.  This makes the `7.54055 samples/s` combination
+the accepted recommended path under the current numerical contract.
+
+## Inductor submodule-combination results (not accepted)
+
+The profiler guard was extended only for non-nested, default-mode submodule
+compiles so their cost and failure modes could be measured without changing the
+production default.  The speed candidates were attractive:
+
+| Combination | Throughput | Capture / compile setup | Peak allocated | Status |
+|---|---:|---:|---:|---|
+| visual + mainline + MMDiT compile + graph | 9.93592 samples/s (`2.315x` vs 4.29264) | 55.29 s / 15.23 s | 8.93 GiB | rejected by equivalence |
+| visual + mainline compile + graph | 9.81743 samples/s (`2.287x`) | 121.90 s / 6.69 s | 8.95 GiB | rejected by equivalence |
+
+The first all-submodule attempt (including execution-controller compile) did not
+produce a profile: during capture, Inductor constant folding attempted an
+`aten.full` CUDA operation and raised `CUDA error: operation not permitted when
+stream is capturing`.  This is retained as a negative result rather than
+silently dropping the experiment.
+
+The graph-side compiled-vs-uncompiled strict gates explain why the fast numbers
+cannot currently be deployed:
+
+* all compiled blocks: `loss.total` differed by `9.9087e-4` (relative
+  `4.024e-4`), above the `2e-5/1e-6` gate;
+* visual + mainline: `loss.total` differed by `9.1863e-4` (relative
+  `3.731e-4`);
+* mainline only: `loss.groups.execution` differed by `4.4730e-5` (relative
+  `1.480e-3`);
+* visual only: `loss.total` differed by `9.5916e-4` (relative
+  `3.896e-4`).
+
+The likely cause is Inductor reassociation/fusion changing BF16/FP32 reduction
+order, not a host-dispatch issue.  These runs are useful speed ceilings, but no
+compiled submodule path is accepted as mathematically equivalent until a future
+deterministic/fused kernel implementation reproduces the current reduction
+contract.
+
 ## Retained execution-diagnostics split
 
 Separate tensors required by the formal execution-value objective from

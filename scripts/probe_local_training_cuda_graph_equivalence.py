@@ -9,6 +9,7 @@ optimizer tensor and RNG continuation is compared after each replay.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -24,6 +25,50 @@ from probe_local_training_cuda_graph import (  # noqa: E402
 from clearvla.mainline.training.cuda_graph import (  # noqa: E402
     CudaGraphTrainingStepRunner,
 )
+
+
+def _configure_compiled_graph_engine(engine: Any) -> None:
+    """Opt-in gate for the safe submodule-compile production combination."""
+
+    compile_mode = os.environ.get("CLEARVLA_EQUIV_COMPILE_SUBMODULES")
+    context_reuse = os.environ.get("CLEARVLA_EQUIV_CONTEXT_REUSE") == "1"
+    valid_modes = {"1", "visual_mainline", "visual", "mainline", "mmdit"}
+    if compile_mode not in valid_modes and not context_reuse:
+        return
+    decoder = engine.model.execution_bottom.decoder
+    if context_reuse or compile_mode in valid_modes:
+        decoder._reuse_prepared_block_contexts = True
+        decoder._reuse_prepared_controller_context = True
+        decoder._reuse_terminal_candidate_velocity = True
+    if compile_mode not in valid_modes:
+        return
+    if compile_mode in {"1", "mmdit"}:
+        for block in tuple(decoder.blocks):
+            block.forward = torch.compile(  # type: ignore[method-assign]
+                block.forward, dynamic=False, fullgraph=False, mode="default"
+            )
+    if compile_mode in {"1", "visual_mainline", "visual"}:
+        encoder = engine.model.observation.compiler.encoder
+        visual_modules: list[torch.nn.Module] = [encoder.flow]
+        if encoder.raw_flow is not None:
+            visual_modules.append(encoder.raw_flow)
+        for module in visual_modules:
+            module.forward = torch.compile(  # type: ignore[method-assign]
+                module.forward, dynamic=False, fullgraph=False, mode="default"
+            )
+    if compile_mode in {"1", "visual_mainline", "mainline"}:
+        mainline_modules: list[torch.nn.Module] = [
+            *tuple(engine.model.grounding.blocks),
+            engine.model.p1.dynamic_policy_block,
+            engine.model.world.dynamics.w1,
+            engine.model.world.dynamics.w2,
+            engine.model.transition.v120_transition,
+            *tuple(engine.model.execution_bottom.layer_contract_heads),
+        ]
+        for module in mainline_modules:
+            module.forward = torch.compile(  # type: ignore[method-assign]
+                module.forward, dynamic=False, fullgraph=False, mode="default"
+            )
 
 
 def _assert_tensor_close(
@@ -309,6 +354,7 @@ def _run_gate(*, start_step: int, steps: int, rtol: float, atol: float) -> None:
     device = torch.device("cuda")
     eager_engine, eager_batch = _engine(device)
     graph_engine, graph_batch = _engine(device)
+    _configure_compiled_graph_engine(graph_engine)
     eager_engine.global_step = start_step
     graph_engine.global_step = start_step
     eager_engine.schedule.step_index = start_step
@@ -440,6 +486,7 @@ def _run_production_runner_gate(*, rtol: float, atol: float) -> None:
     device = torch.device("cuda")
     eager_engine, first_batch = _engine(device)
     graph_engine, _unused_batch = _engine(device)
+    _configure_compiled_graph_engine(graph_engine)
     runner = CudaGraphTrainingStepRunner(graph_engine)
     _assert_parameters_close(graph_engine.model, eager_engine.model, rtol=0.0, atol=0.0)
 
@@ -504,6 +551,7 @@ def _run_topology_recapture_gate(*, rtol: float, atol: float) -> None:
     device = torch.device("cuda")
     eager_engine, batch = _engine(device)
     graph_engine, _unused_batch = _engine(device)
+    _configure_compiled_graph_engine(graph_engine)
     runner = CudaGraphTrainingStepRunner(graph_engine)
     graph_engine.model.train()
     graph_engine.model.set_training_step(0)
