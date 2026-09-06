@@ -24,6 +24,9 @@ from probe_local_training_cuda_graph import (  # noqa: E402
     _validated_capture_region,
 )
 
+from clearvla.mainline.training.acceleration_contract import (  # noqa: E402
+    resolve_training_acceleration_adapter,
+)
 from clearvla.mainline.training.cuda_graph import (  # noqa: E402
     CudaGraphTrainingStepRunner,
 )
@@ -37,8 +40,13 @@ def _configure_compiled_graph_engine(engine: Any) -> None:
     valid_modes = {"1", "visual_mainline", "visual", "mainline", "mmdit"}
     if compile_mode not in valid_modes and not context_reuse:
         return
+    adapter = resolve_training_acceleration_adapter(engine.model)
+    adapter.prepare(engine)
     decoder = engine.model.execution_bottom.decoder
     if context_reuse or compile_mode in valid_modes:
+        # These are optional mainline decoder optimizations.  They remain in
+        # the probe because compile experiments need their explicit switches;
+        # the production Graph backend reaches them only through its adapter.
         decoder._reuse_prepared_block_contexts = True
         decoder._reuse_prepared_controller_context = True
         decoder._reuse_terminal_candidate_velocity = True

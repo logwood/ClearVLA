@@ -14,7 +14,7 @@ import gc
 import inspect
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -22,6 +22,10 @@ import torch
 from torch import Tensor
 
 from ..interfaces import TrainingBatch
+from .acceleration_contract import (
+    TrainingAccelerationAdapter,
+    resolve_training_acceleration_adapter,
+)
 from .engine import MainlineTrainingEngine, TrainStepResult, _autocast
 from .gradient_audit import FiniteGradientSpikeReport
 
@@ -199,11 +203,16 @@ class CudaGraphTrainingStepRunner:
         if engine.device.type != "cuda":
             raise ValueError("CUDA Graph training requires a CUDA engine")
         self.engine = engine
-        decoder = engine.model.execution_bottom.decoder
-        # Both rewrites have independent full-update equivalence gates.  They
-        # replace dynamic candidate grouping with the same known static chart.
-        decoder._static_neutral_owner = True
-        decoder._training_candidate_prefix_reuse = True
+        # Version-specific capture preparation lives behind this adapter.  The
+        # backend therefore remains reusable when a branch replaces the
+        # decoder, block stack or even the whole model implementation.
+        self._acceleration_adapter: TrainingAccelerationAdapter = (
+            resolve_training_acceleration_adapter(engine.model)
+        )
+        self._acceleration_adapter.prepare(engine)
+        self._structure_signature = self._acceleration_adapter.structure_signature(
+            engine
+        )
         # Eager diagnostic steps must zero, rather than discard, the gradient
         # buffers whose addresses are owned by the captured backward graph.
         engine._preserve_static_gradient_buffers = True
@@ -215,12 +224,23 @@ class CudaGraphTrainingStepRunner:
         self.capture_count = 0
         self.capture_setup_seconds = 0.0
 
-    def _topology_key(self) -> str:
-        decoder = self.engine.model.execution_bottom.decoder
-        return (
-            "identity"
-            if float(decoder._execution_progress_value) <= 0.0
-            else "active"
+    def _topology_key(self) -> Hashable:
+        return self._acceleration_adapter.topology_signature(self.engine)
+
+    def invalidate(self, reason: str = "") -> None:
+        """Drop the current graph after a versioned model is replaced.
+
+        A graph owns parameter/activation addresses from its capture.  A
+        branch that hot-swaps modules, changes widths or changes its training
+        topology must call this at a step boundary.  Ordinary optimizer
+        updates do not require invalidation because they preserve storage.
+        """
+
+        del reason  # retained in the API for callers' audit/logging wrappers
+        self._release_capture()
+        self._acceleration_adapter.prepare(self.engine)
+        self._structure_signature = self._acceleration_adapter.structure_signature(
+            self.engine
         )
 
     def _release_capture(self) -> None:
@@ -240,6 +260,10 @@ class CudaGraphTrainingStepRunner:
 
     def _capture(self, batch: TrainingBatch) -> None:
         engine = self.engine
+        # Preparation is idempotent for the active adapter and is repeated at
+        # every recapture so a topology-specific branch can re-install its
+        # own capture-safe implementation details.
+        self._acceleration_adapter.prepare(engine)
         capture_rng = _rng_snapshot(engine)
         started = time.perf_counter()
         try:
@@ -294,7 +318,12 @@ class CudaGraphTrainingStepRunner:
 
     def _ensure_capture(self, batch: TrainingBatch) -> float:
         batch.validate(self.engine.config)
-        capture_key = (self._topology_key(), _static_tree_signature(batch))
+        capture_key = (
+            self._acceleration_adapter.name,
+            self._structure_signature,
+            self._topology_key(),
+            _static_tree_signature(batch),
+        )
         if self._graph is not None and self._capture_key == capture_key:
             if self._static_batch is None:
                 raise RuntimeError("CUDA Graph runner lost its static batch")

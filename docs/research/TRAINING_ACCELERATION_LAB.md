@@ -500,3 +500,58 @@ PYTHONPATH=.:/data/senwang/envs/clearvla-schema30-test/lib/python3.12/site-packa
   tests/test_training_acceleration_execution_diagnostics.py \
   tests/test_training_acceleration_prefix_reuse.py
 ```
+
+## Implementation-level portable acceleration contract (2026-09-06)
+
+The goal of this layer is compatibility across implementation branches, not a
+deployment/online behavior change.  The CUDA-Graph runner now consumes a small
+adapter contract rather than reaching directly into the active decoder:
+
+```text
+versioned model -> TrainingAccelerationAdapter -> shared backend
+                                      ├── eager fallback
+                                      └── CUDA Graph capture/replay
+```
+
+The adapter owns only version-specific capture preparation and the current
+topology identity.  The shared backend owns static batch copying, RNG
+registration, capture lifecycle, gradient buffers and optimizer boundaries.
+The mainline adapter preserves the already-gated neutral-owner and candidate
+prefix rewrites, so this refactor does not change the model objective or
+checkpoint ownership.
+
+Capture keys now include:
+
+* adapter identity;
+* a model structure signature (module classes, parameter/buffer shapes and
+  dtypes, without parameter values);
+* the adapter topology signature; and
+* the existing typed batch signature.
+
+A branch that replaces a block stack or width calls
+`CudaGraphTrainingStepRunner.invalidate()` at a step boundary; the old graph is
+released and the new branch is captured under its own signature.  Ordinary
+optimizer updates do not invalidate the graph.  A branch without a bespoke
+adapter receives a safe generic static adapter and can still use the backend if
+its training surface is static.
+
+This makes the acceleration mechanism reusable across versions, but it does
+not promise a fixed absolute samples/s value: changed FLOPs, memory traffic or
+dynamic topology still change the model's intrinsic cost.  Every branch must
+run the same short eager/Graph equivalence gate and a matched throughput
+profile before promotion.
+
+The read-only source preflight is:
+
+```bash
+python scripts/probe_training_acceleration_compatibility.py --pretty \
+  . ../schema28-core-recovery-pen-20260903 ../v86-slot-controller \
+  ../pen-bspline-routing-20260906 ../rdt-data-adaptation
+```
+
+On the 2026-09-06 worktrees it classified the active acceleration branch as
+`ready-portable-mainline`; the Schema28/Pen and RDT mainline branches as
+`mainline-needs-backend-backport`; and the older V86 branch as
+`legacy-surface-needs-bridge`.  This is intentionally a compatibility
+preflight, not a speed or behavior claim.  It tells us which thin adapter is
+needed before a branch is sent to the GPU gate.
