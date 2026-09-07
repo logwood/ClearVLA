@@ -1,6 +1,6 @@
 # Training acceleration lab
 
-Updated: 2026-09-06
+Updated: 2026-09-07
 
 This ledger records controlled training-throughput experiments on branch
 `codex/training-acceleration`.  It is deliberately separate from the current
@@ -566,3 +566,103 @@ versus Graph replay median `0.1810 s/step` (`4.01x`); this is a regression
 check for the refactor, not a replacement for the production B8/BF16 number
 (`7.54 samples/s` on the authorized RTX 3090 lab).  The remote production
 profile was not overwritten or rerun by this commit.
+
+### Capture-precondition diagnostic (2026-09-06)
+
+An older remote Graph snapshot initially aborted before recording any kernels:
+the raw-flow activation-checkpoint wrapper called CUDA RNG state capture, and
+the active execution candidate probe called `torch.random.fork_rng`.  Both
+operations are legal in eager mode but `current_seed/get_rng_state` is
+forbidden while a CUDA stream is being captured.  This is a capture precondition
+failure, not evidence that raw-flow arithmetic is invalid or that the model
+cannot be benchmarked.
+
+For a diagnostic-only run, the checkpoint wrapper was changed to
+`preserve_rng_state=False` and the candidate probe kept its existing module
+training-state save/restore while omitting the `fork_rng` state query.  The raw
+image pyramid contains only deterministic convolution/normalization/activation
+operators; a local forward/backward check with and without checkpoint RNG
+preservation returned `raw_checkpoint_rng_equivalence_ok`.
+
+On the remote RTX 3090 (GPU 3), this capture-safe diagnostic reached one graph
+capture and measured:
+
+| Path | Throughput | Capture setup | Status |
+|---|---:|---:|---|
+| matched eager fastpath | `4.54067 samples/s` | — | timing baseline |
+| Graph + capture-safe RNG diagnostic | `6.90903 samples/s` | `6.27 s` | `1.522x` diagnostic speedup |
+
+The first identity steps of the strict gate matched.  The active-step portion
+then exceeded the existing `rtol=2e-5, atol=1e-6` envelope at
+`observation.compiler.encoder.flow.correlation_temperature_log` with maximum
+absolute gradient difference `9.55e-6`.  The result is therefore retained as a
+successful capture/performance diagnostic, not promoted as a formal
+mathematical-equivalence pass.  Full output is in the remote lab under
+`compat_versions/schema29_accel_eda7578/results/`:
+
+* `graph_rng_probe_safe_test.json`
+* `eager_matched_test.json`
+* `equivalence_rng_probe_safe_v2.log`
+
+The production implementation should express this as a version adapter
+contract (or use a dedicated RNG-safe path), rather than relying on a global
+test monkeypatch.  A branch may still be benchmarked when this precondition
+fails; only the corresponding formal equivalence claim is withheld.
+
+## Pen and RDT versioned equivalence acceptance (2026-09-07)
+
+The acceptance was run independently against the two requested source
+revisions; Pen results were never used as a proxy for RDT:
+
+| Variant | Revision / layout | CPU golden coverage | CUDA short-gate result |
+|---|---|---:|---|
+| Pen B-spline | `a4a170e` / modular | `15,014` tensors, `10,443,735` elements, zero differences at `atol=rtol=0` | `cuda_graph_equivalence_ok` (4/4 repeats) |
+| RDT | `f8d0c2f` / legacy | `15,023` tensors, `10,443,744` elements, zero differences at `atol=rtol=0` | `cuda_graph_equivalence_ok` (3/7; 4 natural-tail stops) |
+
+The CUDA gate uses the production `CudaGraphTrainingStepRunner`, with
+`rtol=2e-5, atol=1e-6`.  It covers both the identity (`step=0`) and active
+(`step=700`) topology, two captures, copied and restored static inputs, the
+complete loss ledger/metrics, raw and clipped gradients, AdamW state,
+scheduler/global step, CPU/CUDA/flow/condition RNG, and an exact
+`save_checkpoint`/`load_checkpoint_exact` continuation.  The checkpoint
+continuation reported `rng_exact=true` and a fresh capture after restore for
+both variants (Pen `12,213,030` bytes; RDT `12,188,710` bytes).
+
+The long diagnostic then used `256` independent one-update cases at B4 (`1,024`
+sample slots), split evenly between identity and active topology, and compared
+each Graph run with an independent eager-vs-eager control:
+
+| Variant / path | Result max abs | Clipped-gradient max abs | Parameter sample max abs | Parameter sample outliers | RNG |
+|---|---:|---:|---:|---:|---|
+| Pen Graph | `5.96e-8` | `1.40e-7` | `4.02e-6` | `2 / 17` | exact |
+| Pen eager control | `5.96e-8` | `1.39e-7` | `2.68e-6` | `1 / 17` | exact |
+| RDT Graph | `5.96e-8` | `1.17e-7` | `1.53e-6` | `0 / 17` | exact |
+| RDT eager control | `2.98e-8` | `1.01e-7` | `4.40e-7` | `0 / 17` | exact |
+
+Parameter/buffer/optimizer surfaces are sampled at 17 evenly spaced state
+checkpoints; result and gradient surfaces are checked on all 256 cases.  The
+small Pen parameter outliers are in the same raw-flow CUDA tail region seen in
+the eager control (relative-L2 maxima `3.42e-8` Graph versus `2.30e-8` eager).
+They are not evidence of a changed optimizer rule or checkpoint state.  RDT's
+Graph envelope likewise stays below the configured parameter tolerance ratio
+(`0.593` maximum).
+
+Across seven independent RDT gate invocations, three passed and four stopped at
+different single-element CUDA tails (representative maxima `1.01e-6`, `1.39e-6`
+and `2.79e-6`).  One failure occurred in the basic raw-gradient gate and the
+others in the runner's intentional eager-diagnostic/input-copy sequence.  None
+was a loss-ledger, optimizer-scalar, scheduler or RNG mismatch; the
+eager-vs-eager controls exhibit the same CUDA `grid_sample`/pooling-backward
+non-determinism.  Therefore the acceptance decision is:
+
+* Pen's short production Graph path and checkpoint/RNG contract are accepted;
+* RDT's path is functionally accepted for benchmarking, but remains
+  **conditional** for a strict per-element certification until its
+  non-deterministic observation backward is replaced or the calibrated envelope
+  is made an explicit release criterion;
+* neither variant is advertised as bitwise-equivalent over 1,024 CUDA samples;
+  a zero-tolerance long-run requirement needs a deterministic replacement for
+  the current observation backward operators.
+
+Small reproducible summaries are in `compat-tests/results/`, and the shared
+version adapter launcher is `compat-tests/run_variant_cuda_graph_equivalence.py`.

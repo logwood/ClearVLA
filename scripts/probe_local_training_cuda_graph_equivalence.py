@@ -9,12 +9,17 @@ optimizer tensor and RNG continuation is compared after each replay.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import hashlib
 import json
 import os
+import tempfile
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
+import probe_local_training_cuda_graph as _probe_module  # noqa: E402
 import torch
 from probe_local_training_cuda_graph import (  # noqa: E402
     _autocast,
@@ -30,6 +35,8 @@ from clearvla.mainline.training.acceleration_contract import (  # noqa: E402
 from clearvla.mainline.training.cuda_graph import (  # noqa: E402
     CudaGraphTrainingStepRunner,
 )
+
+_SOURCE_ROOT = Path(getattr(_probe_module, "_source_root", Path.cwd())).resolve()
 
 
 def _configure_compiled_graph_engine(engine: Any) -> None:
@@ -731,7 +738,16 @@ def _run_gate(*, start_step: int, steps: int, rtol: float, atol: float) -> None:
     graph_engine.schedule._apply_current_ratio()
 
     _assert_parameters_close(graph_engine.model, eager_engine.model, rtol=0.0, atol=0.0)
-    graph, captured_ledger = _capture_forward_backward(graph_engine, graph_batch)
+    graph_engine.model.set_training_step(graph_engine.global_step)
+    # Use the same adapter-backed capture backend as production.  The older
+    # direct helper remains available for isolated diagnostics, but comparing
+    # it here would test a second graph implementation that is not deployed.
+    graph_runner = CudaGraphTrainingStepRunner(graph_engine)
+    graph_runner._ensure_capture(graph_batch)
+    graph = graph_runner._graph
+    captured_ledger = graph_runner._captured_ledger
+    if graph is None or captured_ledger is None:
+        raise RuntimeError("CUDA Graph gate capture is incomplete")
 
     base_rng = _rng_state(graph_engine, device)
     eager_rng = {name: value.clone() for name, value in base_rng.items()}
@@ -963,6 +979,187 @@ def _run_topology_recapture_gate(*, rtol: float, atol: float) -> None:
     print("runner_equivalent active_recapture loss", float(expected.loss))
 
 
+def _owned_generators(engine: Any) -> dict[str, torch.Generator]:
+    generators: dict[str, torch.Generator] = {}
+    if engine.train_flow_generator is not None:
+        generators["train_flow"] = engine.train_flow_generator
+    if engine.train_condition_generator is not None:
+        generators["train_condition"] = engine.train_condition_generator
+    return generators
+
+
+def _run_checkpoint_resume_gate(*, rtol: float, atol: float) -> None:
+    """Round-trip the real checkpoint API and continue through a fresh capture."""
+
+    from clearvla.mainline.checkpoint import (  # noqa: PLC0415
+        ArtifactIdentity,
+        DatasetIdentity,
+        build_checkpoint_identity,
+    )
+    from clearvla.mainline.runtime.checkpoints import (  # noqa: PLC0415
+        load_checkpoint_exact,
+        save_checkpoint,
+    )
+
+    device = torch.device("cuda")
+    source_engine, first_batch = _engine(device)
+    _configure_compiled_graph_engine(source_engine)
+    source_runner = CudaGraphTrainingStepRunner(source_engine)
+    source_engine.model.train()
+    source_engine.model.set_training_step(source_engine.global_step)
+
+    initial_rng = _rng_state(source_engine, device)
+    _set_rng_state(source_engine, device, initial_rng)
+    source_runner.train_step(first_batch, collect_diagnostics=False)
+    checkpoint_rng = _rng_state(source_engine, device)
+
+    with tempfile.TemporaryDirectory(prefix="clearvla_checkpoint_equiv_") as raw_dir:
+        directory = Path(raw_dir)
+        language_path = directory / "goal.pt"
+        language_path.write_bytes(b"training-acceleration-equivalence")
+        zero_digest = hashlib.sha256(b"").hexdigest()
+        identity = build_checkpoint_identity(
+            source_engine.config,
+            repo_root=_SOURCE_ROOT,
+            dataset=DatasetIdentity(
+                raw_root="/equivalence/fixture",
+                hdf5_glob="*.hdf5",
+                inventory_sha256=zero_digest,
+                state_normalizer_sha256=zero_digest,
+                action_normalizer_sha256=zero_digest,
+                decoded_cache_identity=zero_digest,
+                dino_cache_identity=zero_digest,
+            ),
+            language=ArtifactIdentity.from_file("t5_goal", language_path),
+            commit="e" * 40,
+        )
+        checkpoint_path = directory / "resume.pt"
+        save_checkpoint(
+            checkpoint_path,
+            model=source_engine.model,
+            optimizer=source_engine.optimizer,
+            schedule=source_engine.schedule,
+            config=source_engine.config,
+            identity=identity,
+            epoch=3,
+            global_step=source_engine.global_step,
+            best_metric=0.25,
+            data_state={"fixture_cursor": 1},
+            generators=_owned_generators(source_engine),
+        )
+
+        resumed_engine, _unused_batch = _engine(device)
+        _configure_compiled_graph_engine(resumed_engine)
+        restored = load_checkpoint_exact(
+            checkpoint_path,
+            model=resumed_engine.model,
+            optimizer=resumed_engine.optimizer,
+            schedule=resumed_engine.schedule,
+            config=resumed_engine.config,
+            identity=identity,
+            generators=_owned_generators(resumed_engine),
+        )
+        resumed_engine.global_step = restored.global_step
+        assert restored.epoch == 3
+        assert restored.global_step == source_engine.global_step
+        assert restored.best_metric == 0.25
+        _assert_tensor_mapping_close(
+            resumed_engine.model.state_dict(),
+            source_engine.model.state_dict(),
+            path="checkpoint.model",
+            rtol=0.0,
+            atol=0.0,
+        )
+        _assert_optimizer_close(
+            resumed_engine,
+            source_engine,
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert resumed_engine.schedule.state_dict() == source_engine.schedule.state_dict()
+        restored_rng = _rng_state(resumed_engine, device)
+        _assert_tensor_mapping_close(
+            restored_rng,
+            checkpoint_rng,
+            path="checkpoint.rng",
+            rtol=0.0,
+            atol=0.0,
+        )
+
+        source_batch = _fresh_long_batch(
+            source_engine.config,
+            device,
+            batch_size=2,
+            index=91,
+        )
+        resumed_batch = _fresh_long_batch(
+            resumed_engine.config,
+            device,
+            batch_size=2,
+            index=91,
+        )
+        _assert_independent_equal_batches(resumed_batch, source_batch)
+        resumed_runner = CudaGraphTrainingStepRunner(resumed_engine)
+
+        _set_rng_state(source_engine, device, checkpoint_rng)
+        expected = source_runner.train_step(
+            source_batch,
+            collect_diagnostics=False,
+        )
+        expected_rng = _rng_state(source_engine, device)
+        _set_rng_state(resumed_engine, device, checkpoint_rng)
+        actual = resumed_runner.train_step(
+            resumed_batch,
+            collect_diagnostics=False,
+        )
+        actual_rng = _rng_state(resumed_engine, device)
+
+        _assert_step_result_close(actual, expected, rtol=rtol, atol=atol)
+        _assert_gradients_close(
+            _named_gradients(resumed_engine.model),
+            _named_gradients(source_engine.model),
+            path="checkpoint.continuation.clipped_gradient",
+            rtol=rtol,
+            atol=atol,
+        )
+        _assert_parameters_close(
+            resumed_engine.model,
+            source_engine.model,
+            rtol=rtol,
+            atol=atol,
+        )
+        _assert_optimizer_close(
+            resumed_engine,
+            source_engine,
+            rtol=rtol,
+            atol=atol,
+        )
+        _assert_tensor_mapping_close(
+            actual_rng,
+            expected_rng,
+            path="checkpoint.continuation.rng",
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert resumed_engine.global_step == source_engine.global_step
+        assert resumed_engine.schedule.step_index == source_engine.schedule.step_index
+        assert source_runner.capture_count == 1
+        assert resumed_runner.capture_count == 1
+        print(
+            "checkpoint_resume_equivalence_ok",
+            json.dumps(
+                {
+                    "checkpoint_bytes": checkpoint_path.stat().st_size,
+                    "restored_step": restored.global_step,
+                    "continued_step": resumed_engine.global_step,
+                    "rng_exact": True,
+                    "fresh_capture_count": resumed_runner.capture_count,
+                },
+                sort_keys=True,
+            ),
+        )
+
+
 def _fresh_long_batch(
     config: Any,
     device: torch.device,
@@ -982,13 +1179,299 @@ def _fresh_long_batch(
         torch.cuda.set_rng_state(cuda_state, device)
 
 
+def _quantiles(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {name: 0.0 for name in ("p50", "p90", "p95", "p99", "max")}
+    ordered = sorted(values)
+
+    def interpolate(fraction: float) -> float:
+        position = fraction * float(len(ordered) - 1)
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        weight = position - float(lower)
+        return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+    return {
+        "p50": interpolate(0.50),
+        "p90": interpolate(0.90),
+        "p95": interpolate(0.95),
+        "p99": interpolate(0.99),
+        "max": ordered[-1],
+    }
+
+
+def _surface_distribution(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {"case_count": 0}
+    worst = max(rows, key=lambda row: float(row["max_tolerance_ratio"]))
+    return {
+        "case_count": len(rows),
+        "outside_case_count": sum(int(row["outside_elements"]) > 0 for row in rows),
+        "outside_element_count": sum(int(row["outside_elements"]) for row in rows),
+        "max_abs": _quantiles([float(row["max_abs"]) for row in rows]),
+        "rms_abs": _quantiles([float(row["rms_abs"]) for row in rows]),
+        "relative_l2": _quantiles([float(row["relative_l2"]) for row in rows]),
+        "max_tolerance_ratio": _quantiles(
+            [float(row["max_tolerance_ratio"]) for row in rows]
+        ),
+        "worst_path": worst["max_tolerance_ratio_path"],
+    }
+
+
+def _write_optional_summary(summary: Mapping[str, Any]) -> None:
+    raw_path = os.environ.get("CLEARVLA_EQUIV_JSON_OUTPUT")
+    if not raw_path:
+        return
+    path = Path(raw_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _run_independent_sample_statistics(
+    *,
+    cases: int,
+    rtol: float,
+    atol: float,
+) -> None:
+    """Measure many one-update cases without allowing numerical drift to compound."""
+
+    if cases < 2:
+        raise ValueError("independent equivalence cases must be at least two")
+    device = torch.device("cuda")
+    batch_size = int(os.environ.get("CLEARVLA_EQUIV_LONG_BATCH_SIZE", "4"))
+    if batch_size <= 0:
+        raise ValueError("long equivalence batch size must be positive")
+    eager_control = os.environ.get("CLEARVLA_EQUIV_LONG_EAGER_CONTROL") == "1"
+    eager_engine, _unused_eager_batch = _engine(device)
+    comparison_engine, _unused_comparison_batch = _engine(device)
+    if not eager_control:
+        _configure_compiled_graph_engine(comparison_engine)
+    _assert_parameters_close(
+        comparison_engine.model,
+        eager_engine.model,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    eager_initial_model = _clone_tensor_mapping(eager_engine.model.state_dict())
+    comparison_initial_model = _clone_tensor_mapping(
+        comparison_engine.model.state_dict()
+    )
+    eager_initial_optimizer = copy.deepcopy(eager_engine.optimizer.state_dict())
+    comparison_initial_optimizer = copy.deepcopy(
+        comparison_engine.optimizer.state_dict()
+    )
+    eager_initial_schedule = copy.deepcopy(eager_engine.schedule.state_dict())
+    comparison_initial_schedule = copy.deepcopy(
+        comparison_engine.schedule.state_dict()
+    )
+    runner = None if eager_control else CudaGraphTrainingStepRunner(comparison_engine)
+    half = cases // 2
+    surfaces: dict[str, list[Mapping[str, Any]]] = {
+        "result": [],
+        "clipped_gradient": [],
+        "rng": [],
+        "parameters": [],
+        "buffers": [],
+        "optimizer": [],
+    }
+    state_stride = max(1, cases // 16)
+    batch_tensor_count = 0
+    batch_element_count = 0
+
+    def reset_engine(
+        engine: Any,
+        *,
+        model_state: Mapping[str, torch.Tensor],
+        optimizer_state: Mapping[str, Any],
+        schedule_state: Mapping[str, Any],
+        start_step: int,
+    ) -> None:
+        engine.model.load_state_dict(model_state, strict=True)
+        engine.optimizer.load_state_dict(copy.deepcopy(optimizer_state))
+        engine.schedule.load_state_dict(copy.deepcopy(schedule_state))
+        engine.global_step = start_step
+        engine.schedule.step_index = start_step
+        engine.schedule._apply_current_ratio()
+        engine.model.train()
+        engine.model.set_training_step(start_step)
+
+    print(
+        "independent_sample_config",
+        json.dumps(
+            {
+                "comparison": "eager" if eager_control else "cuda_graph",
+                "cases": cases,
+                "batch_size": batch_size,
+                "sample_slots": cases * batch_size,
+                "identity_cases": half,
+                "active_cases": cases - half,
+                "rtol": rtol,
+                "atol": atol,
+                "state_check_stride": state_stride,
+            },
+            sort_keys=True,
+        ),
+    )
+
+    for index in range(cases):
+        start_step = 0 if index < half else 700
+        reset_engine(
+            eager_engine,
+            model_state=eager_initial_model,
+            optimizer_state=eager_initial_optimizer,
+            schedule_state=eager_initial_schedule,
+            start_step=start_step,
+        )
+        reset_engine(
+            comparison_engine,
+            model_state=comparison_initial_model,
+            optimizer_state=comparison_initial_optimizer,
+            schedule_state=comparison_initial_schedule,
+            start_step=start_step,
+        )
+        eager_batch = _fresh_long_batch(
+            eager_engine.config,
+            device,
+            batch_size=batch_size,
+            index=10_000 + index,
+        )
+        comparison_batch = _fresh_long_batch(
+            comparison_engine.config,
+            device,
+            batch_size=batch_size,
+            index=10_000 + index,
+        )
+        batch_tensor_count, batch_element_count = _assert_independent_equal_batches(
+            comparison_batch,
+            eager_batch,
+        )
+
+        case_seed = 510_000 + index
+        torch.manual_seed(case_seed)
+        torch.cuda.manual_seed_all(case_seed)
+        if eager_engine.train_flow_generator is not None:
+            eager_engine.train_flow_generator.manual_seed(case_seed + 1)
+        if eager_engine.train_condition_generator is not None:
+            eager_engine.train_condition_generator.manual_seed(case_seed + 2)
+        case_rng = _rng_state(eager_engine, device)
+
+        _set_rng_state(eager_engine, device, case_rng)
+        expected = eager_engine.train_step(eager_batch, collect_diagnostics=False)
+        expected_rng = _rng_state(eager_engine, device)
+        _set_rng_state(comparison_engine, device, case_rng)
+        if runner is None:
+            actual = comparison_engine.train_step(
+                comparison_batch,
+                collect_diagnostics=False,
+            )
+        else:
+            actual = runner.train_step(
+                comparison_batch,
+                collect_diagnostics=False,
+            )
+        actual_rng = _rng_state(comparison_engine, device)
+
+        result_statistics = _result_pair_statistics(
+            actual,
+            expected,
+            rtol=rtol,
+            atol=atol,
+        )
+        gradient_statistics = _gradient_pair_statistics(
+            comparison_engine.model,
+            eager_engine.model,
+            rtol=rtol,
+            atol=atol,
+        )
+        rng_statistics = _tensor_pair_statistics(
+            [
+                (name, actual_rng[name], expected_rng[name])
+                for name in expected_rng
+            ],
+            rtol=0.0,
+            atol=0.0,
+        )
+        surfaces["result"].append(result_statistics)
+        surfaces["clipped_gradient"].append(gradient_statistics)
+        surfaces["rng"].append(rng_statistics)
+        if int(rng_statistics["outside_elements"]) != 0:
+            raise AssertionError(f"independent case {index} changed RNG continuation")
+        assert comparison_engine.global_step == eager_engine.global_step
+        assert comparison_engine.schedule.step_index == eager_engine.schedule.step_index
+
+        if index % state_stride == 0 or index + 1 == cases:
+            surfaces["parameters"].append(
+                _parameter_pair_statistics(
+                    comparison_engine.model,
+                    eager_engine.model,
+                    rtol=rtol,
+                    atol=atol,
+                )
+            )
+            surfaces["buffers"].append(
+                _buffer_pair_statistics(
+                    comparison_engine.model,
+                    eager_engine.model,
+                    rtol=rtol,
+                    atol=atol,
+                )
+            )
+            surfaces["optimizer"].append(
+                _optimizer_pair_statistics(
+                    comparison_engine,
+                    eager_engine,
+                    rtol=rtol,
+                    atol=atol,
+                )
+            )
+        if index == 0 or (index + 1) % 16 == 0 or index + 1 == cases:
+            print(
+                "independent_sample_progress",
+                json.dumps(
+                    {
+                        "case": index,
+                        "completed_cases": index + 1,
+                        "sample_slots": (index + 1) * batch_size,
+                        "phase": "identity" if start_step == 0 else "active",
+                        "gradient_max_abs": float(gradient_statistics["max_abs"]),
+                        "result_max_abs": float(result_statistics["max_abs"]),
+                        "rng_exact": int(rng_statistics["outside_elements"]) == 0,
+                        "capture_count": 0 if runner is None else runner.capture_count,
+                    },
+                    sort_keys=True,
+                ),
+            )
+
+    summary = {
+        "comparison": "eager" if eager_control else "cuda_graph",
+        "cases": cases,
+        "batch_size": batch_size,
+        "sample_slots": cases * batch_size,
+        "identity_cases": half,
+        "active_cases": cases - half,
+        "batch_tensor_count": batch_tensor_count,
+        "batch_element_count": batch_element_count,
+        "capture_count": 0 if runner is None else runner.capture_count,
+        "rtol": rtol,
+        "atol": atol,
+        "surfaces": {
+            name: _surface_distribution(rows) for name, rows in surfaces.items()
+        },
+    }
+    _write_optional_summary(summary)
+    print("independent_sample_summary", json.dumps(summary, sort_keys=True))
+
+
 def _run_long_stress_gate(*, steps: int, rtol: float, atol: float) -> None:
     """Compare many distinct batches, including the step-200 topology switch."""
 
     if steps <= 0:
         raise ValueError("long equivalence steps must be positive")
     device = torch.device("cuda")
-    batch_size = 4
+    batch_size = int(os.environ.get("CLEARVLA_EQUIV_LONG_BATCH_SIZE", "4"))
+    if batch_size <= 0:
+        raise ValueError("long equivalence batch size must be positive")
     eager_control = os.environ.get("CLEARVLA_EQUIV_LONG_EAGER_CONTROL") == "1"
     collect_failures = os.environ.get("CLEARVLA_EQUIV_LONG_COLLECT") == "1"
     eager_engine, _unused_eager_batch = _engine(device)
@@ -1138,7 +1621,9 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
     if steps <= 0:
         raise ValueError("long drift-statistics steps must be positive")
     device = torch.device("cuda")
-    batch_size = 4
+    batch_size = int(os.environ.get("CLEARVLA_EQUIV_LONG_BATCH_SIZE", "4"))
+    if batch_size <= 0:
+        raise ValueError("long drift-statistics batch size must be positive")
     eager_control = os.environ.get("CLEARVLA_EQUIV_LONG_EAGER_CONTROL") == "1"
     eager_engine, _unused_eager_batch = _engine(device)
     comparison_engine, _unused_comparison_batch = _engine(device)
@@ -1442,6 +1927,25 @@ def main() -> None:
     # gate; the tighter 2e-7 bound remains the CPU rewrite gate.
     gpu_rtol = 2e-5
     gpu_atol = 1e-6
+    if os.environ.get("CLEARVLA_EQUIV_CHECKPOINT_ONLY") == "1":
+        _run_checkpoint_resume_gate(rtol=gpu_rtol, atol=gpu_atol)
+        return
+    if os.environ.get("CLEARVLA_EQUIV_RUNNER_ONLY") == "1":
+        _run_production_runner_gate(rtol=gpu_rtol, atol=gpu_atol)
+        _run_topology_recapture_gate(rtol=gpu_rtol, atol=gpu_atol)
+        _run_checkpoint_resume_gate(rtol=gpu_rtol, atol=gpu_atol)
+        print("cuda_graph_runner_equivalence_ok")
+        return
+    if os.environ.get("CLEARVLA_EQUIV_INDEPENDENT_STATS") == "1":
+        independent_cases = int(
+            os.environ.get("CLEARVLA_EQUIV_INDEPENDENT_CASES", "256")
+        )
+        _run_independent_sample_statistics(
+            cases=independent_cases,
+            rtol=gpu_rtol,
+            atol=gpu_atol,
+        )
+        return
     long_steps = int(os.environ.get("CLEARVLA_EQUIV_LONG_STEPS", "0"))
     if os.environ.get("CLEARVLA_EQUIV_LONG_STATS") == "1":
         long_rtol = float(os.environ.get("CLEARVLA_EQUIV_LONG_RTOL", gpu_rtol))
@@ -1470,6 +1974,7 @@ def main() -> None:
     _run_gate(start_step=700, steps=2, rtol=gpu_rtol, atol=gpu_atol)
     _run_production_runner_gate(rtol=gpu_rtol, atol=gpu_atol)
     _run_topology_recapture_gate(rtol=gpu_rtol, atol=gpu_atol)
+    _run_checkpoint_resume_gate(rtol=gpu_rtol, atol=gpu_atol)
     print("cuda_graph_equivalence_ok")
 
 

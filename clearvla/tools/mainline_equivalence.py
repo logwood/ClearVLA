@@ -14,6 +14,7 @@ import importlib
 import importlib.util
 import random
 import sys
+import types
 from collections import Counter, OrderedDict, defaultdict
 from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
@@ -87,6 +88,18 @@ def _source_digest(source_root: Path) -> str:
     return digest.hexdigest()
 
 
+def _install_h5py_stub() -> None:
+    """Allow tensor-only captures in environments without the optional HDF5 wheel."""
+
+    try:
+        import h5py  # noqa: F401
+    except ModuleNotFoundError:
+        stub = types.ModuleType("h5py")
+        stub.File = type("File", (), {})
+        stub.Dataset = type("Dataset", (), {})
+        sys.modules["h5py"] = stub
+
+
 def _import_target(source_root: Path) -> dict[str, ModuleType]:
     source_root = source_root.resolve()
     policy_path = source_root / "clearvla" / "mainline" / "model" / "policy.py"
@@ -108,6 +121,7 @@ def _import_target(source_root: Path) -> dict[str, ModuleType]:
             "target source conflicts with already imported ClearVLA modules: "
             + ", ".join(conflicts[:8])
         )
+    _install_h5py_stub()
     sys.path.insert(0, str(source_root))
     names = {
         "config": "clearvla.mainline.config",
@@ -248,6 +262,13 @@ def _load_fixture(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _supported_dataclass_kwargs(cls: type[Any], values: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a shared fixture onto the ABI fields owned by one source version."""
+
+    supported = {field.name for field in fields(cls)}
+    return {name: value for name, value in values.items() if name in supported}
+
+
 def _training_batch(
     modules: Mapping[str, ModuleType], config: Any, payload: Mapping[str, Any]
 ) -> Any:
@@ -260,11 +281,20 @@ def _training_batch(
                 raw_rgb=tensors["raw_rgb"].clone(),
             ),
             history=api.ObservableHistory(
-                state=tensors["state"].clone(),
-                action_state=tensors["action_state"].clone(),
-                codec_gripper_boundary=tensors["codec_gripper_boundary"].clone(),
-                state_history=tensors["state_history"].clone(),
-                executed_action_history=tensors["executed_action_history"].clone(),
+                **_supported_dataclass_kwargs(
+                    api.ObservableHistory,
+                    {
+                        "state": tensors["state"].clone(),
+                        "action_state": tensors["action_state"].clone(),
+                        "codec_gripper_boundary": tensors[
+                            "codec_gripper_boundary"
+                        ].clone(),
+                        "state_history": tensors["state_history"].clone(),
+                        "executed_action_history": tensors[
+                            "executed_action_history"
+                        ].clone(),
+                    },
+                )
             ),
             goal=api.GoalCondition(
                 tokens=tensors["goal_tokens"].clone(),
