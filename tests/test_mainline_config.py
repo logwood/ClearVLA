@@ -6,6 +6,7 @@ from pathlib import Path
 
 from clearvla.mainline.config import ExperimentConfig, config_from_mapping, load_config
 from clearvla.mainline.model.component_contracts import ComponentSelection
+from clearvla.mainline.model.restored_bottom import _build_decoder_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -108,6 +109,13 @@ def test_geometry_gripper_candidate_is_explicitly_identified() -> None:
     assert selection.execution_bottom.endswith(
         "geometry_rms_floored_v1_gripper_six_channel_consensus_v1"
     )
+
+
+def test_bottom_ffn_expansion_controls_active_action_dit() -> None:
+    config = replace(ExperimentConfig(), bottom=replace(ExperimentConfig().bottom, ffn_expansion=3.0))
+    config.validate()
+    resolved = _build_decoder_config(config)
+    assert resolved.latent_cvae_ffn_expansion == 3.0
 
 
 def test_mainline_config_enforces_fixed_graph_boundaries() -> None:
