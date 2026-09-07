@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from clearvla.mainline.config import ExperimentConfig, config_from_mapping, load_config
+from clearvla.mainline.model.component_contracts import ComponentSelection
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -90,6 +91,23 @@ def test_mainline_config_rejects_legacy_or_unknown_switches() -> None:
         assert "unknown bottom fields" in str(error)
     else:
         raise AssertionError("the retired B-spine selector must not enter Schema30")
+
+
+def test_geometry_gripper_candidate_is_explicitly_identified() -> None:
+    config = load_config(
+        ROOT
+        / "configs"
+        / "mainline"
+        / "object_intent_dynamics_323_pen_geometry_gripper_v1.json"
+    )
+    config.validate()
+    assert config.top.geometry_ingress_mode == "rms_floored_v1"
+    assert config.bottom.gripper_decode_mode == "six_channel_consensus_v1"
+    selection = ComponentSelection.from_config(config)
+    assert selection.world.endswith("geometry_rms_floored_v1")
+    assert selection.execution_bottom.endswith(
+        "geometry_rms_floored_v1_gripper_six_channel_consensus_v1"
+    )
 
 
 def test_mainline_config_enforces_fixed_graph_boundaries() -> None:

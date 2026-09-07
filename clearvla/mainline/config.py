@@ -287,10 +287,19 @@ class TopConfig:
     proposal_summary_tokens: int = 3
     goal_condition_dropout: float = 0.05
     action_history_condition_dropout: float = 0.10
+    # Optional geometry-owner normalization for the larger Pen candidate.
+    # ``legacy`` is the recovery behavior; the candidate keeps exact-zero
+    # validity semantics while preventing a low-RMS geometry source from
+    # losing all of its W ingress before typed selection.
+    geometry_ingress_mode: str = "legacy"
 
     def validate(self) -> None:
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")
+        if self.geometry_ingress_mode not in {"legacy", "rms_floored_v1"}:
+            raise ValueError(
+                "top.geometry_ingress_mode must be legacy or rms_floored_v1"
+            )
         if (
             self.grounder_iterations <= 0
             or self.teacher_key_dim <= 0
@@ -348,6 +357,10 @@ class BottomConfig:
     # the continuous physical field; CALVIN owns an explicit two-class
     # command-state head whose argmax is mapped to {-1,+1} by the adapter.
     gripper_output_mode: str = "continuous"
+    # ``legacy_two_channel`` consumes only absolute and local-delta channels.
+    # The larger candidate uses a deterministic consensus of all six legacy
+    # gripper coordinates without changing the 18-D field or 7-D output ABI.
+    gripper_decode_mode: str = "legacy_two_channel"
 
     def validate(self) -> None:
         if self.flow_time_distribution != "v120_mirrored_beta_1_5_1":
@@ -410,6 +423,14 @@ class BottomConfig:
         if self.gripper_output_mode not in {"continuous", "calvin_binary_command"}:
             raise ValueError(
                 "bottom.gripper_output_mode must be continuous or calvin_binary_command"
+            )
+        if self.gripper_decode_mode not in {
+            "legacy_two_channel",
+            "six_channel_consensus_v1",
+        }:
+            raise ValueError(
+                "bottom.gripper_decode_mode must be legacy_two_channel or "
+                "six_channel_consensus_v1"
             )
 
 
@@ -612,6 +633,11 @@ class ExperimentConfig:
                     "CALVIN relative-command profile requires bottom.arm_flow_mode="
                     "relative_command_direct"
                 )
+            if self.bottom.gripper_decode_mode != "legacy_two_channel":
+                raise ValueError(
+                    "CALVIN binary command mode cannot select the continuous "
+                    "six-channel gripper decoder"
+                )
         else:
             if mode != "continuous":
                 raise ValueError(
@@ -628,6 +654,12 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        # Preserve the serialized baseline when the optional candidate is off.
+        # Non-default modes remain part of both training and deployment identity.
+        if self.top.geometry_ingress_mode == "legacy":
+            cast(dict[str, object], payload["top"]).pop("geometry_ingress_mode")
+        if self.bottom.gripper_decode_mode == "legacy_two_channel":
+            cast(dict[str, object], payload["bottom"]).pop("gripper_decode_mode")
         runtime = cast(dict[str, object], payload["runtime"])
         if self.runtime.deployment_flow_schedule is None:
             runtime.pop("deployment_flow_schedule")

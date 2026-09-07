@@ -1226,13 +1226,25 @@ def action_terms(
             codec_gripper_boundary=codec_gripper_boundary,
         )
     physical_delta_consistency = (physical_delta_rows * step_weight).mean()
-    clean_gripper_absolute = clean_parts.gripper_field[..., :1]
-    clean_gripper_local_delta = clean_parts.gripper_field[..., 1:2]
-    clean_gripper_cumulative = anchored_gripper_persistence(
-        clean_gripper_absolute,
-        clean_gripper_local_delta,
-        event_mask,
+    clean_gripper_absolute, clean_gripper_local_delta = codec.gripper_decode_local_operands(
+        clean_physical,
+        history.action_state.float(),
+        codec_gripper_boundary=codec_gripper_boundary,
     )
+    consensus_gripper = codec.gripper_decode_mode == "six_channel_consensus_v1"
+    if consensus_gripper:
+        # Match deployment: a single causal boundary, never a target-event
+        # reset. Event masks select supervision rows but cannot construct a
+        # trajectory the deployed model does not execute.
+        clean_gripper_cumulative = codec_gripper_boundary[:, None] + torch.cumsum(
+            clean_gripper_local_delta, dim=1
+        )
+    else:
+        clean_gripper_cumulative = anchored_gripper_persistence(
+            clean_gripper_absolute,
+            clean_gripper_local_delta,
+            event_mask,
+        )
     continuous_gripper_target = target.normalized[..., -1:].float()
     continuous_gripper_target_delta = delta[..., -1:].detach().float()
     transition_mask, persistence_mask = event_transition_persistence_masks(
@@ -1467,6 +1479,24 @@ def action_terms(
 
         gripper_private_metrics.update(
             {
+                "gripper_decode_mode_code": clean_physical.new_tensor(
+                    float(codec.gripper_decode_mode == "six_channel_consensus_v1"),
+                    dtype=torch.float32,
+                ),
+                "gripper_decode_absolute_correction_rms": (
+                    clean_gripper_absolute.detach().float()
+                    - clean_parts.gripper_field[..., :1].detach().float()
+                )
+                .square()
+                .mean()
+                .sqrt(),
+                "gripper_decode_delta_correction_rms": (
+                    clean_gripper_local_delta.detach().float()
+                    - clean_parts.gripper_field[..., 1:2].detach().float()
+                )
+                .square()
+                .mean()
+                .sqrt(),
                 "gripper_private_gate_signed_mean": gate.detach().float().mean(),
                 "gripper_private_gate_saturation_fraction": (
                     gate.detach().float().abs() >= 0.95
@@ -1539,6 +1569,11 @@ def action_terms(
                 clean_gripper_cumulative,
                 context_mask,
                 f"gradient_tensor_gripper_trajectory_delta_{context_name}_rms",
+            )
+            register_conditional_gradient(
+                clean_gripper_local_delta,
+                context_mask,
+                f"gradient_tensor_gripper_trajectory_local_delta_{context_name}_rms",
             )
     band_metrics: dict[str, Tensor] = {}
     start = 0

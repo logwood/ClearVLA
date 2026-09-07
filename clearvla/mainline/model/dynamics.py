@@ -303,13 +303,17 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         action_dim: int = 7,
         heads: int,
         normalization_floor: float = 0.25,
+        geometry_ingress_mode: str = "legacy",
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
         self.content_dim = int(content_dim)
         self.normalization_floor = float(normalization_floor)
+        self.geometry_ingress_mode = str(geometry_ingress_mode)
         if self.normalization_floor <= 0.0:
             raise ValueError("W typed normalization floor must be positive")
+        if self.geometry_ingress_mode not in {"legacy", "rms_floored_v1"}:
+            raise ValueError("W geometry ingress mode is invalid")
         self.object_content = nn.Linear(content_dim, hidden, bias=False)
         self.object_semantic = nn.Linear(route_dim, hidden, bias=False)
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
@@ -412,6 +416,25 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             semantic,
             appearance,
         )
+
+    def _geometry_ingress(self, value: Tensor) -> tuple[Tensor, Tensor]:
+        """Normalize geometry direction without manufacturing support or values.
+
+        The candidate acts before producer-owned validity is applied.  Thus a
+        weak/invalid object cannot regain availability through normalization.
+        No centering is used: a constant geometry vector is still a physical
+        owner, and exact zero remains exact zero.  The RMS floor bounds the
+        Jacobian gain by ``1 / normalization_floor``.
+        """
+
+        if self.geometry_ingress_mode == "legacy":
+            return value, value.new_ones((*value.shape[:-1], 1), dtype=torch.float32)
+        value_f = value.float()
+        denominator = (
+            value_f.square().mean(dim=-1, keepdim=True)
+            + self.normalization_floor**2
+        ).sqrt()
+        return (value_f / denominator).to(dtype=value.dtype), denominator
 
     @staticmethod
     def _run_typed_block(
@@ -530,10 +553,19 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         # goal-free facts.  The interval coordinate is a zero-mean,
         # zero-preserving modulation of the same physical owner; it cannot
         # create a typed value from a missing fact.
+        geometry_raw = facts.geometry
+        if collect_diagnostics:
+            geometry_raw = geometry_raw.reshape_as(geometry_raw)
+            register_gradient_rms_metric(
+                geometry_raw,
+                gradient_metrics,
+                "gradient_tensor_w_geometry_raw_fact_rms",
+            )
+        geometry_source, geometry_denominator = self._geometry_ingress(geometry_raw)
         typed_sources = (
             facts.semantic * facts.validity.to(dtype=facts.semantic.dtype),
             facts.appearance * facts.validity.to(dtype=facts.appearance.dtype),
-            facts.geometry * facts.validity.to(dtype=facts.geometry.dtype),
+            geometry_source * facts.validity.to(dtype=geometry_source.dtype),
         )
         typed_source_views: list[Tensor] = []
         if collect_diagnostics:
@@ -573,6 +605,27 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             return base, typed_common, typed_interval, {}
         metrics: dict[str, Tensor] = {
             **gradient_metrics,
+            "object_w_geometry_ingress_mode_code": interval.new_tensor(
+                float(self.geometry_ingress_mode == "rms_floored_v1"),
+                dtype=torch.float32,
+            ),
+            "object_w_geometry_raw_fact_rms": geometry_raw.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_geometry_normalized_fact_rms": geometry_source.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_w_geometry_ingress_norm_denominator_min": geometry_denominator.detach()
+            .float()
+            .amin(),
+            "object_w_geometry_ingress_norm_gain_max": geometry_denominator.detach()
+            .float()
+            .reciprocal()
+            .amax(),
             "object_w_goal_direct_ingress": interval.new_zeros((), dtype=torch.float32),
             "object_w_coarse_hidden_direct_ingress": interval.new_zeros(
                 (), dtype=torch.float32

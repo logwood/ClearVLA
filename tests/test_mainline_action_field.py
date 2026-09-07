@@ -556,6 +556,50 @@ def test_gripper_decode_branches_are_the_exact_deployed_operands() -> None:
     )
 
 
+def test_six_channel_gripper_consensus_decodes_the_complete_legacy_chart() -> None:
+    codec = PhysicalActionFieldCodec(
+        action_dim=7,
+        horizon=24,
+        gripper_field_dim=6,
+        decode_delta_blend=0.25,
+        gripper_decode_mode="six_channel_consensus_v1",
+    )
+    state = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4]])
+    action = torch.zeros(1, 24, 7)
+    action[..., -1] = torch.tensor(
+        [[0.4, 0.5, 0.45, 0.2, -0.1, -0.05, 0.0, 0.1, 0.0, -0.2, -0.2, 0.3,
+          0.35, 0.1, 0.0, -0.1, 0.2, 0.2, 0.0, -0.1, 0.0, 0.15, 0.1, 0.0]]
+    )
+    field = codec.encode(action, state)
+    decoded = codec.decode(field, state)
+    torch.testing.assert_close(decoded, action, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(
+        codec.delta_consistency(field, state, action),
+        torch.zeros(1, 24),
+        atol=1e-6,
+        rtol=1e-6,
+    )
+
+
+def test_six_channel_gripper_consensus_reaches_all_field_coordinates() -> None:
+    codec = PhysicalActionFieldCodec(
+        action_dim=7,
+        horizon=24,
+        gripper_field_dim=6,
+        decode_delta_blend=0.25,
+        gripper_decode_mode="six_channel_consensus_v1",
+    )
+    field = torch.zeros(1, 24, codec.physical_dim, requires_grad=True)
+    state = torch.zeros(1, 7)
+    decoded = codec.decode(field, state)
+    decoded[..., -1].sum().backward()
+    assert field.grad is not None
+    # The consensus uses all six legacy coordinates, while the arm field is
+    # untouched by the gripper decoder.
+    assert torch.count_nonzero(field.grad[..., 12:18]) == 24 * 6
+    assert torch.count_nonzero(field.grad[..., :12]) == 0
+
+
 def test_deployed_gripper_delta_branch_retains_pre_event_causal_vjp() -> None:
     codec = _codec()
     field = torch.zeros(1, 24, codec.physical_dim, requires_grad=True)

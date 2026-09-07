@@ -1310,6 +1310,10 @@ class OutletAdapter(nn.Module):
         return self.codec.decode_delta_blend
 
     @property
+    def gripper_decode_mode(self) -> str:
+        return self.codec.gripper_decode_mode
+
+    @property
     def arm_flow_mode(self) -> str:
         return self.codec.arm_flow_mode
 
@@ -1478,6 +1482,19 @@ class OutletAdapter(nn.Module):
         codec_gripper_boundary: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         return self.codec.gripper_decode_branches(
+            field,
+            action_state,
+            codec_gripper_boundary=codec_gripper_boundary,
+        )
+
+    def gripper_decode_local_operands(
+        self,
+        field: Tensor,
+        action_state: Tensor,
+        *,
+        codec_gripper_boundary: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        return self.codec.gripper_decode_local_operands(
             field,
             action_state,
             codec_gripper_boundary=codec_gripper_boundary,

@@ -35,6 +35,7 @@ class PhysicalActionFieldCodec(nn.Module):
         gripper_field_dim: int = 6,
         decode_delta_blend: float = 0.25,
         arm_flow_mode: str = "legacy_independent",
+        gripper_decode_mode: str = "legacy_two_channel",
     ) -> None:
         super().__init__()
         self.action_dim = int(action_dim)
@@ -42,6 +43,7 @@ class PhysicalActionFieldCodec(nn.Module):
         self.gripper_field_dim = int(gripper_field_dim)
         self.decode_delta_blend = float(decode_delta_blend)
         self.arm_flow_mode = str(arm_flow_mode)
+        self.gripper_decode_mode = str(gripper_decode_mode)
         if self.action_dim != 7:
             raise ValueError("the formal physical action chart requires native action_dim=7")
         if self.horizon != 24:
@@ -57,6 +59,11 @@ class PhysicalActionFieldCodec(nn.Module):
             raise ValueError(
                 "arm_flow_mode must be legacy_independent or relative_command_direct"
             )
+        if self.gripper_decode_mode not in {
+            "legacy_two_channel",
+            "six_channel_consensus_v1",
+        }:
+            raise ValueError("gripper_decode_mode is invalid")
         difference = torch.eye(self.horizon, dtype=torch.float64)
         if self.horizon > 1:
             difference[1:, :-1] -= torch.eye(self.horizon - 1, dtype=torch.float64)
@@ -66,6 +73,32 @@ class PhysicalActionFieldCodec(nn.Module):
         )
         self.register_buffer(
             "arm_projection_inverse", torch.linalg.inv(gram).to(torch.float32), persistent=False
+        )
+        # In the six-channel candidate, the legacy fields are redundant
+        # observations of [absolute, local_delta, absolute_delta_magnitude]:
+        #   [g, d, g-anchor, g-d, |d|, (|d|+d)/2].
+        # A fixed least-squares left inverse lets every supervised coordinate
+        # contribute to deployed g/d.  It adds no parameter, event threshold,
+        # learned gate, source-noise change or temporal basis.
+        gripper_analysis = torch.tensor(
+            (
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (1.0, -1.0, 0.0),
+                (0.0, 0.0, 1.0),
+                (0.0, 0.5, 0.5),
+            ),
+            dtype=torch.float64,
+        )
+        gripper_inverse = torch.linalg.solve(
+            gripper_analysis.T @ gripper_analysis,
+            gripper_analysis.T,
+        )
+        self.register_buffer(
+            "gripper_consensus_projection",
+            gripper_inverse[:2].to(torch.float32),
+            persistent=False,
         )
 
     @property
@@ -286,18 +319,65 @@ class PhysicalActionFieldCodec(nn.Module):
         observable before the chunk and therefore available at deployment.
         """
 
-        self._validate_field(field, action_state)
-        parts = self.split(field)
+        absolute, local_delta = self.gripper_decode_local_operands(
+            field,
+            action_state,
+            codec_gripper_boundary=codec_gripper_boundary,
+        )
         gripper = self._resolve_codec_gripper_boundary(
             action_state,
             codec_gripper_boundary,
             reference=field,
         )
-        absolute = parts.gripper_field[..., :1]
         cumulative_delta = gripper[:, None] + torch.cumsum(
-            parts.gripper_field[..., 1:2], dim=1
+            local_delta, dim=1
         )
         return absolute, cumulative_delta
+
+    def gripper_decode_local_operands(
+        self,
+        field: Tensor,
+        action_state: Tensor,
+        *,
+        codec_gripper_boundary: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Return the row-local absolute/delta operands used by the codec.
+
+        The default is byte-for-byte the recovered two-channel read.  The
+        candidate projects the complete six-coordinate legacy chart onto its
+        three algebraic owners, then retains absolute and signed local delta.
+        Only the known online anchor is added to the anchor-relative field.
+        """
+
+        self._validate_field(field, action_state)
+        gripper_field = self.split(field).gripper_field
+        if self.gripper_decode_mode == "legacy_two_channel":
+            return gripper_field[..., :1], gripper_field[..., 1:2]
+        anchor = self._resolve_codec_gripper_boundary(
+            action_state,
+            codec_gripper_boundary,
+            reference=field,
+        )[:, None]
+        with torch.autocast(device_type=field.device.type, enabled=False):
+            shifted = torch.cat(
+                (
+                    gripper_field[..., :2].float(),
+                    gripper_field[..., 2:3].float() + anchor.float(),
+                    gripper_field[..., 3:].float(),
+                ),
+                dim=-1,
+            )
+            operands = torch.einsum(
+                "dc,btc->btd",
+                self.gripper_consensus_projection.to(
+                    device=field.device, dtype=torch.float32
+                ),
+                shifted,
+            )
+        return (
+            operands[..., :1].to(dtype=field.dtype),
+            operands[..., 1:2].to(dtype=field.dtype),
+        )
 
     def delta_consistency(
         self,
@@ -326,9 +406,12 @@ class PhysicalActionFieldCodec(nn.Module):
             codec_gripper_boundary,
         )
         actual_delta = decoded_action - boundary
-        field_delta = torch.cat(
-            (parts.arm_delta, parts.gripper_field[..., 1:2]), dim=-1
+        _, gripper_local_delta = self.gripper_decode_local_operands(
+            field,
+            action_state,
+            codec_gripper_boundary=codec_gripper_boundary,
         )
+        field_delta = torch.cat((parts.arm_delta, gripper_local_delta), dim=-1)
         return F.smooth_l1_loss(actual_delta, field_delta, reduction="none").mean(dim=-1)
 
     def project_arm_tangent(self, arm_field: Tensor) -> tuple[Tensor, Tensor]:

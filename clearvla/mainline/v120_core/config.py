@@ -32,6 +32,9 @@ class V362PolicyConfig:
     # two-class command-state readout and never consumes that field as a
     # command source.
     gripper_output_mode: str = "continuous"
+    # Active mainline consensus uses all six fields as deployed operands.
+    # This controls their shared gripper-private read, not a second codec.
+    gripper_decode_mode: str = "legacy_two_channel"
     # Historical runs sampled arm_abs/arm_delta independently. New runs can
     # instead sample one native arm trajectory and map it into the redundant
     # [absolute, delta] coordinates used by the policy.
@@ -84,6 +87,14 @@ class V362PolicyConfig:
             raise ValueError(
                 "gripper_output_mode must be continuous or calvin_binary_command"
             )
+        if self.gripper_decode_mode not in {"legacy_two_channel", "six_channel_consensus_v1"}:
+            raise ValueError("invalid gripper_decode_mode")
+        if self.gripper_decode_mode == "six_channel_consensus_v1" and (
+            self.gripper_field_dim != 6
+            or self.gripper_field_mode != "legacy_handcrafted"
+            or self.gripper_output_mode != "continuous"
+        ):
+            raise ValueError("gripper consensus requires the continuous six-field chart")
         if str(self.arm_flow_mode) not in {
             "legacy_independent",
             "manifold_native",

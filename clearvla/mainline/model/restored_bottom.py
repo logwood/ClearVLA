@@ -71,6 +71,7 @@ def _build_decoder_config(config: ExperimentConfig):
         action_basis_tokens=dims.action_basis_tokens,
         gripper_field_dim=bottom.gripper_field_dim,
         gripper_output_mode=bottom.gripper_output_mode,
+        gripper_decode_mode=bottom.gripper_decode_mode,
         arm_flow_mode=bottom.arm_flow_mode,
         physical_decode_delta_blend=bottom.physical_decode_delta_blend,
         dropout=bottom.dropout,

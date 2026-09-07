@@ -169,6 +169,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             gripper_field_dim=config.bottom.gripper_field_dim,
             decode_delta_blend=config.bottom.physical_decode_delta_blend,
             arm_flow_mode=config.bottom.arm_flow_mode,
+            gripper_decode_mode=config.bottom.gripper_decode_mode,
         )
         raw_top = ObjectIntentDynamicsTop(
             hidden=dims.hidden_size,
@@ -187,6 +188,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             role_host_depth=top.role_host_depth,
             role_host_expansion=top.role_host_ffn_expansion,
             role_host_dropout=top.role_host_dropout,
+            geometry_ingress_mode=top.geometry_ingress_mode,
             core_config=raw_observation.v120_config,
         )
         raw_history_proposal = HistoryActionProposal(

@@ -184,6 +184,10 @@ class ActionOnlyPhysicalVelocityHead(nn.Module):
         self.arm_manifold = str(config.arm_flow_mode) == "manifold_native"
         self.arm_direct = str(config.arm_flow_mode) == "relative_command_direct"
         self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
+        self.all_gripper_fields_private = (
+            getattr(config, "gripper_decode_mode", "legacy_two_channel")
+            == "six_channel_consensus_v1"
+        )
         if self.arm_manifold:
             self.arm_native = nn.Linear(h, ad)
             self.arm_abs = None
@@ -247,7 +251,12 @@ class ActionOnlyPhysicalVelocityHead(nn.Module):
                 self.grip_delta(gripper_read),
             ]
             if int(self.grip_extra.out_features) > 0:
-                grip_parts.append(self.grip_extra(base_read))
+                # In the consensus chart these four fields also affect the
+                # deployed command. They must share its private owner rather
+                # than bypassing it through the arm/base-only read.
+                grip_parts.append(
+                    self.grip_extra(gripper_read if self.all_gripper_fields_private else base_read)
+                )
             grip_field = torch.cat(grip_parts, dim=-1)
         return torch.cat([arm_field, grip_field], dim=-1), gripper_state, gate
 

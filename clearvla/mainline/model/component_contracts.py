@@ -32,6 +32,26 @@ COMPONENT_ABI_REVISION = "mainline-modular-v1"
 BASELINE_EXECUTION_BOTTOM = "v120_evidence_mmdit_v1"
 
 
+def _world_identity(config: "ExperimentConfig") -> str:
+    base = "object_candidate_w12_typed_interval_qk_v1"
+    if str(config.top.geometry_ingress_mode) == "rms_floored_v1":
+        return base + "_geometry_rms_floored_v1"
+    return base
+
+
+def _execution_bottom_identity(config: "ExperimentConfig") -> str:
+    geometry = str(config.top.geometry_ingress_mode)
+    gripper = str(config.bottom.gripper_decode_mode)
+    if geometry == "legacy" and gripper == "legacy_two_channel":
+        return BASELINE_EXECUTION_BOTTOM
+    suffix = []
+    if geometry == "rms_floored_v1":
+        suffix.append("geometry_rms_floored_v1")
+    if gripper == "six_channel_consensus_v1":
+        suffix.append("gripper_six_channel_consensus_v1")
+    return BASELINE_EXECUTION_BOTTOM + "_" + "_".join(suffix)
+
+
 @dataclass(frozen=True)
 class ComponentSelection:
     """Exactly one implementation selected for every replaceable slot."""
@@ -67,6 +87,8 @@ class ComponentSelection:
             terminal = "continuous_physical_v1"
             outlet = "pen_7d_continuous_v1"
         selection = cls(
+            world=_world_identity(config),
+            execution_bottom=_execution_bottom_identity(config),
             terminal_controller=terminal,
             outlet_adapter=outlet,
         )
@@ -113,14 +135,21 @@ class ComponentSelection:
         profile = str(config.data.data_profile)
         if profile == "calvin_relative_7d_v1":
             return cls(
+                world=_world_identity(config),
+                execution_bottom=_execution_bottom_identity(config),
                 terminal_controller="calvin_binary_command_v1",
                 outlet_adapter="calvin_7d_binary_v1",
             )
         if profile == "rdt_right_arm_action_chart_v1":
             return cls(
+                world=_world_identity(config),
+                execution_bottom=_execution_bottom_identity(config),
                 outlet_adapter="rdt_right_arm_7d_v1",
             )
-        return cls()
+        return cls(
+            world=_world_identity(config),
+            execution_bottom=_execution_bottom_identity(config),
+        )
 
     def as_dict(self) -> dict[str, str]:
         return {
