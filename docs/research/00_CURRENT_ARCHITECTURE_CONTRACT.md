@@ -1,6 +1,6 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-06
+Updated: 2026-09-07
 
 This checkout is the Schema30/raw-only consolidation line. Its behavior
 baseline is Schema28-core recovery, carried by the Schema30 manifest/ABI and
@@ -11,11 +11,13 @@ representation experiments remain recoverable from Git history, but are not
 part of the active source closure or release identity.
 
 This local candidate additionally carries the W `typed_interval_qk_v1` repair,
-S current-row/diagnostic-invariance fixes and the policy-relative typed local
-precision candidate below. It also rejects non-finite loss before backward and
-requires deployment manifests to match the active implementation. It has not
-been deployed and is not a learned-performance release. The prior recovery
-remains the behavior baseline. Current coverage and limitations are in
+S current-row/diagnostic-invariance fixes and recovery-style independent typed
+local precision reads. The rejected policy-relative subtraction is removed.
+It also rejects non-finite loss before backward and
+requires deployment manifests to match the active implementation. It is an
+experimental source identity, not a learned-performance release. The prior
+recovery remains the behavior baseline; deployment state belongs in the rolling
+handoff. Current coverage and limitations are in
 [`auxiliary/MAINLINE_END_TO_END_AUDIT.md`](auxiliary/MAINLINE_END_TO_END_AUDIT.md).
 
 The user-selected Pen candidate combines these local repairs with Q5/Q5 in
@@ -23,8 +25,10 @@ The user-selected Pen candidate combines these local repairs with Q5/Q5 in
 The generic config retains implicit uniform E5 for the original replay
 contract; this is not a restriction on using Q5 in the new Pen candidate.
 Training time sampling, losses and the single-velocity-pass lifecycle are
-unchanged. Prior Pen replay showed small RMSE gains with a small event-F1
-tradeoff; benefit of the combined freshly trained candidate is not yet known.
+unchanged. This successor changes only local P2 reading relative to `5dbe5ee`;
+S, W, Q5, router, codec and all loss weights are held fixed. Its learned
+behavior remains to be established by fresh training, not by an old checkpoint
+loaded under the new reading semantics.
 
 This is the compact source of truth for the active independent mainline. Read
 it before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
@@ -44,7 +48,7 @@ Historical experiment names never select current semantics.
 capability:             object_intent_dynamics_323
 manifest schema:        30
 layout schema:          2 (atomic modular owner layout)
-manifest digest:        183045c232d64d4169f551fae5a7665835d3069174895b3b02188478e8953675
+manifest digest:        f37b245f5b074fac43629371ea9647a4acaa64a4e3cf7d82c64a80c12926d8b4
 active source identity: Schema28-core recovery + local raw/W/S/P2 candidate; not a deployed release
 historical Schema30 source: 3fef2fc0dce297f600c813307c998f587cca1ca3
 branch:                 codex/remove-bspine-keep-solver-20260906 (local integration candidate)
@@ -63,8 +67,8 @@ checkpoint validation: scripts/validate_mainline_checkpoint.sh (read-only)
 config:                 configs/mainline/object_intent_dynamics_323.json
 ```
 
-Release state: local implementation/testing only; no current candidate commit,
-push, checkpoint migration or training launch. This isolated checkout still
+Release state: a fresh Pen experiment, not an accepted behavior release.
+The verified commit and process state are in the rolling handoff. This isolated checkout still
 contains the earlier CALVIN `relative_command_direct` adapter. The independently
 dirty root has newer shared-codec/W-facing CALVIN adapter and data repairs; this
 checkout is not their replacement or the authority on remote process state.
@@ -192,16 +196,17 @@ Only temporal and state-change P3 lanes own zero-null choices, through separate
 invocations of one shared reader. The Evidence MMDiT, continuous capacity and
 execution-value machinery remain intact.
 
-Inside the static factual reader, the local typed-precision candidate uses
-`q_typed = q_policy + typed_offset` and projects `read_typed - read_policy`
-within each modality before the existing optional router. Semantic reads only
-detail differences; appearance only RGB; geometry combines both; horizon
-uses their contrast. Protected factual mean and policy precision reads remain
-outside the router and unchanged. Equal reads or zero typed offsets give zero
-optional innovation, and empty RGB/detail gives exact-zero output. This adds
-no attention call or parameter. Differences are formed in FP32 before ordinary
-autocast projections. It does not change the separate W-effect P2 reader in
-`compiler.py`, nor prove that learned action/gripper RMSE will improve.
+Inside the static factual reader, local typed precision uses independent
+owner queries and values, matching the Schema28-recovery reader. Semantic
+reads learned detail, appearance reads RGB, geometry combines both lanes,
+and horizon uses their contrast. No policy query is added to optional queries
+and no policy read is subtracted before optional output projections. Protected
+factual mean and policy precision remain outside the unchanged router.
+Empty RGB/detail still gives exact-zero output; zero selector metadata is
+not absent pixel evidence and does not require zero output. Independent-read
+identity is explicit despite unchanged state shapes. No attention call,
+parameter, gain or loss is added. The W-effect P2 reader in `compiler.py`
+is unchanged. Do not confuse restored signal access with proven task utility.
 
 ### Training-only Teacher and training call graph
 

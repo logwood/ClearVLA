@@ -42,7 +42,7 @@ class ComponentSelection:
     grounding: str = "progressive_g123_dense_v1"
     intent: str = "stateless_object_intent_current_once_diag_invariant_v1"
     world: str = "object_candidate_w12_typed_interval_qk_v1"
-    p1: str = "v120_factual_policy_relative_precision_dynamic_p1_v1"
+    p1: str = "v120_factual_independent_precision_dynamic_p1_v1"
     policy_compiler: str = "object_p2_p3_v1"
     transition: str = "controlled_transition_v1"
     execution_bottom: str = BASELINE_EXECUTION_BOTTOM

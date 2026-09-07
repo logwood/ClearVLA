@@ -73,16 +73,28 @@ resumed, and repaired RDT runs must also start fresh.
 
 ## Current decision order
 
-### End-to-end static audit candidate (2026-09-06)
+### Local P2 independent-read trial (2026-09-07)
 
-The local Pen integration candidate now includes S's duplicate-current-row
-repair, diagnostic-invariant S attention, the existing W interval-Q/K repair,
-policy-relative optional local precision, a pre-backward finite-loss check and
-active-manifest deployment validation. It has not been deployed. Source
-coverage, reverse-regression evidence and exact limitations are maintained in
+The complete `5dbe5ee` Pen run reached E8/22768. Its action/arm/gripper RMSE
+was 0.0792505 / 0.0572516 / 0.155878 versus recovery 0.0729068 / 0.0554275 /
+0.137020. Decoded event recall was 0.21518 versus 0.30435; local P2 routed
+delta was 5.60e-5 versus 4.02e-3. These paired observations motivate the
+independent-read trial but do not uniquely attribute all regression to P2.
+The next candidate restores only the recovery local reader's independent
+queries and typed values; S/current-row, diagnostic invariance, W interval-Q/K,
+Q5, loss/codec/router settings, and one-forward training remain fixed.
+It starts fresh; no old checkpoint is loaded under new P2 semantics. A separate
+same-checkpoint E5/Q5 read-only comparison uses the original source.
+Local acceptance: 329 tests passed; one CUDA-only regression is deferred to
+the server. The restored local reader matches recovery FP32/BF16 forward,
+all parameter/input VJPs and diagnostics exactly; the previous candidate's
+protected carrier is unchanged. Active source delta is limited to the reader,
+manifest and component-selection identity. This is numerical/interface
+acceptance only, not a performance result.
+Prior source-review coverage and limitations are maintained in
 [`auxiliary/MAINLINE_END_TO_END_AUDIT.md`](auxiliary/MAINLINE_END_TO_END_AUDIT.md).
-Static repairs do not wait on another checkpoint/shuffle panel. The local P2
-representation change is a candidate, not proven RMSE recovery. Its behavior,
+Static repairs do not wait on another checkpoint/shuffle panel. Restoring P2
+reads is not proven RMSE recovery or a complete solution to weak routing. Its behavior,
 the 24-to-48 action-conditioning coverage and residual action/W mismatch remain
 open. The sparse S history packing still does not claim exact frame alignment.
 

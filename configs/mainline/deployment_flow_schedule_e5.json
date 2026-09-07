@@ -1,0 +1,22 @@
+{
+  "deployment_flow_schedule": "clearvla.mainline.deployment_flow_schedule",
+  "schema_version": 1,
+  "method": "euler",
+  "endpoint_policy": "external_t1_head",
+  "initial_state_policy": "reuse_exact_initial",
+  "cache_boundary_policy": "one_w_rebuild_no_history",
+  "proposal": {
+    "schedule": "clearvla.flow_schedule",
+    "schema_version": 1,
+    "kind": "uniform",
+    "boundaries": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    "parameters": {"steps": 5}
+  },
+  "refined": {
+    "schedule": "clearvla.flow_schedule",
+    "schema_version": 1,
+    "kind": "uniform",
+    "boundaries": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    "parameters": {"steps": 5}
+  }
+}

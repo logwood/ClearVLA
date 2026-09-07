@@ -1,6 +1,10 @@
+import json
+from pathlib import Path
+
 from clearvla.mainline.config import load_config
 from clearvla.mainline.manifest import ARCHITECTURE_MANIFEST
 from clearvla.mainline.runtime.deployment import deployment_flow_schedule
+from clearvla.mainline.runtime.flow_schedule import DeploymentFlowSchedule
 
 
 def test_new_pen_candidate_keeps_q5_without_changing_training_contract():
@@ -22,3 +26,8 @@ def test_new_pen_candidate_keeps_q5_without_changing_training_contract():
     right["runtime"].pop("deployment_flow_schedule")
     assert left == right
     assert not any("spine" in key for key in selected.as_dict()["bottom"])
+
+
+def test_explicit_e5_replay_preset_is_exact_legacy_schedule():
+    payload = json.loads(Path("configs/mainline/deployment_flow_schedule_e5.json").read_text())
+    assert DeploymentFlowSchedule.from_dict(payload) == DeploymentFlowSchedule.uniform_five()

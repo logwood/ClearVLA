@@ -71,7 +71,7 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
     )
     assert (
         components.top
-        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3_schema28_core_recovery_s_current_once_diag_invariant_p2_policy_relative_precision_v1_typed_interval_qk_v1"
+        == "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3_schema28_core_recovery_s_current_once_diag_invariant_p2_independent_precision_v1_typed_interval_qk_v1"
     )
     assert (
         components.bottom
