@@ -87,6 +87,9 @@ def _run(args: argparse.Namespace) -> None:
     from test_mainline_policy import _batch, _config  # type: ignore[import-not-found]
 
     from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
+    from clearvla.mainline.training.acceleration_adapters import (
+        MainlineTrainingAccelerationAdapter,
+    )
     from clearvla.mainline.training.acceleration_contract import (
         resolve_training_acceleration_adapter,
     )
@@ -107,6 +110,9 @@ def _run(args: argparse.Namespace) -> None:
         if device.type == "cuda":
             torch.cuda.manual_seed_all(9170)
         model = ClearVLAMainlinePolicy(config).to(device).train()
+        adapter = resolve_training_acceleration_adapter(model)
+        if adapter.name == "generic-static-v1":
+            model.training_acceleration_adapter = MainlineTrainingAccelerationAdapter()
         optimizer, _ = build_optimizer(model, config)
         schedule = WarmupCosineSchedule(
             optimizer,
