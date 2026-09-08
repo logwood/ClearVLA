@@ -338,13 +338,18 @@ def apply_training_compile_plan(
             original = module.forward
             had_instance_method = "forward" in module.__dict__
             original_instance_method = module.__dict__.get("forward")
-            compiled = torch.compile(
-                original,
-                dynamic=region.dynamic,
-                fullgraph=region.fullgraph,
-                mode=region.mode,
-                options=dict(options),
-            )
+            compile_kwargs: dict[str, Any] = {
+                "dynamic": region.dynamic,
+                "fullgraph": region.fullgraph,
+            }
+            # PyTorch rejects even an empty ``options`` mapping together with
+            # ``mode``.  Keep the two forms mutually exclusive at the call
+            # boundary as well as in the declarative plan validator.
+            if region.mode is not None:
+                compile_kwargs["mode"] = region.mode
+            elif options:
+                compile_kwargs["options"] = dict(options)
+            compiled = torch.compile(original, **compile_kwargs)
             snapshot_transforms(module)
             installed = _install_method(
                 module,
