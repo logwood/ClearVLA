@@ -40,6 +40,14 @@ except ModuleNotFoundError:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--config-factory",
+        default="_config",
+        help=(
+            "Factory in tests/test_mainline_policy.py used to construct the "
+            "version-local profile config (for example _bspine_config for Pen)."
+        ),
+    )
     parser.add_argument("--mode", choices=("eager", "graph"), required=True)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--steps", type=int, default=8)
@@ -135,7 +143,18 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("CUDA is required for the remote profile")
     sys.path.insert(0, str(root))
     sys.path.insert(0, str(root / "tests"))
-    from test_mainline_policy import _batch, _config  # type: ignore[import-not-found]
+    import test_mainline_policy as policy_test  # type: ignore[import-not-found]
+
+    _batch = policy_test._batch
+    try:
+        config_factory = getattr(policy_test, args.config_factory)
+    except AttributeError as error:
+        raise ValueError(
+            f"config factory {args.config_factory!r} is absent from "
+            f"{root / 'tests' / 'test_mainline_policy.py'}"
+        ) from error
+    if not callable(config_factory):
+        raise TypeError(f"config factory {args.config_factory!r} is not callable")
 
     from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
     from clearvla.mainline.training.acceleration_adapters import (
@@ -155,7 +174,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         graph_runner_cls = CudaGraphTrainingStepRunner
 
     _seed(args.seed)
-    config = _config()
+    config = config_factory()
     if args.dtype != "auto" and str(config.runtime.compute_dtype) != args.dtype:
         config = dataclasses.replace(
             config,
@@ -259,6 +278,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "steps": int(args.steps),
         "device": torch.cuda.get_device_name(0),
         "torch": torch.__version__,
+        "config_factory": str(args.config_factory),
         "seconds": durations,
         "median_seconds_per_step": median,
         "samples_per_second": float(args.batch_size / median),

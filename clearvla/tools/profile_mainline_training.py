@@ -16,6 +16,7 @@ makes the cost visible without changing the production default.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import math
 import random
@@ -33,6 +34,9 @@ from clearvla.mainline.config import ExperimentConfig, load_config
 from clearvla.mainline.data.loading import load_mainline_data, to_training_batch
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.runtime.numerics import resolve_compute_dtype
+from clearvla.mainline.training.acceleration_adapters import (
+    MainlineTrainingAccelerationAdapter,
+)
 from clearvla.mainline.training.acceleration_contract import (
     resolve_training_acceleration_adapter,
     resolve_training_compile_plan,
@@ -276,11 +280,30 @@ def _finite_float(value: Any) -> float:
     return result
 
 
+def _bottom_module(model: ClearVLAMainlinePolicy) -> Any:
+    """Resolve the execution bottom across modular and legacy layouts."""
+
+    execution_bottom = getattr(model, "execution_bottom", None)
+    if execution_bottom is not None:
+        return execution_bottom
+    bottom = getattr(model, "bottom", None)
+    if bottom is None:
+        raise RuntimeError("model has no execution bottom")
+    return bottom
+
+
+def _decoder_module(model: ClearVLAMainlinePolicy) -> Any:
+    decoder = getattr(_bottom_module(model), "decoder", None)
+    if decoder is None:
+        raise RuntimeError("model execution bottom has no decoder")
+    return decoder
+
+
 def _compile_mmdit_blocks(model: ClearVLAMainlinePolicy, *, mode: str) -> float:
     """Compile the repeated action blocks without wrapping the parent module."""
 
     started = time.perf_counter()
-    decoder = model.execution_bottom.decoder
+    decoder = _decoder_module(model)
     blocks = tuple(decoder.blocks)
     if not blocks:
         raise RuntimeError("cannot compile an empty MMDiT block list")
@@ -320,7 +343,7 @@ def _compile_execution_submodules(model: ClearVLAMainlinePolicy, *, mode: str) -
     """Compile recurrent execution tensor subgraphs without wrapping the decoder."""
 
     started = time.perf_counter()
-    controller = model.execution_bottom.decoder.execution_controller
+    controller = _decoder_module(model).execution_controller
     if controller is None:
         raise RuntimeError("execution controller is disabled in this profile")
     for module in (controller, controller.value_reader):
@@ -337,14 +360,23 @@ def _compile_mainline_blocks(model: ClearVLAMainlinePolicy, *, mode: str) -> flo
     """Compile the repeated tensor-only blocks around the online graph."""
 
     started = time.perf_counter()
-    modules: list[torch.nn.Module] = [
-        *tuple(model.grounding.blocks),
-        model.p1.dynamic_policy_block,
-        model.world.dynamics.w1,
-        model.world.dynamics.w2,
-        model.transition.v120_transition,
-        *tuple(model.execution_bottom.layer_contract_heads),
-    ]
+    grounding = getattr(model, "grounding", None)
+    p1 = getattr(model, "p1", None)
+    world = getattr(model, "world", None)
+    transition = getattr(model, "transition", None)
+    bottom = _bottom_module(model)
+    modules: list[torch.nn.Module] = []
+    if grounding is not None:
+        modules.extend(tuple(grounding.blocks))
+    if p1 is not None:
+        modules.append(p1.dynamic_policy_block)
+    if world is not None:
+        modules.extend((world.dynamics.w1, world.dynamics.w2))
+    if transition is not None:
+        modules.append(transition.v120_transition)
+    modules.extend(tuple(getattr(bottom, "layer_contract_heads", ())))
+    if not modules:
+        raise RuntimeError("model has no resolvable mainline compile blocks")
     for module in modules:
         module.forward = torch.compile(  # type: ignore[method-assign]
             module.forward,
@@ -359,7 +391,7 @@ def _compile_candidate_prefix(model: ClearVLAMainlinePolicy, *, mode: str) -> fl
     """Compile the prefix chart boundary while leaving decoder dispatch intact."""
 
     started = time.perf_counter()
-    decoder = model.execution_bottom.decoder
+    decoder = _decoder_module(model)
     decoder._run_differentiable_native_candidates_prefix_reuse = torch.compile(  # type: ignore[method-assign]
         decoder._run_differentiable_native_candidates_prefix_reuse,
         dynamic=False,
@@ -424,20 +456,29 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     iterator = iter(loader)
     model = ClearVLAMainlinePolicy(config).to(device)
+    # Older version snapshots predate the policy-level adapter hook.  Attach
+    # the version-neutral mainline adapter at the profiler boundary so those
+    # snapshots still receive the same capture-safe preparation as current
+    # source, without changing their module tree or checkpoint state.
+    adapter = resolve_training_acceleration_adapter(model)
+    if adapter.name == "generic-static-v1":
+        model.training_acceleration_adapter = MainlineTrainingAccelerationAdapter()
+    bottom = _bottom_module(model)
+    decoder = _decoder_module(model)
     if args.retain_training_execution_diagnostics:
-        model.execution_bottom._retain_training_decoder_diagnostics = True
+        bottom._retain_training_decoder_diagnostics = True
     if args.retain_candidate_operation_diagnostics:
-        model.execution_bottom.decoder._retain_candidate_operation_diagnostics = True
+        decoder._retain_candidate_operation_diagnostics = True
     if args.candidate_prefix_reuse:
-        model.execution_bottom.decoder._training_candidate_prefix_reuse = True
+        decoder._training_candidate_prefix_reuse = True
     if args.reuse_prepared_block_contexts:
-        model.execution_bottom.decoder._reuse_prepared_block_contexts = True
+        decoder._reuse_prepared_block_contexts = True
     if args.reuse_prepared_controller_context:
-        model.execution_bottom.decoder._reuse_prepared_controller_context = True
+        decoder._reuse_prepared_controller_context = True
     if args.batched_candidate_prefix:
-        model.execution_bottom.decoder._batched_candidate_prefix = True
+        decoder._batched_candidate_prefix = True
     if args.reuse_terminal_candidate_velocity:
-        model.execution_bottom.decoder._reuse_terminal_candidate_velocity = True
+        decoder._reuse_terminal_candidate_velocity = True
     compile_seconds = 0.0
     if args.compile_mmdit_blocks:
         compile_seconds = _compile_mmdit_blocks(model, mode=args.compile_mode)
@@ -466,22 +507,30 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         total_steps=max(args.steps, 1),
         minimum_ratio=config.optimizer.min_lr_ratio,
     )
-    engine = MainlineTrainingEngine(
-        model=model,
-        config=config,
-        optimizer=optimizer,
-        schedule=schedule,
-        device=device,
-        dtype=dtype,
-        train_flow_generator=_owned_generator(device, config.data.seed + 102),
-        train_condition_generator=_owned_generator(device, config.data.seed + 103),
-        skip_postglobal_audit=not args.retain_postglobal_audit,
-        gradient_spike_audit_threshold=(
+    # Keep the profiler usable across version snapshots whose engine grew
+    # optional hot-path controls at different times.  These controls affect
+    # diagnostics only; passing an unknown keyword would otherwise prevent a
+    # perfectly valid older implementation from being benchmarked.
+    engine_kwargs: dict[str, Any] = {
+        "model": model,
+        "config": config,
+        "optimizer": optimizer,
+        "schedule": schedule,
+        "device": device,
+        "dtype": dtype,
+        "train_flow_generator": _owned_generator(device, config.data.seed + 102),
+        "train_condition_generator": _owned_generator(device, config.data.seed + 103),
+    }
+    engine_signature = inspect.signature(MainlineTrainingEngine)
+    if "skip_postglobal_audit" in engine_signature.parameters:
+        engine_kwargs["skip_postglobal_audit"] = not args.retain_postglobal_audit
+    if "gradient_spike_audit_threshold" in engine_signature.parameters:
+        engine_kwargs["gradient_spike_audit_threshold"] = (
             None
             if args.disable_gradient_spike_audit
             else DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD
-        ),
-    )
+        )
+    engine = MainlineTrainingEngine(**engine_kwargs)
     if args.retain_training_execution_diagnostics:
         engine._retain_training_execution_diagnostics = True
     if args.compile_forward:
@@ -570,13 +619,17 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             if should_profile
             else nullcontext()
         )
+        step_kwargs: dict[str, Any] = {
+            "batch": batch,
+            "collect_diagnostics": False,
+            "gradient_spike_handler": handler,
+        }
+        if args.phase_breakdown and "phase_timing" in inspect.signature(
+            step_runner.train_step
+        ).parameters:
+            step_kwargs["phase_timing"] = phase
         with profile_context as profiler:
-            result = step_runner.train_step(
-                batch,
-                collect_diagnostics=False,
-                gradient_spike_handler=handler,
-                phase_timing=phase if args.phase_breakdown else None,
-            )
+            result = step_runner.train_step(**step_kwargs)
         if should_profile and profiler is not None:
             torch_profile_table = profiler.key_averages().table(
                 sort_by="self_cuda_time_total", row_limit=80

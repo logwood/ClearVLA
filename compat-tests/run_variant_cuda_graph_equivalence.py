@@ -27,6 +27,14 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument(
+        "--config-factory",
+        default="_config",
+        help=(
+            "Factory in tests/test_mainline_policy.py used to construct the "
+            "version-local test config (for example _bspine_config for Pen)."
+        ),
+    )
+    parser.add_argument(
         "--selective-compile-profile",
         help="Pass a profile owned by the variant's acceleration adapter.",
     )
@@ -84,7 +92,18 @@ def _run(args: argparse.Namespace) -> None:
     sys.path.insert(0, str(root))
     sys.path.insert(0, str(root / "tests"))
 
-    from test_mainline_policy import _batch, _config  # type: ignore[import-not-found]
+    import test_mainline_policy as policy_test  # type: ignore[import-not-found]
+
+    _batch = policy_test._batch
+    try:
+        config_factory = getattr(policy_test, args.config_factory)
+    except AttributeError as error:
+        raise ValueError(
+            f"config factory {args.config_factory!r} is absent from "
+            f"{root / 'tests' / 'test_mainline_policy.py'}"
+        ) from error
+    if not callable(config_factory):
+        raise TypeError(f"config factory {args.config_factory!r} is not callable")
 
     from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
     from clearvla.mainline.training.acceleration_adapters import (
@@ -103,7 +122,7 @@ def _run(args: argparse.Namespace) -> None:
     )
 
     def engine_factory(device: torch.device) -> tuple[Any, Any]:
-        config = _config()
+        config = config_factory()
         random.seed(9170)
         np.random.seed(9170)
         torch.manual_seed(9170)

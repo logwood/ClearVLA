@@ -25,10 +25,16 @@ with `compare`.  The CUDA acceptance gate uses the production
 ```powershell
 $py = 'D:\CondaData\envs\torch312\python.exe'
 & $py compat-tests\run_variant_cuda_graph_equivalence.py `
-  --root (Resolve-Path compat-tests\local\pen_bspline_a4a170e)
+  --root (Resolve-Path compat-tests\local\pen_bspline_a4a170e) `
+  --config-factory _bspine_config
 & $py compat-tests\run_variant_cuda_graph_equivalence.py `
   --root (Resolve-Path compat-tests\local\rdt_f8d0c2f)
 ```
+
+The factory argument is part of the variant identity.  In particular, a Pen
+run that uses the default ``_config`` factory exercises the Pen source layout
+but does **not** enable its B-spline path and cannot be reported as a Pen
+B-spline acceptance result.
 
 The default gate covers identity and active topology, input-copy and restored
 input replay, raw/clipped gradients, the complete loss ledger, parameters,
