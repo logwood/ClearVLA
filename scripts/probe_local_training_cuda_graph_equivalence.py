@@ -39,53 +39,70 @@ from clearvla.mainline.training.cuda_graph import (  # noqa: E402
 _SOURCE_ROOT = Path(getattr(_probe_module, "_source_root", Path.cwd())).resolve()
 
 
-def _configure_compiled_graph_engine(engine: Any) -> None:
-    """Opt-in gate for the safe submodule-compile production combination."""
+def _selective_compile_settings() -> tuple[str | None, bool]:
+    profile = os.environ.get("CLEARVLA_EQUIV_SELECTIVE_COMPILE_PROFILE")
+    legacy_mode = os.environ.get("CLEARVLA_EQUIV_COMPILE_SUBMODULES")
+    legacy_profiles = {
+        "1": "fast-combined",
+        "visual": "fast-visual",
+        "mainline": "fast-mainline",
+        "mmdit": "fast-mmdit",
+    }
+    if profile and legacy_mode:
+        raise ValueError(
+            "set only CLEARVLA_EQUIV_SELECTIVE_COMPILE_PROFILE; the legacy "
+            "compile switch cannot be combined with it"
+        )
+    if legacy_mode:
+        if legacy_mode not in legacy_profiles:
+            raise ValueError(
+                "legacy compile mode cannot be represented by one version-owned "
+                f"plan: {legacy_mode!r}"
+            )
+        profile = legacy_profiles[legacy_mode]
+    allow_candidate = (
+        os.environ.get("CLEARVLA_EQUIV_ALLOW_CANDIDATE_SELECTIVE_COMPILE") == "1"
+    )
+    if allow_candidate and not profile:
+        raise ValueError(
+            "candidate selective-compile authorization requires a compile profile"
+        )
+    return profile, allow_candidate
 
-    compile_mode = os.environ.get("CLEARVLA_EQUIV_COMPILE_SUBMODULES")
+
+def _configure_compiled_graph_engine(engine: Any) -> None:
+    """Enable only independently selected non-compile implementation rewrites."""
+
     context_reuse = os.environ.get("CLEARVLA_EQUIV_CONTEXT_REUSE") == "1"
-    valid_modes = {"1", "visual_mainline", "visual", "mainline", "mmdit"}
-    if compile_mode not in valid_modes and not context_reuse:
+    if not context_reuse:
         return
     adapter = resolve_training_acceleration_adapter(engine.model)
     adapter.prepare(engine)
-    decoder = engine.model.execution_bottom.decoder
-    if context_reuse or compile_mode in valid_modes:
-        # These are optional mainline decoder optimizations.  They remain in
-        # the probe because compile experiments need their explicit switches;
-        # the production Graph backend reaches them only through its adapter.
-        decoder._reuse_prepared_block_contexts = True
-        decoder._reuse_prepared_controller_context = True
-        decoder._reuse_terminal_candidate_velocity = True
-    if compile_mode not in valid_modes:
-        return
-    if compile_mode in {"1", "mmdit"}:
-        for block in tuple(decoder.blocks):
-            block.forward = torch.compile(  # type: ignore[method-assign]
-                block.forward, dynamic=False, fullgraph=False, mode="default"
-            )
-    if compile_mode in {"1", "visual_mainline", "visual"}:
-        encoder = engine.model.observation.compiler.encoder
-        visual_modules: list[torch.nn.Module] = [encoder.flow]
-        if encoder.raw_flow is not None:
-            visual_modules.append(encoder.raw_flow)
-        for module in visual_modules:
-            module.forward = torch.compile(  # type: ignore[method-assign]
-                module.forward, dynamic=False, fullgraph=False, mode="default"
-            )
-    if compile_mode in {"1", "visual_mainline", "mainline"}:
-        mainline_modules: list[torch.nn.Module] = [
-            *tuple(engine.model.grounding.blocks),
-            engine.model.p1.dynamic_policy_block,
-            engine.model.world.dynamics.w1,
-            engine.model.world.dynamics.w2,
-            engine.model.transition.v120_transition,
-            *tuple(engine.model.execution_bottom.layer_contract_heads),
-        ]
-        for module in mainline_modules:
-            module.forward = torch.compile(  # type: ignore[method-assign]
-                module.forward, dynamic=False, fullgraph=False, mode="default"
-            )
+    execution_bottom = getattr(engine.model, "execution_bottom", None)
+    decoder = getattr(execution_bottom, "decoder", None)
+    if decoder is None:
+        bottom = getattr(engine.model, "bottom", None)
+        decoder = getattr(bottom, "decoder", None)
+    if decoder is None:
+        raise RuntimeError("context-reuse gate cannot locate the execution decoder")
+    decoder._reuse_prepared_block_contexts = True
+    decoder._reuse_prepared_controller_context = True
+    decoder._reuse_terminal_candidate_velocity = True
+
+
+def _comparison_runner(engine: Any) -> CudaGraphTrainingStepRunner:
+    profile, allow_candidate = _selective_compile_settings()
+    runner = CudaGraphTrainingStepRunner(
+        engine,
+        compile_profile=profile,
+        allow_candidate_compile=allow_candidate,
+    )
+    if runner.compile_plan_summary is not None:
+        print(
+            "selective_compile_plan",
+            json.dumps(runner.compile_plan_summary, sort_keys=True),
+        )
+    return runner
 
 
 def _assert_tensor_close(
@@ -108,11 +125,41 @@ def _assert_tensor_close(
         difference = (actual.detach().float() - expected.detach().float()).abs()
         expected_abs = expected.detach().float().abs()
         relative = difference / expected_abs.clamp_min(1e-30)
+        outside = ~torch.isclose(
+            actual.detach().float(),
+            expected.detach().float(),
+            rtol=rtol,
+            atol=atol,
+            equal_nan=True,
+        )
+        outside_flat = outside.reshape(-1).nonzero().flatten()
+        first_flat = int(outside_flat[0]) if outside_flat.numel() else -1
+        if first_flat >= 0:
+            if outside.ndim == 0:
+                first_index = ()
+            else:
+                first_index_values: list[int] = []
+                remainder = first_flat
+                for size in reversed(outside.shape):
+                    first_index_values.append(remainder % int(size))
+                    remainder //= int(size)
+                first_index = tuple(reversed(first_index_values))
+            first_actual = float(actual.detach().float().reshape(-1)[first_flat])
+            first_expected = float(expected.detach().float().reshape(-1)[first_flat])
+            first_abs = float(difference.reshape(-1)[first_flat])
+        else:
+            first_index = ()
+            first_actual = float("nan")
+            first_expected = float("nan")
+            first_abs = float("nan")
         raise AssertionError(
             f"{path}: max_abs={float(difference.max()):.9g} "
             f"max_rel={float(relative.max()):.9g} "
             f"actual_rms={float(actual.detach().float().square().mean().sqrt()):.9g} "
-            f"expected_rms={float(expected.detach().float().square().mean().sqrt()):.9g}"
+            f"expected_rms={float(expected.detach().float().square().mean().sqrt()):.9g} "
+            f"first_outside_index={first_index!r} "
+            f"first_actual={first_actual:.9g} first_expected={first_expected:.9g} "
+            f"first_abs={first_abs:.9g}"
         ) from error
 
 
@@ -267,6 +314,11 @@ def _tensor_pair_statistics(
             "max_tolerance_ratio_path": None,
             "rms_abs": 0.0,
             "relative_l2": 0.0,
+            "first_outside_path": None,
+            "first_outside_index": None,
+            "first_outside_actual": None,
+            "first_outside_expected": None,
+            "first_outside_abs": None,
         }
 
     grouped: dict[
@@ -274,6 +326,7 @@ def _tensor_pair_statistics(
         dict[str, list[torch.Tensor] | list[str] | int],
     ] = {}
     element_count = 0
+    first_outside: dict[str, Any] | None = None
     for path, actual, expected in pairs:
         if (
             tuple(actual.shape) != tuple(expected.shape)
@@ -296,6 +349,26 @@ def _tensor_pair_statistics(
         tolerance = expected_abs * float(rtol) + float(atol)
         tolerance_ratio = difference / tolerance.clamp_min(1e-30)
         relative = difference / expected_abs.clamp_min(1e-30)
+        outside_mask = difference > tolerance
+        outside_count = torch.count_nonzero(outside_mask)
+        if first_outside is None and int(outside_count.item()) > 0:
+            first_flat = int(outside_mask.reshape(-1).nonzero()[0].item())
+            if outside_mask.ndim == 0:
+                first_index: tuple[int, ...] = ()
+            else:
+                first_index_values: list[int] = []
+                remainder = first_flat
+                for size in reversed(outside_mask.shape):
+                    first_index_values.append(remainder % int(size))
+                    remainder //= int(size)
+                first_index = tuple(reversed(first_index_values))
+            first_outside = {
+                "first_outside_path": path,
+                "first_outside_index": list(first_index),
+                "first_outside_actual": float(actual_f.reshape(-1)[first_flat]),
+                "first_outside_expected": float(expected_f.reshape(-1)[first_flat]),
+                "first_outside_abs": float(difference.reshape(-1)[first_flat]),
+            }
         device_key = str(actual.device)
         group = grouped.setdefault(
             device_key,
@@ -321,7 +394,7 @@ def _tensor_pair_statistics(
             ("difference_square", difference.square().sum()),
             ("expected_square", expected_f.square().sum()),
             ("different_elements", torch.count_nonzero(difference)),
-            ("outside_elements", torch.count_nonzero(difference > tolerance)),
+            ("outside_elements", outside_count),
         ):
             rows = group[name]
             assert isinstance(rows, list)
@@ -373,7 +446,7 @@ def _tensor_pair_statistics(
             else:
                 outside_elements += value
 
-    return {
+    result = {
         "tensor_count": len(pairs),
         "element_count": element_count,
         "different_elements": different_elements,
@@ -387,6 +460,17 @@ def _tensor_pair_statistics(
         "rms_abs": (difference_square / float(max(element_count, 1))) ** 0.5,
         "relative_l2": (difference_square / max(expected_square, 1e-30)) ** 0.5,
     }
+    result.update(
+        first_outside
+        or {
+            "first_outside_path": None,
+            "first_outside_index": None,
+            "first_outside_actual": None,
+            "first_outside_expected": None,
+            "first_outside_abs": None,
+        }
+    )
+    return result
 
 
 def _gradient_pair_statistics(
@@ -742,7 +826,7 @@ def _run_gate(*, start_step: int, steps: int, rtol: float, atol: float) -> None:
     # Use the same adapter-backed capture backend as production.  The older
     # direct helper remains available for isolated diagnostics, but comparing
     # it here would test a second graph implementation that is not deployed.
-    graph_runner = CudaGraphTrainingStepRunner(graph_engine)
+    graph_runner = _comparison_runner(graph_engine)
     graph_runner._ensure_capture(graph_batch)
     graph = graph_runner._graph
     captured_ledger = graph_runner._captured_ledger
@@ -871,7 +955,7 @@ def _run_production_runner_gate(*, rtol: float, atol: float) -> None:
     eager_engine, first_batch = _engine(device)
     graph_engine, _unused_batch = _engine(device)
     _configure_compiled_graph_engine(graph_engine)
-    runner = CudaGraphTrainingStepRunner(graph_engine)
+    runner = _comparison_runner(graph_engine)
     _assert_parameters_close(graph_engine.model, eager_engine.model, rtol=0.0, atol=0.0)
 
     torch.manual_seed(9340)
@@ -936,7 +1020,7 @@ def _run_topology_recapture_gate(*, rtol: float, atol: float) -> None:
     eager_engine, batch = _engine(device)
     graph_engine, _unused_batch = _engine(device)
     _configure_compiled_graph_engine(graph_engine)
-    runner = CudaGraphTrainingStepRunner(graph_engine)
+    runner = _comparison_runner(graph_engine)
     graph_engine.model.train()
     graph_engine.model.set_training_step(0)
     runner._ensure_capture(batch)
@@ -1004,7 +1088,7 @@ def _run_checkpoint_resume_gate(*, rtol: float, atol: float) -> None:
     device = torch.device("cuda")
     source_engine, first_batch = _engine(device)
     _configure_compiled_graph_engine(source_engine)
-    source_runner = CudaGraphTrainingStepRunner(source_engine)
+    source_runner = _comparison_runner(source_engine)
     source_engine.model.train()
     source_engine.model.set_training_step(source_engine.global_step)
 
@@ -1099,7 +1183,7 @@ def _run_checkpoint_resume_gate(*, rtol: float, atol: float) -> None:
             index=91,
         )
         _assert_independent_equal_batches(resumed_batch, source_batch)
-        resumed_runner = CudaGraphTrainingStepRunner(resumed_engine)
+        resumed_runner = _comparison_runner(resumed_engine)
 
         _set_rng_state(source_engine, device, checkpoint_rng)
         expected = source_runner.train_step(
@@ -1204,6 +1288,14 @@ def _surface_distribution(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {"case_count": 0}
     worst = max(rows, key=lambda row: float(row["max_tolerance_ratio"]))
+    first_outside_case = next(
+        (
+            (index, row)
+            for index, row in enumerate(rows)
+            if int(row["outside_elements"]) > 0
+        ),
+        None,
+    )
     return {
         "case_count": len(rows),
         "outside_case_count": sum(int(row["outside_elements"]) > 0 for row in rows),
@@ -1215,6 +1307,23 @@ def _surface_distribution(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
             [float(row["max_tolerance_ratio"]) for row in rows]
         ),
         "worst_path": worst["max_tolerance_ratio_path"],
+        "first_outside_case_index": (
+            None if first_outside_case is None else first_outside_case[0]
+        ),
+        "first_outside": (
+            None
+            if first_outside_case is None
+            else {
+                name: first_outside_case[1][name]
+                for name in (
+                    "first_outside_path",
+                    "first_outside_index",
+                    "first_outside_actual",
+                    "first_outside_expected",
+                    "first_outside_abs",
+                )
+            }
+        ),
     }
 
 
@@ -1265,7 +1374,7 @@ def _run_independent_sample_statistics(
     comparison_initial_schedule = copy.deepcopy(
         comparison_engine.schedule.state_dict()
     )
-    runner = None if eager_control else CudaGraphTrainingStepRunner(comparison_engine)
+    runner = None if eager_control else _comparison_runner(comparison_engine)
     half = cases // 2
     surfaces: dict[str, list[Mapping[str, Any]]] = {
         "result": [],
@@ -1453,6 +1562,9 @@ def _run_independent_sample_statistics(
         "batch_tensor_count": batch_tensor_count,
         "batch_element_count": batch_element_count,
         "capture_count": 0 if runner is None else runner.capture_count,
+        "selective_compile_plan": (
+            None if runner is None else runner.compile_plan_summary
+        ),
         "rtol": rtol,
         "atol": atol,
         "surfaces": {
@@ -1495,7 +1607,7 @@ def _run_long_stress_gate(*, steps: int, rtol: float, atol: float) -> None:
     if eager_control:
         graph_engine.model.train()
     else:
-        runner = CudaGraphTrainingStepRunner(graph_engine)
+        runner = _comparison_runner(graph_engine)
         graph_engine.model.train()
         graph_engine.model.set_training_step(graph_engine.global_step)
         runner._ensure_capture(first_graph_batch)
@@ -1657,7 +1769,7 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
     if eager_control:
         comparison_engine.model.train()
     else:
-        runner = CudaGraphTrainingStepRunner(comparison_engine)
+        runner = _comparison_runner(comparison_engine)
         comparison_engine.model.train()
         comparison_engine.model.set_training_step(comparison_engine.global_step)
         runner._ensure_capture(first_comparison_batch)
@@ -1700,6 +1812,9 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
         "clipped_gradient": None,
         "rng": None,
     }
+    first_outside: dict[str, dict[str, Any] | None] = {
+        name: None for name in first_outside_step
+    }
     outside_step_count = {name: 0 for name in first_outside_step}
     worst: dict[str, dict[str, Any]] = {}
     loss_abs_rows: list[float] = []
@@ -1716,6 +1831,19 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
             outside_step_count[category] += 1
             if first_outside_step[category] is None:
                 first_outside_step[category] = step
+                first_outside[category] = {
+                    "step": step,
+                    **{
+                        name: statistics[name]
+                        for name in (
+                            "first_outside_path",
+                            "first_outside_index",
+                            "first_outside_actual",
+                            "first_outside_expected",
+                            "first_outside_abs",
+                        )
+                    },
+                }
         previous = worst.get(category)
         if previous is None or float(statistics["max_tolerance_ratio"]) > float(
             previous["max_tolerance_ratio"]
@@ -1893,7 +2021,11 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
             runner.capture_setup_seconds if runner is not None else 0.0
         ),
         "first_outside_step": first_outside_step,
+        "first_outside": first_outside,
         "outside_step_count": outside_step_count,
+        "selective_compile_plan": (
+            None if runner is None else runner.compile_plan_summary
+        ),
         "worst": worst,
         "loss_abs_max": max(loss_abs_rows, default=0.0),
         "loss_abs_rms": (

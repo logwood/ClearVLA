@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from torch import nn
 
 from clearvla.mainline.training.acceleration_contract import (
     GenericTrainingAccelerationAdapter,
+    TrainingCompilePlan,
+    TrainingCompileRegion,
+    TrainingEagerBoundary,
     module_structure_signature,
     resolve_training_acceleration_adapter,
+    resolve_training_compile_plan,
 )
 
 
@@ -75,3 +79,62 @@ def test_structure_signature_ignores_parameter_values() -> None:
         for parameter in model.parameters():
             parameter.add_(1.0)
     assert module_structure_signature(model) == before
+
+
+def test_legacy_adapter_needs_no_compile_plan_until_profile_is_requested() -> None:
+    model = _ToyPolicy(8, with_adapter=True)
+    engine = type("Engine", (), {"model": model})()
+    adapter = resolve_training_acceleration_adapter(model)
+    assert resolve_training_compile_plan(adapter, engine, None) is None
+    try:
+        resolve_training_compile_plan(adapter, engine, "precision-mainline")
+    except ValueError as error:
+        assert "does not support compile profile" in str(error)
+    else:
+        raise AssertionError("an adapter without compile_plan accepted a profile")
+
+
+def test_compile_plan_signature_covers_regions_options_and_boundaries() -> None:
+    base = TrainingCompilePlan(
+        name="toy-plan",
+        regions=(
+            TrainingCompileRegion(
+                name="body",
+                module_paths=("block",),
+                options=(("force_same_precision", True),),
+            ),
+        ),
+        eager_boundaries=(
+            TrainingEagerBoundary(
+                module_path="block.norm",
+                reason="preserve-eager-norm",
+            ),
+        ),
+    )
+    changed_region = replace(
+        base,
+        regions=(replace(base.regions[0], module_paths=("head",)),),
+        eager_boundaries=(),
+    )
+    changed_options = replace(
+        base,
+        regions=(
+            replace(
+                base.regions[0],
+                options=(("force_same_precision", False),),
+            ),
+        ),
+    )
+    changed_boundary = replace(
+        base,
+        eager_boundaries=(
+            replace(base.eager_boundaries[0], reason="different-policy"),
+        ),
+    )
+    signatures = {
+        base.signature(),
+        changed_region.signature(),
+        changed_options.signature(),
+        changed_boundary.signature(),
+    }
+    assert len(signatures) == 4

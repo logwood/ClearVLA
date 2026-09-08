@@ -33,12 +33,19 @@ from clearvla.mainline.config import ExperimentConfig, load_config
 from clearvla.mainline.data.loading import load_mainline_data, to_training_batch
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.runtime.numerics import resolve_compute_dtype
+from clearvla.mainline.training.acceleration_contract import (
+    resolve_training_acceleration_adapter,
+    resolve_training_compile_plan,
+)
 from clearvla.mainline.training.cuda_graph import CudaGraphTrainingStepRunner
 from clearvla.mainline.training.engine import MainlineTrainingEngine
 from clearvla.mainline.training.gradient_audit import (
     DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD,
 )
 from clearvla.mainline.training.optimizer import WarmupCosineSchedule, build_optimizer
+from clearvla.mainline.training.selective_compile import (
+    apply_training_compile_plan,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -91,6 +98,19 @@ def _parser() -> argparse.ArgumentParser:
             "Capture ordinary-batch online encode, forward, loss and backward; "
             "keep diagnostics, clipping, AdamW and scheduling eager."
         ),
+    )
+    parser.add_argument(
+        "--selective-compile-profile",
+        help=(
+            "Apply a version-adapter-owned selective Inductor plan (for the "
+            "mainline adapter: fast|precision|partitioned-{visual|mainline|mmdit|combined}). "
+            "Candidate plans also require --allow-candidate-selective-compile."
+        ),
+    )
+    parser.add_argument(
+        "--allow-candidate-selective-compile",
+        action="store_true",
+        help="Authorize a candidate plan for this isolated profiler run.",
     )
     parser.add_argument(
         "--compile-mmdit-blocks",
@@ -368,6 +388,27 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(
             "manual CUDA Graph training cannot nest reduce-overhead CUDA Graphs"
         )
+    legacy_compile_flags = {
+        "compile_mmdit_blocks": args.compile_mmdit_blocks,
+        "compile_forward": args.compile_forward,
+        "compile_visual_submodules": args.compile_visual_submodules,
+        "compile_execution_submodules": args.compile_execution_submodules,
+        "compile_mainline_blocks": args.compile_mainline_blocks,
+        "compile_candidate_prefix": args.compile_candidate_prefix,
+    }
+    enabled_legacy_compile_flags = tuple(
+        name for name, enabled in legacy_compile_flags.items() if enabled
+    )
+    if args.selective_compile_profile and enabled_legacy_compile_flags:
+        raise ValueError(
+            "--selective-compile-profile cannot be combined with legacy compile "
+            f"flags: {enabled_legacy_compile_flags!r}"
+        )
+    if args.allow_candidate_selective_compile and not args.selective_compile_profile:
+        raise ValueError(
+            "--allow-candidate-selective-compile requires "
+            "--selective-compile-profile"
+        )
     config = _overrides(load_config(args.config), args)
     _seed(config.data.seed)
     device = _device(args.device)
@@ -450,9 +491,31 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             fullgraph=False,
             mode=args.compile_mode,
         )
+    selective_compile_summary: dict[str, Any] | None = None
+    if args.selective_compile_profile and not args.cuda_graph_training:
+        adapter = resolve_training_acceleration_adapter(engine.model)
+        adapter.prepare(engine)
+        plan = resolve_training_compile_plan(
+            adapter,
+            engine,
+            args.selective_compile_profile,
+        )
+        if plan is None:
+            raise RuntimeError("requested selective compile profile resolved to no plan")
+        selective_compile_summary = apply_training_compile_plan(
+            engine,
+            plan,
+            profile=args.selective_compile_profile,
+            allow_candidate=args.allow_candidate_selective_compile,
+        ).summary()
     step_runner: MainlineTrainingEngine | CudaGraphTrainingStepRunner = engine
     if args.cuda_graph_training:
-        step_runner = CudaGraphTrainingStepRunner(engine)
+        step_runner = CudaGraphTrainingStepRunner(
+            engine,
+            compile_profile=args.selective_compile_profile,
+            allow_candidate_compile=args.allow_candidate_selective_compile,
+        )
+        selective_compile_summary = step_runner.compile_plan_summary
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
@@ -560,6 +623,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             if isinstance(step_runner, CudaGraphTrainingStepRunner)
             else 0.0
         ),
+        "selective_compile_profile": args.selective_compile_profile,
+        "selective_compile_plan": selective_compile_summary,
         "compile_mmdit_blocks": bool(args.compile_mmdit_blocks),
         "compile_forward": bool(args.compile_forward),
         "compile_visual_submodules": bool(args.compile_visual_submodules),

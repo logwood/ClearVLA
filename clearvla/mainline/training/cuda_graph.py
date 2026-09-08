@@ -25,9 +25,15 @@ from ..interfaces import TrainingBatch
 from .acceleration_contract import (
     TrainingAccelerationAdapter,
     resolve_training_acceleration_adapter,
+    resolve_training_compile_plan,
 )
 from .engine import MainlineTrainingEngine, TrainStepResult, _autocast
 from .gradient_audit import FiniteGradientSpikeReport
+from .selective_compile import (
+    AppliedTrainingCompilePlan,
+    apply_training_compile_plan,
+    get_applied_training_compile_plan,
+)
 
 
 class StaticTrainingInputMismatch(ValueError):
@@ -199,7 +205,13 @@ def _restore_rng_snapshot(
 class CudaGraphTrainingStepRunner:
     """Replay ordinary training steps while preserving eager diagnostics."""
 
-    def __init__(self, engine: MainlineTrainingEngine) -> None:
+    def __init__(
+        self,
+        engine: MainlineTrainingEngine,
+        *,
+        compile_profile: str | None = None,
+        allow_candidate_compile: bool = False,
+    ) -> None:
         if engine.device.type != "cuda":
             raise ValueError("CUDA Graph training requires a CUDA engine")
         self.engine = engine
@@ -210,6 +222,20 @@ class CudaGraphTrainingStepRunner:
             resolve_training_acceleration_adapter(engine.model)
         )
         self._acceleration_adapter.prepare(engine)
+        existing_compile = get_applied_training_compile_plan(engine)
+        self._compile_profile = (
+            compile_profile
+            if compile_profile is not None
+            else (None if existing_compile is None else existing_compile.profile)
+        )
+        self._allow_candidate_compile = bool(
+            allow_candidate_compile
+            or (
+                existing_compile is not None
+                and existing_compile.acceptance == "candidate"
+            )
+        )
+        self._applied_compile_plan = self._configure_compile_plan()
         self._structure_signature = self._acceleration_adapter.structure_signature(
             engine
         )
@@ -224,8 +250,50 @@ class CudaGraphTrainingStepRunner:
         self.capture_count = 0
         self.capture_setup_seconds = 0.0
 
+    def _configure_compile_plan(self) -> AppliedTrainingCompilePlan | None:
+        plan = resolve_training_compile_plan(
+            self._acceleration_adapter,
+            self.engine,
+            self._compile_profile,
+        )
+        if plan is None:
+            existing = get_applied_training_compile_plan(self.engine)
+            if existing is not None:
+                raise RuntimeError(
+                    "engine already has a selective compile plan but the CUDA Graph "
+                    "runner was configured with compile disabled"
+                )
+            return None
+        return apply_training_compile_plan(
+            self.engine,
+            plan,
+            profile=str(self._compile_profile),
+            allow_candidate=self._allow_candidate_compile,
+        )
+
+    @property
+    def compile_plan_summary(self) -> dict[str, Any] | None:
+        if self._applied_compile_plan is None:
+            return None
+        return self._applied_compile_plan.summary()
+
     def _topology_key(self) -> Hashable:
         return self._acceleration_adapter.topology_signature(self.engine)
+
+    def _capture_identity(self, batch: TrainingBatch) -> Hashable:
+        """Describe every model/input choice that owns captured CUDA work."""
+
+        return (
+            self._acceleration_adapter.name,
+            self._structure_signature,
+            (
+                "no-selective-compile"
+                if self._applied_compile_plan is None
+                else self._applied_compile_plan.signature
+            ),
+            self._topology_key(),
+            _static_tree_signature(batch),
+        )
 
     def invalidate(self, reason: str = "") -> None:
         """Drop the current graph after a versioned model is replaced.
@@ -238,7 +306,11 @@ class CudaGraphTrainingStepRunner:
 
         del reason  # retained in the API for callers' audit/logging wrappers
         self._release_capture()
+        self._acceleration_adapter = resolve_training_acceleration_adapter(
+            self.engine.model
+        )
         self._acceleration_adapter.prepare(self.engine)
+        self._applied_compile_plan = self._configure_compile_plan()
         self._structure_signature = self._acceleration_adapter.structure_signature(
             self.engine
         )
@@ -318,12 +390,7 @@ class CudaGraphTrainingStepRunner:
 
     def _ensure_capture(self, batch: TrainingBatch) -> float:
         batch.validate(self.engine.config)
-        capture_key = (
-            self._acceleration_adapter.name,
-            self._structure_signature,
-            self._topology_key(),
-            _static_tree_signature(batch),
-        )
+        capture_key = self._capture_identity(batch)
         if self._graph is not None and self._capture_key == capture_key:
             if self._static_batch is None:
                 raise RuntimeError("CUDA Graph runner lost its static batch")

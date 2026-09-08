@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import inspect
+import os
 import random
 import runpy
 import sys
@@ -25,6 +26,15 @@ import torch
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument(
+        "--selective-compile-profile",
+        help="Pass a profile owned by the variant's acceleration adapter.",
+    )
+    parser.add_argument(
+        "--allow-candidate-selective-compile",
+        action="store_true",
+    )
+    parser.add_argument("--context-reuse", action="store_true")
     return parser
 
 
@@ -58,11 +68,19 @@ def _install_h5py_stub() -> None:
         sys.modules["h5py"] = stub
 
 
-def _run(root: Path) -> None:
-    root = root.resolve()
+def _run(args: argparse.Namespace) -> None:
+    root = args.root.resolve()
     if not (root / "clearvla").is_dir() or not (root / "tests").is_dir():
         raise ValueError(f"not a ClearVLA source snapshot: {root}")
     _install_h5py_stub()
+    if args.selective_compile_profile is not None:
+        os.environ["CLEARVLA_EQUIV_SELECTIVE_COMPILE_PROFILE"] = (
+            args.selective_compile_profile
+        )
+    if args.allow_candidate_selective_compile:
+        os.environ["CLEARVLA_EQUIV_ALLOW_CANDIDATE_SELECTIVE_COMPILE"] = "1"
+    if args.context_reuse:
+        os.environ["CLEARVLA_EQUIV_CONTEXT_REUSE"] = "1"
     sys.path.insert(0, str(root))
     sys.path.insert(0, str(root / "tests"))
 
@@ -140,4 +158,4 @@ def _run(root: Path) -> None:
 
 
 if __name__ == "__main__":
-    _run(_parser().parse_args().root)
+    _run(_parser().parse_args())
