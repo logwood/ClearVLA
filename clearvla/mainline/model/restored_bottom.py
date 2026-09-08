@@ -71,6 +71,7 @@ def _build_decoder_config(config: ExperimentConfig):
         action_basis_tokens=dims.action_basis_tokens,
         gripper_field_dim=bottom.gripper_field_dim,
         physical_decode_delta_blend=bottom.physical_decode_delta_blend,
+        latent_cvae_ffn_expansion=bottom.ffn_expansion,
         dropout=bottom.dropout,
         latent_cvae_mmdit_depth=bottom.evidence_depth,
         latent_cvae_mmdit_operator_rank=bottom.operator_rank,

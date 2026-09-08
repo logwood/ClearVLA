@@ -123,6 +123,10 @@ class ObservableHistory:
     action_state: Tensor  # [B,A], current state in the action chart
     state_history: Tensor  # [B,Hs,S]
     executed_action_history: Tensor  # [B,Ha,A]
+    # Profile-owned gripper command boundary. Legacy callers may omit it and
+    # retain the Pen/current-state fallback; RDT loading supplies the previous
+    # executed command explicitly.
+    codec_gripper_boundary: Tensor | None = None
 
     @property
     def batch(self) -> int:
@@ -133,6 +137,8 @@ class ObservableHistory:
         batch = self.batch
         _shape(self.state, (batch, dims.state_dim), "current state")
         _shape(self.action_state, (batch, dims.action_dim), "current action-state")
+        if self.codec_gripper_boundary is not None:
+            _shape(self.codec_gripper_boundary, (batch, 1), "codec gripper boundary")
         _shape(
             self.state_history,
             (batch, dims.state_history_length, dims.state_dim),
@@ -150,6 +156,8 @@ class ObservableHistory:
             "executed_action_history",
         ):
             _floating(getattr(self, name), name.replace("_", " "))
+        if self.codec_gripper_boundary is not None:
+            _floating(self.codec_gripper_boundary, "codec gripper boundary")
         devices = {
             value.device
             for value in (
@@ -159,8 +167,19 @@ class ObservableHistory:
                 self.executed_action_history,
             )
         }
+        if self.codec_gripper_boundary is not None:
+            devices.add(self.codec_gripper_boundary.device)
         if len(devices) != 1:
             raise ValueError("observable history tensors must share a device")
+
+    def resolved_codec_gripper_boundary(self) -> Tensor:
+        """Return the profile-owned boundary, falling back to Pen state."""
+
+        return (
+            self.action_state[:, -1:]
+            if self.codec_gripper_boundary is None
+            else self.codec_gripper_boundary
+        )
 
 
 @dataclass(frozen=True)

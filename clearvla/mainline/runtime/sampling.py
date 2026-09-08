@@ -100,7 +100,11 @@ def _integrate_cache(
             collect_diagnostics=False,
         )
     return SamplingResult(
-        action=model.action_codec.decode(value, cache.history.action_state).float(),
+        action=model.action_codec.decode(
+            value,
+            cache.history.action_state,
+            codec_gripper_boundary=cache.history.resolved_codec_gripper_boundary(),
+        ).float(),
         physical_field=value,
         motion_logits=endpoint_output.bottom.motion_logits.float(),
         initial_physical_noise=noise,

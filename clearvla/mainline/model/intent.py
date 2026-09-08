@@ -132,14 +132,28 @@ class StatelessObjectIntentOrganizer(nn.Module):
         route_dim: int,
         horizon: int,
         heads: int,
+        language_conditioning_mode: str = "goal_read",
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
         self.horizon = int(horizon)
+        self.language_conditioning_mode = str(language_conditioning_mode)
+        if self.language_conditioning_mode not in {"goal_read", "task_anchor_v1"}:
+            raise ValueError("language conditioning mode is invalid")
         self.goal_input = nn.Linear(goal_dim, hidden, bias=False)
         self.goal_queries = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.goal_read = _CrossRead(hidden, heads)
         self.goal_self = _SelfBlock(hidden, heads)
+        self.language_task_anchor: nn.Linear | None = None
+        if self.language_conditioning_mode == "task_anchor_v1":
+            retained_rng_state = torch.get_rng_state()
+            try:
+                self.language_task_anchor = nn.Linear(hidden, hidden, bias=False)
+                nn.init.zeros_(self.language_task_anchor.weight)
+            finally:
+                # A zero-start language owner must not shift initialization of
+                # the retained S/W/P graph or change continuation RNG.
+                torch.set_rng_state(retained_rng_state)
         history_width = state_dim + action_dim + state_dim + 1
         self.history_input = nn.Sequential(
             nn.LayerNorm(history_width, elementwise_affine=False),
@@ -296,6 +310,17 @@ class StatelessObjectIntentOrganizer(nn.Module):
             diagnostics=collect_diagnostics,
         )
         protected_goal = self.goal_self(protected_goal)
+        if self.language_conditioning_mode == "task_anchor_v1":
+            if self.language_task_anchor is None:
+                raise RuntimeError("task-anchor mode has no language owner")
+            language_anchor, _ = smooth_rms_contract(
+                self.language_task_anchor(protected_goal.mean(dim=1)),
+                0.35,
+            )
+        else:
+            language_anchor = protected_goal.new_zeros(
+                protected_goal.shape[0], protected_goal.shape[-1]
+            )
         paired_history, observed_state_delta = self._paired_history(
             state_history, state, executed_history
         )
@@ -306,8 +331,13 @@ class StatelessObjectIntentOrganizer(nn.Module):
         interval_base = self.interval_identity.to(
             device=objects.device, dtype=objects.dtype
         ).expand(batch, -1, -1)
+        interval_goal_query = (
+            interval_base + language_anchor[:, None]
+            if self.language_conditioning_mode == "task_anchor_v1"
+            else interval_base
+        )
         _, goal_innovation, interval_goal_attention = self.interval_goal(
-            interval_base, protected_goal, diagnostics=collect_diagnostics
+            interval_goal_query, protected_goal, diagnostics=collect_diagnostics
         )
         _, history_innovation, interval_history_attention = self.interval_history(
             interval_base, history, diagnostics=collect_diagnostics
@@ -417,6 +447,15 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 dim=1, unbiased=False
             ).mean(),
             "object_intent_goal_innovation_rms": goal_innovation.detach().float().square().mean().sqrt(),
+            "object_intent_language_conditioning_mode_code": public_intervals.new_tensor(
+                float(self.language_conditioning_mode == "task_anchor_v1"),
+                dtype=torch.float32,
+            ),
+            "object_intent_language_task_anchor_rms": language_anchor.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
             "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
             "object_intent_typed_action_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),

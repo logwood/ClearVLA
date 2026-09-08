@@ -67,6 +67,40 @@ def balanced_event_row_weights(event_mask: Tensor, horizon_weight: Tensor) -> Te
     return torch.where(both_classes, balanced, torch.ones_like(balanced))
 
 
+def action_frame_weights(
+    event_mask: Tensor,
+    motion_mask: Tensor,
+    horizon_weight: Tensor,
+    *,
+    mode: str,
+    event_gain: float,
+    motion_gain: float,
+) -> Tensor:
+    """Build bounded event/motion row weights without dropping hold frames.
+
+    The target-derived mask is training supervision only; it never enters an
+    online condition.  Renormalizing by the existing horizon mass keeps the
+    formal action objective budget comparable across Pen and RDT profiles.
+    """
+
+    if event_mask.ndim != 2 or motion_mask.shape != event_mask.shape:
+        raise ValueError("action frame masks must both be [B,T]")
+    if horizon_weight.ndim != 1 or int(horizon_weight.shape[0]) != int(event_mask.shape[1]):
+        raise ValueError("action frame horizon weights do not align")
+    if mode == "uniform":
+        return torch.ones_like(event_mask, dtype=torch.float32)
+    if mode != "event_motion_v1":
+        raise ValueError("unknown action frame weight mode")
+    raw = (
+        torch.ones_like(event_mask, dtype=torch.float32)
+        + float(event_gain) * event_mask.float()
+        + float(motion_gain) * motion_mask.float()
+    )
+    step = horizon_weight.float()[None]
+    normalization = (raw * step).sum() / step.expand_as(raw).sum().clamp_min(1.0)
+    return raw / normalization.clamp_min(1e-8)
+
+
 def causal_event_trajectory_mask(event_mask: Tensor) -> Tensor:
     """Select each continuous event row and every later trajectory row."""
 
@@ -139,6 +173,7 @@ def sample_flow_matching(
     action_state: Tensor,
     codec: PhysicalActionFieldCodec,
     distribution: str,
+    codec_gripper_boundary: Tensor | None = None,
     generator: torch.Generator | None = None,
 ) -> FlowMatchingState:
     if target.ndim != 3:
@@ -163,7 +198,11 @@ def sample_flow_matching(
     v120_time = numerator / denominator.clamp_min(1e-8)
     v120_time = v120_time * 0.999 + 0.001
     time = 1.0 - v120_time
-    target_physical = codec.encode(target, action_state)
+    target_physical = codec.encode(
+        target,
+        action_state,
+        codec_gripper_boundary=codec_gripper_boundary,
+    )
     noise = codec.sample_noise(
         int(target.shape[0]),
         device=target.device,
@@ -957,7 +996,10 @@ def action_terms(
     objective = config.objectives
     raw_grip = target.raw_units[..., -1].float()
     raw_boundary = torch.cat(
-        (target.current_raw_units[:, None, -1:].float(), raw_grip[:, :-1, None]),
+        (
+            target.gripper_transition_boundary_raw_units[:, None, -1:].float(),
+            raw_grip[:, :-1, None],
+        ),
         dim=1,
     )[..., 0]
     raw_grip_delta = raw_grip - raw_boundary
@@ -974,6 +1016,25 @@ def action_terms(
     )
     event_mask = (event_target != 0).to(dtype=torch.float32)
     prediction = output.bottom.physical_velocity.float()
+    horizon_weight = anchor_horizon_weights(
+        horizon=config.dimensions.action_horizon,
+        tail_emphasis=objective.horizon_tail_emphasis,
+        first_step_protection=objective.horizon_first_step_protection,
+        device=prediction.device,
+    )
+    target_parts = codec.split(flow_state.target_physical.detach())
+    motion_mask = (
+        target_parts.arm_delta.float().norm(dim=-1)
+        >= float(objective.arm_motion_threshold)
+    ).to(dtype=torch.float32)
+    frame_weight = action_frame_weights(
+        event_mask,
+        motion_mask,
+        horizon_weight,
+        mode=objective.action_frame_weight_mode,
+        event_gain=objective.action_frame_event_gain,
+        motion_gain=objective.action_frame_motion_gain,
+    )
     velocity_target = flow_state.target_physical_velocity.detach().float()
     residual = prediction - velocity_target
     residual_parts = codec.split(residual)
@@ -981,13 +1042,7 @@ def action_terms(
         residual_parts.arm_absolute.square() + residual_parts.arm_delta.square()
     )
     gripper_error_unweighted = residual_parts.gripper_field.square().mean(dim=-1)
-    horizon_weight = anchor_horizon_weights(
-        horizon=config.dimensions.action_horizon,
-        tail_emphasis=objective.horizon_tail_emphasis,
-        first_step_protection=objective.horizon_first_step_protection,
-        device=prediction.device,
-    )
-    step_weight = horizon_weight[None]
+    step_weight = horizon_weight[None] * frame_weight
     event_row_weight = balanced_event_row_weights(event_mask, horizon_weight)
     gripper_error = gripper_error_unweighted * event_row_weight
     physical_error_unweighted = (
@@ -1030,7 +1085,20 @@ def action_terms(
     native_flow = (native_error * step_weight).mean()
     remaining = (1.0 - flow_state.time.float())[:, None, None]
     clean_physical = flow_state.noisy_physical.float() + remaining * prediction
-    decoded = codec.decode(clean_physical, history.action_state.float())
+    boundary_reader = getattr(history, "resolved_codec_gripper_boundary", None)
+    codec_gripper_boundary = (
+        boundary_reader()
+        if callable(boundary_reader)
+        else getattr(history, "codec_gripper_boundary", None)
+    )
+    if codec_gripper_boundary is None:
+        codec_gripper_boundary = history.action_state[:, -1:]
+    codec_gripper_boundary = codec_gripper_boundary.float()
+    decoded = codec.decode(
+        clean_physical,
+        history.action_state.float(),
+        codec_gripper_boundary=codec_gripper_boundary,
+    )
     decoded_element_error = F.smooth_l1_loss(
         decoded,
         target.normalized.float(),
@@ -1047,14 +1115,30 @@ def action_terms(
     ).mean()
     boundary = torch.cat(
         (
-            history.action_state[:, None].float(),
+            torch.cat(
+                (
+                    history.action_state[:, None, :-1].float(),
+                    codec_gripper_boundary[:, None].float(),
+                ),
+                dim=-1,
+            ),
             target.normalized[:, :-1].float(),
         ),
         dim=1,
     )
     delta = target.normalized.float() - boundary
     predicted_boundary = torch.cat(
-        (history.action_state[:, None].float(), decoded[:, :-1]), dim=1
+        (
+            torch.cat(
+                (
+                    history.action_state[:, None, :-1].float(),
+                    codec_gripper_boundary[:, None].float(),
+                ),
+                dim=-1,
+            ),
+            decoded[:, :-1],
+        ),
+        dim=1,
     )
     predicted_delta = decoded - predicted_boundary
     smooth_delta_rows = F.smooth_l1_loss(
@@ -1067,15 +1151,18 @@ def action_terms(
         clean_physical,
         history.action_state.float(),
         decoded,
+        codec_gripper_boundary=codec_gripper_boundary,
     )
     physical_delta_consistency = (physical_delta_rows * step_weight).mean()
     clean_parts = codec.split(clean_physical)
     clean_gripper_absolute = clean_parts.gripper_field[..., :1]
     clean_gripper_local_delta = clean_parts.gripper_field[..., 1:2]
-    clean_gripper_cumulative = anchored_gripper_persistence(
-        clean_gripper_absolute,
+    # This is the deployed causal branch: one profile-owned boundary and a
+    # full-horizon cumulative delta. Event masks select rows for the auxiliary
+    # trajectory budget; they must not re-anchor or hide a pre-event error.
+    clean_gripper_cumulative = codec_gripper_boundary[:, None] + torch.cumsum(
         clean_gripper_local_delta,
-        event_mask,
+        dim=1,
     )
     continuous_gripper_target = target.normalized[..., -1:].float()
     continuous_gripper_target_delta = delta[..., -1:].detach().float()
@@ -1136,7 +1223,6 @@ def action_terms(
     gripper_trajectory = 0.5 * (
         gripper_trajectory_absolute + gripper_trajectory_delta
     )
-    target_parts = codec.split(flow_state.target_physical.detach())
     motion_target = (
         target_parts.arm_delta.float().norm(dim=-1)
         >= float(objective.arm_motion_threshold)
@@ -1399,6 +1485,23 @@ def action_terms(
         "motion_recall": motion_recall,
         "action_horizon_weight_first": horizon_weight[0],
         "action_horizon_weight_tail": horizon_weight[-1],
+        "action_frame_weight_mode_code": prediction.new_tensor(
+            float(objective.action_frame_weight_mode == "event_motion_v1"),
+            dtype=torch.float32,
+        ),
+        "action_frame_weight_mean": (
+            frame_weight.detach().float() * horizon_weight[None]
+        ).mean(),
+        "action_frame_weight_min": frame_weight.detach().float().amin(),
+        "action_frame_weight_max": frame_weight.detach().float().amax(),
+        "action_frame_weight_event_fraction": (
+            event_mask.detach().float() * frame_weight.detach().float() * horizon_weight[None]
+        ).sum()
+        / (frame_weight.detach().float() * horizon_weight[None]).sum().clamp_min(1e-8),
+        "action_frame_weight_motion_fraction": (
+            motion_mask.detach().float() * frame_weight.detach().float() * horizon_weight[None]
+        ).sum()
+        / (frame_weight.detach().float() * horizon_weight[None]).sum().clamp_min(1e-8),
         "action_flow_first": physical_error_unweighted[:, 0].mean(),
         "action_flow_first4": physical_error_unweighted[:, :4].mean(),
         "action_flow_first8": physical_error_unweighted[:, :8].mean(),
@@ -1587,6 +1690,7 @@ __all__ = [
     "LossLedger",
     "anchored_gripper_persistence",
     "action_terms",
+    "action_frame_weights",
     "balanced_event_row_weights",
     "causal_event_trajectory_mask",
     "compose_losses",

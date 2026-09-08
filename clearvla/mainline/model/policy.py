@@ -135,6 +135,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             role_host_depth=top.role_host_depth,
             role_host_expansion=top.role_host_ffn_expansion,
             role_host_dropout=top.role_host_dropout,
+            language_conditioning_mode=top.language_conditioning_mode,
             core_config=self.observation.v120_config,
         )
         self.history_proposal = HistoryActionProposal(

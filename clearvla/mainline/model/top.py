@@ -181,6 +181,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         role_host_depth: int = 3,
         role_host_expansion: float = 4.0,
         role_host_dropout: float = 0.05,
+        language_conditioning_mode: str = "goal_read",
         core_config=None,
     ) -> None:
         super().__init__()
@@ -232,6 +233,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             route_dim=route_dim,
             horizon=horizon,
             heads=heads,
+            language_conditioning_mode=language_conditioning_mode,
         )
         self.coarse_action = CoarseActionIntent(
             hidden=hidden,

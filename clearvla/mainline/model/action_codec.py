@@ -86,9 +86,43 @@ class PhysicalActionFieldCodec(nn.Module):
             raise ValueError("native action state must align with the physical field")
 
     @staticmethod
-    def _boundary(action: Tensor, action_state: Tensor) -> Tensor:
+    def _resolve_codec_gripper_boundary(
+        action_state: Tensor,
+        codec_gripper_boundary: Tensor | None,
+        *,
+        reference: Tensor,
+    ) -> Tensor:
+        value = (
+            action_state[:, -1:]
+            if codec_gripper_boundary is None
+            else codec_gripper_boundary
+        )
+        if tuple(value.shape) != (int(action_state.shape[0]), 1):
+            raise ValueError("codec gripper boundary must align as [B,1]")
+        return value.to(device=reference.device, dtype=reference.dtype)
+
+    def _boundary(
+        self,
+        action: Tensor,
+        action_state: Tensor,
+        codec_gripper_boundary: Tensor | None = None,
+    ) -> Tensor:
+        gripper = self._resolve_codec_gripper_boundary(
+            action_state,
+            codec_gripper_boundary,
+            reference=action,
+        )
+        first = torch.cat(
+            (
+                action_state[:, : self.arm_dim].to(
+                    device=action.device, dtype=action.dtype
+                ),
+                gripper,
+            ),
+            dim=-1,
+        )
         return torch.cat(
-            (action_state[:, None].to(device=action.device, dtype=action.dtype), action[:, :-1]),
+            (first[:, None], action[:, :-1]),
             dim=1,
         )
 
@@ -102,16 +136,26 @@ class PhysicalActionFieldCodec(nn.Module):
             gripper_field=field[..., 2 * arm :],
         )
 
-    def encode(self, action: Tensor, action_state: Tensor) -> Tensor:
+    def encode(
+        self,
+        action: Tensor,
+        action_state: Tensor,
+        *,
+        codec_gripper_boundary: Tensor | None = None,
+    ) -> Tensor:
         """Map a normalized native action chunk to the fixed 18-D flow chart."""
 
         self._validate_action(action, action_state)
-        boundary = self._boundary(action, action_state)
+        boundary = self._boundary(action, action_state, codec_gripper_boundary)
         arm = action[..., : self.arm_dim]
         previous_arm = boundary[..., : self.arm_dim]
         grip = action[..., -1:]
         previous_grip = boundary[..., -1:]
-        state_grip = action_state[:, None, -1:].to(device=action.device, dtype=action.dtype)
+        state_grip = self._resolve_codec_gripper_boundary(
+            action_state,
+            codec_gripper_boundary,
+            reference=action,
+        )[:, None]
         delta = grip - previous_grip
         # The resolved field width is six, so these are exactly the first six
         # coordinates of the historical legacy_handcrafted codec.
@@ -147,7 +191,13 @@ class PhysicalActionFieldCodec(nn.Module):
             generator=generator,
         )
 
-    def decode(self, field: Tensor, action_state: Tensor) -> Tensor:
+    def decode(
+        self,
+        field: Tensor,
+        action_state: Tensor,
+        *,
+        codec_gripper_boundary: Tensor | None = None,
+    ) -> Tensor:
         """Decode one physical field to the normalized native action chart."""
 
         self._validate_field(field, action_state)
@@ -159,6 +209,7 @@ class PhysicalActionFieldCodec(nn.Module):
         grip_absolute, grip_from_delta = self.gripper_decode_branches(
             field,
             action_state,
+            codec_gripper_boundary=codec_gripper_boundary,
         )
         blend = self.decode_delta_blend
         arm = (1.0 - blend) * parts.arm_absolute + blend * arm_from_delta
@@ -169,6 +220,8 @@ class PhysicalActionFieldCodec(nn.Module):
         self,
         field: Tensor,
         action_state: Tensor,
+        *,
+        codec_gripper_boundary: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Return the two exact continuous operands used by deployment.
 
@@ -180,9 +233,13 @@ class PhysicalActionFieldCodec(nn.Module):
 
         self._validate_field(field, action_state)
         parts = self.split(field)
-        state = action_state.to(device=field.device, dtype=field.dtype)
+        gripper = self._resolve_codec_gripper_boundary(
+            action_state,
+            codec_gripper_boundary,
+            reference=field,
+        )
         absolute = parts.gripper_field[..., :1]
-        cumulative_delta = state[:, None, -1:] + torch.cumsum(
+        cumulative_delta = gripper[:, None] + torch.cumsum(
             parts.gripper_field[..., 1:2], dim=1
         )
         return absolute, cumulative_delta
@@ -192,12 +249,18 @@ class PhysicalActionFieldCodec(nn.Module):
         field: Tensor,
         action_state: Tensor,
         decoded_action: Tensor,
+        *,
+        codec_gripper_boundary: Tensor | None = None,
     ) -> Tensor:
         """Return the historical per-step physical/native delta SmoothL1 rows."""
 
         self._validate_field(field, action_state)
         self._validate_action(decoded_action, action_state)
-        boundary = self._boundary(decoded_action, action_state)
+        boundary = self._boundary(
+            decoded_action,
+            action_state,
+            codec_gripper_boundary,
+        )
         actual_delta = decoded_action - boundary
         parts = self.split(field)
         field_delta = torch.cat(

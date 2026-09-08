@@ -287,10 +287,18 @@ class TopConfig:
     proposal_summary_tokens: int = 3
     goal_condition_dropout: float = 0.05
     action_history_condition_dropout: float = 0.10
+    # ``goal_read`` is the recovery path.  ``task_anchor_v1`` gives the
+    # language read an explicit S-owned query anchor without adding a second
+    # language path to W/P or changing the public action ABI.
+    language_conditioning_mode: str = "goal_read"
 
     def validate(self) -> None:
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")
+        if self.language_conditioning_mode not in {"goal_read", "task_anchor_v1"}:
+            raise ValueError(
+                "top.language_conditioning_mode must be goal_read or task_anchor_v1"
+            )
         if (
             self.grounder_iterations <= 0
             or self.teacher_key_dim <= 0
@@ -419,9 +427,17 @@ class ObjectiveConfig:
     arm_motion_threshold: float = 0.02
     horizon_tail_emphasis: float = 0.20
     horizon_first_step_protection: float = 0.05
+    # Optional shared Pen/RDT frame weighting.  ``uniform`` is the recovery
+    # behavior; the candidate reweights event/motion rows and renormalizes
+    # against the original horizon mass without dropping hold frames.
+    action_frame_weight_mode: str = "uniform"
+    action_frame_event_gain: float = 0.0
+    action_frame_motion_gain: float = 0.0
 
     def validate(self) -> None:
         for name, value in asdict(self).items():
+            if name == "action_frame_weight_mode":
+                continue
             if not math.isfinite(float(value)) or float(value) < 0.0:
                 raise ValueError(f"objective.{name} must be finite and non-negative")
         if self.future_dynamics <= 0.0 or self.intent_structure <= 0.0:
@@ -432,6 +448,24 @@ class ObjectiveConfig:
             raise ValueError("the resolved anchor-band emphasis is tail=0.20 and first=0.05")
         if self.execution_value != 0.05 or self.execution_value_huber_delta != 0.10:
             raise ValueError("the recovered V120 execution-value contract is weight=.05 beta=.10")
+        if self.action_frame_weight_mode not in {"uniform", "event_motion_v1"}:
+            raise ValueError(
+                "objective.action_frame_weight_mode must be uniform or event_motion_v1"
+            )
+        if self.action_frame_event_gain < 0.0 or self.action_frame_motion_gain < 0.0:
+            raise ValueError("action frame gains must be non-negative")
+        if self.action_frame_event_gain > 4.0 or self.action_frame_motion_gain > 4.0:
+            raise ValueError("action frame gains must be <= 4")
+        if self.action_frame_weight_mode == "uniform" and (
+            self.action_frame_event_gain != 0.0
+            or self.action_frame_motion_gain != 0.0
+        ):
+            raise ValueError("uniform action frame weighting requires zero gains")
+        if self.action_frame_weight_mode == "event_motion_v1" and (
+            self.action_frame_event_gain == 0.0
+            and self.action_frame_motion_gain == 0.0
+        ):
+            raise ValueError("event_motion_v1 requires a positive event or motion gain")
 
 
 @dataclass(frozen=True)

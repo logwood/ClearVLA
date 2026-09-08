@@ -929,6 +929,9 @@ def _validation_action_estimator_match(
         action_state=batch.online.history.action_state,
         codec=model.action_codec,
         distribution=config.bottom.flow_time_distribution,
+        codec_gripper_boundary=(
+            batch.online.history.resolved_codec_gripper_boundary()
+        ),
         generator=generator,
     )
     source_noise = initial_physical_noise.to(
@@ -969,6 +972,7 @@ def _validation_action_estimator_match(
     estimator_action = model.action_codec.decode(
         clean_physical,
         cache.history.action_state,
+        codec_gripper_boundary=cache.history.resolved_codec_gripper_boundary(),
     ).float()
     estimator_condition = PhysicalActionCondition.from_horizon_action(
         estimator_action.detach(),
@@ -1222,6 +1226,9 @@ def _validate(
         target_physical = engine.model.action_codec.encode(
             batch.action_target.normalized,
             batch.online.history.action_state,
+            codec_gripper_boundary=(
+                batch.online.history.resolved_codec_gripper_boundary()
+            ),
         )
         motion_target = (
             engine.model.action_codec.split(target_physical).arm_delta.float().norm(dim=-1)

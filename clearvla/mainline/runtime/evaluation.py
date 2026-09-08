@@ -224,8 +224,10 @@ class ValidationAccumulator:
     ) -> None:
         target = batch.action_target.normalized.float()
         normalized_current = batch.online.history.action_state.float()
+        normalized_boundary = batch.action_target.gripper_transition_boundary.float()
         raw_target = batch.action_target.raw_units.float()
         raw_current = batch.action_target.current_raw_units.float()
+        raw_boundary = batch.action_target.gripper_transition_boundary_raw_units.float()
         if row_indices is not None:
             rows = row_indices.detach().to(device="cpu", dtype=torch.long)
             if rows.ndim != 1 or not rows.numel():
@@ -238,8 +240,10 @@ class ValidationAccumulator:
             prediction = prediction.index_select(0, device_rows)
             target = target.index_select(0, device_rows)
             normalized_current = normalized_current.index_select(0, device_rows)
+            normalized_boundary = normalized_boundary.index_select(0, device_rows)
             raw_target = raw_target.index_select(0, device_rows)
             raw_current = raw_current.index_select(0, device_rows)
+            raw_boundary = raw_boundary.index_select(0, device_rows)
             if motion_logits is not None:
                 motion_logits = motion_logits.index_select(0, device_rows)
             if motion_target is not None:
@@ -295,7 +299,7 @@ class ValidationAccumulator:
             gripper_field = physical_field.detach().float()[..., -6:]
             absolute_branch = gripper_field[..., :1]
             cumulative_branch = (
-                normalized_current.detach()[:, None, -1:]
+                normalized_boundary.detach()[:, None, -1:]
                 + torch.cumsum(gripper_field[..., 1:2], dim=1)
             )
             reconstructed = (1.0 - blend) * absolute_branch + blend * cumulative_branch
@@ -346,11 +350,12 @@ class ValidationAccumulator:
             raw_prediction = prediction.float()
             raw_target = target
             raw_current = normalized_current
+            raw_boundary = normalized_boundary
         target_boundary = torch.cat(
-            (raw_current[:, None], raw_target[:, :-1]), dim=1
+            (raw_boundary[:, None], raw_target[:, :-1]), dim=1
         )
         pred_boundary = torch.cat(
-            (raw_current[:, None], raw_prediction[:, :-1]), dim=1
+            (raw_boundary[:, None], raw_prediction[:, :-1]), dim=1
         )
         target_delta = raw_target - target_boundary
         pred_delta = raw_prediction - pred_boundary
@@ -1123,6 +1128,9 @@ def evaluate_loader(
         target_physical = model.action_codec.encode(
             batch.action_target.normalized,
             batch.online.history.action_state,
+            codec_gripper_boundary=(
+                batch.online.history.resolved_codec_gripper_boundary()
+            ),
         )
         motion_target = (
             model.action_codec.split(target_physical).arm_delta.float().norm(dim=-1)

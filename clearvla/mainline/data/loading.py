@@ -738,6 +738,12 @@ def to_training_batch(
         history=ObservableHistory(
             state=_device_tensor(batch, "state", device=device, dtype=torch.float32),
             action_state=_device_tensor(batch, "action_state", device=device, dtype=torch.float32),
+            codec_gripper_boundary=_device_tensor(
+                batch,
+                "gripper_transition_boundary",
+                device=device,
+                dtype=torch.float32,
+            )[:, -1:],
             state_history=_device_tensor(
                 batch, "history_state", device=device, dtype=torch.float32
             ),

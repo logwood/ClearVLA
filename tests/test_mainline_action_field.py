@@ -230,7 +230,86 @@ def test_no_event_gripper_trajectory_masks_are_exact_zero() -> None:
     assert (cumulative_delta[..., 0] * persistence).sum() == 0
 
 
-def test_command_event_boundary_does_not_retarget_the_qpos_anchored_codec_delta() -> None:
+def test_explicit_profile_gripper_boundary_owns_encode_and_decode() -> None:
+    codec = _codec()
+    action_state = torch.zeros(1, 7)
+    previous_command = torch.zeros(1, 7)
+    previous_command[..., -1] = 0.5
+    action = torch.ones(1, 24, 7)
+    field = codec.encode(
+        action,
+        action_state,
+        codec_gripper_boundary=previous_command[..., -1:],
+    )
+    parts = codec.split(field)
+    torch.testing.assert_close(parts.gripper_field[0, 0, 1], torch.tensor(0.5))
+    torch.testing.assert_close(
+        codec.decode(
+            field,
+            action_state,
+            codec_gripper_boundary=previous_command[..., -1:],
+        ),
+        action,
+    )
+    assert not torch.allclose(codec.decode(field, action_state), action)
+
+
+def test_action_terms_use_the_profile_boundary_for_rdt_style_targets() -> None:
+    codec = _codec()
+    config = ExperimentConfig()
+    action_state = torch.zeros(1, 7)
+    previous_command = torch.zeros(1, 7)
+    previous_command[..., -1] = 0.5
+    action = torch.ones(1, 24, 7)
+    target_physical = codec.encode(
+        action,
+        action_state,
+        codec_gripper_boundary=previous_command[..., -1:],
+    )
+    target = ActionSupervision(
+        normalized=action,
+        raw_units=action,
+        current_raw_units=action_state,
+        gripper_transition_boundary=previous_command,
+        gripper_transition_boundary_raw_units=previous_command,
+    )
+    history = ObservableHistory(
+        state=action_state,
+        action_state=action_state,
+        state_history=torch.zeros(1, 3, 7),
+        executed_action_history=torch.zeros(1, 8, 7),
+        codec_gripper_boundary=previous_command[..., -1:],
+    )
+    zero = torch.zeros_like(target_physical)
+    output = cast(
+        PolicyStepOutput,
+        SimpleNamespace(
+            bottom=SimpleNamespace(
+                physical_velocity=target_physical,
+                motion_logits=torch.zeros(1, 24),
+                decoder_tensors={},
+            )
+        ),
+    )
+    terms = action_terms(
+        config,
+        codec,
+        output,
+        target,
+        history,
+        FlowMatchingState(
+            time=torch.zeros(1),
+            source_physical_noise=zero,
+            noisy_physical=zero,
+            target_physical=target_physical,
+            target_physical_velocity=target_physical,
+        ),
+    )
+    for name in ("decoded_action", "smooth_delta", "physical_delta_consistency"):
+        torch.testing.assert_close(terms[name], torch.tensor(0.0), atol=1e-6, rtol=1e-6)
+
+
+def test_command_event_boundary_uses_the_profile_gripper_boundary() -> None:
     codec = _codec()
     config = ExperimentConfig()
     action = torch.zeros(1, 24, 7)
@@ -238,7 +317,11 @@ def test_command_event_boundary_does_not_retarget_the_qpos_anchored_codec_delta(
     current_qpos = torch.zeros(1, 7)
     previous_command = torch.zeros(1, 7)
     previous_command[..., -1] = 0.5
-    target_physical = codec.encode(action, current_qpos)
+    target_physical = codec.encode(
+        action,
+        current_qpos,
+        codec_gripper_boundary=previous_command[..., -1:],
+    )
     zero = torch.zeros_like(target_physical)
     output = cast(
         PolicyStepOutput,
@@ -262,7 +345,13 @@ def test_command_event_boundary_does_not_retarget_the_qpos_anchored_codec_delta(
         codec,
         output,
         target,
-        cast(ObservableHistory, SimpleNamespace(action_state=current_qpos)),
+        cast(
+            ObservableHistory,
+            SimpleNamespace(
+                action_state=current_qpos,
+                codec_gripper_boundary=previous_command[..., -1:],
+            ),
+        ),
         FlowMatchingState(
             time=torch.zeros(1),
             source_physical_noise=zero,

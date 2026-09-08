@@ -629,6 +629,9 @@ class MainlineTrainingEngine:
             batch.action_target.normalized,
             action_state=batch.online.history.action_state,
             codec=self.model.action_codec,
+            codec_gripper_boundary=(
+                batch.online.history.resolved_codec_gripper_boundary()
+            ),
             distribution=self.config.bottom.flow_time_distribution,
             generator=generator,
         )
