@@ -51,6 +51,20 @@ def _parser() -> argparse.ArgumentParser:
         default="auto",
         help="Compute dtype; auto follows the branch's serialized test config.",
     )
+    parser.add_argument(
+        "--selective-compile-profile",
+        help="Profile resolved by the version's training acceleration adapter.",
+    )
+    parser.add_argument(
+        "--allow-candidate-selective-compile",
+        action="store_true",
+        help="Allow an equivalence-pending profile for an isolated experiment.",
+    )
+    parser.add_argument(
+        "--context-reuse",
+        action="store_true",
+        help="Enable the independently gated decoder context-reuse flags.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -124,6 +138,13 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     from test_mainline_policy import _batch, _config  # type: ignore[import-not-found]
 
     from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
+    from clearvla.mainline.training.acceleration_adapters import (
+        MainlineTrainingAccelerationAdapter,
+    )
+    from clearvla.mainline.training.acceleration_contract import (
+        resolve_training_acceleration_adapter,
+        resolve_training_compile_plan,
+    )
     from clearvla.mainline.training.engine import MainlineTrainingEngine
     from clearvla.mainline.training.optimizer import WarmupCosineSchedule, build_optimizer
 
@@ -146,6 +167,13 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "bf16": torch.bfloat16,
     }[args.dtype]
     model = ClearVLAMainlinePolicy(config).to("cuda").train()
+    # Older source snapshots predate the optional model hook.  Attaching the
+    # shared adapter in this harness keeps their model source untouched while
+    # exercising exactly the same backend and layout discovery.
+    adapter = resolve_training_acceleration_adapter(model)
+    if adapter.name == "generic-static-v1":
+        model.training_acceleration_adapter = MainlineTrainingAccelerationAdapter()
+        adapter = resolve_training_acceleration_adapter(model)
     optimizer, _ = build_optimizer(model, config)
     schedule = WarmupCosineSchedule(
         optimizer,
@@ -163,8 +191,43 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         seed=args.seed + 100,
         dtype=dtype,
     )
+    adapter.prepare(engine)
+    if args.context_reuse:
+        decoder = getattr(getattr(model, "execution_bottom", None), "decoder", None)
+        if decoder is None:
+            decoder = getattr(getattr(model, "bottom", None), "decoder", None)
+        if decoder is None:
+            raise RuntimeError("context-reuse requested but decoder was not found")
+        decoder._reuse_prepared_block_contexts = True
+        decoder._reuse_prepared_controller_context = True
+        decoder._reuse_terminal_candidate_velocity = True
+    compile_summary: dict[str, Any] | None = None
+    if args.selective_compile_profile and args.mode == "eager":
+        plan = resolve_training_compile_plan(
+            adapter,
+            engine,
+            args.selective_compile_profile,
+        )
+        if plan is None:
+            raise RuntimeError("selective compile profile resolved to no plan")
+        from clearvla.mainline.training.selective_compile import (
+            apply_training_compile_plan,
+        )
+
+        compile_summary = apply_training_compile_plan(
+            engine,
+            plan,
+            profile=args.selective_compile_profile,
+            allow_candidate=args.allow_candidate_selective_compile,
+        ).summary()
     batch = _move(_batch(config, batch=args.batch_size), torch.device("cuda"))
-    runner: Any = engine if args.mode == "eager" else graph_runner_cls(engine)
+    runner: Any = engine if args.mode == "eager" else graph_runner_cls(
+        engine,
+        compile_profile=args.selective_compile_profile,
+        allow_candidate_compile=args.allow_candidate_selective_compile,
+    )
+    if args.mode == "graph":
+        compile_summary = runner.compile_plan_summary
 
     # Warm-up includes graph capture in graph mode.  It is reported separately
     # and never folded into steady-state speed.
@@ -192,6 +255,9 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "samples_per_second": float(args.batch_size / median),
         "peak_allocated_gib": float(torch.cuda.max_memory_allocated() / 2**30),
         "peak_reserved_gib": float(torch.cuda.max_memory_reserved() / 2**30),
+        "selective_compile_profile": args.selective_compile_profile,
+        "selective_compile_plan": compile_summary,
+        "context_reuse": bool(args.context_reuse),
     }
     if graph_runner_cls is not None:
         result["capture_count"] = int(runner.capture_count)
