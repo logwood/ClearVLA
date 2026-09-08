@@ -156,6 +156,15 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     _seed(args.seed)
     config = _config()
+    if args.dtype != "auto" and str(config.runtime.compute_dtype) != args.dtype:
+        config = dataclasses.replace(
+            config,
+            runtime=dataclasses.replace(
+                config.runtime,
+                compute_dtype=args.dtype,
+            ),
+        )
+        config.validate()
     # Test configs are intentionally small enough to run on all lab GPUs; the
     # batch dimension is the only controlled throughput variable here.
     dtype = {
