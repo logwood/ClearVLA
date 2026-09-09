@@ -103,6 +103,18 @@ and the available workspace tests pass.  It remains a candidate rather than a
 release claim until the POSIX-only lifecycle tests run on their intended host
 and the volatile handoff is refreshed.
 
+The initial Windows CPU baseline after removing one stale test/API mismatch is
+`792 passed, 10 skipped, 4 failed`.  The removed test imported
+`_dwell_value_targets`, which existed only at historical commit `82700f3` and
+was removed from the runtime at `b2c1fa8`; restoring unused runtime code would
+have hidden the test drift.  The four remaining failures are all in the
+historical hierarchical-controller experiment: family-attention diversity,
+scope validation, neutral update-logit initialization and exact legacy-forward
+identity.  They are an explicit baseline debt, not an allowed-failure list and
+not evidence against the current default mainline.  Resolve that experiment as
+a separate semantic unit before claiming a fully green repository baseline;
+do not import the active `v86-slot-controller` WIP wholesale.
+
 After the WIP units are preserved and reviewed:
 
 1. advance local `master` only to the accepted ordered commit sequence;
