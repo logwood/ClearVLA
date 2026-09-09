@@ -1,6 +1,6 @@
 # ClearVLA current mainline consolidation and refactor plan
 
-Updated: 2026-09-04
+Updated: 2026-09-10
 
 Status: planning only.  This file orders future repository and source work; it
 does not authorize a merge, branch/worktree deletion, checkpoint migration,
@@ -21,7 +21,7 @@ here.
 
 | Surface | Current fact | Planning consequence |
 |---|---|---|
-| Git identity | At the 2026-09-04 repository audit, the active checkout and both verified remote refs were `b8163cb`; the working tree has unpublished changes on the historically named `codex/schema29-mainline`. | Treat that branch as the current WIP line until its changes are preserved. Make `master` the sole formal trunk afterward because it is already the remote default; re-fetch and compare immediately before any branch action. |
+| Git identity | The root worktree is at `e62b1b7` on the historically named `codex/schema29-mainline`; `origin/master` is its ancestor by four commits at the 2026-09-10 local snapshot.  The isolated `codex/mainline-integration-20260910` branch starts at the same commit and owns convergence work only. | Treat neither commit date nor an experiment branch name as release status. Preserve and review semantic units on the integration line, then make `master` the sole formal trunk; re-fetch immediately before any remote action. |
 | Active default | Manifest format 30, component layout 2 and the Schema28-core recovery behavior are the default.  The branch's `schema29` text is historical. | Do not infer behavior, checkpoint compatibility or release status from a branch/run name. |
 | Pen evidence | The recovery Pen E8 curve is complete and is the current comparable behavior baseline. | The old “wait for E8” phase is closed.  Remaining far-horizon/event weakness stays in the issue ledger and does not automatically select a mechanism. |
 | RDT evidence | The recovery artifact at `0973f192` declared a previous-command gripper boundary but used current qpos in loss/evaluation. | Its event/F1 surface cannot close the RDT contract.  Only a newly initialized run from the corrected boundary can replace it. |
@@ -34,6 +34,17 @@ here.
 
 Repository convergence precedes further architectural refactoring.  It is a
 review sequence, not permission to execute destructive Git operations.
+
+Generate the current factual inventory from the integration checkout with:
+
+```text
+python scripts/audit_repository_convergence.py --base HEAD
+```
+
+The command is read-only and reports worktree dirtiness, local and
+remote-tracking divergence, merge bases and stashes.  Its output is a transient
+review input, not a committed status ledger or an automatic disposition.  A
+new inventory is required immediately before any merge, archive or removal.
 
 ### Preserve and classify the root WIP
 
