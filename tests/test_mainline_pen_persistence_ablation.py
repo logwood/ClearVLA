@@ -154,7 +154,7 @@ def test_mode_does_not_change_model_state_rng_or_two_pass_sampling(tmp_path):
 def test_anchored_full_forward_ledger_and_backward():
     from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
     from clearvla.mainline.training.engine import MainlineTrainingEngine
-    from clearvla.mainline.training.optimizer import build_optimizer, WarmupCosineSchedule
+    from clearvla.mainline.training.optimizer import WarmupCosineSchedule, build_optimizer
     from tests.test_mainline_policy import _batch, _config
 
     config = _config()
