@@ -157,7 +157,7 @@ Revalidate every row immediately before acting.
 | `codex/v86-slot-controller` | Extract the small real source/test/launcher WIP from line-ending noise before removal. |
 | `codex/v76-recovered` | Historical ancestor whose exact tip `1e9363b` is already retained by `v76-owned-intent-mmdit-checkpoint`.  It has no worktree, upstream or stash dependency and is deletion-ready after the formal trunk is selected; revalidate those facts immediately before removing the local branch. |
 | `origin/codex/hybrid-v1` | Three unique commits form an optional hybrid Pen experiment and must not be merged wholesale.  The final `cd9489a` exposes a separable deployment-identity gap—the committed validator writes but does not validate `architecture_manifest`—but its patch is hybrid-schema-specific, has no focused negative test, and overlaps the root worktree's active `deployment.py`/`manifest.py` edits.  After that owner closes the WIP, either confirm the gap was superseded or extract a current-schema manifest-validation unit with explicit legacy compatibility tests.  Retain the remote ref until then. |
-| `origin/codex/rdt-data-adaptation` | Remote ancestor and later deletion candidate; revalidate against the server before deletion. |
+| `origin/codex/rdt-data-adaptation` | The local remote-tracking tip `8672c5f` is a strict integration-line ancestor (`44` base-only / `0` ref-only commits), so no code or provenance admission remains.  It is remote-deletion-ready only after a fresh fetch confirms the server ref and a separate remote-write authorization is given. |
 
 Before removing any worktree or branch, require: clean/understood status,
 recoverable unique commits, preserved intentional untracked files, no dependent
