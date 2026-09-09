@@ -151,13 +151,41 @@ Revalidate every row immediately before acting.
 | `codex/pen-bspline-routing-20260906` | Optional B-spine experiment line.  Keep outside the default until its matched evidence and interface gates close. |
 | `codex/rdt-multitask-prep` | Its four unique commits are reviewed and none is an admissible standalone early-convergence unit.  `f6d2a0d` couples accurate historical audit relabeling to an unapproved reversal of the current threshold/config/launcher policy; `2bebd43` is a one-time v1-to-v3 reconciliation producer; and `ffe5c64`/`f8d0c2f` form an untested task/machine-specific gate with `/data`, an eight-GPU inventory, an old workspace command and an old source-scope baseline embedded in its report.  Its own saved result is `BLOCKED`/`DO_NOT_START`.  Preserve the untracked audits, reconciliation, repeated acceptance reports, launch-gate report and `new_logs` evidence before archiving/removing the branch/worktree; do not promote these historical producers into the active tool surface.  Rebuild a future launch gate against the then-current outlet and identity contracts. |
 | `codex/schema28-core-recovery-pen-20260903` | No code admission remains.  Commit `0973f19` is not whole-commit patch-equivalent, but 13 of its 24 per-file patches—including `dynamics.py`, `intent.py` and `types.py`—are stable-patch identical in later mainline commit `cb7f0fd`; the remaining surfaces replay the recovery together with layout-2, optional B-spine and the stricter profile-owned gripper boundary.  Current manifest, single-forward training, profile-boundary, validation-boundary and resume-schema tests close that supersession.  Retain an immutable provenance tag for the formal recovery run before removing the redundant branch/worktree. |
-| `codex/schema25-r1-replay` | Its sole branch commit `90557b6` is confirmed patch-equivalent to the integration line, so no code admission remains.  The worktree still owns modified/staged historical documents, two untracked candidate memos and local `.audit` scripts/results; classify those records independently before any removal. |
+| `codex/schema25-r1-replay` | Its sole branch commit `90557b6` is confirmed patch-equivalent to the integration line, so no code admission remains.  Its remaining WIP is fully classified below: admit none of it to active source or documentation, and preserve only the named external run-provenance bundle before removing the worktree. |
 | `codex/schema28-estimator-gate` | No source or test admission remains.  Whole-commit patch identity differs because `6a43e8e` edited an intermediate repair-plan state, but its `logging.py`, `train.py`, architecture-contract and two test-file patches have the same stable patch IDs as mainline commit `ab80fe3`; the unmatched plan narration is superseded by this living plan.  Preserve the untracked `.audit/schema28_estimator_gate_6a43e8e_gate2` replay record as experiment provenance before archiving/removing the branch and worktree. |
 | `codex/v94-latent-ownership-execution` | Keep while the protected stash depends on it. |
 | `codex/v86-slot-controller` | Extract the small real source/test/launcher WIP from line-ending noise before removal. |
 | `codex/v76-recovered` | Historical ancestor whose exact tip `1e9363b` is already retained by `v76-owned-intent-mmdit-checkpoint`.  It has no worktree, upstream or stash dependency and is deletion-ready after the formal trunk is selected; revalidate those facts immediately before removing the local branch. |
 | `origin/codex/hybrid-v1` | Three unique commits form an optional hybrid Pen experiment and must not be merged wholesale.  The final `cd9489a` exposes a separable deployment-identity gap—the committed validator writes but does not validate `architecture_manifest`—but its patch is hybrid-schema-specific, has no focused negative test, and overlaps the root worktree's active `deployment.py`/`manifest.py` edits.  After that owner closes the WIP, either confirm the gap was superseded or extract a current-schema manifest-validation unit with explicit legacy compatibility tests.  Retain the remote ref until then. |
 | `origin/codex/rdt-data-adaptation` | The local remote-tracking tip `8672c5f` is a strict integration-line ancestor (`44` base-only / `0` ref-only commits), so no code or provenance admission remains.  It is remote-deletion-ready only after a fresh fetch confirms the server ref and a separate remote-write authorization is given. |
+
+The `schema25-r1-replay` dirty worktree is not an unpublished implementation
+lane.  Its exact WIP disposition is:
+
+- reject its `AGENTS.md` and auxiliary README edits because they make an
+  isolated replay workspace authoritative and incorrectly declare the current
+  optional B-spine retired;
+- reject the 354-line R2-plan append because it turns a compact historical
+  worksheet back into an active Schema26/27 queue.  Its accepted gripper and
+  FP32-capacity repairs are already implemented by `097330a` and its remaining
+  current questions are represented in the issue ledger;
+- do not import the two untracked B-spline/MIP candidate memos.  The former is
+  superseded by the committed standalone B-spline package, Schema31 candidate
+  and later arm-only implementation; the latter assumes the old single-pass
+  Schema27 graph, while the compact WAM research map already retains MIP as an
+  independent, conditional hypothesis;
+- do not promote the staged 523-line Schema27 checkpoint as current memory.
+  Its decision-bearing proof was the pre-event cumulative-delta responsibility
+  leak and the BF16 capacity dead zone (`838/1,126` positive-progress rows at
+  exact-one capacity with zero contraction-bank gradient); both selected the
+  `097330a` repairs.  Later recovery evidence supersedes its behavior tables;
+- before removal, preserve outside Git one provenance bundle containing the
+  checkpoint, its extraction script, and the exact Schema27 run artifacts:
+  `metrics.jsonl` (70,915,801 bytes, SHA-256
+  `D808820ADBE9A556E6418E8A948FFE2C31BE15D292907279BEF2B5C4858F263F`)
+  plus `run_context.json` (28,177 bytes, SHA-256
+  `8AAACC7F6BCA131A5D48A2EFF9866EC99145A8B87B971C47668AE21044E0CE8A`).
+  The raw JSONL and the one-off Schema28 CPU probe do not enter the repository.
 
 Before removing any worktree or branch, require: clean/understood status,
 recoverable unique commits, preserved intentional untracked files, no dependent
