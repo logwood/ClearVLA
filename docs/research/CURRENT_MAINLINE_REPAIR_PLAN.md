@@ -60,11 +60,12 @@ Generate the current factual inventory from the integration checkout with:
 python scripts/audit_repository_convergence.py --base HEAD
 ```
 
-The command is read-only and reports worktree dirtiness, local and
-remote-tracking divergence, merge bases, patch-equivalent versus unique
-commits, and stashes.  Its output is a transient review input, not a committed
-status ledger or an automatic disposition.  A new inventory is required
-immediately before any merge, archive or removal.
+The command is read-only and reports worktree dirtiness, exact tracked-path
+sets and cross-worktree overlaps, local and remote-tracking divergence, merge
+bases, patch-equivalent versus unique commits, and stashes.  Its output is a
+transient review input, not a committed status ledger or an automatic
+disposition.  A new inventory is required immediately before any merge,
+archive or removal.
 
 ### Preserve and classify the root WIP
 

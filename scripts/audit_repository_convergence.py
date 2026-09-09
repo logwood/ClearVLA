@@ -70,9 +70,13 @@ def parse_worktree_porcelain(output: str) -> list[dict[str, Any]]:
     return worktrees
 
 
-def parse_status_porcelain(output: bytes) -> dict[str, int | bool]:
+def parse_status_porcelain(output: bytes) -> dict[str, Any]:
     records = output.split(b"\0")
     tracked = staged = unstaged = untracked = conflicts = 0
+    tracked_paths: list[str] = []
+    untracked_paths: list[str] = []
+    conflict_paths: list[str] = []
+    rename_source_paths: list[str] = []
     index = 0
     while index < len(records):
         record = records[index]
@@ -82,16 +86,27 @@ def parse_status_porcelain(output: bytes) -> dict[str, int | bool]:
         code = record[:2].decode("ascii", errors="replace")
         if code == "??":
             untracked += 1
+            untracked_paths.append(os.fsdecode(record[3:]))
             continue
         if code == "!!":
             continue
+        path = os.fsdecode(record[3:])
         tracked += 1
+        tracked_paths.append(path)
         x, y = code[0], code[1]
         staged += int(x != " ")
         unstaged += int(y != " ")
-        conflicts += int(code in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
+        conflict = code in {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+        conflicts += int(conflict)
+        if conflict:
+            conflict_paths.append(path)
         if "R" in code or "C" in code:
-            index += 1  # Porcelain v1 -z appends the original rename/copy path.
+            # In porcelain v1 ``-z`` mode the current path precedes the
+            # original rename/copy path.  Keep both because another worktree
+            # may still edit the original path.
+            if index < len(records) and records[index]:
+                rename_source_paths.append(os.fsdecode(records[index]))
+            index += 1
     return {
         "tracked": tracked,
         "staged": staged,
@@ -99,6 +114,10 @@ def parse_status_porcelain(output: bytes) -> dict[str, int | bool]:
         "untracked": untracked,
         "conflicts": conflicts,
         "dirty": bool(tracked or untracked),
+        "tracked_paths": sorted(set(tracked_paths)),
+        "untracked_paths": sorted(set(untracked_paths)),
+        "conflict_paths": sorted(set(conflict_paths)),
+        "rename_source_paths": sorted(set(rename_source_paths)),
     }
 
 
@@ -174,6 +193,44 @@ def collect_stashes(repo: Path) -> list[dict[str, str]]:
     return rows
 
 
+def collect_tracked_path_overlaps(
+    worktrees: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return repository-relative tracked paths changed in multiple worktrees."""
+
+    owners_by_path: dict[str, list[dict[str, str]]] = {}
+    for worktree in worktrees:
+        status = worktree.get("status", {})
+        if not isinstance(status, dict) or "error" in status:
+            continue
+        paths = {
+            str(path)
+            for key in ("tracked_paths", "rename_source_paths")
+            for path in status.get(key, [])
+        }
+        owner = {
+            "branch": str(worktree.get("branch", "(detached)")),
+            "worktree": str(worktree["worktree"]),
+        }
+        for path in paths:
+            owners_by_path.setdefault(path, []).append(owner)
+
+    overlaps: list[dict[str, Any]] = []
+    for path, owners in owners_by_path.items():
+        if len(owners) < 2:
+            continue
+        overlaps.append(
+            {
+                "path": path,
+                "worktrees": sorted(
+                    owners,
+                    key=lambda value: (value["branch"], value["worktree"]),
+                ),
+            }
+        )
+    return sorted(overlaps, key=lambda value: value["path"])
+
+
 def collect_inventory(
     repo: Path,
     base: str,
@@ -192,11 +249,12 @@ def collect_inventory(
     remote_refs = collect_refs(root, base, "refs/remotes") if include_remotes else []
     complete = all("error" not in worktree["status"] for worktree in worktrees)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "complete": complete,
         "repository": str(root),
         "base": {"ref": base, "commit": base_commit},
         "worktrees": worktrees,
+        "tracked_path_overlaps": collect_tracked_path_overlaps(worktrees),
         "refs": {"local": local_refs, "remote_tracking": remote_refs},
         "stashes": collect_stashes(root),
     }
@@ -243,6 +301,19 @@ def render_markdown(inventory: dict[str, Any]) -> str:
             )
             + " |"
         )
+
+    lines.extend(["", "## Tracked-path overlaps", ""])
+    overlaps = inventory.get("tracked_path_overlaps", [])
+    if overlaps:
+        lines.extend(["| Path | Worktrees |", "|---|---|"])
+        for overlap in overlaps:
+            owners = ", ".join(
+                f"{_cell(owner['branch'])} (`{_cell(owner['worktree'])}`)"
+                for owner in overlap["worktrees"]
+            )
+            lines.append(f"| {_cell(overlap['path'])} | {owners} |")
+    else:
+        lines.append("None.")
 
     lines.extend(
         [

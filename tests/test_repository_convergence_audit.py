@@ -58,7 +58,51 @@ def test_parse_status_porcelain_counts_rename_once():
         "untracked": 1,
         "conflicts": 1,
         "dirty": True,
+        "tracked_paths": [
+            "conflict.txt",
+            "renamed.txt",
+            "staged.txt",
+            "tracked.txt",
+        ],
+        "untracked_paths": ["new.txt"],
+        "conflict_paths": ["conflict.txt"],
+        "rename_source_paths": ["old.txt"],
     }
+
+
+def test_tracked_path_overlap_includes_rename_sources_and_skips_unreadable():
+    worktrees = [
+        {
+            "worktree": "C:/repo/one",
+            "branch": "one",
+            "status": {
+                "tracked_paths": ["new.txt"],
+                "rename_source_paths": ["shared.txt"],
+            },
+        },
+        {
+            "worktree": "C:/repo/two",
+            "branch": "two",
+            "status": {
+                "tracked_paths": ["shared.txt"],
+                "rename_source_paths": [],
+            },
+        },
+        {
+            "worktree": "C:/repo/unreadable",
+            "branch": "unreadable",
+            "status": {"error": "unavailable", "dirty": None},
+        },
+    ]
+    assert audit.collect_tracked_path_overlaps(worktrees) == [
+        {
+            "path": "shared.txt",
+            "worktrees": [
+                {"branch": "one", "worktree": "C:/repo/one"},
+                {"branch": "two", "worktree": "C:/repo/two"},
+            ],
+        }
+    ]
 
 
 def test_collect_inventory_reports_real_worktrees_without_writing(tmp_path):
@@ -92,6 +136,7 @@ def test_collect_inventory_reports_real_worktrees_without_writing(tmp_path):
     (stale / "tracked.txt").write_text("integrated", encoding="utf-8")
     _git(stale, "add", "tracked.txt")
     _git(stale, "commit", "-m", "same patch from stale branch")
+    (repo / "tracked.txt").write_text("root work in progress", encoding="utf-8")
 
     before = {path.relative_to(topic) for path in topic.rglob("*") if path.is_file()}
     inventory = audit.collect_inventory(
@@ -100,6 +145,7 @@ def test_collect_inventory_reports_real_worktrees_without_writing(tmp_path):
     after = {path.relative_to(topic) for path in topic.rglob("*") if path.is_file()}
 
     assert before == after
+    assert inventory["schema_version"] == 2
     assert inventory["complete"] is True
     assert inventory["base"]["ref"] == base
     assert {row["ref"] for row in inventory["refs"]["local"]} == {
@@ -119,9 +165,22 @@ def test_collect_inventory_reports_real_worktrees_without_writing(tmp_path):
     assert topic_row["status"]["tracked"] == 1
     assert topic_row["status"]["untracked"] == 1
     assert topic_row["status"]["dirty"] is True
+    assert topic_row["status"]["tracked_paths"] == ["tracked.txt"]
+    assert topic_row["status"]["untracked_paths"] == ["new.txt"]
+    assert inventory["tracked_path_overlaps"] == [
+        {
+            "path": "tracked.txt",
+            "worktrees": [
+                {"branch": base, "worktree": repo.as_posix()},
+                {"branch": "topic", "worktree": topic.as_posix()},
+            ],
+        }
+    ]
 
     report = audit.render_markdown(inventory)
     assert "This is a read-only fact report" in report
     assert "0 unreadable" in report
     assert "Unique patches" in report
+    assert "Tracked-path overlaps" in report
+    assert "| tracked.txt |" in report
     assert "| topic |" in report
