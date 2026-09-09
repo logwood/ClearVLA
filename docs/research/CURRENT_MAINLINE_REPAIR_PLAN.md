@@ -30,6 +30,25 @@ here.
 | Working tree | The root contains several WIP lanes, including CALVIN outlet work, benchmark/simulation work, physical/B-spline assets, dependency/script changes and history cleanup. | Isolate distinct behavior changes, while allowing behavior-neutral cleanup to accompany the owner it clarifies.  Never promote an unclassified dirty tree as one commit. |
 | Protected provenance | The `pre-schema29-root-promotion-20260901` stash is based on `codex/v94-latent-ownership-execution`. | Keep the branch and stash untouched until the stash is explicitly inventoried and resolved. |
 
+## Documentation ownership
+
+Repository memory follows the same one-owner rule as source code:
+
+| Surface | Owns | Must not own |
+|---|---|---|
+| Architecture contract | Current graph, typed boundaries, accepted outlet semantics and invariants | Epoch narration, active PIDs, old-version deltas or feasibility reports |
+| Current issue ledger | Unresolved questions, latest comparable observations and source-entry conditions | Closed repair diary, full probe output or execution checklist |
+| Repair plan | Future repository/refactor order, safety gates and completion criteria | Current architecture truth or volatile run state |
+| Active handoff | Timestamped PIDs, paths, process health and immediate next actions | Architecture decisions or permanent experiment history |
+| Package README | Stable package purpose, public API, ownership boundary and entry points | Release claims, live run state or future design backlog |
+| Archive/index | Historical reasoning and retrieval pointers | Authority over current source |
+
+Prefer Git history over new versioned archive documents when removing obsolete
+narration.  Update a package README only for a stable interface or command;
+learned results belong in the issue ledger or raw run record.  Temporary
+B-spine audits and old conversation ledgers remain evidence, not competing
+architecture contracts.
+
 ## Repository convergence
 
 Repository convergence precedes further architectural refactoring.  It is a
@@ -77,6 +96,13 @@ behavior hypotheses must never be hidden inside one “cleanup” change.
 
 ### Promote one formal trunk
 
+The first candidate prefix is the four-commit operational sequence
+`origin/master..e62b1b7`: it changes only README/handoff text,
+the standard-library workspace tool and its tests.  Local compilation, Ruff
+and the available workspace tests pass.  It remains a candidate rather than a
+release claim until the POSIX-only lifecycle tests run on their intended host
+and the volatile handoff is refreshed.
+
 After the WIP units are preserved and reviewed:
 
 1. advance local `master` only to the accepted ordered commit sequence;
@@ -96,8 +122,15 @@ Revalidate every row immediately before acting.
 
 | Ref | Current disposition |
 |---|---|
-| `codex/schema29-mainline` | Current capability/WIP line.  Promote accepted commits to `master`, then delete only when redundant. |
+| `codex/mainline-integration-20260910` | Sole convergence staging line.  Admit reviewed semantic units only; do not run model experiments from it or call it the formal trunk. |
+| `codex/schema29-mainline` | Shared root capability/WIP line.  Preserve its unpublished units independently; do not write integration-only changes back into its dirty worktree. |
 | local `master` | Behind the local `origin/master` snapshot.  Fast-forward after WIP protection; do not merge the old local tip as a side line. |
+| `codex/training-acceleration` | Active, divergent acceleration line with local WIP.  Admit only completed equivalence-gated units after its owner closes the worktree; never merge the dirty branch wholesale. |
+| `codex/pen-rdt-shared-core-schema28-20260908` | Formal shared-core experiment provenance plus separate local WIP.  Preserve the run ref; extract any accepted outlet/loss change as its own reviewed unit. |
+| `codex/pen-gripper-anchored-ablation-20260909` | Single-variable Pen persistence experiment.  Retain as provenance until the run is disposed; it does not select the default persistence contract. |
+| `codex/pen-rdt-shared-core-20260908` and `codex/remove-bspine-keep-solver-20260906` | Both currently point at `c7eccde`, but one worktree has unpublished changes.  Treat them as distinct retained state until WIP and run provenance are resolved, then keep one replacement ref if still needed. |
+| `codex/pen-geometry-gripper-repair-20260907` | Coupled geometry/gripper candidate.  Do not merge wholesale or infer either intervention independently from the combined result. |
+| `codex/pen-bspline-routing-20260906` | Optional B-spine experiment line.  Keep outside the default until its matched evidence and interface gates close. |
 | `codex/rdt-multitask-prep` | Do not merge wholesale.  Preserve only explicitly selected documentation/provenance, then archive and remove the branch/worktree. |
 | `codex/schema28-core-recovery-pen-20260903` | Retain an immutable provenance tag for the formal recovery run, then remove the redundant branch/worktree. |
 | `codex/schema25-r1-replay` | Code is already patch-equivalent in mainline; first preserve or reject its dirty/staged documentation, then remove it. |
