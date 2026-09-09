@@ -135,9 +135,18 @@ def _parse_ref_rows(output: str) -> list[dict[str, str]]:
 def _divergence(repo: Path, base: str, ref: str) -> dict[str, Any]:
     counts = str(_run_git(repo, "rev-list", "--left-right", "--count", f"{base}...{ref}"))
     base_only, ref_only = (int(value) for value in counts.split())
+    cherry = str(_run_git(repo, "cherry", base, ref))
+    patch_equivalent = unique_patch = 0
+    for line in cherry.splitlines():
+        if line.startswith("- "):
+            patch_equivalent += 1
+        elif line.startswith("+ "):
+            unique_patch += 1
     return {
         "base_only_commits": base_only,
         "ref_only_commits": ref_only,
+        "patch_equivalent_commits": patch_equivalent,
+        "unique_patch_commits": unique_patch,
         "merge_base": _optional_git(repo, "merge-base", base, ref),
     }
 
@@ -240,8 +249,8 @@ def render_markdown(inventory: dict[str, Any]) -> str:
             "",
             "## Refs relative to base",
             "",
-            "| Scope | Ref | Base-only | Ref-only | Merge base | Tip | Subject |",
-            "|---|---|---:|---:|---|---|---|",
+            "| Scope | Ref | Base-only | Ref-only | Patch-equivalent | Unique patches | Merge base | Tip | Subject |",
+            "|---|---|---:|---:|---:|---:|---|---|---|",
         ]
     )
     for scope, rows in inventory["refs"].items():
@@ -254,6 +263,8 @@ def render_markdown(inventory: dict[str, Any]) -> str:
                         _cell(row["ref"]),
                         _cell(row["base_only_commits"]),
                         _cell(row["ref_only_commits"]),
+                        _cell(row["patch_equivalent_commits"]),
+                        _cell(row["unique_patch_commits"]),
                         _cell((row.get("merge_base") or "")[:12]),
                         _cell(row["commit"][:12]),
                         _cell(row["subject"]),

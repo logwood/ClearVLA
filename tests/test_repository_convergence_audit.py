@@ -71,14 +71,27 @@ def test_collect_inventory_reports_real_worktrees_without_writing(tmp_path):
     _git(repo, "add", "tracked.txt")
     _git(repo, "commit", "-m", "base")
     base = _git(repo, "branch", "--show-current")
+    _git(repo, "branch", "stale", "HEAD")
+    (repo / "tracked.txt").write_text("integrated", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "integrated change")
 
     topic = tmp_path / "topic"
     _git(repo, "worktree", "add", "-b", "topic", str(topic), "HEAD")
+    (topic / "topic.txt").write_text("topic commit", encoding="utf-8")
+    _git(topic, "add", "topic.txt")
+    _git(topic, "commit", "-m", "unique topic change")
     (topic / "tracked.txt").write_text("changed", encoding="utf-8")
     (topic / "new.txt").write_text("untracked", encoding="utf-8")
     _git(topic, "stash", "push", "-u", "-m", "protected test state")
     (topic / "tracked.txt").write_text("changed again", encoding="utf-8")
     (topic / "new.txt").write_text("untracked again", encoding="utf-8")
+
+    stale = tmp_path / "stale"
+    _git(repo, "worktree", "add", str(stale), "stale")
+    (stale / "tracked.txt").write_text("integrated", encoding="utf-8")
+    _git(stale, "add", "tracked.txt")
+    _git(stale, "commit", "-m", "same patch from stale branch")
 
     before = {path.relative_to(topic) for path in topic.rglob("*") if path.is_file()}
     inventory = audit.collect_inventory(
@@ -89,7 +102,17 @@ def test_collect_inventory_reports_real_worktrees_without_writing(tmp_path):
     assert before == after
     assert inventory["complete"] is True
     assert inventory["base"]["ref"] == base
-    assert {row["ref"] for row in inventory["refs"]["local"]} == {base, "topic"}
+    assert {row["ref"] for row in inventory["refs"]["local"]} == {
+        base,
+        "stale",
+        "topic",
+    }
+    topic_ref = next(row for row in inventory["refs"]["local"] if row["ref"] == "topic")
+    assert topic_ref["patch_equivalent_commits"] == 0
+    assert topic_ref["unique_patch_commits"] == 1
+    stale_ref = next(row for row in inventory["refs"]["local"] if row["ref"] == "stale")
+    assert stale_ref["patch_equivalent_commits"] == 1
+    assert stale_ref["unique_patch_commits"] == 0
     assert len(inventory["stashes"]) == 1
     assert "protected test state" in inventory["stashes"][0]["subject"]
     topic_row = next(row for row in inventory["worktrees"] if row.get("branch") == "topic")
@@ -100,4 +123,5 @@ def test_collect_inventory_reports_real_worktrees_without_writing(tmp_path):
     report = audit.render_markdown(inventory)
     assert "This is a read-only fact report" in report
     assert "0 unreadable" in report
+    assert "Unique patches" in report
     assert "| topic |" in report

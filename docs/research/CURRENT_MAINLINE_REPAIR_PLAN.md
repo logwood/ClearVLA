@@ -61,9 +61,10 @@ python scripts/audit_repository_convergence.py --base HEAD
 ```
 
 The command is read-only and reports worktree dirtiness, local and
-remote-tracking divergence, merge bases and stashes.  Its output is a transient
-review input, not a committed status ledger or an automatic disposition.  A
-new inventory is required immediately before any merge, archive or removal.
+remote-tracking divergence, merge bases, patch-equivalent versus unique
+commits, and stashes.  Its output is a transient review input, not a committed
+status ledger or an automatic disposition.  A new inventory is required
+immediately before any merge, archive or removal.
 
 ### Preserve and classify the root WIP
 
@@ -145,7 +146,7 @@ Revalidate every row immediately before acting.
 | `codex/pen-bspline-routing-20260906` | Optional B-spine experiment line.  Keep outside the default until its matched evidence and interface gates close. |
 | `codex/rdt-multitask-prep` | Do not merge wholesale.  Preserve only explicitly selected documentation/provenance, then archive and remove the branch/worktree. |
 | `codex/schema28-core-recovery-pen-20260903` | Retain an immutable provenance tag for the formal recovery run, then remove the redundant branch/worktree. |
-| `codex/schema25-r1-replay` | Code is already patch-equivalent in mainline; first preserve or reject its dirty/staged documentation, then remove it. |
+| `codex/schema25-r1-replay` | Its sole branch commit `90557b6` is confirmed patch-equivalent to the integration line, so no code admission remains.  The worktree still owns modified/staged historical documents, two untracked candidate memos and local `.audit` scripts/results; classify those records independently before any removal. |
 | `codex/schema28-estimator-gate` | Estimator code/tests are already patch-equivalent in mainline; preserve decision-relevant documentation only, then archive/remove. |
 | `codex/v94-latent-ownership-execution` | Keep while the protected stash depends on it. |
 | `codex/v86-slot-controller` | Extract the small real source/test/launcher WIP from line-ending noise before removal. |
