@@ -151,6 +151,7 @@ Revalidate every row immediately before acting.
 | `codex/v94-latent-ownership-execution` | Keep while the protected stash depends on it. |
 | `codex/v86-slot-controller` | Extract the small real source/test/launcher WIP from line-ending noise before removal. |
 | `codex/v76-recovered` | Historical ancestor.  Verify its retained tag/provenance, then remove the branch. |
+| `origin/codex/hybrid-v1` | Three unique commits form an optional hybrid Pen experiment and must not be merged wholesale.  The final `cd9489a` exposes a separable deployment-identity gap—the committed validator writes but does not validate `architecture_manifest`—but its patch is hybrid-schema-specific, has no focused negative test, and overlaps the root worktree's active `deployment.py`/`manifest.py` edits.  After that owner closes the WIP, either confirm the gap was superseded or extract a current-schema manifest-validation unit with explicit legacy compatibility tests.  Retain the remote ref until then. |
 | `origin/codex/rdt-data-adaptation` | Remote ancestor and later deletion candidate; revalidate against the server before deletion. |
 
 Before removing any worktree or branch, require: clean/understood status,
