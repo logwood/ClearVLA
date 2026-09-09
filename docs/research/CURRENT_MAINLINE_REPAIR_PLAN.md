@@ -100,9 +100,13 @@ behavior hypotheses must never be hidden inside one “cleanup” change.
 The first candidate prefix is the four-commit operational sequence
 `origin/master..e62b1b7`: it changes only README/handoff text,
 the standard-library workspace tool and its tests.  Local compilation, Ruff
-and the available workspace tests pass.  It remains a candidate rather than a
-release claim until the POSIX-only lifecycle tests run on their intended host
-and the volatile handoff is refreshed.
+and the Windows workspace tests pass.  The exact committed `e62b1b7` workspace
+tool and test were also exported from the Git object database into an isolated
+Linux temporary directory; all 17 workspace tests passed, including the
+POSIX-only open-file rename, process-identity and virtualenv-symlink cases,
+without modifying a tracked checkout.  This closes the platform lifecycle
+gate.  The prefix remains a candidate rather than a release claim until the
+shared WIP is protected/reviewed and the volatile handoff is refreshed.
 
 The initial Windows CPU baseline after removing one stale test/API mismatch is
 `792 passed, 10 skipped, 4 failed`.  The removed test imported
