@@ -29,12 +29,13 @@ from __future__ import annotations
 import copy
 import math
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from torch.utils.checkpoint import checkpoint
+from torch.utils.checkpoint import checkpoint, create_selective_checkpoint_contexts
 
 from .differential_intent_effect import (
     DifferentialWindowEffectBank,
@@ -1445,6 +1446,38 @@ def _group_count(channels: int) -> int:
     return 1
 
 
+_RAW_FLOW_CHECKPOINT_SAVE_OPERATIONS = {
+    "convolution": (torch.ops.aten.convolution.default,),
+    "linear": (
+        torch.ops.aten.addmm.default,
+        torch.ops.aten.mm.default,
+        torch.ops.aten.bmm.default,
+    ),
+    "grid_sample": (torch.ops.aten.grid_sampler_2d.default,),
+}
+
+
+def _raw_flow_selective_checkpoint_context(
+    save_operations: tuple[str, ...],
+) -> Any:
+    """Create a fresh selective-checkpoint cache for one refiner call."""
+
+    requested = tuple(dict.fromkeys(str(name) for name in save_operations))
+    unknown = set(requested).difference(_RAW_FLOW_CHECKPOINT_SAVE_OPERATIONS)
+    if unknown:
+        raise ValueError(
+            f"unknown raw-flow checkpoint save operations: {sorted(unknown)!r}"
+        )
+    operations = [
+        operation
+        for name in requested
+        for operation in _RAW_FLOW_CHECKPOINT_SAVE_OPERATIONS[name]
+    ]
+    if not operations:
+        raise ValueError("selective raw-flow checkpoint requires a saved operation")
+    return create_selective_checkpoint_contexts(operations)
+
+
 class _RawImagePyramid(nn.Module):
     """Shared RGB pyramid that preserves 1/4 detail until grounded reading.
 
@@ -1523,10 +1556,32 @@ class _DenseRawFlowRefiner(nn.Module):
         self.radius = int(radius)
         self.uncertainty_floor = float(uncertainty_floor)
         self.activation_checkpoint = bool(activation_checkpoint)
+        # Empty retains the historical full-recompute checkpoint.  The
+        # version-owned acceleration adapter may opt into selective caching of
+        # named expensive stock operators.  This plain execution attribute is
+        # deliberately absent from state_dict/checkpoint ownership.
+        self.checkpoint_save_operations: tuple[str, ...] = ()
         self.preserve_uncertain_seed = bool(preserve_uncertain_seed)
         self.bounded_coordinates = bool(bounded_coordinates)
         self.normalization_floor = (
             None if normalization_floor is None else float(normalization_floor)
+        )
+        # Keep the fixed local stencil as a non-persistent device buffer.  A
+        # Python-list -> CUDA tensor conversion is legal in eager mode but is
+        # forbidden while a CUDA Graph stream is being captured.  The buffer
+        # moves with the refiner, is absent from checkpoints, and therefore
+        # does not alter the model state ABI.
+        self.register_buffer(
+            "_batched_offset_values",
+            torch.tensor(
+                [
+                    (dx, dy)
+                    for dy in range(-self.radius, self.radius + 1)
+                    for dx in range(-self.radius, self.radius + 1)
+                ],
+                dtype=torch.float32,
+            ),
+            persistent=False,
         )
         self.feature = nn.Sequential(
             nn.Conv2d(input_dim, hidden, 1, bias=False),
@@ -1560,6 +1615,87 @@ class _DenseRawFlowRefiner(nn.Module):
             & (coordinates[..., 1] <= float(side - 1))
         )
         return sampled, valid
+
+    def _batched_samples(
+        self,
+        second_feature: Tensor,
+        center: Tensor,
+        offsets: list[tuple[int, int]],
+        search_scale: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Sample every local offset in one batched grid-sample launch.
+
+        The reference implementation invokes ``grid_sample`` once per offset.
+        Production mid/high refiners use 25/9 offsets, respectively, so the
+        repeated launches are visible even inside a captured graph.  This
+        helper only changes the launch grouping: offset order, coordinate
+        arithmetic, validity masks and the attached input graph are retained.
+        The caller still performs the per-offset normalization and reductions
+        in the historical order.  It is deliberately opt-in because CUDA's
+        backward accumulation order for a repeated batched input can differ
+        in the last bits from separate launches.
+
+        Returns:
+            sampled: ``[B,O,C,H,W]`` sampled feature rows;
+            valid: ``[B,O,H,W]`` geometric support masks;
+            offset_field: ``[B,O,2,H,W]`` physical patch offsets.
+        """
+
+        if second_feature.ndim != 4 or center.ndim != 4:
+            raise ValueError("batched raw sampling received invalid feature geometry")
+        batch, channels, side, side_b = second_feature.shape
+        if side != side_b or tuple(center.shape) != (batch, side, side, 2):
+            raise ValueError("batched raw sampling geometry does not align")
+        if not offsets:
+            raise ValueError("batched raw sampling requires at least one offset")
+
+        # Keep the exact historical (dx, dy) ordering.  ``search_scale`` is
+        # already FP32 in the refiner, as are the coordinates passed to the
+        # reference sampler.
+        offset_values = self._batched_offset_values
+        if offset_values.device != second_feature.device:
+            raise RuntimeError(
+                "batched raw sampling stencil must be on the feature device "
+                "before capture"
+            )
+        if tuple(offset_values.shape) != (len(offsets), 2):
+            raise RuntimeError("batched raw sampling stencil does not match radius")
+        offset_field = offset_values.view(1, len(offsets), 2, 1, 1)
+        if self.preserve_uncertain_seed:
+            offset_field = offset_field * search_scale.unsqueeze(1)
+        else:
+            offset_field = offset_field.expand(batch, -1, -1, side, side)
+        coordinates = center.unsqueeze(1) + offset_field.permute(0, 1, 3, 4, 2)
+        valid = (
+            (coordinates[..., 0] >= 0.0)
+            & (coordinates[..., 0] <= float(side - 1))
+            & (coordinates[..., 1] >= 0.0)
+            & (coordinates[..., 1] <= float(side - 1))
+        )
+        flat_coordinates = coordinates.reshape(batch * len(offsets), side, side, 2)
+        flat_grid = _normalize_grid(flat_coordinates, side, side)
+        # ``expand`` avoids constructing one independent feature copy per
+        # offset before the sampler.  ``reshape`` materializes only the layout
+        # required by the stock 4-D operator and keeps the repeated source
+        # attached so its backward still reaches ``second_feature``.
+        flat_value = (
+            second_feature.unsqueeze(1)
+            .expand(-1, len(offsets), -1, -1, -1)
+            .reshape(batch * len(offsets), channels, side, side)
+        )
+        with torch.autocast(device_type=second_feature.device.type, enabled=False):
+            sampled = F.grid_sample(
+                flat_value.float(),
+                flat_grid.float(),
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=True,
+            )
+        return (
+            sampled.reshape(batch, len(offsets), channels, side, side),
+            valid,
+            offset_field,
+        )
 
     def _forward_tensors(
         self,
@@ -1627,16 +1763,29 @@ class _DenseRawFlowRefiner(nn.Module):
         sampled_rows: list[Tensor] = []
         offset_rows: list[Tensor] = []
         search_scale = 1.0 + 0.5 * (1.0 - reliability)
-        for dx, dy in offsets:
-            if self.preserve_uncertain_seed:
-                offset = torch.cat(
-                    (float(dx) * search_scale, float(dy) * search_scale), dim=1
-                )
+        batched_rows = None
+        if getattr(self, "_batched_offset_sampling", False):
+            batched_rows = self._batched_samples(
+                second_feature,
+                center,
+                offsets,
+                search_scale,
+            )
+        for index, (dx, dy) in enumerate(offsets):
+            if batched_rows is None:
+                if self.preserve_uncertain_seed:
+                    offset = torch.cat(
+                        (float(dx) * search_scale, float(dy) * search_scale), dim=1
+                    )
+                else:
+                    offset = up_flow.new_tensor((float(dx), float(dy)))[None, :, None, None]
+                    offset = offset.expand(batch, -1, side, side)
+                coordinates = center + offset.permute(0, 2, 3, 1)
+                sampled, valid = self._sample(second_feature, coordinates)
             else:
-                offset = up_flow.new_tensor((float(dx), float(dy)))[None, :, None, None]
-                offset = offset.expand(batch, -1, side, side)
-            coordinates = center + offset.permute(0, 2, 3, 1)
-            sampled, valid = self._sample(second_feature, coordinates)
+                sampled = batched_rows[0][:, index]
+                valid = batched_rows[1][:, index]
+                offset = batched_rows[2][:, index]
             if self.normalization_floor is None:
                 sampled_normalized = F.normalize(sampled.float(), dim=1)
             else:
@@ -1753,13 +1902,22 @@ class _DenseRawFlowRefiner(nn.Module):
         ):
             raise ValueError("raw coarse reliability must align with coarse flow")
         if self.activation_checkpoint and self.training and torch.is_grad_enabled():
+            checkpoint_kwargs: dict[str, Any] = {"use_reentrant": False}
+            save_operations = tuple(
+                getattr(self, "checkpoint_save_operations", ())
+            )
+            if save_operations:
+                checkpoint_kwargs["context_fn"] = partial(
+                    _raw_flow_selective_checkpoint_context,
+                    save_operations,
+                )
             rows = checkpoint(
                 self._forward_tensors,
                 first,
                 second,
                 coarse_flow,
                 coarse_reliability,
-                use_reentrant=False,
+                **checkpoint_kwargs,
             )
         else:
             rows = self._forward_tensors(first, second, coarse_flow, coarse_reliability)

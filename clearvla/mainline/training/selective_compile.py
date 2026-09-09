@@ -39,6 +39,8 @@ class AppliedTrainingCompilePlan:
     eager_boundaries: tuple[tuple[str, str], ...]
     wrapper_setup_seconds: float
     model_identity: int
+    disable_aot_autograd_buffer_donation: bool = False
+    compiled_targets: tuple[tuple[str, str], ...] = ()
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -47,8 +49,14 @@ class AppliedTrainingCompilePlan:
             "acceptance": self.acceptance,
             "rng_policy": self.rng_policy,
             "numerical_policy": self.numerical_policy,
+            "aot_autograd_buffer_donation": (
+                "disabled"
+                if self.disable_aot_autograd_buffer_donation
+                else "default"
+            ),
             "signature_sha256": self.signature_sha256,
             "compiled_module_paths": list(self.compiled_module_paths),
+            "compiled_targets": [list(value) for value in self.compiled_targets],
             "eager_boundaries": [list(value) for value in self.eager_boundaries],
             "wrapper_setup_seconds": self.wrapper_setup_seconds,
         }
@@ -226,6 +234,14 @@ def apply_training_compile_plan(
     signature = plan.signature()
     if existing is not None:
         if existing.profile == profile and existing.signature == signature:
+            if existing.disable_aot_autograd_buffer_donation:
+                try:
+                    from torch._functorch import config as aot_autograd_config
+                except ImportError as error:
+                    raise RuntimeError(
+                        "AOTAutograd buffer-donation control is unavailable"
+                    ) from error
+                aot_autograd_config.donated_buffer = False
             return existing
         raise RuntimeError(
             "a different selective compile plan is already installed on this model; "
@@ -234,9 +250,13 @@ def apply_training_compile_plan(
 
     modules, compile_paths = _resolve_modules(engine.model, plan)
     _validate_inductor_options(plan)
-    for path in compile_paths:
-        if not callable(getattr(modules[path], "forward", None)):
-            raise ValueError(f"compiled module has no callable forward: {path!r}")
+    for region in plan.regions:
+        for path in region.module_paths:
+            if not callable(getattr(modules[path], region.method_name, None)):
+                raise ValueError(
+                    "compiled module has no callable target: "
+                    f"{path}.{region.method_name}"
+                )
 
     boundary_actions: list[
         tuple[Any, str, str, tuple[Hashable, ...], bool]
@@ -264,27 +284,62 @@ def apply_training_compile_plan(
         )
 
     compile_actions: list[
-        tuple[Any, str, Mapping[str, str | int | bool], tuple[Hashable, ...], bool]
+        tuple[
+            Any,
+            str,
+            str,
+            Mapping[str, str | int | bool],
+            tuple[Hashable, ...],
+            bool,
+        ]
     ] = []
     for region in plan.regions:
         options: Mapping[str, str | int | bool] = dict(region.options)
         for path in region.module_paths:
             module = modules[path]
-            transform_signature = (
-                "compiled-forward-v1",
-                signature,
-                region.name,
-                path,
-            )
+            if region.method_name == "forward":
+                # Keep the exact transform identity used by existing plans.
+                transform_signature = (
+                    "compiled-forward-v1",
+                    signature,
+                    region.name,
+                    path,
+                )
+            else:
+                transform_signature = (
+                    "compiled-method-v1",
+                    signature,
+                    region.name,
+                    path,
+                    region.method_name,
+                )
             compile_actions.append(
                 (
                     module,
                     region.name,
+                    region.method_name,
                     options,
                     transform_signature,
-                    _preflight_transform(module, "forward", transform_signature),
+                    _preflight_transform(
+                        module,
+                        region.method_name,
+                        transform_signature,
+                    ),
                 )
             )
+
+    aot_autograd_config: Any | None = None
+    previous_buffer_donation: bool | None = None
+    if plan.disable_aot_autograd_buffer_donation:
+        try:
+            from torch._functorch import config as aot_autograd_config
+        except ImportError as error:
+            raise RuntimeError(
+                "AOTAutograd buffer-donation control is unavailable"
+            ) from error
+        if not hasattr(aot_autograd_config, "donated_buffer"):
+            raise RuntimeError("AOTAutograd buffer-donation control is unavailable")
+        previous_buffer_donation = bool(aot_autograd_config.donated_buffer)
 
     started = time.perf_counter()
     changed: list[tuple[nn.Module, str, bool, Any]] = []
@@ -303,6 +358,14 @@ def apply_training_compile_plan(
         )
 
     try:
+        if aot_autograd_config is not None:
+            # The Pen diagnostic surface intentionally calls autograd.grad
+            # multiple times with retain_graph=True before the formal
+            # backward.  Donated AOT buffers are a one-backward memory
+            # optimization and are incompatible with that unchanged contract.
+            # Keep donation disabled for the lifetime of this compiled plan;
+            # this changes buffer reuse only, never tensor arithmetic.
+            aot_autograd_config.donated_buffer = False
         for module, method_name, reason, transform_signature, needs_install in (
             boundary_actions
         ):
@@ -329,15 +392,20 @@ def apply_training_compile_plan(
                 )
 
         region_by_name = {region.name: region for region in plan.regions}
-        for module, region_name, options, transform_signature, needs_install in (
-            compile_actions
-        ):
+        for (
+            module,
+            region_name,
+            method_name,
+            options,
+            transform_signature,
+            needs_install,
+        ) in compile_actions:
             if not needs_install:
                 continue
             region = region_by_name[region_name]
-            original = module.forward
-            had_instance_method = "forward" in module.__dict__
-            original_instance_method = module.__dict__.get("forward")
+            original = getattr(module, method_name)
+            had_instance_method = method_name in module.__dict__
+            original_instance_method = module.__dict__.get(method_name)
             compile_kwargs: dict[str, Any] = {
                 "dynamic": region.dynamic,
                 "fullgraph": region.fullgraph,
@@ -353,7 +421,7 @@ def apply_training_compile_plan(
             snapshot_transforms(module)
             installed = _install_method(
                 module,
-                "forward",
+                method_name,
                 compiled,
                 transform_signature=transform_signature,
             )
@@ -361,7 +429,7 @@ def apply_training_compile_plan(
                 changed.append(
                     (
                         module,
-                        "forward",
+                        method_name,
                         had_instance_method,
                         original_instance_method,
                     )
@@ -377,6 +445,11 @@ def apply_training_compile_plan(
                 setattr(module, _TRANSFORM_ATTRIBUTE, dict(original_map or {}))
             elif hasattr(module, _TRANSFORM_ATTRIBUTE):
                 delattr(module, _TRANSFORM_ATTRIBUTE)
+        if (
+            aot_autograd_config is not None
+            and previous_buffer_donation is not None
+        ):
+            aot_autograd_config.donated_buffer = previous_buffer_donation
         raise
 
     signature_sha256 = hashlib.sha256(repr(signature).encode("utf-8")).hexdigest()
@@ -395,6 +468,14 @@ def apply_training_compile_plan(
         ),
         wrapper_setup_seconds=time.perf_counter() - started,
         model_identity=id(engine.model),
+        disable_aot_autograd_buffer_donation=(
+            plan.disable_aot_autograd_buffer_donation
+        ),
+        compiled_targets=tuple(
+            (path, region.method_name)
+            for region in plan.regions
+            for path in region.module_paths
+        ),
     )
     setattr(engine, _APPLICATION_ATTRIBUTE, result)
     return result

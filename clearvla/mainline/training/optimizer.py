@@ -175,6 +175,8 @@ class OptimizerOwnership:
 def build_optimizer(
     model: nn.Module,
     config: ExperimentConfig,
+    *,
+    fused: bool | None = None,
 ) -> tuple[torch.optim.AdamW, OptimizerOwnership]:
     """Put every trainable tensor in exactly one named role/decay group."""
 
@@ -220,11 +222,15 @@ def build_optimizer(
                 "parameter_names": tuple(grouped_names[(role, decay)]),
             }
         )
+    optimizer_kwargs: dict[str, object] = {}
+    if fused is not None:
+        optimizer_kwargs["fused"] = bool(fused)
     optimizer = torch.optim.AdamW(
         optimizer_groups,
         lr=config.optimizer.learning_rate,
         betas=(config.optimizer.beta1, config.optimizer.beta2),
         eps=config.optimizer.epsilon,
+        **optimizer_kwargs,
     )
     role_counts = {
         role: sum(len(grouped.get((role, decay), ())) for decay in (False, True))

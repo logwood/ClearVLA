@@ -472,6 +472,78 @@ class MainlineTrainingEngine:
             )
         return total_norm, metrics, gradient_norm_scalar
 
+    def _captured_gradient_lifecycle(self) -> Tensor:
+        """Run the finite-path gradient mutations inside a CUDA Graph.
+
+        This helper is intentionally narrower than :meth:`_gradient_lifecycle`:
+        it contains only the deterministic norm reductions and the two
+        clipping mutations.  Host-side finite/spike attribution and all
+        diagnostics stay outside the graph.  Callers must opt in only when the
+        gradient-spike audit is disabled; otherwise the pre-clip owner scan
+        would no longer observe the required gradients.
+
+        ``error_if_nonfinite`` is disabled because its Python scalar branch is
+        not capture-safe.  The returned pre-clip norm is retained in graph
+        storage and checked immediately after replay; a non-finite result is
+        still fail-closed before the optimizer update.
+        """
+
+        ordered_parameters = self._ordered_parameters
+        parameters = tuple(
+            parameter
+            for _, parameter in ordered_parameters
+            if parameter.grad is not None
+        )
+        if not parameters:
+            raise RuntimeError("captured gradient lifecycle found no gradients")
+        total_norm = torch.nn.utils.get_total_norm(
+            [parameter.grad for parameter in parameters],
+            norm_type=2.0,
+            error_if_nonfinite=False,
+            foreach=True,
+        )
+        decoder_parameters = tuple(
+            parameter
+            for parameter in self._decoder_parameters
+            if parameter.grad is not None
+        )
+        if decoder_parameters:
+            decoder_norm = torch.nn.utils.get_total_norm(
+                [parameter.grad for parameter in decoder_parameters],
+                norm_type=2.0,
+                error_if_nonfinite=False,
+                foreach=True,
+            )
+            torch.nn.utils.clip_grads_with_norm_(
+                list(decoder_parameters),
+                1.0,
+                decoder_norm,
+                foreach=True,
+            )
+        postlocal_norm = torch.nn.utils.get_total_norm(
+            [parameter.grad for parameter in parameters],
+            norm_type=2.0,
+            error_if_nonfinite=False,
+            foreach=True,
+        )
+        torch.nn.utils.clip_grads_with_norm_(
+            list(parameters),
+            self.config.optimizer.grad_clip,
+            postlocal_norm,
+            foreach=True,
+        )
+        # The post-global norm is explicitly audit-only.  The ordinary graph
+        # path has already omitted it when ``skip_postglobal_audit`` is true;
+        # retaining that policy here keeps the captured arithmetic identical.
+        if not self.skip_postglobal_audit:
+            torch.nn.utils.get_total_norm(
+                [parameter.grad for parameter in parameters],
+                norm_type=2.0,
+                error_if_nonfinite=False,
+                foreach=True,
+            )
+        return total_norm
+
     def _clip_gradients_with_first_offender(self) -> Tensor:
         """Compatibility wrapper used by the non-finite regression test."""
 

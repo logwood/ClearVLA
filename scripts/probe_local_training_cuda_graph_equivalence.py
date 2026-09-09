@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import hashlib
+import inspect
 import json
 import os
 import tempfile
@@ -73,11 +74,155 @@ def _selective_compile_settings() -> tuple[str | None, bool]:
 def _configure_compiled_graph_engine(engine: Any) -> None:
     """Enable only independently selected non-compile implementation rewrites."""
 
+    adapter = resolve_training_acceleration_adapter(engine.model)
+    # The small research engine does not attach a bespoke adapter at
+    # construction time.  Install the mainline adapter here so optional
+    # implementation-owned probes (including raw-flow batching) use the same
+    # contract as the production profiler instead of reaching into the model
+    # directly.
+    if adapter.name == "generic-static-v1":
+        from clearvla.mainline.training.acceleration_adapters import (
+            MainlineTrainingAccelerationAdapter,
+        )
+
+        engine.model.training_acceleration_adapter = MainlineTrainingAccelerationAdapter()
+        adapter = resolve_training_acceleration_adapter(engine.model)
+    adapter.prepare(engine)
+    if os.environ.get("CLEARVLA_EQUIV_ATOMIC_FACTUAL_CONTRACTION") == "1":
+        hook = getattr(adapter, "set_atomic_factual_contraction", None)
+        if not callable(hook):
+            raise RuntimeError(
+                f"training adapter {adapter.name!r} does not expose the atomic "
+                "factual-contraction probe"
+            )
+        changed = int(hook(engine, enabled=True))
+        if changed != 1:
+            raise RuntimeError(
+                "atomic factual contraction was requested but its exact "
+                "version-owned boundary was not found"
+            )
+    checkpoint_scopes = tuple(
+        scope
+        for scope, selected in (
+            (
+                "raw_flow",
+                os.environ.get("CLEARVLA_EQUIV_DISABLE_RAW_FLOW_CHECKPOINT")
+                == "1"
+                or os.environ.get("CLEARVLA_EQUIV_DISABLE_ACTIVATION_CHECKPOINT")
+                == "1",
+            ),
+            (
+                "p1",
+                os.environ.get("CLEARVLA_EQUIV_DISABLE_P1_CHECKPOINT") == "1"
+                or os.environ.get("CLEARVLA_EQUIV_DISABLE_ACTIVATION_CHECKPOINT")
+                == "1",
+            ),
+            (
+                "raw_pyramid",
+                os.environ.get("CLEARVLA_EQUIV_DISABLE_RAW_PYRAMID_CHECKPOINT")
+                == "1",
+            ),
+            (
+                "raw_mid",
+                os.environ.get("CLEARVLA_EQUIV_DISABLE_RAW_MID_CHECKPOINT") == "1",
+            ),
+            (
+                "raw_high",
+                os.environ.get("CLEARVLA_EQUIV_DISABLE_RAW_HIGH_CHECKPOINT") == "1",
+            ),
+            (
+                "raw_context",
+                os.environ.get("CLEARVLA_EQUIV_DISABLE_RAW_CONTEXT_CHECKPOINT")
+                == "1",
+            ),
+        )
+        if selected
+    )
+    if checkpoint_scopes:
+        hook = getattr(adapter, "set_activation_checkpointing", None)
+        if not callable(hook):
+            raise RuntimeError(
+                f"training adapter {adapter.name!r} does not expose the "
+                "activation-checkpoint policy probe"
+            )
+        changed = int(hook(engine, enabled=False, scopes=checkpoint_scopes))
+        if changed == 0:
+            raise RuntimeError(
+                "activation-checkpoint disabling was requested but no supported "
+                "checkpoint surfaces were found"
+            )
+    raw_mid_save_operations = tuple(
+        name
+        for name in os.environ.get(
+            "CLEARVLA_EQUIV_RAW_MID_CHECKPOINT_SAVE_OPERATIONS", ""
+        ).split(",")
+        if name
+    )
+    if raw_mid_save_operations:
+        if "raw_mid" in checkpoint_scopes or "raw_flow" in checkpoint_scopes:
+            raise ValueError(
+                "raw-mid selective checkpoint caching cannot be combined with "
+                "disabling the raw-mid checkpoint"
+            )
+        hook = getattr(adapter, "set_selective_checkpoint_save_operations", None)
+        if not callable(hook):
+            raise RuntimeError(
+                f"training adapter {adapter.name!r} does not expose selective "
+                "checkpoint caching"
+            )
+        changed = int(
+            hook(
+                engine,
+                scope="raw_mid",
+                operations=raw_mid_save_operations,
+            )
+        )
+        if changed == 0:
+            raise RuntimeError(
+                "raw-mid selective checkpoint caching found no supported surface"
+            )
+    if os.environ.get("CLEARVLA_EQUIV_BATCHED_RAW_FLOW_SAMPLING") == "1":
+        hook = getattr(adapter, "set_batched_raw_flow_sampling", None)
+        if not callable(hook):
+            raise RuntimeError(
+                f"training adapter {adapter.name!r} does not expose the "
+                "batched raw-flow sampling probe"
+            )
+        changed = int(hook(engine, enabled=True))
+        if changed == 0:
+            raise RuntimeError(
+                "batched raw-flow sampling was requested but no refiner was found"
+            )
+    cudnn_benchmark_scopes = tuple(
+        dict.fromkeys(
+            scope
+            for scope in os.environ.get(
+                "CLEARVLA_EQUIV_CUDNN_BENCHMARK_SCOPES", ""
+            ).split(",")
+            if scope
+        )
+    )
+    if cudnn_benchmark_scopes:
+        hook = getattr(adapter, "set_cudnn_benchmark_scopes", None)
+        if not callable(hook):
+            raise RuntimeError(
+                f"training adapter {adapter.name!r} does not expose scoped "
+                "cuDNN benchmarking"
+            )
+        changed = int(
+            hook(
+                engine,
+                enabled=True,
+                scopes=cudnn_benchmark_scopes,
+            )
+        )
+        if changed != len(cudnn_benchmark_scopes):
+            raise RuntimeError(
+                "scoped cuDNN benchmark did not install every requested scope"
+            )
     context_reuse = os.environ.get("CLEARVLA_EQUIV_CONTEXT_REUSE") == "1"
     if not context_reuse:
         return
-    adapter = resolve_training_acceleration_adapter(engine.model)
-    adapter.prepare(engine)
     execution_bottom = getattr(engine.model, "execution_bottom", None)
     decoder = getattr(execution_bottom, "decoder", None)
     if decoder is None:
@@ -90,13 +235,111 @@ def _configure_compiled_graph_engine(engine: Any) -> None:
     decoder._reuse_terminal_candidate_velocity = True
 
 
+def _prewarm_cudnn_default_scopes(
+    engine: Any,
+    batch: Any,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Seed and guard default plans before a global benchmark trace."""
+
+    prewarm_scopes = tuple(
+        dict.fromkeys(
+            scope
+            for scope in os.environ.get(
+                "CLEARVLA_EQUIV_CUDNN_DEFAULT_PREWARM_SCOPES", ""
+            ).split(",")
+            if scope
+        )
+    )
+    guard_scopes = tuple(
+        dict.fromkeys(
+            (
+                *prewarm_scopes,
+                *(
+                    scope
+                    for scope in os.environ.get(
+                        "CLEARVLA_EQUIV_CUDNN_DEFAULT_GUARD_SCOPES", ""
+                    ).split(",")
+                    if scope
+                ),
+            )
+        )
+    )
+    if not guard_scopes:
+        return (), ()
+    if torch.backends.cudnn.benchmark:
+        raise RuntimeError(
+            "default cuDNN prewarm must run before global benchmark is enabled"
+        )
+    adapter = resolve_training_acceleration_adapter(engine.model)
+    if prewarm_scopes:
+        hook = getattr(adapter, "prewarm_cudnn_default_scopes", None)
+        if not callable(hook):
+            raise RuntimeError(
+                f"training adapter {adapter.name!r} does not expose default "
+                "cuDNN prewarm"
+            )
+        changed = int(hook(engine, batch, scopes=prewarm_scopes))
+        if changed != len(prewarm_scopes):
+            raise RuntimeError(
+                "default cuDNN prewarm did not cover every requested scope"
+            )
+    additional_guards = tuple(
+        scope for scope in guard_scopes if scope not in prewarm_scopes
+    )
+    if additional_guards:
+        guard_hook = getattr(adapter, "set_cudnn_default_scopes", None)
+        if not callable(guard_hook):
+            raise RuntimeError(
+                f"training adapter {adapter.name!r} does not expose default "
+                "cuDNN guards"
+            )
+        changed = int(
+            guard_hook(
+                engine,
+                enabled=True,
+                scopes=additional_guards,
+            )
+        )
+        if changed != len(additional_guards):
+            raise RuntimeError(
+                "default cuDNN guards did not cover every requested scope"
+            )
+    benchmark_phase = os.environ.get("CLEARVLA_EQUIV_CUDNN_BENCHMARK_PHASE")
+    torch.backends.cudnn.benchmark = benchmark_phase is None
+    print(
+        "cudnn_default_prewarm_ok "
+        + json.dumps(
+            {
+                "prewarm_scopes": list(prewarm_scopes),
+                "guard_scopes": list(guard_scopes),
+                "benchmark_phase": benchmark_phase,
+                "global_benchmark": bool(torch.backends.cudnn.benchmark),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    return prewarm_scopes, guard_scopes
+
+
 def _comparison_runner(engine: Any) -> CudaGraphTrainingStepRunner:
     profile, allow_candidate = _selective_compile_settings()
-    runner = CudaGraphTrainingStepRunner(
-        engine,
-        compile_profile=profile,
-        allow_candidate_compile=allow_candidate,
+    runner_kwargs: dict[str, Any] = {
+        "compile_profile": profile,
+        "allow_candidate_compile": allow_candidate,
+    }
+    capture_gradient_lifecycle = (
+        os.environ.get("CLEARVLA_EQUIV_CAPTURE_GRADIENT_LIFECYCLE") == "1"
     )
+    runner_parameters = inspect.signature(CudaGraphTrainingStepRunner).parameters
+    if "capture_gradient_lifecycle" in runner_parameters:
+        runner_kwargs["capture_gradient_lifecycle"] = capture_gradient_lifecycle
+    elif capture_gradient_lifecycle:
+        raise ValueError(
+            "this version's CUDA Graph runner does not support captured "
+            "gradient lifecycle"
+        )
+    runner = CudaGraphTrainingStepRunner(engine, **runner_kwargs)
     if runner.compile_plan_summary is not None:
         print(
             "selective_compile_plan",
@@ -593,22 +836,60 @@ def _result_pair_statistics(
     *,
     rtol: float,
     atol: float,
+    metric_provenance: Mapping[str, bool] | None = None,
 ) -> dict[str, Any]:
     assert tuple(actual.metrics) == tuple(expected.metrics)
+    if metric_provenance is not None and tuple(metric_provenance) != tuple(
+        actual.metrics
+    ):
+        raise AssertionError("result metric provenance key contract differs")
+    metric_names = tuple(
+        name
+        for name in expected.metrics
+        if metric_provenance is None or metric_provenance[name]
+    )
     pairs = [
         ("loss", actual.loss, expected.loss),
         ("gradient_norm", actual.gradient_norm, expected.gradient_norm),
         *[
             (f"metrics.{name}", actual.metrics[name], expected.metrics[name])
-            for name in expected.metrics
+            for name in metric_names
         ],
     ]
     result = _tensor_pair_statistics(pairs, rtol=rtol, atol=atol)
+    result["training_metric_count"] = len(metric_names)
+    result["detached_metric_count"] = (
+        0 if metric_provenance is None else len(expected.metrics) - len(metric_names)
+    )
     result["learning_rate_equal"] = actual.learning_rate == expected.learning_rate
     result["gradient_norm_scalar_abs"] = abs(
         float(actual.gradient_norm_scalar) - float(expected.gradient_norm_scalar)
     )
     return result
+
+
+def _detached_result_metric_statistics(
+    actual: Any,
+    expected: Any,
+    *,
+    rtol: float,
+    atol: float,
+    metric_provenance: Mapping[str, bool],
+) -> dict[str, Any]:
+    if (
+        tuple(actual.metrics) != tuple(expected.metrics)
+        or tuple(metric_provenance) != tuple(actual.metrics)
+    ):
+        raise AssertionError("detached metric provenance key contract differs")
+    names = tuple(name for name, active in metric_provenance.items() if not active)
+    return _tensor_pair_statistics(
+        [
+            (f"metrics.{name}", actual.metrics[name], expected.metrics[name])
+            for name in names
+        ],
+        rtol=rtol,
+        atol=atol,
+    )
 
 
 def _tree_tensor_pairs(
@@ -706,12 +987,16 @@ def _set_rng_state(
         engine.train_condition_generator.set_state(state["condition"])
 
 
-def _ledger_snapshot(ledger: Any) -> dict[str, dict[str, torch.Tensor] | torch.Tensor]:
+def _ledger_snapshot(ledger: Any) -> dict[str, Any]:
     return {
         "total": ledger.total.detach().clone(),
         "groups": _clone_tensor_mapping(ledger.groups),
         "contributions": _clone_tensor_mapping(ledger.contributions),
         "terms": _clone_tensor_mapping(ledger.terms),
+        "term_requires_grad": {
+            name: bool(value.requires_grad)
+            for name, value in ledger.terms.items()
+        },
     }
 
 
@@ -743,15 +1028,26 @@ def _eager_forward_backward(engine: Any, batch: Any) -> Any:
     engine.model.train()
     engine.model.set_training_step(engine.global_step)
     engine.optimizer.zero_grad(set_to_none=True)
-    with _autocast(engine.device, engine.dtype):
-        ledger, _metrics = engine._forward(
-            batch,
-            training=True,
-            collect_diagnostics=False,
-            generator=engine.train_flow_generator,
-            condition_generator=engine.train_condition_generator,
-        )
-    ledger.total.backward()
+    benchmark_phase = os.environ.get("CLEARVLA_EQUIV_CUDNN_BENCHMARK_PHASE")
+    if benchmark_phase not in {None, "forward", "backward"}:
+        raise ValueError(f"unknown cuDNN benchmark phase: {benchmark_phase!r}")
+    try:
+        if benchmark_phase is not None:
+            torch.backends.cudnn.benchmark = benchmark_phase == "forward"
+        with _autocast(engine.device, engine.dtype):
+            ledger, _metrics = engine._forward(
+                batch,
+                training=True,
+                collect_diagnostics=False,
+                generator=engine.train_flow_generator,
+                condition_generator=engine.train_condition_generator,
+            )
+        if benchmark_phase is not None:
+            torch.backends.cudnn.benchmark = benchmark_phase == "backward"
+        ledger.total.backward()
+    finally:
+        if benchmark_phase is not None:
+            torch.backends.cudnn.benchmark = False
     return ledger
 
 
@@ -763,6 +1059,679 @@ def _finish_update(engine: Any) -> tuple[torch.Tensor, float]:
     engine.schedule.step()
     engine.global_step += 1
     return gradient_norm.detach().clone(), gradient_norm_scalar
+
+
+def _cpu_trace_tree(value: Any) -> Any:
+    """Clone a nested training-state surface into process-independent CPU storage."""
+
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(device="cpu").clone()
+    if isinstance(value, Mapping):
+        return {name: _cpu_trace_tree(item) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_cpu_trace_tree(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_cpu_trace_tree(item) for item in value)
+    return copy.deepcopy(value)
+
+
+class _BackendFactualBoundaryCapture:
+    """Record the causal P1 boundary without changing the trained graph.
+
+    The factual reader returns ``(updated_trajectory, metrics)``.  The first
+    tensor is the exact value consumed by the rest of P1/P2, while the metric
+    mapping is detached audit state.  A module hook observes both after any
+    version-owned compile wrapper has been installed; the tensor gradient hook
+    observes the VJP arriving from the unchanged downstream loss.
+    """
+
+    _CANDIDATE_PATHS = (
+        "p1.factual_reader",
+        "factual_reader",
+        "bottom.factual_reader",
+    )
+
+    def __init__(self, engine: Any) -> None:
+        modules = dict(engine.model.named_modules())
+        try:
+            self.module_path = next(
+                path for path in self._CANDIDATE_PATHS if path in modules
+            )
+        except StopIteration as error:
+            raise RuntimeError(
+                "backend trace cannot locate the factual P1 reader"
+            ) from error
+        self._calls: list[dict[str, Any]] = []
+        self._gradients: list[torch.Tensor | None] = []
+        self._handle = modules[self.module_path].register_forward_hook(
+            self._record_forward
+        )
+
+    def begin_step(self) -> None:
+        if self._calls or self._gradients:
+            raise RuntimeError("factual boundary trace was not consumed")
+
+    def _record_gradient(self, index: int, gradient: torch.Tensor) -> None:
+        if self._gradients[index] is not None:
+            raise RuntimeError("factual boundary gradient was recorded twice")
+        self._gradients[index] = gradient.detach().clone()
+
+    def _record_forward(
+        self,
+        _module: torch.nn.Module,
+        inputs: tuple[Any, ...],
+        output: Any,
+    ) -> None:
+        if (
+            not isinstance(output, tuple)
+            or len(output) != 2
+            or not isinstance(output[0], torch.Tensor)
+            or not isinstance(output[1], Mapping)
+        ):
+            raise TypeError(
+                "factual P1 boundary must return (Tensor, metric mapping)"
+            )
+        updated, metrics = output
+        if not inputs or not isinstance(inputs[0], torch.Tensor):
+            raise TypeError("factual P1 boundary has no trajectory tensor input")
+        incoming = inputs[0]
+        if tuple(incoming.shape) != tuple(updated.shape):
+            raise ValueError("factual P1 input/output trajectory shapes differ")
+        with torch.no_grad():
+            row = {
+                "output": updated.detach().clone(),
+                "update": (updated.detach() - incoming.detach()).clone(),
+                "metrics": {
+                    name: value.detach().clone()
+                    for name, value in metrics.items()
+                    if isinstance(value, torch.Tensor)
+                },
+            }
+        index = len(self._calls)
+        self._calls.append(row)
+        self._gradients.append(None)
+        if updated.requires_grad:
+            updated.register_hook(
+                lambda gradient, index=index: self._record_gradient(
+                    index, gradient
+                )
+            )
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        if not self._calls:
+            raise RuntimeError("formal forward did not cross the factual P1 boundary")
+        rows: list[dict[str, Any]] = []
+        for call, gradient in zip(self._calls, self._gradients, strict=True):
+            rows.append({**call, "output_gradient": gradient})
+        self._calls = []
+        self._gradients = []
+        return rows
+
+    def close(self) -> None:
+        self._handle.remove()
+
+
+def _export_backend_trace(path: Path, *, steps: int = 4) -> None:
+    """Export one fresh trajectory for cross-process backend comparison.
+
+    cuDNN's algorithm cache is process-global.  Comparing a default and a
+    benchmark engine inside one process can accidentally reuse the first
+    engine's cached plan.  Independent trace processes avoid that ambiguity
+    while retaining the complete loss, raw/clipped gradient, parameter,
+    optimizer, scheduler and RNG surfaces.  When a selective-compile profile
+    is requested, construct its runner only to install the version-owned
+    module transforms; execute the exported steps on the ordinary default
+    stream.  This isolates compilation arithmetic from CUDA-Graph stream and
+    capture effects without changing the eager reference path.
+    """
+
+    if path.exists():
+        raise FileExistsError(f"backend trace already exists: {path}")
+    if steps <= 0:
+        raise ValueError("backend trace steps must be positive")
+    device = torch.device("cuda")
+    engine, prewarm_batch = _engine(device)
+    _configure_compiled_graph_engine(engine)
+    compile_profile, _allow_candidate = _selective_compile_settings()
+    compile_plan_summary: dict[str, Any] | None = None
+    if compile_profile is not None:
+        compile_runner = _comparison_runner(engine)
+        compile_plan_summary = compile_runner.compile_plan_summary
+        if compile_plan_summary is None:
+            raise RuntimeError(
+                "selective compile was requested but no plan was installed"
+            )
+    (
+        cudnn_default_prewarm_scopes,
+        cudnn_default_guard_scopes,
+    ) = _prewarm_cudnn_default_scopes(
+        engine,
+        prewarm_batch,
+    )
+    initial_model = _cpu_trace_tree(engine.model.state_dict())
+    initial_optimizer = _cpu_trace_tree(engine.optimizer.state_dict())
+    initial_schedule = copy.deepcopy(engine.schedule.state_dict())
+    initial_rng = _cpu_trace_tree(_rng_state(engine, device))
+    factual_boundary = _BackendFactualBoundaryCapture(engine)
+    rows: list[dict[str, Any]] = []
+    try:
+        for index in range(steps):
+            batch = _fresh_long_batch(
+                engine.config,
+                device,
+                batch_size=2,
+                index=20_000 + index,
+            )
+            factual_boundary.begin_step()
+            ledger = _eager_forward_backward(engine, batch)
+            ledger_snapshot = _cpu_trace_tree(_ledger_snapshot(ledger))
+            factual_snapshot = _cpu_trace_tree(factual_boundary.snapshot())
+            raw_gradients = _cpu_trace_tree(_named_gradients(engine.model))
+            gradient_norm, gradient_norm_scalar = _finish_update(engine)
+            torch.cuda.synchronize(device)
+            rows.append(
+                {
+                    "step": index,
+                    "ledger": ledger_snapshot,
+                    "factual_boundary": factual_snapshot,
+                    "raw_gradients": raw_gradients,
+                    "gradient_norm": _cpu_trace_tree(gradient_norm),
+                    "gradient_norm_scalar": float(gradient_norm_scalar),
+                    "clipped_gradients": _cpu_trace_tree(
+                        _named_gradients(engine.model)
+                    ),
+                    "model": _cpu_trace_tree(engine.model.state_dict()),
+                    "optimizer": _cpu_trace_tree(engine.optimizer.state_dict()),
+                    "schedule": copy.deepcopy(engine.schedule.state_dict()),
+                    "global_step": int(engine.global_step),
+                    "rng": _cpu_trace_tree(_rng_state(engine, device)),
+                }
+            )
+    finally:
+        factual_boundary.close()
+    trace = {
+        "schema": "clearvla-training-backend-trace-v3",
+        "backend": {
+            "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+            "cudnn_benchmark_scopes": [
+                scope
+                for scope in os.environ.get(
+                    "CLEARVLA_EQUIV_CUDNN_BENCHMARK_SCOPES", ""
+                ).split(",")
+                if scope
+            ],
+            "cudnn_default_prewarm_scopes": list(
+                cudnn_default_prewarm_scopes
+            ),
+            "cudnn_default_guard_scopes": list(cudnn_default_guard_scopes),
+            "cudnn_benchmark_phase": os.environ.get(
+                "CLEARVLA_EQUIV_CUDNN_BENCHMARK_PHASE"
+            ),
+            "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
+            "deterministic_algorithms": (
+                torch.are_deterministic_algorithms_enabled()
+            ),
+            "float32_matmul_precision": torch.get_float32_matmul_precision(),
+            "selective_compile_plan": compile_plan_summary,
+            "factual_boundary_path": factual_boundary.module_path,
+        },
+        "steps": rows,
+        "initial_model": initial_model,
+        "initial_optimizer": initial_optimizer,
+        "initial_schedule": initial_schedule,
+        "initial_rng": initial_rng,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(trace, path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    print(
+        "backend_trace_exported",
+        json.dumps(
+            {
+                "path": str(path),
+                "sha256": digest,
+                "bytes": path.stat().st_size,
+                "steps": steps,
+                **trace["backend"],
+            },
+            sort_keys=True,
+        ),
+    )
+
+
+def _backend_trace_surface_statistics(
+    actual: Any,
+    expected: Any,
+    *,
+    path: str,
+    rtol: float,
+    atol: float,
+) -> dict[str, Any]:
+    pairs = _tree_tensor_pairs(actual, expected, path=path)
+    return _tensor_pair_statistics(pairs, rtol=rtol, atol=atol)
+
+
+def _backend_trace_named_statistics(
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    *,
+    path: str,
+    rtol: float,
+    atol: float,
+) -> dict[str, Any]:
+    """Report a mapping summary plus every tensor that actually changed."""
+
+    if tuple(actual) != tuple(expected):
+        raise AssertionError(f"{path}: mapping contract differs")
+    summary = _backend_trace_surface_statistics(
+        actual,
+        expected,
+        path=path,
+        rtol=rtol,
+        atol=atol,
+    )
+    changed: dict[str, Any] = {}
+    for name in actual:
+        statistics = _backend_trace_surface_statistics(
+            actual[name],
+            expected[name],
+            path=f"{path}.{name}",
+            rtol=rtol,
+            atol=atol,
+        )
+        if int(statistics["different_elements"]) > 0:
+            changed[name] = statistics
+    return {"summary": summary, "changed": changed}
+
+
+def _backend_trace_ledger_statistics(
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    *,
+    path: str,
+    rtol: float,
+    atol: float,
+) -> dict[str, Any]:
+    """Separate formal objectives from detached/raw diagnostic terms."""
+
+    base_fields = ("total", "groups", "contributions", "terms")
+    extended_fields = (*base_fields, "term_requires_grad")
+    if tuple(actual) not in {base_fields, extended_fields} or tuple(
+        expected
+    ) != tuple(actual):
+        raise AssertionError(f"{path}: loss-ledger contract differs")
+    report = {
+        "total": _backend_trace_surface_statistics(
+            actual["total"],
+            expected["total"],
+            path=f"{path}.total",
+            rtol=rtol,
+            atol=atol,
+        ),
+        "groups": _backend_trace_named_statistics(
+            actual["groups"],
+            expected["groups"],
+            path=f"{path}.groups",
+            rtol=rtol,
+            atol=atol,
+        ),
+        "contributions": _backend_trace_named_statistics(
+            actual["contributions"],
+            expected["contributions"],
+            path=f"{path}.contributions",
+            rtol=rtol,
+            atol=atol,
+        ),
+        "terms": _backend_trace_named_statistics(
+            actual["terms"],
+            expected["terms"],
+            path=f"{path}.terms",
+            rtol=rtol,
+            atol=atol,
+        ),
+    }
+    if tuple(actual) == extended_fields:
+        actual_provenance = actual["term_requires_grad"]
+        expected_provenance = expected["term_requires_grad"]
+        if actual_provenance != expected_provenance:
+            raise AssertionError(f"{path}: loss-term gradient provenance differs")
+        trainable_names = tuple(
+            name for name, active in actual_provenance.items() if active
+        )
+        detached_names = tuple(
+            name for name, active in actual_provenance.items() if not active
+        )
+        report.update(
+            {
+                "term_requires_grad": actual_provenance,
+                "trainable_terms": _backend_trace_named_statistics(
+                    {name: actual["terms"][name] for name in trainable_names},
+                    {name: expected["terms"][name] for name in trainable_names},
+                    path=f"{path}.trainable_terms",
+                    rtol=rtol,
+                    atol=atol,
+                ),
+                "detached_terms": _backend_trace_named_statistics(
+                    {name: actual["terms"][name] for name in detached_names},
+                    {name: expected["terms"][name] for name in detached_names},
+                    path=f"{path}.detached_terms",
+                    rtol=rtol,
+                    atol=atol,
+                ),
+            }
+        )
+    else:
+        report.update(
+            {
+                "term_requires_grad": None,
+                "trainable_terms": None,
+                "detached_terms": None,
+            }
+        )
+    return report
+
+
+def _backend_trace_factual_statistics(
+    actual: list[Mapping[str, Any]],
+    expected: list[Mapping[str, Any]],
+    *,
+    path: str,
+    rtol: float,
+    atol: float,
+) -> list[dict[str, Any]]:
+    """Split the causal P1 tensor/VJP from its detached metric sidecar."""
+
+    if len(actual) != len(expected):
+        raise AssertionError(f"{path}: factual P1 call counts differ")
+    required = ("output", "update", "metrics", "output_gradient")
+    reports: list[dict[str, Any]] = []
+    for index, (actual_call, expected_call) in enumerate(
+        zip(actual, expected, strict=True)
+    ):
+        call_path = f"{path}[{index}]"
+        if tuple(actual_call) != required or tuple(expected_call) != required:
+            raise AssertionError(f"{call_path}: factual P1 contract differs")
+        reports.append(
+            {
+                "output": _backend_trace_surface_statistics(
+                    actual_call["output"],
+                    expected_call["output"],
+                    path=f"{call_path}.output",
+                    rtol=rtol,
+                    atol=atol,
+                ),
+                "update": _backend_trace_surface_statistics(
+                    actual_call["update"],
+                    expected_call["update"],
+                    path=f"{call_path}.update",
+                    rtol=rtol,
+                    atol=atol,
+                ),
+                "output_gradient": _backend_trace_surface_statistics(
+                    actual_call["output_gradient"],
+                    expected_call["output_gradient"],
+                    path=f"{call_path}.output_gradient",
+                    rtol=rtol,
+                    atol=atol,
+                ),
+                "metrics": _backend_trace_named_statistics(
+                    actual_call["metrics"],
+                    expected_call["metrics"],
+                    path=f"{call_path}.metrics",
+                    rtol=rtol,
+                    atol=atol,
+                ),
+            }
+        )
+    return reports
+
+
+def _compare_backend_traces(
+    reference_path: Path,
+    candidate_path: Path,
+    *,
+    rtol: float,
+    atol: float,
+) -> None:
+    """Compare independent default/benchmark trajectories without cache leakage."""
+
+    reference = torch.load(reference_path, map_location="cpu", weights_only=False)
+    candidate = torch.load(candidate_path, map_location="cpu", weights_only=False)
+    supported_schemas = {
+        "clearvla-training-backend-trace-v1",
+        "clearvla-training-backend-trace-v2",
+        "clearvla-training-backend-trace-v3",
+    }
+    if reference.get("schema") not in supported_schemas:
+        raise ValueError("reference backend trace has an unsupported schema")
+    if candidate.get("schema") != reference.get("schema"):
+        raise ValueError("candidate backend trace schema differs")
+    reference_rows = reference.get("steps")
+    candidate_rows = candidate.get("steps")
+    if not isinstance(reference_rows, list) or not isinstance(candidate_rows, list):
+        raise TypeError("backend traces must contain step lists")
+    if len(reference_rows) != len(candidate_rows):
+        raise AssertionError("backend trace step counts differ")
+
+    initial = {
+        "model": _backend_trace_surface_statistics(
+            candidate["initial_model"],
+            reference["initial_model"],
+            path="initial.model",
+            rtol=0.0,
+            atol=0.0,
+        ),
+        "optimizer": _backend_trace_surface_statistics(
+            candidate["initial_optimizer"],
+            reference["initial_optimizer"],
+            path="initial.optimizer",
+            rtol=0.0,
+            atol=0.0,
+        ),
+        "rng": _backend_trace_surface_statistics(
+            candidate["initial_rng"],
+            reference["initial_rng"],
+            path="initial.rng",
+            rtol=0.0,
+            atol=0.0,
+        ),
+    }
+    if candidate["initial_schedule"] != reference["initial_schedule"]:
+        raise AssertionError("initial scheduler states differ")
+
+    trace_has_factual_boundary = reference.get("schema") in {
+        "clearvla-training-backend-trace-v2",
+        "clearvla-training-backend-trace-v3",
+    }
+    if trace_has_factual_boundary and (
+        candidate["backend"].get("factual_boundary_path")
+        != reference["backend"].get("factual_boundary_path")
+    ):
+        raise AssertionError("factual P1 boundary paths differ")
+
+    reports: list[dict[str, Any]] = []
+    failed_surfaces: list[str] = []
+    failed_training_surfaces: list[str] = []
+    failed_diagnostic_surfaces: list[str] = []
+    for index, (actual, expected) in enumerate(
+        zip(candidate_rows, reference_rows, strict=True)
+    ):
+        if int(actual["step"]) != int(expected["step"]):
+            raise AssertionError(f"backend trace step identity differs at {index}")
+        if int(actual["global_step"]) != int(expected["global_step"]):
+            raise AssertionError(f"backend global step differs at {index}")
+        if actual["schedule"] != expected["schedule"]:
+            raise AssertionError(f"backend scheduler state differs at {index}")
+        scalar_difference = abs(
+            float(actual["gradient_norm_scalar"])
+            - float(expected["gradient_norm_scalar"])
+        )
+        scalar_tolerance = atol + rtol * abs(
+            float(expected["gradient_norm_scalar"])
+        )
+        surfaces = {
+            name: _backend_trace_surface_statistics(
+                actual[name],
+                expected[name],
+                path=f"step[{index}].{name}",
+                rtol=(0.0 if name == "rng" else rtol),
+                atol=(0.0 if name == "rng" else atol),
+            )
+            for name in (
+                "ledger",
+                "raw_gradients",
+                "gradient_norm",
+                "clipped_gradients",
+                "model",
+                "optimizer",
+                "rng",
+            )
+        }
+        if trace_has_factual_boundary:
+            surfaces["factual_boundary"] = _backend_trace_surface_statistics(
+                actual["factual_boundary"],
+                expected["factual_boundary"],
+                path=f"step[{index}].factual_boundary",
+                rtol=rtol,
+                atol=atol,
+            )
+            factual_boundary_sections = _backend_trace_factual_statistics(
+                actual["factual_boundary"],
+                expected["factual_boundary"],
+                path=f"step[{index}].factual_boundary",
+                rtol=rtol,
+                atol=atol,
+            )
+        else:
+            factual_boundary_sections = []
+        ledger_sections = _backend_trace_ledger_statistics(
+            actual["ledger"],
+            expected["ledger"],
+            path=f"step[{index}].ledger",
+            rtol=rtol,
+            atol=atol,
+        )
+        if scalar_difference > scalar_tolerance:
+            failed_surfaces.append(f"step[{index}].gradient_norm_scalar")
+            failed_training_surfaces.append(
+                f"step[{index}].gradient_norm_scalar"
+            )
+        for name, statistics in surfaces.items():
+            if int(statistics["outside_elements"]) > 0:
+                failed_surfaces.append(f"step[{index}].{name}")
+                if name not in {"ledger", "factual_boundary"}:
+                    failed_training_surfaces.append(f"step[{index}].{name}")
+        formal_ledger_sections = (
+            ("total", ledger_sections["total"]),
+            ("groups", ledger_sections["groups"]["summary"]),
+            (
+                "contributions",
+                ledger_sections["contributions"]["summary"],
+            ),
+        )
+        for name, statistics in formal_ledger_sections:
+            if int(statistics["outside_elements"]) > 0:
+                failed_training_surfaces.append(
+                    f"step[{index}].ledger.{name}"
+                )
+        trainable_terms = ledger_sections["trainable_terms"]
+        detached_terms = ledger_sections["detached_terms"]
+        if trainable_terms is not None and int(
+            trainable_terms["summary"]["outside_elements"]
+        ) > 0:
+            failed_training_surfaces.append(
+                f"step[{index}].ledger.trainable_terms"
+            )
+        if detached_terms is not None:
+            if int(detached_terms["summary"]["outside_elements"]) > 0:
+                failed_diagnostic_surfaces.append(
+                    f"step[{index}].ledger.detached_terms"
+                )
+        elif int(
+            ledger_sections["terms"]["summary"]["outside_elements"]
+        ) > 0:
+            failed_diagnostic_surfaces.append(
+                f"step[{index}].ledger.unclassified_terms"
+            )
+        for call_index, factual_sections in enumerate(
+            factual_boundary_sections
+        ):
+            for name in ("output", "update", "output_gradient"):
+                if int(factual_sections[name]["outside_elements"]) > 0:
+                    failed_training_surfaces.append(
+                        f"step[{index}].factual_boundary[{call_index}].{name}"
+                    )
+            if int(
+                factual_sections["metrics"]["summary"]["outside_elements"]
+            ) > 0:
+                failed_diagnostic_surfaces.append(
+                    f"step[{index}].factual_boundary[{call_index}].metrics"
+                )
+        reports.append(
+            {
+                "step": index,
+                "gradient_norm_scalar_abs": scalar_difference,
+                "gradient_norm_scalar_tolerance": scalar_tolerance,
+                "surfaces": surfaces,
+                "ledger_sections": ledger_sections,
+                "factual_boundary_sections": factual_boundary_sections,
+            }
+        )
+
+    for name, statistics in initial.items():
+        if int(statistics["outside_elements"]) > 0:
+            failed_surfaces.append(f"initial.{name}")
+            failed_training_surfaces.append(f"initial.{name}")
+    summary = {
+        "schema": "clearvla-training-backend-comparison-v2",
+        "reference": {
+            "path": str(reference_path),
+            "backend": reference["backend"],
+        },
+        "candidate": {
+            "path": str(candidate_path),
+            "backend": candidate["backend"],
+        },
+        "rtol": rtol,
+        "atol": atol,
+        "initial": initial,
+        "steps": reports,
+        "failed_surfaces": failed_surfaces,
+        "failed_training_surfaces": failed_training_surfaces,
+        "failed_diagnostic_surfaces": failed_diagnostic_surfaces,
+        "training_state_accepted": not failed_training_surfaces,
+        "strict_observability_accepted": not failed_surfaces,
+        # Mathematical training equivalence is owned by the differentiable
+        # objective, P1 boundary/VJP, gradients, parameters, optimizer and RNG.
+        # Detached metrics remain visible under the stricter observability
+        # status, but an eager-vs-eager diagnostic reduction cannot veto an
+        # otherwise identical optimizer trajectory.
+        "accepted": not failed_training_surfaces,
+    }
+    output_value = os.environ.get("CLEARVLA_EQUIV_BACKEND_COMPARISON_JSON")
+    if output_value:
+        output_path = Path(output_value)
+        if output_path.exists():
+            raise FileExistsError(
+                f"backend comparison output already exists: {output_path}"
+            )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    print("backend_trace_comparison", json.dumps(summary, sort_keys=True))
+    if failed_training_surfaces:
+        raise AssertionError(
+            "cross-backend trace exceeded the mathematical training gate: "
+            + ", ".join(failed_training_surfaces)
+        )
+    if failed_diagnostic_surfaces:
+        print(
+            "backend_detached_observability_drift",
+            json.dumps(failed_diagnostic_surfaces),
+        )
+    print("cudnn_backend_equivalence_ok")
 
 
 def _capture_forward_backward(engine: Any, batch: Any) -> tuple[torch.cuda.CUDAGraph, Any]:
@@ -912,24 +1881,67 @@ def _run_gate(*, start_step: int, steps: int, rtol: float, atol: float) -> None:
         )
 
 
+def _install_metric_provenance_recorder(engine: Any) -> dict[str, bool]:
+    """Record which emitted scalar metrics belong to the training objective.
+
+    ``TrainStepResult.metrics`` is detached by design, so inspecting the result
+    after the step cannot distinguish a differentiable raw loss term from an
+    audit-only scalar.  Wrap the engine's existing metric materializer and
+    retain that provenance while the live ledger is still available.  The
+    wrapper does not add tensor work or modify any returned value.
+    """
+
+    original = engine._tensor_metrics
+    provenance: dict[str, bool] = {}
+
+    def recorded(ledger: Any, values: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        result = original(ledger, values)
+        current = {name: False for name in result}
+        current["loss_total"] = True
+        for name in ledger.groups:
+            current[f"loss_group_{name}"] = True
+        for name in ledger.contributions:
+            current[f"loss_contrib_{name}"] = True
+        for name, value in ledger.terms.items():
+            current[f"loss_{name}"] = bool(value.requires_grad)
+        # Model-side values are observations even if their source tensor is
+        # attached elsewhere; only LossLedger ownership can enter backward.
+        for name in values:
+            if name in current:
+                current[name] = False
+        current["loss_ledger_gap"] = True
+        current["loss_contribution_gap"] = True
+        if tuple(current) != tuple(result):
+            raise AssertionError("training-result metric provenance differs")
+        provenance.clear()
+        provenance.update(current)
+        return result
+
+    engine._tensor_metrics = recorded
+    return provenance
+
+
 def _assert_step_result_close(
     actual: Any,
     expected: Any,
     *,
     rtol: float,
     atol: float,
+    path: str = "result",
+    actual_metric_provenance: Mapping[str, bool] | None = None,
+    expected_metric_provenance: Mapping[str, bool] | None = None,
 ) -> None:
     _assert_tensor_close(
         actual.loss,
         expected.loss,
-        path="result.loss",
+        path=f"{path}.loss",
         rtol=rtol,
         atol=atol,
     )
     _assert_tensor_close(
         actual.gradient_norm,
         expected.gradient_norm,
-        path="result.gradient_norm",
+        path=f"{path}.gradient_norm",
         rtol=rtol,
         atol=atol,
     )
@@ -939,13 +1951,61 @@ def _assert_step_result_close(
     assert abs(actual.gradient_norm_scalar - expected.gradient_norm_scalar) <= (
         atol + rtol * abs(expected.gradient_norm_scalar)
     )
+    if actual_metric_provenance is None and expected_metric_provenance is None:
+        _assert_tensor_mapping_close(
+            actual.metrics,
+            expected.metrics,
+            path=f"{path}.metrics",
+            rtol=rtol,
+            atol=atol,
+        )
+        return
+    if actual_metric_provenance is None or expected_metric_provenance is None:
+        raise AssertionError(f"{path}: only one metric provenance map was recorded")
+    if (
+        tuple(actual_metric_provenance) != tuple(actual.metrics)
+        or tuple(expected_metric_provenance) != tuple(expected.metrics)
+    ):
+        raise AssertionError(f"{path}: metric provenance key contract differs")
+    if actual_metric_provenance != expected_metric_provenance:
+        raise AssertionError(f"{path}: metric gradient provenance differs")
+    training_names = tuple(
+        name for name, active in actual_metric_provenance.items() if active
+    )
+    diagnostic_names = tuple(
+        name for name, active in actual_metric_provenance.items() if not active
+    )
     _assert_tensor_mapping_close(
-        actual.metrics,
-        expected.metrics,
-        path="result.metrics",
+        {name: actual.metrics[name] for name in training_names},
+        {name: expected.metrics[name] for name in training_names},
+        path=f"{path}.training_metrics",
         rtol=rtol,
         atol=atol,
     )
+    diagnostic_statistics = _backend_trace_named_statistics(
+        {name: actual.metrics[name] for name in diagnostic_names},
+        {name: expected.metrics[name] for name in diagnostic_names},
+        path=f"{path}.detached_observability",
+        rtol=rtol,
+        atol=atol,
+    )
+    if int(diagnostic_statistics["summary"]["outside_elements"]) > 0:
+        outside = {
+            name: statistics
+            for name, statistics in diagnostic_statistics["changed"].items()
+            if int(statistics["outside_elements"]) > 0
+        }
+        print(
+            "step_result_detached_observability_drift",
+            json.dumps(
+                {
+                    "path": path,
+                    "summary": diagnostic_statistics["summary"],
+                    "outside": outside,
+                },
+                sort_keys=True,
+            ),
+        )
 
 
 def _run_production_runner_gate(*, rtol: float, atol: float) -> None:
@@ -954,6 +2014,8 @@ def _run_production_runner_gate(*, rtol: float, atol: float) -> None:
     device = torch.device("cuda")
     eager_engine, first_batch = _engine(device)
     graph_engine, _unused_batch = _engine(device)
+    eager_metric_provenance = _install_metric_provenance_recorder(eager_engine)
+    graph_metric_provenance = _install_metric_provenance_recorder(graph_engine)
     _configure_compiled_graph_engine(graph_engine)
     runner = _comparison_runner(graph_engine)
     _assert_parameters_close(graph_engine.model, eager_engine.model, rtol=0.0, atol=0.0)
@@ -987,7 +2049,15 @@ def _run_production_runner_gate(*, rtol: float, atol: float) -> None:
         actual = runner.train_step(batch, collect_diagnostics=diagnostics)
         graph_rng = _rng_state(graph_engine, device)
 
-        _assert_step_result_close(actual, expected, rtol=rtol, atol=atol)
+        _assert_step_result_close(
+            actual,
+            expected,
+            rtol=rtol,
+            atol=atol,
+            path=f"runner.{label}",
+            actual_metric_provenance=graph_metric_provenance,
+            expected_metric_provenance=eager_metric_provenance,
+        )
         _assert_gradients_close(
             _named_gradients(graph_engine.model),
             _named_gradients(eager_engine.model),
@@ -1019,6 +2089,8 @@ def _run_topology_recapture_gate(*, rtol: float, atol: float) -> None:
     device = torch.device("cuda")
     eager_engine, batch = _engine(device)
     graph_engine, _unused_batch = _engine(device)
+    eager_metric_provenance = _install_metric_provenance_recorder(eager_engine)
+    graph_metric_provenance = _install_metric_provenance_recorder(graph_engine)
     _configure_compiled_graph_engine(graph_engine)
     runner = _comparison_runner(graph_engine)
     graph_engine.model.train()
@@ -1040,7 +2112,15 @@ def _run_topology_recapture_gate(*, rtol: float, atol: float) -> None:
     _set_rng_state(graph_engine, device, graph_rng)
     actual = runner.train_step(batch, collect_diagnostics=False)
     graph_rng = _rng_state(graph_engine, device)
-    _assert_step_result_close(actual, expected, rtol=rtol, atol=atol)
+    _assert_step_result_close(
+        actual,
+        expected,
+        rtol=rtol,
+        atol=atol,
+        path="runner.active",
+        actual_metric_provenance=graph_metric_provenance,
+        expected_metric_provenance=eager_metric_provenance,
+    )
     _assert_gradients_close(
         _named_gradients(graph_engine.model),
         _named_gradients(eager_engine.model),
@@ -1087,6 +2167,7 @@ def _run_checkpoint_resume_gate(*, rtol: float, atol: float) -> None:
 
     device = torch.device("cuda")
     source_engine, first_batch = _engine(device)
+    source_metric_provenance = _install_metric_provenance_recorder(source_engine)
     _configure_compiled_graph_engine(source_engine)
     source_runner = _comparison_runner(source_engine)
     source_engine.model.train()
@@ -1133,6 +2214,9 @@ def _run_checkpoint_resume_gate(*, rtol: float, atol: float) -> None:
         )
 
         resumed_engine, _unused_batch = _engine(device)
+        resumed_metric_provenance = _install_metric_provenance_recorder(
+            resumed_engine
+        )
         _configure_compiled_graph_engine(resumed_engine)
         restored = load_checkpoint_exact(
             checkpoint_path,
@@ -1198,7 +2282,15 @@ def _run_checkpoint_resume_gate(*, rtol: float, atol: float) -> None:
         )
         actual_rng = _rng_state(resumed_engine, device)
 
-        _assert_step_result_close(actual, expected, rtol=rtol, atol=atol)
+        _assert_step_result_close(
+            actual,
+            expected,
+            rtol=rtol,
+            atol=atol,
+            path="checkpoint.continuation",
+            actual_metric_provenance=resumed_metric_provenance,
+            expected_metric_provenance=source_metric_provenance,
+        )
         _assert_gradients_close(
             _named_gradients(resumed_engine.model),
             _named_gradients(source_engine.model),
@@ -1287,7 +2379,10 @@ def _quantiles(values: list[float]) -> dict[str, float]:
 def _surface_distribution(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {"case_count": 0}
-    worst = max(rows, key=lambda row: float(row["max_tolerance_ratio"]))
+    worst_sample_index, worst = max(
+        enumerate(rows),
+        key=lambda item: float(item[1]["max_tolerance_ratio"]),
+    )
     first_outside_case = next(
         (
             (index, row)
@@ -1296,6 +2391,28 @@ def _surface_distribution(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         ),
         None,
     )
+    outside_cases = [
+        {
+            "case_index": int(row.get("case_index", sample_index)),
+            "sample_index": sample_index,
+            "outside_elements": int(row["outside_elements"]),
+            "max_abs": float(row["max_abs"]),
+            "max_tolerance_ratio": float(row["max_tolerance_ratio"]),
+            "max_tolerance_ratio_path": row["max_tolerance_ratio_path"],
+            **{
+                name: row[name]
+                for name in (
+                    "first_outside_path",
+                    "first_outside_index",
+                    "first_outside_actual",
+                    "first_outside_expected",
+                    "first_outside_abs",
+                )
+            },
+        }
+        for sample_index, row in enumerate(rows)
+        if int(row["outside_elements"]) > 0
+    ]
     return {
         "case_count": len(rows),
         "outside_case_count": sum(int(row["outside_elements"]) > 0 for row in rows),
@@ -1307,9 +2424,22 @@ def _surface_distribution(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
             [float(row["max_tolerance_ratio"]) for row in rows]
         ),
         "worst_path": worst["max_tolerance_ratio_path"],
+        "worst_case_index": int(worst.get("case_index", worst_sample_index)),
+        "worst_sample_index": worst_sample_index,
         "first_outside_case_index": (
+            None
+            if first_outside_case is None
+            else int(
+                first_outside_case[1].get(
+                    "case_index",
+                    first_outside_case[0],
+                )
+            )
+        ),
+        "first_outside_sample_index": (
             None if first_outside_case is None else first_outside_case[0]
         ),
+        "outside_cases": outside_cases,
         "first_outside": (
             None
             if first_outside_case is None
@@ -1353,6 +2483,33 @@ def _run_independent_sample_statistics(
     eager_control = os.environ.get("CLEARVLA_EQUIV_LONG_EAGER_CONTROL") == "1"
     eager_engine, _unused_eager_batch = _engine(device)
     comparison_engine, _unused_comparison_batch = _engine(device)
+    freeze_observation = os.environ.get("CLEARVLA_EQUIV_FREEZE_OBSERVATION") == "1"
+    frozen_parameter_count = 0
+    if freeze_observation:
+        frozen_counts = []
+        for engine in (eager_engine, comparison_engine):
+            observation = getattr(engine.model, "observation", None)
+            if observation is None:
+                raise RuntimeError(
+                    "observation-freeze diagnostic cannot locate model.observation"
+                )
+            parameters = tuple(observation.parameters())
+            if not parameters:
+                raise RuntimeError(
+                    "observation-freeze diagnostic found no observation parameters"
+                )
+            for parameter in parameters:
+                parameter.requires_grad_(False)
+            frozen_counts.append(len(parameters))
+        if frozen_counts[0] != frozen_counts[1]:
+            raise AssertionError(
+                "observation-freeze diagnostic changed parameter coverage between engines"
+            )
+        frozen_parameter_count = frozen_counts[0]
+    eager_metric_provenance = _install_metric_provenance_recorder(eager_engine)
+    comparison_metric_provenance = _install_metric_provenance_recorder(
+        comparison_engine
+    )
     if not eager_control:
         _configure_compiled_graph_engine(comparison_engine)
     _assert_parameters_close(
@@ -1378,6 +2535,7 @@ def _run_independent_sample_statistics(
     half = cases // 2
     surfaces: dict[str, list[Mapping[str, Any]]] = {
         "result": [],
+        "detached_observability": [],
         "clipped_gradient": [],
         "rng": [],
         "parameters": [],
@@ -1418,6 +2576,8 @@ def _run_independent_sample_statistics(
                 "rtol": rtol,
                 "atol": atol,
                 "state_check_stride": state_stride,
+                "freeze_observation": freeze_observation,
+                "frozen_parameter_count": frozen_parameter_count,
             },
             sort_keys=True,
         ),
@@ -1481,27 +2641,52 @@ def _run_independent_sample_statistics(
             )
         actual_rng = _rng_state(comparison_engine, device)
 
-        result_statistics = _result_pair_statistics(
-            actual,
-            expected,
-            rtol=rtol,
-            atol=atol,
+        result_statistics = dict(
+            _result_pair_statistics(
+                actual,
+                expected,
+                rtol=rtol,
+                atol=atol,
+                metric_provenance=comparison_metric_provenance,
+            ),
+            case_index=index,
         )
-        gradient_statistics = _gradient_pair_statistics(
-            comparison_engine.model,
-            eager_engine.model,
-            rtol=rtol,
-            atol=atol,
+        if comparison_metric_provenance != eager_metric_provenance:
+            raise AssertionError(
+                f"independent case {index} changed metric gradient provenance"
+            )
+        detached_statistics = dict(
+            _detached_result_metric_statistics(
+                actual,
+                expected,
+                rtol=rtol,
+                atol=atol,
+                metric_provenance=comparison_metric_provenance,
+            ),
+            case_index=index,
         )
-        rng_statistics = _tensor_pair_statistics(
-            [
-                (name, actual_rng[name], expected_rng[name])
-                for name in expected_rng
-            ],
-            rtol=0.0,
-            atol=0.0,
+        gradient_statistics = dict(
+            _gradient_pair_statistics(
+                comparison_engine.model,
+                eager_engine.model,
+                rtol=rtol,
+                atol=atol,
+            ),
+            case_index=index,
+        )
+        rng_statistics = dict(
+            _tensor_pair_statistics(
+                [
+                    (name, actual_rng[name], expected_rng[name])
+                    for name in expected_rng
+                ],
+                rtol=0.0,
+                atol=0.0,
+            ),
+            case_index=index,
         )
         surfaces["result"].append(result_statistics)
+        surfaces["detached_observability"].append(detached_statistics)
         surfaces["clipped_gradient"].append(gradient_statistics)
         surfaces["rng"].append(rng_statistics)
         if int(rng_statistics["outside_elements"]) != 0:
@@ -1511,27 +2696,36 @@ def _run_independent_sample_statistics(
 
         if index % state_stride == 0 or index + 1 == cases:
             surfaces["parameters"].append(
-                _parameter_pair_statistics(
-                    comparison_engine.model,
-                    eager_engine.model,
-                    rtol=rtol,
-                    atol=atol,
+                dict(
+                    _parameter_pair_statistics(
+                        comparison_engine.model,
+                        eager_engine.model,
+                        rtol=rtol,
+                        atol=atol,
+                    ),
+                    case_index=index,
                 )
             )
             surfaces["buffers"].append(
-                _buffer_pair_statistics(
-                    comparison_engine.model,
-                    eager_engine.model,
-                    rtol=rtol,
-                    atol=atol,
+                dict(
+                    _buffer_pair_statistics(
+                        comparison_engine.model,
+                        eager_engine.model,
+                        rtol=rtol,
+                        atol=atol,
+                    ),
+                    case_index=index,
                 )
             )
             surfaces["optimizer"].append(
-                _optimizer_pair_statistics(
-                    comparison_engine,
-                    eager_engine,
-                    rtol=rtol,
-                    atol=atol,
+                dict(
+                    _optimizer_pair_statistics(
+                        comparison_engine,
+                        eager_engine,
+                        rtol=rtol,
+                        atol=atol,
+                    ),
+                    case_index=index,
                 )
             )
         if index == 0 or (index + 1) % 16 == 0 or index + 1 == cases:
@@ -1545,6 +2739,9 @@ def _run_independent_sample_statistics(
                         "phase": "identity" if start_step == 0 else "active",
                         "gradient_max_abs": float(gradient_statistics["max_abs"]),
                         "result_max_abs": float(result_statistics["max_abs"]),
+                        "detached_observability_max_abs": float(
+                            detached_statistics["max_abs"]
+                        ),
                         "rng_exact": int(rng_statistics["outside_elements"]) == 0,
                         "capture_count": 0 if runner is None else runner.capture_count,
                     },
@@ -1562,6 +2759,8 @@ def _run_independent_sample_statistics(
         "batch_tensor_count": batch_tensor_count,
         "batch_element_count": batch_element_count,
         "capture_count": 0 if runner is None else runner.capture_count,
+        "freeze_observation": freeze_observation,
+        "frozen_parameter_count": frozen_parameter_count,
         "selective_compile_plan": (
             None if runner is None else runner.compile_plan_summary
         ),
@@ -1739,6 +2938,10 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
     eager_control = os.environ.get("CLEARVLA_EQUIV_LONG_EAGER_CONTROL") == "1"
     eager_engine, _unused_eager_batch = _engine(device)
     comparison_engine, _unused_comparison_batch = _engine(device)
+    eager_metric_provenance = _install_metric_provenance_recorder(eager_engine)
+    comparison_metric_provenance = _install_metric_provenance_recorder(
+        comparison_engine
+    )
     if not eager_control:
         _configure_compiled_graph_engine(comparison_engine)
     _assert_parameters_close(
@@ -1809,6 +3012,7 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
 
     first_outside_step: dict[str, int | None] = {
         "result": None,
+        "detached_observability": None,
         "clipped_gradient": None,
         "rng": None,
     }
@@ -1924,6 +3128,18 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
             expected,
             rtol=rtol,
             atol=atol,
+            metric_provenance=comparison_metric_provenance,
+        )
+        if comparison_metric_provenance != eager_metric_provenance:
+            raise AssertionError(
+                f"long step {index} changed metric gradient provenance"
+            )
+        detached_statistics = _detached_result_metric_statistics(
+            actual,
+            expected,
+            rtol=rtol,
+            atol=atol,
+            metric_provenance=comparison_metric_provenance,
         )
         gradient_statistics = _gradient_pair_statistics(
             comparison_engine.model,
@@ -1940,6 +3156,11 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
             atol=0.0,
         )
         update_trajectory_summary("result", result_statistics, step=index)
+        update_trajectory_summary(
+            "detached_observability",
+            detached_statistics,
+            step=index,
+        )
         update_trajectory_summary(
             "clipped_gradient",
             gradient_statistics,
@@ -1993,6 +3214,7 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
                 "sample_slots": (index + 1) * batch_size,
                 "capture_count": capture_count,
                 "result": result_statistics,
+                "detached_observability": detached_statistics,
                 "clipped_gradient": gradient_statistics,
                 "parameters": parameter_statistics,
                 "buffers": buffer_statistics,
@@ -2048,17 +3270,49 @@ def _run_long_drift_statistics(*, steps: int, rtol: float, atol: float) -> None:
         ),
     }
     print("long_drift_summary", json.dumps(summary, sort_keys=True))
+    _write_optional_summary(summary)
 
 
 def main() -> None:
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required")
     # Two independently allocated eager engines on this CUDA stack already
     # differ by up to 2.92435e-7 after one matched update despite identical
     # loss and RNG continuation.  Use a 1e-6 absolute envelope for the GPU
     # gate; the tighter 2e-7 bound remains the CPU rewrite gate.
     gpu_rtol = 2e-5
     gpu_atol = 1e-6
+    export_backend_trace = os.environ.get("CLEARVLA_EQUIV_EXPORT_BACKEND_TRACE")
+    compare_backend_traces = os.environ.get(
+        "CLEARVLA_EQUIV_COMPARE_BACKEND_TRACES"
+    )
+    if export_backend_trace and compare_backend_traces:
+        raise ValueError(
+            "backend trace export and comparison modes are mutually exclusive"
+        )
+    if export_backend_trace:
+        _export_backend_trace(
+            Path(export_backend_trace),
+            steps=int(os.environ.get("CLEARVLA_EQUIV_BACKEND_TRACE_STEPS", "4")),
+        )
+        return
+    if compare_backend_traces:
+        paths = tuple(compare_backend_traces.split(os.pathsep))
+        if len(paths) != 2 or any(not value for value in paths):
+            raise ValueError(
+                "backend trace comparison requires exactly two paths"
+            )
+        _compare_backend_traces(
+            Path(paths[0]),
+            Path(paths[1]),
+            rtol=gpu_rtol,
+            atol=gpu_atol,
+        )
+        return
+    # Trace comparison above is deliberately CPU-only (both artifacts are
+    # loaded with ``map_location="cpu"``).  Export and live execution still
+    # require CUDA, but offline acceptance should remain usable on hosts that
+    # do not expose a GPU.
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required")
     if os.environ.get("CLEARVLA_EQUIV_CHECKPOINT_ONLY") == "1":
         _run_checkpoint_resume_gate(rtol=gpu_rtol, atol=gpu_atol)
         return

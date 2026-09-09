@@ -666,3 +666,173 @@ non-determinism.  Therefore the acceptance decision is:
 
 Small reproducible summaries are in `compat-tests/results/`, and the shared
 version adapter launcher is `compat-tests/run_variant_cuda_graph_equivalence.py`.
+
+## Portable mixed-safe recovery and atomic factual contraction (2026-09-10)
+
+### Accepted acceleration surface before the atomic experiment
+
+The portable adapter work converged on the following B8/BF16 training profile:
+
+```text
+precision-mainline-grounding-safe+mainline-p1+mainline-world+
+mainline-transition+mainline-layer-heads+factual-shell-safe
+```
+
+It is composed with fused AdamW, the complete training CUDA Graph lifecycle,
+prepared block/controller-context reuse, terminal candidate-velocity reuse,
+and disabled P1/raw-high/raw-pyramid activation checkpointing.  It does not
+change a parameter, buffer, checkpoint key, loss, optimizer rule, RNG draw,
+model tensor shape or candidate count.  Every optional feature is installed
+through the version-owned `MainlineTrainingAccelerationAdapter`; unresolved
+paths fail closed rather than silently reducing the profile.
+
+A fresh GPU2 B8 ABCBA rerun measured eager at `4.6242 / 4.4378 samples/s`
+and mixed-safe at `9.0445 / 9.0261 samples/s`.  The pooled comparison is about
+`4.529 -> 9.035 samples/s`, or `1.995x`.  This is the pre-atomic accepted
+baseline; it is not inferred from the earlier rejected full-forward compile.
+
+### Exact-order atomic factual implementation
+
+The remaining compiler barrier was the normalized P1 RGB/detail contraction:
+
+```text
+bqgcijmku,bcijmkv->bqguv
+```
+
+Allowing Inductor to see this einsum can reassociate the BF16 reduction even
+when the real-number formula is unchanged.  The opt-in implementation in
+`clearvla/mainline/training/factual_contraction.py` therefore exposes one
+opaque `torch.library.custom_op` and an explicit first-order backward.  It
+uses the exact eager einsum matrix layout, including the `c,i,j,k,m` flattened
+reduction order, and uses the same BF16 GEMM order for both VJPs.  Fake/meta
+implementations preserve the real output shapes, dtypes and strides.
+
+The forward custom op returns its private left/right matrices so autograd can
+save the actual forward operands, while the public wrapper exposes only the
+factual output.  Installation replaces only the model instance's
+`_configured_typed_microgrid_rgb_detail_contraction` callable.  Disabling it
+restores the previous class/instance lookup; construction without the opt-in
+does not import the custom-op module.  The hook adds no module, parameter,
+buffer or serialized state.  The compile family is named `factual-atomic` and
+is intentionally unavailable until the hook has been installed.
+
+The current modular reader and legacy reader expose the same narrow method
+boundary.  The Pen `a4a170e` snapshot predated that boundary, so its lab copy
+received a five-anchor interface-only migration: one `Callable` import, the
+default eager contraction method, an optional callback, one callback dispatch,
+and the configured callback argument.  The default remains the original
+einsum.  This was applied with exact-anchor counts and before/after SHA-256
+values because the snapshot is an untracked subdirectory and ordinary
+`git apply` reports success while skipping it.  Fresh-pycache inspection then
+reported `class_has_method=True`, `reader_method_callable=True`, and
+`install_result=1`.
+
+Focused verification before the model gates included:
+
+* `torch.library.opcheck`: schema, autograd registration, FakeTensor and AOT
+  dynamic-shape checks all passed;
+* local factual/compile-plan tests: `61 passed`;
+* local acceleration-contract/prefetch tests: `23 passed`;
+* remote CUDA BF16/Inductor factual tests: `5 passed`;
+* compiled atomic forward and VJP matched eager einsum bit-for-bit in the
+  focused CUDA test;
+* the remote general factual/compile suite: `61 passed`.
+
+### Pen/RDT independent mathematical-behavior gates
+
+The candidate profile was:
+
+```text
+precision-mainline-grounding-safe+mainline-p1+mainline-world+
+mainline-transition+mainline-layer-heads+factual-atomic
+```
+
+Pen and RDT first passed independent `8 cases x B4` and `64 cases x B4`
+screens.  Formal acceptance then ran frozen and unfrozen observation modes
+independently for each variant, each with `256 cases x B4`: 1,024 cases and
+4,096 sample slots in total.  Identity and active topology each own half the
+cases.  Result and clipped-gradient surfaces are checked on all 256 cases;
+parameter, optimizer and buffer state are sampled at 17 evenly spaced
+checkpoints.  The tolerance remains `atol=1e-6, rtol=2e-5` and RNG is exact.
+
+| Variant / observation | Result max abs / out | Clipped-gradient max abs / out | Parameter max abs | Parameter out checkpoints / elements | Optimizer / buffer / RNG |
+|---|---:|---:|---:|---:|---|
+| Pen frozen | `3.040e-6 / 0` | `6.158e-8 / 0` | `4.927e-7` | `0 / 0` | zero outliers / zero outliers / exact |
+| Pen unfrozen | `4.947e-6 / 0` | `4.131e-7 / 0` | `4.560e-6` | `2 / 2` | zero outliers / zero outliers / exact |
+| RDT frozen | `2.921e-6 / 0` | `7.887e-8 / 0` | `7.050e-7` | `0 / 0` | zero outliers / zero outliers / exact |
+| RDT unfrozen | `2.265e-6 / 0` | `4.112e-7 / 0` | `5.603e-6` | `3 / 4` | zero outliers / zero outliers / exact |
+
+The unfrozen parameter tails do not originate in the atomic contraction.
+Freezing all 545 observation parameters removes every parameter outlier in
+both variants.  Against matched mixed-safe `256 x B4` runs, Pen atomic has
+`2 checkpoints / 2 elements / 4.560e-6` versus mixed-safe
+`3 / 3 / 4.660e-6`; both share cases 80 and 96 in
+`early_masked_raw_context.local.0.weight`.  RDT atomic has
+`3 / 4 / 5.603e-6` versus mixed-safe `2 / 4 / 5.603e-6`; both share cases 0
+and 32 in `flow.context.0.weight` and
+`early_masked_raw_context.local.10.weight`.  Atomic's one additional RDT
+checkpoint is one `raw_flow.pyramid.high.0.weight` element at `1.557e-6`.
+This is the same sparse cuDNN observation-backward envelope already present in
+the accepted mixed-safe path, not a new factual-path loss or optimizer drift.
+
+RDT's detached `loss_execution_terminal_target_cost_margin` remains outside
+the strict envelope: atomic reports 33/256 frozen and 40/256 unfrozen cases,
+versus 32/256 and 41/256 for mixed-safe.  This scalar is audit-only and does
+not enter backward.  Its near-identical incidence across profiles is recorded
+as observability evidence, not counted as a training-objective failure.
+
+The four formal atomic result files are:
+
+* `runs/pen_atomic_independent_256_b4_frozen_g1_formal1_20260910.json`;
+* `runs/pen_atomic_independent_256_b4_unfrozen_g1_formal1_20260910.json`;
+* `runs/rdt_atomic_independent_256_b4_frozen_g2_formal1_20260910.json`;
+* `runs/rdt_atomic_independent_256_b4_unfrozen_g2_formal1_resume1_20260910.json`.
+
+### B8 same-GPU performance gate
+
+The final GPU2 ABCBA order was eager A, mixed-safe A, atomic C, mixed-safe B,
+eager B.  Every process used the same config, repeated batch, BF16, B8, four
+workers, 16 warm-up steps and 60 measured steps.
+
+| Segment | Throughput | CUDA allocated / reserved | Process peak |
+|---|---:|---:|---:|
+| eager A | `4.56113 samples/s` | `11.221 / 13.943 GiB` | `14,632 MiB` |
+| mixed-safe A | `9.05460 samples/s` | `19.510 / 21.746 GiB` | `22,954 MiB` |
+| factual-atomic | `9.51306 samples/s` | `17.231 / 19.482 GiB` | `20,608 MiB` |
+| mixed-safe B | `9.20255 samples/s` | `19.510 / 21.742 GiB` | `22,950 MiB` |
+| eager B | `4.54374 samples/s` | `11.221 / 13.943 GiB` | `14,632 MiB` |
+
+The pooled eager rate is `4.55243 samples/s` and the pooled mixed-safe rate is
+`9.12858 samples/s`.  Atomic therefore provides:
+
+* `2.08967x` over eager;
+* `+0.38449 samples/s`, or `+4.2119%`, over the bracketing mixed-safe mean;
+* a maximum verified repeat rate of `9.52053 samples/s`;
+* a remaining gap to `10 samples/s` of `0.47947 samples/s` (`4.79%`) using
+  the warm repeat, or `0.48694` (`4.87%`) in the ABCBA centre segment;
+* about `2.29 GiB` (`10.2%`) lower process peak than mixed-safe, plus about
+  `2.28 GiB` lower PyTorch allocated peak.
+
+The cold-cache atomic CUDA-Graph capture took `322.80 s`, compared with about
+`20.20 s` for mixed-safe.  A second process with the Inductor disk cache
+already populated measured `9.52053 samples/s`, `17.232 / 19.486 GiB`
+allocated/reserved and a `32.24 s` capture.  Thus roughly 290 seconds are a
+one-time compilation cost; cached startup retains about 12 seconds of extra
+setup.  Production packaging should precompile or persist the Inductor cache
+for the fixed B8 shape rather than paying the cold cost on every launch.
+
+The ABCBA files use the prefix
+`runs/profile_atomic_vs_mixed_abcba60_*_b8_g2_atomic1_20260910`; the warm
+repeat is `runs/profile_atomic_warm_repeat60_b8_g2_warm1_20260910.json`.
+
+### Decision
+
+Retain `factual-atomic` as the preferred opt-in B8 training candidate when a
+persistent/prewarmed compiler cache is available.  It clears the predeclared
+`+0.2 samples/s` incremental gate, exceeds the user's `2x` minimum, returns
+the dedicated-GPU process estimate below the 22 GiB release limit, and passes
+the Pen/RDT training-behavior surfaces.  Keep `factual-shell-safe` as the
+cold-start and old-version fallback.  Do not describe either path as bitwise
+identical over a complete unfrozen CUDA update: both inherit the calibrated,
+sparse observation-convolution tail.  The verified `9.52 samples/s` is a
+training-throughput result, not a deployment-camera FPS measurement.

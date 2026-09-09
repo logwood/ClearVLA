@@ -1,10 +1,12 @@
 """Opt-in CUDA Graph runner for ordinary ClearVLA training batches.
 
 The model, losses, gradient lifecycle, optimizer and scheduler remain owned by
-``MainlineTrainingEngine``.  This runner records only its ordinary-batch
+``MainlineTrainingEngine``.  This runner records its ordinary-batch
 forward/loss/backward surface, whose thousands of small CUDA launches are
-otherwise repeatedly dispatched from Python.  Diagnostic batches retain the
-complete eager path.
+otherwise repeatedly dispatched from Python.  An independent opt-in graph may
+also replay an already-initialized fused AdamW step while the Python scheduler
+and checkpoint-visible optimizer metadata remain unchanged.  Diagnostic
+batches retain the complete eager path.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import gc
 import inspect
+import math
 import sys
 import time
 from collections.abc import Callable, Hashable, Mapping
@@ -27,7 +30,12 @@ from .acceleration_contract import (
     resolve_training_acceleration_adapter,
     resolve_training_compile_plan,
 )
-from .engine import MainlineTrainingEngine, TrainStepResult, _autocast
+from .engine import (
+    MainlineTrainingEngine,
+    NonFiniteGradientError,
+    TrainStepResult,
+    _autocast,
+)
 from .gradient_audit import FiniteGradientSpikeReport
 from .selective_compile import (
     AppliedTrainingCompilePlan,
@@ -211,6 +219,8 @@ class CudaGraphTrainingStepRunner:
         *,
         compile_profile: str | None = None,
         allow_candidate_compile: bool = False,
+        capture_gradient_lifecycle: bool = False,
+        capture_optimizer_step: bool = False,
     ) -> None:
         if engine.device.type != "cuda":
             raise ValueError("CUDA Graph training requires a CUDA engine")
@@ -235,6 +245,34 @@ class CudaGraphTrainingStepRunner:
                 and existing_compile.acceptance == "candidate"
             )
         )
+        if capture_gradient_lifecycle and (
+            engine.gradient_spike_audit_threshold is not None
+        ):
+            raise ValueError(
+                "captured gradient lifecycle requires the gradient-spike audit "
+                "to be disabled"
+            )
+        self._capture_gradient_lifecycle = bool(capture_gradient_lifecycle)
+        if capture_optimizer_step:
+            if not isinstance(engine.optimizer, torch.optim.AdamW):
+                raise ValueError(
+                    "captured optimizer step currently requires torch.optim.AdamW"
+                )
+            if not engine.optimizer.param_groups or not all(
+                bool(group.get("fused", False))
+                for group in engine.optimizer.param_groups
+            ):
+                raise ValueError(
+                    "captured optimizer step requires fused AdamW in every group"
+                )
+            if any(
+                bool(group.get("differentiable", False))
+                for group in engine.optimizer.param_groups
+            ):
+                raise ValueError(
+                    "captured optimizer step does not support differentiable AdamW"
+                )
+        self._capture_optimizer_step = bool(capture_optimizer_step)
         self._applied_compile_plan = self._configure_compile_plan()
         self._structure_signature = self._acceleration_adapter.structure_signature(
             engine
@@ -246,9 +284,20 @@ class CudaGraphTrainingStepRunner:
         self._static_batch: TrainingBatch | None = None
         self._captured_ledger: Any = None
         self._captured_metrics: dict[str, Tensor] | None = None
+        self._captured_gradient_norm: Tensor | None = None
         self._capture_key: Any = None
+        self._optimizer_graph: torch.cuda.CUDAGraph | None = None
+        self._optimizer_lr_host: Tensor | None = None
+        self._optimizer_lr_device: Tensor | None = None
+        self._optimizer_gradient_parameters: tuple[Tensor, ...] = ()
         self.capture_count = 0
+        self.replay_count = 0
+        self.diagnostic_eager_count = 0
         self.capture_setup_seconds = 0.0
+        self.optimizer_capture_count = 0
+        self.optimizer_replay_count = 0
+        self.optimizer_eager_step_count = 0
+        self.optimizer_capture_setup_seconds = 0.0
 
     def _configure_compile_plan(self) -> AppliedTrainingCompilePlan | None:
         plan = resolve_training_compile_plan(
@@ -316,8 +365,15 @@ class CudaGraphTrainingStepRunner:
         )
 
     def _release_capture(self) -> None:
-        if self._graph is not None:
+        if self._graph is not None or self._optimizer_graph is not None:
             torch.cuda.synchronize(self.engine.device)
+        if self._optimizer_graph is not None:
+            self._optimizer_graph.reset()
+        self._optimizer_graph = None
+        self._optimizer_lr_host = None
+        self._optimizer_lr_device = None
+        self._optimizer_gradient_parameters = ()
+        if self._graph is not None:
             self._graph.reset()
             # A replacement capture owns a new backward graph.  Drop the old
             # AccumulateGrad buffers before collecting its graph executable so
@@ -326,9 +382,162 @@ class CudaGraphTrainingStepRunner:
         self._graph = None
         self._captured_ledger = None
         self._captured_metrics = None
+        self._captured_gradient_norm = None
         self._static_batch = None
         self._capture_key = None
         gc.collect()
+
+    def _optimizer_state_is_capture_ready(self) -> bool:
+        """Return whether fused AdamW has initialized every active state row.
+
+        Fused AdamW lazily creates ``step`` and moment tensors.  Recording that
+        initialization would put their zero-fill operations in the graph and
+        replay them before every update.  The first fresh-run update therefore
+        remains the ordinary optimizer call; capture begins only after those
+        exact native state tensors exist.  A topology recapture repeats this
+        guard so newly active parameters receive the same ordinary lazy-init
+        semantics.
+        """
+
+        found_gradient = False
+        optimizer = self.engine.optimizer
+        for group in optimizer.param_groups:
+            for parameter in group["params"]:
+                gradient = parameter.grad
+                if gradient is None:
+                    continue
+                found_gradient = True
+                state = optimizer.state.get(parameter, {})
+                required = {"step", "exp_avg", "exp_avg_sq"}
+                if bool(group.get("amsgrad", False)):
+                    required.add("max_exp_avg_sq")
+                if not required.issubset(state):
+                    return False
+        return found_gradient
+
+    def _current_optimizer_gradient_parameters(self) -> tuple[Tensor, ...]:
+        return tuple(
+            parameter
+            for group in self.engine.optimizer.param_groups
+            for parameter in group["params"]
+            if parameter.grad is not None
+        )
+
+    def _stage_optimizer_learning_rates(self) -> None:
+        host = self._optimizer_lr_host
+        device = self._optimizer_lr_device
+        if host is None or device is None:
+            raise RuntimeError("captured optimizer learning-rate storage is absent")
+        groups = self.engine.optimizer.param_groups
+        if host.numel() != len(groups):
+            raise RuntimeError("captured optimizer group count changed")
+        for index, group in enumerate(groups):
+            learning_rate = group["lr"]
+            if isinstance(learning_rate, Tensor):
+                raise RuntimeError(
+                    "checkpoint-visible optimizer learning rate stopped being a float"
+                )
+            host[index] = float(learning_rate)
+        device.copy_(host, non_blocking=True)
+
+    def _capture_fused_optimizer_step(self) -> None:
+        """Record one initialized fused AdamW update without executing it.
+
+        CUDA stream capture records kernels but does not own the formal update;
+        the immediate first replay below does.  Temporary device LR scalars are
+        FP32 views of one vector.  They reproduce fused AdamW's native scalar
+        conversion while every public param-group field is restored before the
+        scheduler or checkpoint code can observe it.
+        """
+
+        forward_graph = self._graph
+        if forward_graph is None:
+            raise RuntimeError("optimizer capture requires a forward/backward graph")
+        engine = self.engine
+        optimizer = engine.optimizer
+        gradient_parameters = self._current_optimizer_gradient_parameters()
+        if not gradient_parameters:
+            raise RuntimeError("captured optimizer found no active gradients")
+        groups = optimizer.param_groups
+        host = torch.empty(
+            len(groups),
+            dtype=torch.float32,
+            pin_memory=True,
+        )
+        for index, group in enumerate(groups):
+            learning_rate = group["lr"]
+            if isinstance(learning_rate, Tensor):
+                raise RuntimeError(
+                    "captured optimizer requires checkpoint-visible float LRs"
+                )
+            host[index] = float(learning_rate)
+        device = host.to(device=engine.device, non_blocking=False)
+        originals = tuple(
+            (group["lr"], bool(group.get("capturable", False)))
+            for group in groups
+        )
+        graph = torch.cuda.CUDAGraph()
+        started = time.perf_counter()
+        try:
+            for index, group in enumerate(groups):
+                group["lr"] = device[index]
+                group["capturable"] = True
+            # The two graphs always replay in capture order and never overlap,
+            # so sharing their allocator pool avoids a second peak workspace.
+            with torch.cuda.graph(graph, pool=forward_graph.pool()):
+                optimizer.step()
+        except Exception:
+            graph.reset()
+            raise
+        finally:
+            for group, (learning_rate, capturable) in zip(
+                groups,
+                originals,
+                strict=True,
+            ):
+                group["lr"] = learning_rate
+                group["capturable"] = capturable
+        torch.cuda.synchronize(engine.device)
+        self._optimizer_graph = graph
+        self._optimizer_lr_host = host
+        self._optimizer_lr_device = device
+        self._optimizer_gradient_parameters = gradient_parameters
+        self.optimizer_capture_count += 1
+        self.optimizer_capture_setup_seconds += time.perf_counter() - started
+
+    def _optimizer_step(self) -> None:
+        """Execute one native or captured optimizer update."""
+
+        if not self._capture_optimizer_step:
+            self.engine.optimizer.step()
+            self.optimizer_eager_step_count += 1
+            return
+        graph = self._optimizer_graph
+        if graph is None:
+            if not self._optimizer_state_is_capture_ready():
+                self.engine.optimizer.step()
+                self.optimizer_eager_step_count += 1
+                return
+            self._capture_fused_optimizer_step()
+            graph = self._optimizer_graph
+            if graph is None:
+                raise RuntimeError("fused optimizer capture did not produce a graph")
+        current_parameters = self._current_optimizer_gradient_parameters()
+        if len(current_parameters) != len(self._optimizer_gradient_parameters) or any(
+            current is not captured
+            for current, captured in zip(
+                current_parameters,
+                self._optimizer_gradient_parameters,
+                strict=True,
+            )
+        ):
+            raise RuntimeError(
+                "captured optimizer active-gradient parameter set changed; "
+                "invalidate the runner at the topology boundary"
+            )
+        self._stage_optimizer_learning_rates()
+        graph.replay()
+        self.optimizer_replay_count += 1
 
     def _capture(self, batch: TrainingBatch) -> None:
         engine = self.engine
@@ -379,9 +588,15 @@ class CudaGraphTrainingStepRunner:
                             condition_generator=engine.train_condition_generator,
                         )
                     captured_ledger.total.backward()
+                    captured_gradient_norm = (
+                        engine._captured_gradient_lifecycle()
+                        if self._capture_gradient_lifecycle
+                        else None
+                    )
             self._graph = graph
             self._captured_ledger = captured_ledger
             self._captured_metrics = captured_metrics
+            self._captured_gradient_norm = captured_gradient_norm
             self.capture_count += 1
         finally:
             _restore_rng_snapshot(engine, capture_rng)
@@ -425,6 +640,7 @@ class CudaGraphTrainingStepRunner:
         phase_timing: dict[str, float] | None = None,
     ) -> TrainStepResult:
         if collect_diagnostics:
+            self.diagnostic_eager_count += 1
             return self.engine.train_step(
                 batch,
                 collect_diagnostics=True,
@@ -455,26 +671,45 @@ class CudaGraphTrainingStepRunner:
         graph = self._graph
         ledger = self._captured_ledger
         captured_metrics = self._captured_metrics
+        captured_gradient_norm = self._captured_gradient_norm
         if graph is None or ledger is None or captured_metrics is None:
             raise RuntimeError("CUDA Graph training capture is incomplete")
         replay_started = time.perf_counter()
         graph.replay()
+        self.replay_count += 1
         timing_mark("cuda_graph_forward_backward_seconds", replay_started)
 
         gradient_started = time.perf_counter()
-        gradient_norm, gradient_metrics, gradient_norm_scalar = (
-            engine._gradient_lifecycle(
-                collect_diagnostics=False,
-                gradient_spike_handler=gradient_spike_handler,
+        if captured_gradient_norm is None:
+            gradient_norm, gradient_metrics, gradient_norm_scalar = (
+                engine._gradient_lifecycle(
+                    collect_diagnostics=False,
+                    gradient_spike_handler=gradient_spike_handler,
+                )
             )
-        )
+        else:
+            if gradient_spike_handler is not None:
+                raise RuntimeError(
+                    "captured gradient lifecycle cannot run with a spike handler"
+                )
+            gradient_norm = captured_gradient_norm
+            gradient_norm_scalar = float(
+                gradient_norm.detach().float().cpu().item()
+            )
+            if not math.isfinite(gradient_norm_scalar):
+                raise NonFiniteGradientError(
+                    engine._first_nonfinite_gradient_report(
+                        global_norm=gradient_norm
+                    )
+                )
+            gradient_metrics = {}
         timing_mark("gradient_lifecycle_seconds", gradient_started)
         learning_rate = float(
             engine.config.optimizer.learning_rate
             * engine.schedule.ratio(engine.schedule.step_index)
         )
         optimizer_started = time.perf_counter()
-        engine.optimizer.step()
+        self._optimizer_step()
         engine.schedule.step()
         engine.global_step += 1
         timing_mark("optimizer_seconds", optimizer_started)
