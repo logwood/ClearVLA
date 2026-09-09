@@ -154,7 +154,7 @@ Revalidate every row immediately before acting.
 | `codex/schema25-r1-replay` | Its sole branch commit `90557b6` is confirmed patch-equivalent to the integration line, so no code admission remains.  Its remaining WIP is fully classified below: admit none of it to active source or documentation, and preserve only the named external run-provenance bundle before removing the worktree. |
 | `codex/schema28-estimator-gate` | No source or test admission remains.  Whole-commit patch identity differs because `6a43e8e` edited an intermediate repair-plan state, but its `logging.py`, `train.py`, architecture-contract and two test-file patches have the same stable patch IDs as mainline commit `ab80fe3`; the unmatched plan narration is superseded by this living plan.  Preserve the untracked `.audit/schema28_estimator_gate_6a43e8e_gate2` replay record as experiment provenance before archiving/removing the branch and worktree. |
 | `codex/v94-latent-ownership-execution` | Keep while the protected stash depends on it. |
-| `codex/v86-slot-controller` | Extract the small real source/test/launcher WIP from line-ending noise before removal. |
+| `codex/v86-slot-controller` | No admission remains.  The branch tip `82700f3` is a strict integration-line ancestor and its dirty worktree is classified below as line-ending noise plus a superseded, incomplete controller prototype. |
 | `codex/v76-recovered` | Historical ancestor whose exact tip `1e9363b` is already retained by `v76-owned-intent-mmdit-checkpoint`.  It has no worktree, upstream or stash dependency and is deletion-ready after the formal trunk is selected; revalidate those facts immediately before removing the local branch. |
 | `origin/codex/hybrid-v1` | Three unique commits form an optional hybrid Pen experiment and must not be merged wholesale.  The final `cd9489a` exposes a separable deployment-identity gap—the committed validator writes but does not validate `architecture_manifest`—but its patch is hybrid-schema-specific, has no focused negative test, and overlaps the root worktree's active `deployment.py`/`manifest.py` edits.  After that owner closes the WIP, either confirm the gap was superseded or extract a current-schema manifest-validation unit with explicit legacy compatibility tests.  Retain the remote ref until then. |
 | `origin/codex/rdt-data-adaptation` | The local remote-tracking tip `8672c5f` is a strict integration-line ancestor (`44` base-only / `0` ref-only commits), so no code or provenance admission remains.  It is remote-deletion-ready only after a fresh fetch confirms the server ref and a separate remote-write authorization is given. |
@@ -186,6 +186,20 @@ lane.  Its exact WIP disposition is:
   plus `run_context.json` (28,177 bytes, SHA-256
   `8AAACC7F6BCA131A5D48A2EFF9866EC99145A8B87B971C47668AE21044E0CE8A`).
   The raw JSONL and the one-off Schema28 CPU probe do not enter the repository.
+
+The `v86-slot-controller` worktree has 49 tracked paths reported modified, but
+46 are LF/CRLF-only.  Its real delta is one controller prototype, two attached
+logging/test edits and an untracked launcher.  Later commit `b2c1fa8` already
+integrates and extends the useful independent-slot GRU update, selector-only
+reader and output-diversity diagnostics.  It deliberately uses separate
+dispatch/ownership without an equal-load target, rejecting this prototype's
+three-step equal-marginal projection because that made every slot read the same
+mixture.  The launcher only wraps the historical V86 chart and has no separate
+run evidence.  The exact dirty test file produces `50 passed, 1 skipped, 2
+failed`: the hierarchical-MMDiT scope guard and legacy-forward boundary remain
+open.  Treat all four substantive dirty files as superseded/rejected, not as a
+patch donor; retain neither the line-ending churn nor the launcher when the
+worktree is eventually removed.
 
 Before removing any worktree or branch, require: clean/understood status,
 recoverable unique commits, preserved intentional untracked files, no dependent
