@@ -433,10 +433,12 @@ class ObjectiveConfig:
     action_frame_weight_mode: str = "uniform"
     action_frame_event_gain: float = 0.0
     action_frame_motion_gain: float = 0.0
+    # Pen-only training ablation. Never changes the deployed codec operands.
+    gripper_persistence_mode: str = "deployment_cumulative"
 
     def validate(self) -> None:
         for name, value in asdict(self).items():
-            if name == "action_frame_weight_mode":
+            if name in {"action_frame_weight_mode", "gripper_persistence_mode"}:
                 continue
             if not math.isfinite(float(value)) or float(value) < 0.0:
                 raise ValueError(f"objective.{name} must be finite and non-negative")
@@ -466,6 +468,10 @@ class ObjectiveConfig:
             and self.action_frame_motion_gain == 0.0
         ):
             raise ValueError("event_motion_v1 requires a positive event or motion gain")
+        if self.gripper_persistence_mode not in {
+            "deployment_cumulative", "anchored_training"
+        }:
+            raise ValueError("objective.gripper_persistence_mode is invalid")
 
 
 @dataclass(frozen=True)
@@ -573,6 +579,11 @@ class ExperimentConfig:
         if len(self.data.camera_names) != self.dimensions.num_cameras:
             raise ValueError("data camera order must align with model num_cameras")
         profile = resolve_action_state_profile(self.data.data_profile)
+        if (
+            self.objectives.gripper_persistence_mode == "anchored_training"
+            and profile.name != "identity_7d_pen"
+        ):
+            raise ValueError("anchored_training is a Pen-only persistence ablation")
         if profile.output_dim != self.dimensions.action_dim:
             raise ValueError("data profile width must align with dimensions.action_dim")
         if profile.output_dim != self.dimensions.state_dim:

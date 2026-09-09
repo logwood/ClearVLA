@@ -50,3 +50,20 @@ behavior curves. Acceptance must report language anchor RMS/gradients, frame
 weight range and weighted fractions, RDT boundary closure, all horizon bands,
 decoded gripper event P/R/F1, and the exact loss ledger. No early loss or
 internal language/weight activation is a behavior claim.
+
+## Isolated Pen anchored-persistence control (2026-09-09)
+
+The child preset `object_intent_dynamics_323_pen_anchored_v1.json` changes only
+`objectives.gripper_persistence_mode` and the output path relative to Pen
+shared v1. It selects historical event-anchored auxiliary persistence training,
+not target-event-assisted inference. RDT and all default presets retain
+`deployment_cumulative`. The deployed delta branch always starts at the
+profile boundary; no event reset, extra sampler, teacher input or W pass is
+introduced. Fixed-input deployed action must be bit-exact across modes.
+
+Run one fresh Pen B8/BF16/8-epoch experiment with
+`scripts/train_pen_anchored_ablation.sh`. Compare with the full `cd43eee` run,
+not its best checkpoint alone. This experiment tests a training-definition
+difference and is not evidence that the anchored mode should become default.
+Logs/checkpoints belong in the selected `/data/senwang/clearvla/experiments/pen/`
+run directory; source stays in `/home/sen.wang/workspace/robotics/clear/`.

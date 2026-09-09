@@ -1157,13 +1157,21 @@ def action_terms(
     clean_parts = codec.split(clean_physical)
     clean_gripper_absolute = clean_parts.gripper_field[..., :1]
     clean_gripper_local_delta = clean_parts.gripper_field[..., 1:2]
-    # This is the deployed causal branch: one profile-owned boundary and a
-    # full-horizon cumulative delta. Event masks select rows for the auxiliary
-    # trajectory budget; they must not re-anchor or hide a pre-event error.
-    clean_gripper_cumulative = codec_gripper_boundary[:, None] + torch.cumsum(
-        clean_gripper_local_delta,
-        dim=1,
-    )
+    if objective.gripper_persistence_mode == "anchored_training":
+        # Explicit historical-training ablation, not a deployed trajectory.
+        # Only persistence supervision reanchors at target event rows; the
+        # codec, decoded action and all other objectives remain unchanged.
+        clean_gripper_cumulative = anchored_gripper_persistence(
+            clean_gripper_absolute,
+            clean_gripper_local_delta,
+            event_mask,
+        )
+    else:
+        # Default: one profile-owned boundary, exactly as in deployment.
+        clean_gripper_cumulative = codec_gripper_boundary[:, None] + torch.cumsum(
+            clean_gripper_local_delta,
+            dim=1,
+        )
     continuous_gripper_target = target.normalized[..., -1:].float()
     continuous_gripper_target_delta = delta[..., -1:].detach().float()
     transition_mask, persistence_mask = event_transition_persistence_masks(
@@ -1469,6 +1477,9 @@ def action_terms(
         "smooth_delta": smooth_delta,
         "physical_delta_consistency": physical_delta_consistency,
         "gripper_trajectory": gripper_trajectory,
+        "gripper_persistence_mode_code": prediction.new_tensor(
+            float(objective.gripper_persistence_mode == "anchored_training")
+        ),
         "gripper_trajectory_absolute": gripper_trajectory_absolute.detach(),
         "gripper_trajectory_delta": gripper_trajectory_delta.detach(),
         "gripper_trajectory_mask_fraction": event_and_after_mask.detach().mean(),

@@ -7,6 +7,24 @@ Experiment labels never select model semantics. Historical evidence lives in
 `TOP_ARCHITECTURE_ISSUE_LEDGER.md`; only still-open work belongs in
 `CURRENT_MAINLINE_ISSUES.md`.
 
+### Explicit Pen persistence ablation (2026-09-09)
+
+This branch is an isolated fresh-training ablation of shared-core `cd43eee`.
+`objectives.gripper_persistence_mode=deployment_cumulative` remains the default.
+Only the Pen ablation preset selects `anchored_training`: the auxiliary
+persistence loss reconstructs `absolute[last target event] + subsequent deltas`,
+as in the actual `0973f192` training source. This is intentionally NOT the
+deployed trajectory; target events never enter online prediction or decoding.
+Transition loss, frame weights, language anchor, FFN, optimizer, source noise,
+18-D codec, two E5 passes and all deployment behavior remain unchanged.
+Non-Pen use of this opt-in is rejected. It is not a promoted repair or an
+exact-resume source for a different persistence mode. Config/source digests
+distinguish the fresh experiment; no tensor shape or optimizer owner is added.
+Compare matched epochs against `20260908-pen-shared-core`, retaining
+Schema28 recovery as the behavior reference. Judge full/arm/far/gripper RMSE,
+event P/R/F1/counts, and post-event 1-2/3-6/7+ jointly. The previous combined
+run does not isolate frame-weight benefit or persistence-switch harm.
+
 ## Agent quick contract
 
 ```text
