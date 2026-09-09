@@ -11,6 +11,18 @@ checkpoint 身份。
 > [`clearvla/mainline/`](clearvla/mainline/README.md) 是唯一活动实现；旧的
 > `Vxx` 启动器、设计稿与日志只用于复现和归因，不能代表当前模型语义。
 
+## 远端工作区入口
+
+`senwang-server` 上唯一面向人的 ClearVLA 入口是
+`/data/senwang/clearvla`。正式实验从 `experiments/<outlet>/<run-id>/`
+读取，`active/pen` 与 `active/calvin` 只指向各 outlet 当前正式实验；路径名称不
+定义模型版本或 checkpoint 身份。
+
+未来训练直接写入该统一实验空间，代码由固定仓库和按提交隔离的 Git 工作树
+管理，不再为每个版本复制完整 clone。活动进程、旧实验接入方式和完整路径合同
+见
+[`ACTIVE_MAINLINE_HANDOFF.md`](docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md)。
+
 ## 架构一览
 
 ```mermaid
@@ -103,35 +115,15 @@ checkpoint。正式运行至少需要：
 
 ## 运行主线
 
-先执行有限批次 smoke：
+远端新实验统一使用 `workspace launch`，从明确 Git 提交建立工作树，输出直接
+写入统一实验目录。先以独立 run ID 执行 `--smoke`，确认数据身份、forward/backward、
+参数所有权和显存，再授权正式训练；不要在各版本 checkout 下面另建输出迷宫。
+命令和路径只维护在 [运行交接](docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md#commands)。
 
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/clearvla_mainline_smoke \
-bash scripts/smoke_mainline.sh
-```
-
-确认数据身份、forward/backward、参数所有权和显存门槛后，再从全新目录启动
-正式训练：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 \
-OUT_DIR=runs/clearvla_mainline \
-bash scripts/train_mainline.sh
-```
-
-现有 checkpoint 只能先走只读验证入口：
-
-```bash
-CHECKPOINT=/path/to/checkpoint \
-bash scripts/validate_mainline_checkpoint.sh
-```
-
-RDT-8 使用独立的
-[`scripts/smoke_rdt_multitask.sh`](scripts/smoke_rdt_multitask.sh) 和
-[`scripts/train_rdt_multitask.sh`](scripts/train_rdt_multitask.sh)。Schema31
-B-spine-0 的显式配置、运行命令与放行门槛见
-[`clearvla/mainline/README.md`](clearvla/mainline/README.md)。
+已有的 `scripts/train_mainline.sh`、outlet 启动器和
+`scripts/validate_mainline_checkpoint.sh` 保留为底层/历史复现入口，不是服务器
+新实验的第二套目录规则。只读验证仍必须使用 checkpoint 对应的源码与配置；
+不借目录整理迁移或恢复权重，也不从 smoke checkpoint 初始化正式训练。
 
 ## 仓库导航
 

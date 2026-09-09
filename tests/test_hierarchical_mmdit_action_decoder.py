@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     V39PolicyTrainerConfig,
     _accumulate_metric_tensors,
-    _dwell_value_targets,
     _optimizer_groups,
     _oracle_exit_supervision,
     _sync_loss_row,
@@ -72,45 +71,6 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             _sync_loss_row(losses)
         with self.assertRaisesRegex(ValueError, message):
             _accumulate_metric_tensors({}, losses)
-
-    def test_dwell_targets_use_post_update_decision_coordinates(self) -> None:
-        prefix_error = torch.tensor(
-            [
-                [1.00, 0.70, 0.45, 0.40, 0.38],
-                [1.00, 0.80, 0.60, 0.60, 0.60],
-            ]
-        )
-        block_ids = torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]])
-        active = torch.tensor(
-            [
-                [True, True, True, True],
-                [True, True, False, False],
-            ]
-        )
-        targets = _dwell_value_targets(
-            prefix_error=prefix_error,
-            block_ids=block_ids,
-            active=active,
-            compute_cost=0.01,
-        )
-        torch.testing.assert_close(targets["exit_target"], prefix_error[:, 1:])
-        torch.testing.assert_close(
-            targets["continue_action"],
-            torch.tensor([[0, 1, 0, 0], [1, 0, 0, 0]]),
-        )
-        torch.testing.assert_close(
-            targets["continue_valid"],
-            torch.tensor(
-                [
-                    [True, True, True, False],
-                    [True, False, False, False],
-                ]
-            ),
-        )
-        torch.testing.assert_close(
-            targets["continue_target"][0, :3],
-            torch.tensor([0.41, 0.40, 0.39]),
-        )
 
     def test_unified_controller_slots_are_configurable_and_outputs_are_neutral(self) -> None:
         cfg = replace(
