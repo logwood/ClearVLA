@@ -147,7 +147,7 @@ Revalidate every row immediately before acting.
 | `codex/rdt-multitask-prep` | Do not merge wholesale.  Preserve only explicitly selected documentation/provenance, then archive and remove the branch/worktree. |
 | `codex/schema28-core-recovery-pen-20260903` | Retain an immutable provenance tag for the formal recovery run, then remove the redundant branch/worktree. |
 | `codex/schema25-r1-replay` | Its sole branch commit `90557b6` is confirmed patch-equivalent to the integration line, so no code admission remains.  The worktree still owns modified/staged historical documents, two untracked candidate memos and local `.audit` scripts/results; classify those records independently before any removal. |
-| `codex/schema28-estimator-gate` | Estimator code/tests are already patch-equivalent in mainline; preserve decision-relevant documentation only, then archive/remove. |
+| `codex/schema28-estimator-gate` | No source or test admission remains.  Whole-commit patch identity differs because `6a43e8e` edited an intermediate repair-plan state, but its `logging.py`, `train.py`, architecture-contract and two test-file patches have the same stable patch IDs as mainline commit `ab80fe3`; the unmatched plan narration is superseded by this living plan.  Preserve the untracked `.audit/schema28_estimator_gate_6a43e8e_gate2` replay record as experiment provenance before archiving/removing the branch and worktree. |
 | `codex/v94-latent-ownership-execution` | Keep while the protected stash depends on it. |
 | `codex/v86-slot-controller` | Extract the small real source/test/launcher WIP from line-ending noise before removal. |
 | `codex/v76-recovered` | Historical ancestor.  Verify its retained tag/provenance, then remove the branch. |
