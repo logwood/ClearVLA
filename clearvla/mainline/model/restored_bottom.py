@@ -80,6 +80,10 @@ def _build_decoder_config(config: ExperimentConfig):
         gripper_output_mode=bottom.gripper_output_mode,
         arm_flow_mode=bottom.arm_flow_mode,
         physical_decode_delta_blend=bottom.physical_decode_delta_blend,
+        # Keep the active action-DiT's FFN width owned by the mainline
+        # BottomConfig. The extracted V120 path must not silently retain a
+        # separate latent-CVAE default when this setting changes.
+        latent_cvae_ffn_expansion=bottom.ffn_expansion,
         dropout=bottom.dropout,
         latent_cvae_mmdit_depth=bottom.evidence_depth,
         latent_cvae_mmdit_operator_rank=bottom.operator_rank,
