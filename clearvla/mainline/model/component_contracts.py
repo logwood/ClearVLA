@@ -78,6 +78,9 @@ class ComponentSelection:
         if profile == "calvin_relative_7d_v1":
             terminal = "calvin_binary_command_v1"
             outlet = "calvin_7d_binary_v1"
+        elif profile == "libero_relative_7d_v1":
+            terminal = "continuous_physical_v1"
+            outlet = "libero_7d_continuous_v1"
         elif profile == "rdt_right_arm_action_chart_v1":
             terminal = "continuous_physical_v1"
             outlet = "rdt_right_arm_7d_v1"
@@ -135,6 +138,11 @@ class ComponentSelection:
                 execution_bottom=_execution_bottom_selection(config),
                 terminal_controller="calvin_binary_command_v1",
                 outlet_adapter="calvin_7d_binary_v1",
+            )
+        if profile == "libero_relative_7d_v1":
+            return cls(
+                execution_bottom=_execution_bottom_selection(config),
+                outlet_adapter="libero_7d_continuous_v1",
             )
         if profile == "rdt_right_arm_action_chart_v1":
             return cls(

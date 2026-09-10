@@ -8,6 +8,7 @@ import pytest
 
 from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.mainline.config import ExperimentConfig
+from clearvla.mainline.model.component_contracts import ComponentSelection
 from clearvla.mainline.runtime.deployment import (
     build_deployment_abi,
     deployment_config_from_checkpoint,
@@ -69,6 +70,9 @@ def _abi() -> tuple[ExperimentConfig, dict[str, object]]:
 
 def test_libero_direct_relative_command_deployment_abi_round_trip() -> None:
     config, abi = _abi()
+    selection = ComponentSelection.from_config(config)
+    assert selection.outlet_adapter == "libero_7d_continuous_v1"
+    assert selection.terminal_controller == "continuous_physical_v1"
     action = abi["action"]
     assert isinstance(action, dict)
     assert action["arm_flow_mode"] == "relative_command_direct"

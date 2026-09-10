@@ -1292,7 +1292,7 @@ class ExecutionBottomStage(nn.Module):
 
 
 class OutletAdapter(nn.Module):
-    """Selected outlet's physical field codec (Pen/RDT/CALVIN ABI)."""
+    """Selected outlet's physical field codec (Pen/RDT/CALVIN/LIBERO ABI)."""
 
     def __init__(self, codec: PhysicalActionFieldCodec, *, selection: str) -> None:
         super().__init__()
