@@ -61,6 +61,9 @@ class _CandidateHarness:
     _select_scale_rows = staticmethod(
         EvidenceLatentMMDiTActionDecoder._select_scale_rows
     )
+    _predict_candidate_velocity_chart = (
+        EvidenceLatentMMDiTActionDecoder._predict_candidate_velocity_chart
+    )
 
     def __init__(self) -> None:
         self.operation_calls = 0
