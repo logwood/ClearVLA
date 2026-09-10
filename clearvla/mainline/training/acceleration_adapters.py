@@ -38,6 +38,17 @@ _NUMERICS_OPTIONS: tuple[tuple[str, str | int | bool], ...] = (
     ("prologue_fusion", False),
 )
 
+# ``torch.compile(mode="default")`` is allowed to lower random-producing
+# operators into the compiled region.  That can change the number/order of
+# generator advances even when every tensor value is otherwise close.  Keep a
+# deliberately narrow candidate that retains Inductor's ordinary fusion and
+# scheduling choices while forcing random operators through the eager
+# fallback.  It is separate from ``precision`` so the experiment can measure
+# the cost of the RNG contract without also disabling reduction fusion.
+_FAST_RNG_OPTIONS: tuple[tuple[str, str | int | bool], ...] = (
+    ("fallback_random", True),
+)
+
 _AUTOTUNED_NUMERICS_OPTIONS: tuple[tuple[str, str | int | bool], ...] = (
     *_NUMERICS_OPTIONS,
     # Match ``max-autotune-no-cudagraphs`` kernel search without surrendering
@@ -90,6 +101,7 @@ _PROFILE_ALIASES: dict[str, tuple[str, ...]] = {
 }
 _PROFILE_STRATEGIES = {
     "fast",
+    "fast-rng",
     "precision",
     "autotune",
     "partitioned",
@@ -825,7 +837,7 @@ class MainlineTrainingAccelerationAdapter:
         """Build one layout-aware candidate plan from semantic module groups.
 
         The ordinary profile grammar is
-        ``{fast|precision|autotune|partitioned}-`` followed by one
+        ``{fast|fast-rng|precision|autotune|partitioned}-`` followed by one
         or more
         ``+``-joined semantic families.  Stable aliases include ``visual``,
         ``core``, ``combined`` and ``expanded``.  For example,
@@ -872,15 +884,25 @@ class MainlineTrainingAccelerationAdapter:
         closed instead of silently compiling a different numerical contract.
         """
 
-        try:
-            strategy, scope = profile.split("-", 1)
-        except ValueError as error:
-            raise ValueError(f"invalid selective compile profile: {profile!r}") from error
-        if strategy not in _PROFILE_STRATEGIES:
+        # Strategies may themselves contain a hyphen (currently
+        # ``fast-rng``).  Match the longest registered prefix so the profile
+        # grammar remains extensible without changing existing fingerprints.
+        strategy = next(
+            (
+                candidate
+                for candidate in sorted(_PROFILE_STRATEGIES, key=len, reverse=True)
+                if profile.startswith(candidate + "-")
+            ),
+            None,
+        )
+        if strategy is None:
             raise ValueError(
-                f"unknown selective compile strategy {strategy!r}; "
+                f"unknown selective compile strategy in profile {profile!r}; "
                 f"supported={tuple(sorted(_PROFILE_STRATEGIES))!r}"
             )
+        scope = profile[len(strategy) + 1 :]
+        if not scope:
+            raise ValueError(f"invalid selective compile profile: {profile!r}")
         composable_hybrid = scope.startswith("mainline+")
         if strategy == "hybrid" and not (
             scope in _HYBRID_SCOPES or composable_hybrid
@@ -1209,6 +1231,8 @@ class MainlineTrainingAccelerationAdapter:
             selected_families = _resolve_profile_families(scope)
         if strategy == "fast":
             options = ()
+        elif strategy == "fast-rng":
+            options = _FAST_RNG_OPTIONS
         elif strategy == "autotune":
             options = _AUTOTUNED_NUMERICS_OPTIONS
         else:
@@ -1269,6 +1293,22 @@ class MainlineTrainingAccelerationAdapter:
         )
         boundaries = (*generic_boundaries, *explicit_boundaries)
         layout = "modular" if decoder_path.startswith("execution_bottom") else "legacy"
+        if strategy == "hybrid":
+            numerical_policy = (
+                "partition-"
+                + "+".join(partitioned_families)
+                + "-and-force-precision-mainline"
+            )
+        elif strategy == "partitioned":
+            numerical_policy = "partition-known-reductions-and-force-precision"
+        elif strategy == "autotune":
+            numerical_policy = "force-precision-with-autotuned-kernel-schedules"
+        elif strategy == "precision":
+            numerical_policy = "force-precision-with-inductor-reduction-order"
+        elif strategy == "fast-rng":
+            numerical_policy = "unrestricted-inductor-with-fallback-random"
+        else:
+            numerical_policy = "unrestricted-inductor-candidate"
         return TrainingCompilePlan(
             name=f"clearvla-{layout}-{profile}-v1",
             regions=regions,
@@ -1279,27 +1319,7 @@ class MainlineTrainingAccelerationAdapter:
                 if boundaries
                 else "inductor-fallback-random"
             ),
-            numerical_policy=(
-                (
-                    "partition-"
-                    + "+".join(partitioned_families)
-                    + "-and-force-precision-mainline"
-                )
-                if strategy == "hybrid"
-                else (
-                    "partition-known-reductions-and-force-precision"
-                    if strategy == "partitioned"
-                    else (
-                        "force-precision-with-autotuned-kernel-schedules"
-                        if strategy == "autotune"
-                        else (
-                            "force-precision-with-inductor-reduction-order"
-                            if strategy == "precision"
-                            else "unrestricted-inductor-candidate"
-                        )
-                    )
-                )
-            ),
+            numerical_policy=numerical_policy,
             disable_aot_autograd_buffer_donation=(
                 scope in {"core", "core-flow", "mainline-mmdit"}
                 or ("+" in scope and "mmdit" in selected_families)

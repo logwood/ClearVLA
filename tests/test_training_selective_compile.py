@@ -993,6 +993,21 @@ def test_mainline_adapter_autotunes_without_relaxing_precision_options() -> None
     )
 
 
+def test_mainline_adapter_fast_rng_keeps_only_random_fallback_guard() -> None:
+    model = _layout_model(modular=True)
+    engine = SimpleNamespace(model=model)
+
+    plan = MainlineTrainingAccelerationAdapter().compile_plan(
+        engine,
+        "fast-rng-mainline",
+    )
+
+    plan.validate()
+    assert dict(plan.regions[0].options) == {"fallback_random": True}
+    assert plan.regions[0].mode is None
+    assert plan.numerical_policy == "unrestricted-inductor-with-fallback-random"
+
+
 def test_cuda_graph_capture_identity_changes_with_compile_plan_signature() -> None:
     runner = object.__new__(CudaGraphTrainingStepRunner)
     runner.engine = SimpleNamespace()
