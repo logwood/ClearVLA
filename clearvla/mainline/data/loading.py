@@ -13,6 +13,8 @@ from torch.utils.data import DataLoader
 
 from clearvla.data.action_chart import project_episodes, resolve_action_state_profile
 from clearvla.data.hdf5_episode import (
+    LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING,
+    RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING,
     LoadedEpisode,
     load_episodes,
     load_hdf5_instruction,
@@ -301,12 +303,48 @@ def _normalizers(
     action_rows: list[np.ndarray] = []
     state_rows: list[np.ndarray] = []
     for index in train_ids:
-        action = episodes[index].actions_raw
-        state = episodes[index].states_raw
+        episode = episodes[index]
+        action = episode.actions_raw
+        state = episode.states_raw
         if action is None or state is None:
             raise ValueError("mainline normalization requires state and action arrays")
-        action_rows.append(action)
-        state_rows.append(state)
+        if episode.state_normalizer_reference_raw is not None:
+            # Causal alignment deliberately changes model evidence, while the
+            # numeric-only legacy reference preserves the comparison's state
+            # normalizer identity.  It is never exposed to the model.
+            reference = episode.state_normalizer_reference_raw
+            if episode.terminal_state_index is None:
+                action_rows.append(action)
+            elif (
+                episode.terminal_padding_mode
+                == LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING
+                and episode.source_action_count is not None
+            ):
+                action_rows.append(action[: int(episode.source_action_count)])
+            else:
+                raise ValueError(
+                    "a state normalizer reference is valid only for causal LIBERO data"
+                )
+            state_rows.append(reference)
+        elif episode.terminal_state_index is None:
+            action_rows.append(action)
+            state_rows.append(state)
+        elif episode.terminal_padding_mode == LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING:
+            if episode.source_action_count is None:
+                raise ValueError("LIBERO terminal replay is missing source_action_count")
+            source_count = int(episode.source_action_count)
+            if int(episode.terminal_state_index) != source_count:
+                raise ValueError("LIBERO terminal replay source/terminal indices disagree")
+            action_rows.append(action[:source_count])
+            state_rows.append(state[:source_count])
+        elif episode.terminal_padding_mode == RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING:
+            terminal = int(episode.terminal_state_index)
+            action_rows.append(action[:terminal])
+            state_rows.append(state[: terminal + 1])
+        else:
+            raise ValueError(
+                "an episode with terminal_state_index has an unknown padding contract"
+            )
     actions = ArrayNormalizer.fit_zscore(action_rows)
     states = ArrayNormalizer.fit_zscore(state_rows)
     return actions, states
