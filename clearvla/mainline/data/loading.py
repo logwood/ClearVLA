@@ -11,6 +11,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
 
+from clearvla.benchmarks.common import audit_benchmark_dataset
 from clearvla.data.action_chart import project_episodes, resolve_action_state_profile
 from clearvla.data.hdf5_episode import (
     LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING,
@@ -73,6 +74,24 @@ from .language import (
 from .normalizer import ArrayNormalizer
 from .normalizer_artifact import load_shared_normalizers
 from .token_store import DinoV2TokenStore
+
+
+def _audit_causal_libero_training_source(
+    *,
+    data_profile: str,
+    window_boundary_contract: str,
+    raw_root: Path,
+) -> None:
+    """Fail closed on causal LIBERO rows before generic episode filtering."""
+
+    if data_profile != "libero_relative_7d_v1":
+        return
+    if window_boundary_contract not in {
+        CAUSAL_PREFIX_V1,
+        CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    }:
+        return
+    audit_benchmark_dataset(raw_root)
 
 
 def _configure_worker_tensor_sharing(workers: int) -> None:
@@ -472,6 +491,11 @@ def _load_mainline_data(
         # inventory and 63/5/5 membership are not changed by the RDT adapter.
         min_length = 48 + 8 + 2
     raw_root = Path(data.raw_hdf5_root)
+    _audit_causal_libero_training_source(
+        data_profile=profile.name,
+        window_boundary_contract=data.window_boundary_contract,
+        raw_root=raw_root,
+    )
     episode_inventory = None
     if data.split_mode == "episode-manifest":
         _manifest_path, _manifest_payload, episode_inventory = (

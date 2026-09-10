@@ -5,6 +5,7 @@ from dataclasses import replace
 from typing import cast
 
 import numpy as np
+import pytest
 import torch
 
 from clearvla.data.samplers import (
@@ -28,7 +29,9 @@ from clearvla.mainline.data.language import load_t5_condition, load_t5_condition
 from clearvla.mainline.data.loading import (
     GoalTemplate,
     MainlineDataBundle,
+    _audit_causal_libero_training_source,
     _configure_worker_tensor_sharing,
+    load_mainline_data,
     to_training_batch,
 )
 from clearvla.mainline.data.normalizer import ArrayNormalizer
@@ -306,6 +309,48 @@ def test_causal_libero_loader_owns_boundary_quotas_and_bounded_panels() -> None:
     )
     assert isinstance(panel.batch_sampler, EvenlySpacedPanelBatchSampler)
     assert panel.batch_sampler.summary["selected_rows"] == 8
+
+
+def test_causal_libero_source_audit_is_scoped_to_its_formal_loader_entry(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AuditReached(RuntimeError):
+        pass
+
+    def audit_source(root) -> None:
+        assert root == tmp_path
+        raise AuditReached("causal source audit ran")
+
+    monkeypatch.setattr(
+        "clearvla.mainline.data.loading.audit_benchmark_dataset",
+        audit_source,
+    )
+    base = ExperimentConfig()
+    causal = replace(
+        base,
+        data=replace(
+            base.data,
+            raw_hdf5_root=str(tmp_path),
+            data_profile="libero_relative_7d_v1",
+            window_boundary_contract=CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+        ),
+        bottom=replace(base.bottom, arm_flow_mode="relative_command_direct"),
+    )
+    with pytest.raises(AuditReached, match="causal source audit ran"):
+        load_mainline_data(causal)
+
+    for profile in ("identity_7d_pen", "rdt_right_arm_action_chart_v1"):
+        _audit_causal_libero_training_source(
+            data_profile=profile,
+            window_boundary_contract=CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+            raw_root=tmp_path,
+        )
+    _audit_causal_libero_training_source(
+        data_profile="libero_relative_7d_v1",
+        window_boundary_contract="strict_complete_v1",
+        raw_root=tmp_path,
+    )
 
 
 def test_validation_loader_does_not_keep_prefetch_workers_alive() -> None:
