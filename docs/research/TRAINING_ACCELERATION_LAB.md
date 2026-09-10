@@ -1,6 +1,6 @@
 # Training acceleration lab
 
-Updated: 2026-09-10
+Updated: 2026-09-11
 
 This ledger records controlled training-throughput experiments on branch
 `codex/training-acceleration`.  It is deliberately separate from the current
@@ -700,21 +700,24 @@ bqgcijmku,bcijmkv->bqguv
 ```
 
 Allowing Inductor to see this einsum can reassociate the BF16 reduction even
-when the real-number formula is unchanged.  The opt-in implementation in
-`clearvla/mainline/training/factual_contraction.py` therefore exposes one
-opaque `torch.library.custom_op` and an explicit first-order backward.  It
-uses the exact eager einsum matrix layout, including the `c,i,j,k,m` flattened
-reduction order, and uses the same BF16 GEMM order for both VJPs.  Fake/meta
-implementations preserve the real output shapes, dtypes and strides.
+when the real-number formula is unchanged.  The first implementation
+(`factual-atomic-v1`) therefore kept the complete contraction and its explicit
+first-order backward behind one opaque `torch.library.custom_op`.  That form
+is retained as `opaque_atomic_factual_rgb_detail_contraction` for old compiler
+versions and as the fallback control.
 
-The forward custom op returns its private left/right matrices so autograd can
-save the actual forward operands, while the public wrapper exposes only the
-factual output.  Installation replaces only the model instance's
-`_configured_typed_microgrid_rgb_detail_contraction` callable.  Disabling it
-restores the previous class/instance lookup; construction without the opt-in
-does not import the custom-op module.  The hook adds no module, parameter,
-buffer or serialized state.  The compile family is named `factual-atomic` and
-is intentionally unavailable until the hook has been installed.
+The preferred `factual-atomic-v2` implementation exposes only the two layout
+copies and uses an exact-order ATen `bmm`.  The reduction axis is still
+flattened in the eager `c,i,j,k,m` order, so the surrounding Inductor graph can
+see/fuse layout work without receiving an einsum that it may reassociate.  Its
+ordinary autograd VJPs are the same two BF16 GEMMs as the opaque control.  The
+implementation adds no module, parameter, buffer, checkpoint key, loss term,
+RNG draw or tensor shape; installation still replaces only the model
+instance's `_configured_typed_microgrid_rgb_detail_contraction` callable and
+disabling it restores the prior lookup.  Fake/meta implementations preserve
+the real output shapes, dtypes and strides.  The adapter records
+`+exact-k-before-m-aten-bmm` in its numerical policy and fails closed unless
+the instance hook was installed before compilation/capture.
 
 The current modular reader and legacy reader expose the same narrow method
 boundary.  The Pen `a4a170e` snapshot predated that boundary, so its lab copy
@@ -731,7 +734,8 @@ Focused verification before the model gates included:
 
 * `torch.library.opcheck`: schema, autograd registration, FakeTensor and AOT
   dynamic-shape checks all passed;
-* local factual/compile-plan tests: `61 passed`;
+* local factual/compile-plan tests: `61 passed` before v2 and `87 passed,
+  1 skipped` after the v2/fallback coverage;
 * local acceleration-contract/prefetch tests: `23 passed`;
 * remote CUDA BF16/Inductor factual tests: `5 passed`;
 * compiled atomic forward and VJP matched eager einsum bit-for-bit in the
@@ -824,6 +828,47 @@ for the fixed B8 shape rather than paying the cold cost on every launch.
 The ABCBA files use the prefix
 `runs/profile_atomic_vs_mixed_abcba60_*_b8_g2_atomic1_20260910`; the warm
 repeat is `runs/profile_atomic_warm_repeat60_b8_g2_warm1_20260910.json`.
+
+The v2 layout probe also compared the preferred BMM against the opaque control
+on the production factual shapes.  It was bitwise equal for output and all
+tested route/fine/value-weight/RGB-detail VJPs.  On the matched B8/BF16
+micro-profile the compiled full contraction moved from a median `3.224 ms` to
+`3.008 ms` (`1.072x`), while the full B8 training comparison moved from
+`9.39433` to `9.50996 samples/s` (`+1.23%`) and reduced allocated peak memory
+by about `1.10 GiB`.  These are incremental gains on top of the accepted
+mixed-safe graph, not a new model behavior.  Reproduce the isolated probe with
+`scripts/probe_factual_atomic_layout.py`; its laboratory-only candidate
+wrapper is `scripts/profile_factual_atomic_layout_candidate.py`.
+
+### Batched raw-flow offset sampling candidate (local screening only)
+
+The existing version-owned raw-flow hook can group the 25/9 local offset
+`grid_sample` calls in each refiner into one batched launch.  The caller keeps
+the historical offset order, validity masks and per-offset reductions; only
+the launch organization changes.  This is deliberately separate from
+`factual-atomic` because repeated views of one feature tensor change CUDA
+backward accumulation order at the last bits.
+
+The standalone probe
+`scripts/probe_batched_raw_flow_sampling.py` measured the following on the
+local RTX 4060 Laptop (PyTorch `2.11.0+cu126`, radius 2, B4, 32 channels,
+32×32 feature map, activation checkpointing enabled):
+
+```text
+outputs: bitwise equal
+median refiner step: 89.89 ms -> 52.30 ms (1.719x)
+parameter-VJP worst absolute delta: 2.06e-6 (relative-L2 5.17e-6)
+```
+
+The full small-model CUDA-Graph screen with `64 cases × B2` retained exact
+loss/result/RNG surfaces, zero result/gradient/optimizer/buffer outliers, and
+a maximum parameter delta of `9.13e-7` under the existing
+`atol=1e-6, rtol=2e-5` gate.  This is encouraging but not a promotion: the
+remote Pen/RDT snapshots used for the formal compatibility gate predate the
+`_batched_samples` interface, so their fail-closed probe correctly stopped
+before running (`batched raw-flow sampling ... no refiner was found`).  A
+version-local backport plus fresh Pen and RDT 256-case gates is required before
+claiming a production speedup.  No default profile enables this candidate.
 
 ### Fast-RNG plus global cuDNN 10-FPS candidate (2026-09-10)
 

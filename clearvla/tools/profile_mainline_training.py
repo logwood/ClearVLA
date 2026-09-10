@@ -253,7 +253,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Replace only the normalized factual RGB/detail einsum with its "
-            "opaque exact-order training operator (experimental)."
+            "exact K-before-M BMM training operator (experimental)."
         ),
     )
     parser.add_argument(

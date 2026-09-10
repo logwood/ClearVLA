@@ -871,9 +871,11 @@ class MainlineTrainingAccelerationAdapter:
         value-contraction boundary when that version exposes it and otherwise
         falls back to the complete micro-grid expectation boundary.
         ``factual-atomic`` compiles the same complete factual shell after an
-        adapter-installed opaque value contraction has fixed the eager einsum's
-        BF16 matrix and backward order.  It fails closed unless that opt-in
-        hook is already installed on the model instance.
+        adapter-installed exact K-before-M BMM has fixed the eager einsum's
+        BF16 matrix and backward order.  Its layout copies remain visible to
+        the surrounding compiler, but the contraction stays an ATen BMM rather
+        than a reassociable einsum.  It fails closed unless that opt-in hook is
+        already installed on the model instance.
         The ``mainline-*`` subfamilies expose the existing mainline targets as
         portable diagnostic/selection units.  Their ordered union is exactly
         ``mainline``; selecting them never changes the established mainline
@@ -1309,8 +1311,12 @@ class MainlineTrainingAccelerationAdapter:
             numerical_policy = "unrestricted-inductor-with-fallback-random"
         else:
             numerical_policy = "unrestricted-inductor-candidate"
+        plan_revision = "v1"
+        if "factual-atomic" in selected_families:
+            numerical_policy += "+exact-k-before-m-aten-bmm"
+            plan_revision = "v2"
         return TrainingCompilePlan(
-            name=f"clearvla-{layout}-{profile}-v1",
+            name=f"clearvla-{layout}-{profile}-{plan_revision}",
             regions=regions,
             eager_boundaries=boundaries,
             acceptance="candidate",

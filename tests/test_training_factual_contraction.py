@@ -13,6 +13,7 @@ from clearvla.mainline.training.factual_contraction import (
     _factual_rgb_detail_backward_op,
     _factual_rgb_detail_forward_op,
     atomic_factual_rgb_detail_contraction,
+    opaque_atomic_factual_rgb_detail_contraction,
 )
 
 
@@ -71,6 +72,40 @@ def test_atomic_factual_contraction_matches_einsum_output_and_vjp_exactly(
     probe = torch.randn(
         expected.shape,
         generator=torch.Generator().manual_seed(407),
+        dtype=expected.dtype,
+    )
+    expected_gradients = torch.autograd.grad((expected * probe).sum(), expected_inputs)
+    actual_gradients = torch.autograd.grad((actual * probe).sum(), actual_inputs)
+
+    assert torch.equal(actual, expected)
+    assert all(
+        torch.equal(actual_gradient, expected_gradient)
+        for actual_gradient, expected_gradient in zip(
+            actual_gradients,
+            expected_gradients,
+            strict=True,
+        )
+    )
+
+
+@pytest.mark.parametrize("dtype", (torch.float32, torch.bfloat16))
+def test_opaque_atomic_fallback_matches_preferred_contraction_exactly(
+    dtype: torch.dtype,
+) -> None:
+    value_weight, rgb_detail = _inputs(dtype)
+    expected_inputs = tuple(
+        value.detach().clone().requires_grad_(True)
+        for value in (value_weight, rgb_detail)
+    )
+    actual_inputs = tuple(
+        value.detach().clone().requires_grad_(True)
+        for value in (value_weight, rgb_detail)
+    )
+    expected = atomic_factual_rgb_detail_contraction(*expected_inputs)
+    actual = opaque_atomic_factual_rgb_detail_contraction(*actual_inputs)
+    probe = torch.randn(
+        expected.shape,
+        generator=torch.Generator().manual_seed(408),
         dtype=expected.dtype,
     )
     expected_gradients = torch.autograd.grad((expected * probe).sum(), expected_inputs)

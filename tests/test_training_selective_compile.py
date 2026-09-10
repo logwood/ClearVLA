@@ -834,6 +834,8 @@ def test_atomic_factual_family_requires_adapter_opt_in() -> None:
     )
     assert atomic_region.module_paths == ("p1.factual_reader",)
     assert atomic_region.method_name == "forward"
+    assert plan.name.endswith("factual-atomic-v2")
+    assert plan.numerical_policy.endswith("+exact-k-before-m-aten-bmm")
     assert not any(
         boundary.module_path == "p1.factual_reader"
         for boundary in plan.eager_boundaries

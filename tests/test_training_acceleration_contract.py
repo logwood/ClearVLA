@@ -320,6 +320,47 @@ def test_mainline_adapter_context_reuse_is_one_optional_version_hook() -> None:
     assert decoder._reuse_terminal_candidate_velocity is True
 
 
+def test_mainline_adapter_toggles_batched_raw_flow_without_state_abi_change() -> None:
+    torch.manual_seed(198)
+    mid = _DenseRawFlowRefiner(
+        8,
+        8,
+        radius=1,
+        uncertainty_floor=0.05,
+        activation_checkpoint=False,
+        preserve_uncertain_seed=True,
+        bounded_coordinates=True,
+        normalization_floor=0.10,
+    )
+    high = copy.deepcopy(mid)
+    raw_flow = SimpleNamespace(mid=mid, high=high)
+    model = SimpleNamespace(
+        observation=SimpleNamespace(
+            compiler=SimpleNamespace(
+                encoder=SimpleNamespace(raw_flow=raw_flow)
+            )
+        )
+    )
+    engine = SimpleNamespace(model=model)
+    adapter = MainlineTrainingAccelerationAdapter()
+    before_state = {
+        name: tuple(value.shape)
+        for name, value in mid.state_dict().items()
+    }
+
+    assert adapter.set_batched_raw_flow_sampling(engine, enabled=True) == 2
+    assert mid._batched_offset_sampling is True
+    assert high._batched_offset_sampling is True
+    assert {
+        name: tuple(value.shape)
+        for name, value in mid.state_dict().items()
+    } == before_state
+
+    assert adapter.set_batched_raw_flow_sampling(engine, enabled=False) == 2
+    assert mid._batched_offset_sampling is False
+    assert high._batched_offset_sampling is False
+
+
 def test_mainline_adapter_scopes_cudnn_benchmark_without_state_abi_change() -> None:
     probes = {
         name: _CudnnFlagProbe()

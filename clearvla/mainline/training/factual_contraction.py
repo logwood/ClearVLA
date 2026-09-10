@@ -1,10 +1,13 @@
-"""Exact-order opaque contraction for the opt-in factual training path.
+"""Exact-order contractions for the opt-in factual training path.
 
 The factual reader's normalized RGB/detail reduction is numerically sensitive:
 letting Inductor see the complete einsum can reassociate its BF16 reduction.
-This module exposes the same two-operand einsum as an opaque custom operator.
-The operator materializes the exact matrix order used by PyTorch's eager
-einsum and owns an explicit first-order backward with the same BF16 GEMMs.
+This module fixes that order in two forms.  The original opaque implementation
+keeps matrix construction and explicit first-order backward inside custom
+operators.  The preferred implementation exposes only the layout transforms
+and an exact-order ATen BMM to the surrounding compiled factual shell.  That
+lets Inductor fuse copies with their producers without seeing an einsum that
+it could reassociate.
 
 Nothing imports or installs this path during ordinary model construction.  A
 version-owned training acceleration adapter must opt one model instance in.
@@ -79,6 +82,38 @@ def _forward_matrices(
     right = (
         rgb_detail.permute(0, 1, 2, 3, 5, 4, 6)
         .clone(memory_format=torch.contiguous_format)
+        .view(batch, states, values)
+    )
+    return left, right
+
+
+def _compiler_visible_forward_matrices(
+    value_weight: Tensor,
+    rgb_detail: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Build the same matrices while leaving their copies compiler-visible."""
+
+    (
+        batch,
+        query,
+        glimpse,
+        cameras,
+        grid_y,
+        grid_x,
+        slots,
+        candidates,
+        micro,
+    ) = value_weight.shape
+    values = rgb_detail.shape[-1]
+    states = cameras * grid_y * grid_x * candidates * slots
+    left = (
+        value_weight.permute(0, 1, 2, 8, 3, 4, 5, 7, 6)
+        .contiguous()
+        .view(batch, query * glimpse * micro, states)
+    )
+    right = (
+        rgb_detail.permute(0, 1, 2, 3, 5, 4, 6)
+        .contiguous()
         .view(batch, states, values)
     )
     return left, right
@@ -285,11 +320,11 @@ _factual_rgb_detail_forward_op.register_autograd(
 )
 
 
-def atomic_factual_rgb_detail_contraction(
+def opaque_atomic_factual_rgb_detail_contraction(
     value_weight: Tensor,
     rgb_detail: Tensor,
 ) -> Tensor:
-    """Run the eager-equivalent contraction behind one compiler-visible op."""
+    """Run the eager-equivalent contraction behind one opaque logical op."""
 
     output, _left, _right = _factual_rgb_detail_forward_op(
         value_weight,
@@ -298,4 +333,35 @@ def atomic_factual_rgb_detail_contraction(
     return output
 
 
-__all__ = ["atomic_factual_rgb_detail_contraction"]
+def atomic_factual_rgb_detail_contraction(
+    value_weight: Tensor,
+    rgb_detail: Tensor,
+) -> Tensor:
+    """Run exact-order BMM with compiler-visible layout transformations.
+
+    The explicit K-before-M flattening is identical to eager ``einsum``.  BMM
+    remains the reduction primitive, so Inductor can fuse only the surrounding
+    layout/cast work rather than rewriting the sensitive BF16 contraction.
+    """
+
+    _validate_inputs(value_weight, rgb_detail)
+    batch, query, glimpse = value_weight.shape[:3]
+    micro = value_weight.shape[-1]
+    values = rgb_detail.shape[-1]
+    left, right = _compiler_visible_forward_matrices(
+        value_weight,
+        rgb_detail,
+    )
+    return torch.bmm(left, right).reshape(
+        batch,
+        query,
+        glimpse,
+        micro,
+        values,
+    ).float()
+
+
+__all__ = [
+    "atomic_factual_rgb_detail_contraction",
+    "opaque_atomic_factual_rgb_detail_contraction",
+]
