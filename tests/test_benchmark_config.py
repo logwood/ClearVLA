@@ -68,3 +68,54 @@ def test_benchmark_config_refuses_missing_split_manifest(tmp_path: Path) -> None
             run_root=tmp_path / "run",
         )
 
+
+def test_benchmark_config_binds_libero_direct_relative_command_contract(
+    tmp_path: Path,
+) -> None:
+    converted = _converted_root(tmp_path / "converted")
+    (converted / "dataset_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "clearvla-external-benchmark-dataset-v1",
+                "converter_schema": "clearvla-libero-converter-v1",
+                "benchmark": "LIBERO",
+                "data_profile": "libero_relative_7d_v1",
+                "arm_flow_mode": "relative_command_direct",
+                "gripper_output_mode": "continuous",
+                "controller": "OSC_POSE",
+                "cameras": ["agentview_rgb", "eye_in_hand_rgb"],
+                "split_unit": "episode",
+                "valid_center_start": 24,
+                "valid_center_end": "length - 49",
+                "evaluator_language_verified": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = build_benchmark_config(
+        ROOT / "configs" / "mainline" / "object_intent_dynamics_323.json",
+        tmp_path / "libero.json",
+        hdf5_root=converted,
+        cache_root=tmp_path / "cache",
+        language_bank=tmp_path / "language.pt",
+        run_root=tmp_path / "run",
+        gripper_event_threshold=0.1,
+    )
+    config = config_from_mapping(payload)
+    assert config.data.data_profile == "libero_relative_7d_v1"
+    assert config.bottom.arm_flow_mode == "relative_command_direct"
+    assert config.bottom.gripper_output_mode == "continuous"
+
+    stale = json.loads((converted / "dataset_manifest.json").read_text())
+    stale["arm_flow_mode"] = "legacy_independent"
+    (converted / "dataset_manifest.json").write_text(json.dumps(stale), encoding="utf-8")
+    with pytest.raises(ValueError, match="arm_flow_mode"):
+        build_benchmark_config(
+            ROOT / "configs" / "mainline" / "object_intent_dynamics_323.json",
+            tmp_path / "stale.json",
+            hdf5_root=converted,
+            cache_root=tmp_path / "stale-cache",
+            language_bank=tmp_path / "stale-language.pt",
+            run_root=tmp_path / "stale-run",
+            gripper_event_threshold=0.1,
+        )

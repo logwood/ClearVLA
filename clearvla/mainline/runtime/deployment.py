@@ -13,6 +13,7 @@ import json
 from dataclasses import asdict
 from typing import Mapping, cast
 
+from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.vision.preprocessing import (
     PreprocessConfig,
     preprocessing_identity,
@@ -25,6 +26,17 @@ from ..data.normalizer import ArrayNormalizer
 DEPLOYMENT_ABI_SCHEMA = "clearvla-mainline-deployment-abi-v1"
 CONTINUOUS_GRIPPER_CODEC_BOUNDARY_SCOPE = (
     "profile_owned_full_horizon_encode_decode_loss_evaluation"
+)
+
+_LIBERO_PROFILE_NAME = "libero_relative_7d_v1"
+_LIBERO_ACTION_NAMES = (
+    "dx",
+    "dy",
+    "dz",
+    "droll",
+    "dpitch",
+    "dyaw",
+    "gripper",
 )
 
 _GRAPH_SECTIONS = (
@@ -52,6 +64,77 @@ def deployment_graph_config(config: ExperimentConfig) -> dict[str, object]:
     return {name: payload[name] for name in _GRAPH_SECTIONS}
 
 
+def _strict_int(value: object, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"deployment ABI {name} must be an integer")
+    return int(value)
+
+
+def _sequence(value: object, *, name: str) -> tuple[object, ...]:
+    if not isinstance(value, (tuple, list)):
+        raise ValueError(f"deployment ABI {name} must be a sequence")
+    return tuple(value)
+
+
+def _indices(value: object, *, name: str) -> tuple[int, ...]:
+    return tuple(
+        _strict_int(item, name=f"{name}[{index}]")
+        for index, item in enumerate(_sequence(value, name=name))
+    )
+
+
+def _validate_libero_profile(
+    profile: Mapping[str, object],
+    *,
+    gripper_indices: object,
+) -> None:
+    """Reject a relabelled or projected chart at the deployment boundary."""
+
+    registered = resolve_action_state_profile(_LIBERO_PROFILE_NAME)
+    if profile.get("name") != _LIBERO_PROFILE_NAME:
+        raise ValueError("deployment LIBERO profile identity differs")
+    if profile.get("sha256") != registered.digest():
+        raise ValueError("deployment LIBERO profile digest differs")
+    for field, expected in (
+        ("source_action_dim", 7),
+        ("source_state_dim", 7),
+        ("action_chart", "libero_normalized_osc_pose_6d_plus_continuous_gripper"),
+        ("state_chart", "libero_eef_6d_plus_gripper_opening_width"),
+        ("gripper_transition_boundary", "previous_command"),
+    ):
+        actual = (
+            _strict_int(profile.get(field), name=f"action.data_profile.{field}")
+            if field in {"source_action_dim", "source_state_dim"}
+            else profile.get(field)
+        )
+        if actual != expected:
+            raise ValueError(
+                f"deployment LIBERO profile {field}={actual!r} differs from {expected!r}"
+            )
+    for field in ("action_indices", "state_indices"):
+        if _indices(profile.get(field), name=f"action.data_profile.{field}") != tuple(
+            range(7)
+        ):
+            raise ValueError(f"deployment LIBERO profile {field} must cover [0..6]")
+    if _indices(
+        profile.get("gripper_indices"),
+        name="action.data_profile.gripper_indices",
+    ) != (6,) or _indices(gripper_indices, name="action.gripper_indices") != (6,):
+        raise ValueError("deployment LIBERO gripper indices must be [6]")
+    try:
+        scales = tuple(
+            float(item)
+            for item in _sequence(
+                profile.get("state_to_action_scale"),
+                name="action.data_profile.state_to_action_scale",
+            )
+        )
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("deployment LIBERO state-to-action scale is not numeric") from error
+    if scales != (1.0,) * 7:
+        raise ValueError("deployment LIBERO state-to-action scale must be all ones")
+
+
 def build_deployment_abi(
     config: ExperimentConfig,
     identity: CheckpointIdentity,
@@ -66,7 +149,16 @@ def build_deployment_abi(
 
     config.validate()
     identity.validate()
-    gripper_codec_boundary = str(data_profile.get("gripper_transition_boundary", ""))
+    profile = {str(key): value for key, value in data_profile.items()}
+    profile_name = str(profile.get("name", ""))
+    if profile_name != config.data.data_profile:
+        raise ValueError(
+            "deployment data profile differs from config: "
+            f"{profile_name!r} != {config.data.data_profile!r}"
+        )
+    if profile_name == _LIBERO_PROFILE_NAME:
+        _validate_libero_profile(profile, gripper_indices=gripper_indices)
+    gripper_codec_boundary = str(profile.get("gripper_transition_boundary", ""))
     if gripper_codec_boundary not in {
         "current_action_state",
         "previous_command",
@@ -77,6 +169,26 @@ def build_deployment_abi(
         resize_hw=(int(config.data.cache_side), int(config.data.cache_side)),
         crop_hw=None,
     )
+    action_contract: dict[str, object] = {
+        "data_profile": profile,
+        "gripper_indices": [int(value) for value in gripper_indices],
+        "gripper_output_mode": str(config.bottom.gripper_output_mode),
+        "arm_flow_mode": str(config.bottom.arm_flow_mode),
+        "continuous_gripper_codec_boundary": gripper_codec_boundary,
+        "continuous_gripper_codec_boundary_scope": (
+            CONTINUOUS_GRIPPER_CODEC_BOUNDARY_SCOPE
+        ),
+        "receding_horizon_execute_rows": 1,
+        "prediction_horizon": int(config.dimensions.action_horizon),
+    }
+    if profile_name == _LIBERO_PROFILE_NAME:
+        action_contract.update(
+            {
+                "names": list(_LIBERO_ACTION_NAMES),
+                "normalized_low": [-1.0] * 7,
+                "normalized_high": [1.0] * 7,
+            }
+        )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
         "source_config_digest": identity.config_digest,
@@ -99,18 +211,7 @@ def build_deployment_abi(
             "state_dim": int(config.dimensions.state_dim),
             "action_dim": int(config.dimensions.action_dim),
         },
-        "action": {
-            "data_profile": dict(data_profile),
-            "gripper_indices": [int(value) for value in gripper_indices],
-            "gripper_output_mode": str(config.bottom.gripper_output_mode),
-            "arm_flow_mode": str(config.bottom.arm_flow_mode),
-            "continuous_gripper_codec_boundary": gripper_codec_boundary,
-            "continuous_gripper_codec_boundary_scope": (
-                CONTINUOUS_GRIPPER_CODEC_BOUNDARY_SCOPE
-            ),
-            "receding_horizon_execute_rows": 1,
-            "prediction_horizon": int(config.dimensions.action_horizon),
-        },
+        "action": action_contract,
         "normalizers": {
             "action_sha256": canonical_sha256(action_normalizer.to_dict()),
             "state_sha256": canonical_sha256(state_normalizer.to_dict()),
@@ -213,8 +314,54 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     if profile.get("name") == "calvin_relative_7d_v1":
         if arm_mode != "relative_command_direct":
             raise ValueError("CALVIN deployment requires direct relative-command arms")
+    elif profile.get("name") == _LIBERO_PROFILE_NAME:
+        _validate_libero_profile(
+            profile,
+            gripper_indices=action.get("gripper_indices"),
+        )
+        if arm_mode != "relative_command_direct":
+            raise ValueError("LIBERO deployment requires direct relative-command arms")
+        if output_mode != "continuous":
+            raise ValueError("LIBERO deployment requires continuous gripper output")
+        if profile_gripper_boundary != "previous_command":
+            raise ValueError("LIBERO deployment requires a previous-command boundary")
+        dimensions = _mapping(graph.get("dimensions"), name="graph_config.dimensions")
+        for field, expected in (
+            ("action_dim", 7),
+            ("state_dim", 7),
+            ("action_horizon", 24),
+        ):
+            if _strict_int(
+                dimensions.get(field),
+                name=f"graph_config.dimensions.{field}",
+            ) != expected:
+                raise ValueError(f"LIBERO deployment {field} must be {expected}")
+        for field, expected in (("state_dim", 7), ("action_dim", 7)):
+            if _strict_int(
+                observation.get(field),
+                name=f"observation.{field}",
+            ) != expected:
+                raise ValueError(f"LIBERO deployment observation {field} must be {expected}")
+        if _strict_int(
+            action.get("prediction_horizon"),
+            name="action.prediction_horizon",
+        ) != 24:
+            raise ValueError("LIBERO deployment prediction horizon must be 24")
+        if _sequence(action.get("names"), name="action.names") != _LIBERO_ACTION_NAMES:
+            raise ValueError("LIBERO deployment action names/order is stale")
+        for field in ("normalized_low", "normalized_high"):
+            try:
+                values = tuple(
+                    float(item)
+                    for item in _sequence(action.get(field), name=f"action.{field}")
+                )
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ValueError(f"LIBERO deployment {field} is not numeric") from error
+            expected = (-1.0,) * 7 if field == "normalized_low" else (1.0,) * 7
+            if values != expected:
+                raise ValueError(f"LIBERO deployment {field} differs from [-1,1]")
     elif arm_mode != "legacy_independent":
-        raise ValueError("direct relative-command arms are CALVIN-only")
+        raise ValueError("direct relative-command arms are CALVIN/LIBERO-only")
     if normalizers.get("mode") != "zscore":
         raise ValueError("deployment normalizers must use zscore")
     for owner, digest in (

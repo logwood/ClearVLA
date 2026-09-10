@@ -686,6 +686,22 @@ class ExperimentConfig:
                     "CALVIN relative-command profile requires bottom.arm_flow_mode="
                     "relative_command_direct"
                 )
+        elif profile.name == "libero_relative_7d_v1":
+            if mode != "continuous":
+                raise ValueError(
+                    "LIBERO profile requires bottom.gripper_output_mode=continuous"
+                )
+            if profile_grippers != (6,):
+                raise ValueError("LIBERO continuous gripper must own native action dimension 7")
+            if float(self.objectives.gripper_command) != 0.0:
+                raise ValueError(
+                    "LIBERO continuous gripper requires objective.gripper_command=0"
+                )
+            if arm_mode != "relative_command_direct":
+                raise ValueError(
+                    "LIBERO relative-command profile requires bottom.arm_flow_mode="
+                    "relative_command_direct"
+                )
         else:
             if mode != "continuous":
                 raise ValueError(
@@ -697,7 +713,8 @@ class ExperimentConfig:
                 )
             if arm_mode != "legacy_independent":
                 raise ValueError(
-                    "relative_command_direct is valid only for the CALVIN action profile"
+                    "relative_command_direct is valid only for CALVIN or LIBERO "
+                    "action profiles"
                 )
 
     def as_dict(self) -> dict[str, object]:

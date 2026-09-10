@@ -260,7 +260,12 @@ def build_benchmark_config(
                     "LIBERO config window boundary differs from the converted-root "
                     f"contract {manifest_window_contract!r}"
                 )
-            data["window_boundary_contract"] = manifest_window_contract
+            # The original audited converter already matches the current
+            # loader's strict in-episode window rule and needs no new config
+            # field.  Prefix/terminal roots remain gated on the separate
+            # opt-in window-boundary integration unit.
+            if converter_schema != LIBERO_CONVERTER_SCHEMA:
+                data["window_boundary_contract"] = manifest_window_contract
     elif window_boundary_contract is not None:
         data["window_boundary_contract"] = str(window_boundary_contract)
     # A fully materialized benchmark conversion carries a task inventory.  In
@@ -338,4 +343,3 @@ if __name__ == "__main__":
 
 
 __all__ = ["build_benchmark_config"]
-
