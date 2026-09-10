@@ -7,6 +7,14 @@ from typing import Iterator, Sequence
 import numpy as np
 from torch.utils.data import Sampler
 
+from clearvla.data.window_boundaries import (
+    CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    CAUSAL_PREFIX_V1,
+    PREFIX_REGION,
+    STRICT_REGION,
+    TAIL_REGION,
+)
+
 
 @dataclass(frozen=True)
 class EventBalancedSamplerConfig:
@@ -246,6 +254,176 @@ class InformationBalancedBatchSampler(Sampler[list[int]]):
                 self.all_indices,
             )
             batch.extend(motion_rows)
+            rng.shuffle(batch)
+            yield batch
+
+
+class BoundaryAwareInformationBatchSampler(Sampler[list[int]]):
+    """Reserve exact prefix/tail slots around an information-balanced strict lane.
+
+    The epoch length is anchored to the historical strict-window count divided
+    by the full batch size. Adding boundary supervision therefore changes
+    neither optimizer steps per epoch nor schedule duration.
+    """
+
+    def __init__(
+        self,
+        motion_score: np.ndarray,
+        is_event: np.ndarray,
+        boundary_region: Sequence[str],
+        *,
+        contract: str,
+        config: InformationBalancedSamplerConfig,
+    ) -> None:
+        config.validate()
+        score = np.asarray(motion_score, dtype=np.float64)
+        events = np.asarray(is_event, dtype=bool)
+        regions = np.asarray(
+            tuple(str(value) for value in boundary_region), dtype=object
+        )
+        if score.ndim != 1 or not len(score) or events.shape != score.shape:
+            raise ValueError("boundary sampler motion/event vectors must align")
+        if regions.shape != score.shape:
+            raise ValueError("boundary sampler regions must align with dataset windows")
+        if not np.isfinite(score).all() or (score < 0.0).any():
+            raise ValueError(
+                "boundary sampler motion scores must be finite and non-negative"
+            )
+        selected_contract = str(contract)
+        if selected_contract == CAUSAL_PREFIX_V1:
+            quotas = {PREFIX_REGION: 1, TAIL_REGION: 0, STRICT_REGION: 7}
+        elif selected_contract == CAUSAL_PREFIX_TERMINAL_SUFFIX_V2:
+            quotas = {PREFIX_REGION: 1, TAIL_REGION: 1, STRICT_REGION: 6}
+        else:
+            raise ValueError(
+                "boundary-aware sampling requires a causal LIBERO boundary contract"
+            )
+        if config.batch_size != 8 or sum(quotas.values()) != config.batch_size:
+            raise ValueError("controlled LIBERO boundary sampling requires B8")
+        pools = {
+            name: np.flatnonzero(regions == name).astype(np.int64, copy=False)
+            for name in (PREFIX_REGION, STRICT_REGION, TAIL_REGION)
+        }
+        for name, quota in quotas.items():
+            if quota and len(pools[name]) < quota:
+                raise ValueError(
+                    f"boundary sampler region {name!r} has {len(pools[name])} rows, "
+                    f"fewer than its per-batch quota {quota}"
+                )
+        strict_pool = pools[STRICT_REGION]
+        batches = math.ceil(len(strict_pool) / config.batch_size)
+        if batches <= 0:
+            raise ValueError("boundary sampler has no strict baseline windows")
+        strict_config = InformationBalancedSamplerConfig(
+            batch_size=quotas[STRICT_REGION],
+            uniform_fraction=config.uniform_fraction,
+            event_fraction=config.event_fraction,
+            motion_quantile=config.motion_quantile,
+            batches_per_epoch=batches,
+            seed=config.seed,
+            drop_last=False,
+        )
+        self.contract = selected_contract
+        self.config = config
+        self.quotas = quotas
+        self.pools = pools
+        self.strict_sampler = InformationBalancedBatchSampler(
+            score[strict_pool],
+            events[strict_pool],
+            strict_config,
+        )
+        self.epoch = 0
+        self.batches_per_epoch = int(batches)
+
+    def set_epoch(self, epoch: int) -> None:
+        if epoch < 0:
+            raise ValueError("epoch must be non-negative")
+        self.epoch = int(epoch)
+        self.strict_sampler.set_epoch(epoch)
+
+    def __len__(self) -> int:
+        return self.batches_per_epoch
+
+    @property
+    def summary(self) -> dict[str, object]:
+        return {
+            "schema": "clearvla-boundary-aware-information-sampler-v1",
+            "contract": self.contract,
+            "batch_size": int(self.config.batch_size),
+            "batches_per_epoch": len(self),
+            "epoch_length_reference": "ceil(strict_window_count/full_batch_size)",
+            "region_window_counts": {
+                name: int(len(pool)) for name, pool in self.pools.items()
+            },
+            "region_quota_per_batch": dict(self.quotas),
+            "region_rows_per_epoch": {
+                name: int(quota * len(self)) for name, quota in self.quotas.items()
+            },
+            "strict_information_sampling": self.strict_sampler.summary,
+            "prefix_tail_cycle_replacement": "only_after_full_region_cycle",
+            "within_batch_duplicates": False,
+        }
+
+    @staticmethod
+    def _draw_cycle(
+        rng: np.random.Generator,
+        pool: np.ndarray,
+        permutation: np.ndarray,
+        cursor: int,
+        count: int,
+    ) -> tuple[list[int], np.ndarray, int]:
+        if count <= 0:
+            return [], permutation, cursor
+        if len(pool) < count:
+            raise ValueError("boundary region pool is smaller than its batch quota")
+        if cursor + count > len(permutation):
+            permutation = pool.copy()
+            rng.shuffle(permutation)
+            cursor = 0
+        rows = [int(value) for value in permutation[cursor : cursor + count]]
+        return rows, permutation, cursor + count
+
+    def __iter__(self) -> Iterator[list[int]]:
+        rng = np.random.default_rng(
+            self.config.seed + self.epoch * 1_000_003 + 79_019
+        )
+        permutations = {name: pool.copy() for name, pool in self.pools.items()}
+        cursors = {name: 0 for name in self.pools}
+        for values in permutations.values():
+            rng.shuffle(values)
+
+        strict_pool = self.pools[STRICT_REGION]
+        strict_batches: Iterator[list[int]] = (
+            iter(self.strict_sampler) if self.strict_sampler.informative else iter(())
+        )
+        for _batch_index in range(len(self)):
+            if self.strict_sampler.informative:
+                strict_local = next(strict_batches)
+                strict_rows = [int(strict_pool[index]) for index in strict_local]
+            else:
+                strict_rows, permutations[STRICT_REGION], cursors[STRICT_REGION] = (
+                    self._draw_cycle(
+                        rng,
+                        strict_pool,
+                        permutations[STRICT_REGION],
+                        cursors[STRICT_REGION],
+                        self.quotas[STRICT_REGION],
+                    )
+                )
+            batch = list(strict_rows)
+            for name in (PREFIX_REGION, TAIL_REGION):
+                rows, permutations[name], cursors[name] = self._draw_cycle(
+                    rng,
+                    self.pools[name],
+                    permutations[name],
+                    cursors[name],
+                    self.quotas[name],
+                )
+                batch.extend(rows)
+            if len(batch) != self.config.batch_size or len(set(batch)) != len(batch):
+                raise AssertionError(
+                    "boundary-aware sampler violated its B8 quota/uniqueness"
+                )
             rng.shuffle(batch)
             yield batch
 
@@ -507,6 +685,49 @@ class TaskStratifiedBatchSampler(Sampler[list[int]]):
             },
             "batch_size": self.batch_size,
             "batches": len(self),
+        }
+
+    def __iter__(self) -> Iterator[list[int]]:
+        for start in range(0, len(self.order), self.batch_size):
+            yield list(self.order[start : start + self.batch_size])
+
+
+class EvenlySpacedPanelBatchSampler(Sampler[list[int]]):
+    """Bound one read-only panel while covering its complete ordered pool."""
+
+    def __init__(self, length: int, *, batch_size: int, max_batches: int) -> None:
+        if int(length) <= 0 or int(batch_size) <= 0 or int(max_batches) <= 0:
+            raise ValueError(
+                "panel length, batch size and max batches must be positive"
+            )
+        self.source_rows = int(length)
+        self.batch_size = int(batch_size)
+        self.max_batches = int(max_batches)
+        selected_count = min(
+            self.source_rows, self.batch_size * self.max_batches
+        )
+        positions = np.linspace(
+            0,
+            self.source_rows - 1,
+            num=selected_count,
+            dtype=np.int64,
+        )
+        if len(np.unique(positions)) != selected_count:
+            raise AssertionError("evenly spaced panel selection produced duplicates")
+        self.order = tuple(int(value) for value in positions)
+
+    def __len__(self) -> int:
+        return math.ceil(len(self.order) / self.batch_size)
+
+    @property
+    def summary(self) -> dict[str, object]:
+        return {
+            "schema": "clearvla-evenly-spaced-validation-panel-v1",
+            "source_rows": self.source_rows,
+            "selected_rows": len(self.order),
+            "batch_size": self.batch_size,
+            "batches": len(self),
+            "selection": "inclusive_linspace_over_ordered_dataset",
         }
 
     def __iter__(self) -> Iterator[list[int]]:

@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Mapping, TypeVar, cast
 
 from clearvla.data.action_chart import resolve_action_state_profile
+from clearvla.data.window_boundaries import (
+    CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    CAUSAL_PREFIX_V1,
+    STRICT_COMPLETE_V1,
+    WINDOW_BOUNDARY_CONTRACTS,
+)
 
 from .manifest import ARCHITECTURE_MANIFEST
 from .v120_core.bspine import (
@@ -78,6 +84,9 @@ class DataConfig:
     # identity profile.  Other source charts must opt into a threshold rather
     # than silently borrowing raw units from another dataset.
     sampling_gripper_event_threshold: float | None = None
+    # Selects which causal episode centers are admitted for training. The
+    # strict default is omitted from serialization to preserve old identities.
+    window_boundary_contract: str = STRICT_COMPLETE_V1
 
     def camera_key_map(self) -> dict[str, str]:
         if self.camera_key_overrides:
@@ -176,6 +185,18 @@ class DataConfig:
             raise ValueError("data stride must be positive and worker count non-negative")
         if self.seed < 0:
             raise ValueError("data seed must be non-negative")
+        if self.window_boundary_contract not in WINDOW_BOUNDARY_CONTRACTS:
+            raise ValueError(
+                "data.window_boundary_contract must be one of "
+                f"{WINDOW_BOUNDARY_CONTRACTS}"
+            )
+        if (
+            self.window_boundary_contract != STRICT_COMPLETE_V1
+            and self.data_profile != "libero_relative_7d_v1"
+        ):
+            raise ValueError(
+                "causal prefix/terminal boundary contracts are valid only for LIBERO"
+            )
         resolve_action_state_profile(self.data_profile).validate()
         if self.sampling_gripper_event_threshold is not None:
             threshold = float(self.sampling_gripper_event_threshold)
@@ -647,6 +668,13 @@ class ExperimentConfig:
             raise ValueError("data profile width must align with dimensions.action_dim")
         if profile.output_dim != self.dimensions.state_dim:
             raise ValueError("data profile width must align with dimensions.state_dim")
+        if self.data.window_boundary_contract in {
+            CAUSAL_PREFIX_V1,
+            CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+        } and self.optimizer.batch_size != 8:
+            raise ValueError(
+                "controlled LIBERO boundary experiments require batch size 8"
+            )
         sampling_threshold = self.data.sampling_gripper_event_threshold
         if profile.name == "identity_7d_pen":
             if self.objectives.gripper_event_threshold != 0.10:
@@ -719,6 +747,11 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        data = cast(dict[str, object], payload["data"])
+        if self.data.window_boundary_contract == STRICT_COMPLETE_V1:
+            # Old configs acquire the strict dataclass default when parsed;
+            # omitting it keeps their serialized/digest identity unchanged.
+            data.pop("window_boundary_contract", None)
         bottom = cast(dict[str, object], payload["bottom"])
         if self.bottom.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
             for name in (

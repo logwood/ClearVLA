@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 from typing import cast
 
 import numpy as np
 import torch
 
-from clearvla.data.samplers import InformationBalancedBatchSampler
+from clearvla.data.samplers import (
+    BoundaryAwareInformationBatchSampler,
+    EvenlySpacedPanelBatchSampler,
+    InformationBalancedBatchSampler,
+)
+from clearvla.data.window_boundaries import (
+    CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    PREFIX_REGION,
+    STRICT_REGION,
+    TAIL_REGION,
+)
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.data.dataset import (
     CachedTokenPolicyWindowDataset,
@@ -229,6 +240,72 @@ def test_train_loader_owns_the_resolved_information_balanced_sampler() -> None:
         validation_loader.batch_sampler,
         InformationBalancedBatchSampler,
     )
+
+
+def test_causal_libero_loader_owns_boundary_quotas_and_bounded_panels() -> None:
+    class BoundaryDataset(_SamplingDataset):
+        boundary_regions = np.asarray(
+            [
+                *([PREFIX_REGION] * 4),
+                *([STRICT_REGION] * 8),
+                *([TAIL_REGION] * 4),
+            ],
+            dtype=object,
+        )
+
+    dataset = BoundaryDataset()
+    goal = GoalTemplate(
+        tokens=torch.zeros(1, 1, 12),
+        mask=torch.ones(1, 1, dtype=torch.bool),
+        metadata={"source": "test"},
+    )
+    bundle = MainlineDataBundle(
+        episodes=(),
+        splits={"train": (), "val_prefix": ()},
+        datasets={"train": dataset, "val_prefix": dataset},
+        materialized_episode_indices=(),
+        action_normalizer=cast(ArrayNormalizer, None),
+        state_normalizer=cast(ArrayNormalizer, None),
+        goal=goal,
+        skipped=(),
+        sampling_seed=7,
+        information_uniform_fraction=0.50,
+        information_event_fraction=0.125,
+        information_motion_quantile=0.70,
+        gripper_event_threshold=0.10,
+        window_boundary_contract=CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+        gripper_indices=(6,),
+    )
+    train_loader = bundle.loader(
+        "train",
+        batch_size=8,
+        workers=0,
+        device=torch.device("cpu"),
+    )
+    assert isinstance(
+        train_loader.batch_sampler, BoundaryAwareInformationBatchSampler
+    )
+    assert train_loader.batch_sampler.summary["region_quota_per_batch"] == {
+        PREFIX_REGION: 1,
+        TAIL_REGION: 1,
+        STRICT_REGION: 6,
+    }
+    batch = next(iter(train_loader))["index"].tolist()
+    assert len(batch) == len(set(batch)) == 8
+    assert Counter(dataset.boundary_regions[index] for index in batch) == Counter(
+        {PREFIX_REGION: 1, STRICT_REGION: 6, TAIL_REGION: 1}
+    )
+
+    panel = bundle.loader(
+        "val_prefix",
+        batch_size=4,
+        workers=0,
+        device=torch.device("cpu"),
+        shuffle=False,
+        coverage_panel_max_batches=2,
+    )
+    assert isinstance(panel.batch_sampler, EvenlySpacedPanelBatchSampler)
+    assert panel.batch_sampler.summary["selected_rows"] == 8
 
 
 def test_validation_loader_does_not_keep_prefetch_workers_alive() -> None:

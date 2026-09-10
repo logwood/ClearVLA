@@ -1,6 +1,6 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-04
+Updated: 2026-09-10
 
 This is the compact source of truth for the active independent mainline. Read
 it before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
@@ -601,6 +601,31 @@ hidden model condition. This outlet validates the adapter and cross-task
 ecology. It does not claim native three-camera, depth or bimanual 14-D model
 consumption. Details live in
 [`auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md`](auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md).
+
+### LIBERO causal-window outlet
+
+LIBERO uses the independent outlet identity `libero_7d_continuous_v1` and the
+existing `relative_command_direct` arm path. The official released
+observations are post-action rows; the audited causal converter renders reset
+row 0 from the recorded simulator state, shifts released row `t-1` to causal
+row `t>0`, and retains the released final row as the genuine terminal
+observation.
+
+Window admission is explicit and data-only. `strict_complete_v1` remains the
+default. `causal_prefix_v1` adds reset-prefix centers, while
+`causal_prefix_terminal_suffix_v2` also materializes 48 absorbing rows so the
+last real action owns complete Teacher support. Pre-reset state/RGB history
+repeats the reset observation; missing executed-command history uses
+`action_state[0]`, never the unexecuted `action[0]`. Terminal padding repeats
+the terminal observation, emits zero arm commands and holds the final gripper
+command. Legal centers stop at the last real source action.
+
+Synthetic suffix rows do not enter action/state normalizer fitting. Causally
+realigned LIBERO data carries a numeric-only legacy state reference for exact
+E8 chart continuity; it is never model evidence. Causal regions are admitted
+only on the training surface. Primary validation/test remain strict, and
+bounded `val_prefix`/`val_tail` deployment panels use isolated metrics that
+cannot select the best checkpoint.
 
 ### Pen/RDT gripper boundary decision
 

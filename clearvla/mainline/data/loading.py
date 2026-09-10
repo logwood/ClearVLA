@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -25,6 +25,8 @@ from clearvla.data.multitask_selection import (
     load_rdt_multitask_selection_manifest,
 )
 from clearvla.data.samplers import (
+    BoundaryAwareInformationBatchSampler,
+    EvenlySpacedPanelBatchSampler,
     InformationBalancedBatchSampler,
     InformationBalancedSamplerConfig,
     TaskBalancedInformationBatchSampler,
@@ -36,6 +38,13 @@ from clearvla.data.split import (
     load_episode_split_manifest_inventory,
     load_rdt_split_manifest,
     resolve_episode_ids,
+)
+from clearvla.data.window_boundaries import (
+    CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    CAUSAL_PREFIX_V1,
+    PREFIX_REGION,
+    STRICT_COMPLETE_V1,
+    TAIL_REGION,
 )
 from clearvla.vision.decoded_image_store import DecodedImageStore
 from clearvla.vision.online_store import OnlineVisualStore
@@ -121,6 +130,7 @@ class MainlineDataBundle:
     information_event_fraction: float
     information_motion_quantile: float
     gripper_event_threshold: float | None
+    window_boundary_contract: str = STRICT_COMPLETE_V1
     gripper_indices: tuple[int, ...] = (-1,)
     task_order: tuple[str, ...] = ()
     episode_task_indices: tuple[int, ...] = ()
@@ -200,6 +210,7 @@ class MainlineDataBundle:
         shuffle: bool | None = None,
         generator: torch.Generator | None = None,
         task_panel_max_batches: int | None = None,
+        coverage_panel_max_batches: int | None = None,
     ) -> DataLoader:
         if split not in self.datasets:
             raise KeyError(f"unknown data split {split!r}")
@@ -250,7 +261,18 @@ class MainlineDataBundle:
                 motion_quantile=self.information_motion_quantile,
                 seed=self.sampling_seed,
             )
-            if self.is_multitask:
+            if self.window_boundary_contract in {
+                CAUSAL_PREFIX_V1,
+                CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+            }:
+                sampler = BoundaryAwareInformationBatchSampler(
+                    motion_score,
+                    is_event,
+                    dataset.boundary_regions,
+                    contract=self.window_boundary_contract,
+                    config=sampler_config,
+                )
+            elif self.is_multitask:
                 sampler = TaskBalancedInformationBatchSampler(
                     motion_score,
                     is_event,
@@ -282,6 +304,17 @@ class MainlineDataBundle:
                 self.task_order,
                 samples_per_task=samples_per_task,
                 batch_size=batch_size,
+            )
+            return DataLoader(dataset, batch_sampler=sampler, **common)
+        if (
+            not do_shuffle
+            and coverage_panel_max_batches is not None
+            and int(coverage_panel_max_batches) > 0
+        ):
+            sampler = EvenlySpacedPanelBatchSampler(
+                len(dataset),
+                batch_size=batch_size,
+                max_batches=int(coverage_panel_max_batches),
             )
             return DataLoader(dataset, batch_sampler=sampler, **common)
         return DataLoader(
@@ -407,7 +440,7 @@ def _load_mainline_data(
     obs = config.observation
     cameras = tuple(data.camera_names)
     profile = resolve_action_state_profile(data.data_profile)
-    dataset_config = ObservedStateDatasetConfig(
+    strict_dataset_config = ObservedStateDatasetConfig(
         world_horizon=48,
         policy_horizon=dims.action_horizon,
         support_stride=4,
@@ -415,10 +448,21 @@ def _load_mainline_data(
         visual_history_offsets=(-2 * obs.flow_reference_frames, -obs.flow_reference_frames, 0),
         executed_action_offsets=(-24, -16, -12, -8, -6, -4, -2, -1),
         stride=data.stride,
+        window_boundary_contract=STRICT_COMPLETE_V1,
     )
-    dataset_config.validate()
+    strict_dataset_config.validate()
+    train_dataset_config = (
+        strict_dataset_config
+        if data.window_boundary_contract == STRICT_COMPLETE_V1
+        else replace(
+            strict_dataset_config,
+            causal_reset_padding=True,
+            window_boundary_contract=data.window_boundary_contract,
+        )
+    )
+    train_dataset_config.validate()
     if data.split_mode in {"manifest", "episode-manifest"}:
-        min_length = dataset_config.minimum_episode_length
+        min_length = strict_dataset_config.minimum_episode_length
         if data.split_mode == "manifest" and min_length != RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH:
             raise AssertionError(
                 "RDT manifest minimum length no longer matches the typed window ABI"
@@ -582,7 +626,14 @@ def _load_mainline_data(
             f"native chart expects {dims.patches_per_camera}"
         )
     datasets: dict[str, CachedTokenPolicyWindowDataset] = {}
-    for name, ids in dataset_episode_ids.items():
+
+    def materialize_dataset(
+        name: str,
+        ids: list[int],
+        *,
+        selected_config: ObservedStateDatasetConfig,
+        allowed_regions: tuple[str, ...] | None = None,
+    ) -> None:
         base = ObservedStateWindowDataset(
             episodes,
             ids,
@@ -590,13 +641,42 @@ def _load_mainline_data(
             camera_names=cameras,
             state_normalizer=state_normalizer,
             action_normalizer=action_normalizer,
-            config=dataset_config,
+            config=selected_config,
             gripper_transition_boundary=profile.gripper_transition_boundary,
+            allowed_boundary_regions=allowed_regions,
         )
         datasets[name] = CachedTokenPolicyWindowDataset(
             base,
             token_store=token_store,
         )
+
+    for name, ids in dataset_episode_ids.items():
+        materialize_dataset(
+            name,
+            ids,
+            selected_config=(
+                train_dataset_config if name == "train" else strict_dataset_config
+            ),
+        )
+    # Primary validation/test stay on complete strict windows. Boundary rows
+    # are separate deployment-only panels and cannot select checkpoints.
+    if "val" in dataset_episode_ids and data.window_boundary_contract in {
+        CAUSAL_PREFIX_V1,
+        CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    }:
+        materialize_dataset(
+            "val_prefix",
+            dataset_episode_ids["val"],
+            selected_config=train_dataset_config,
+            allowed_regions=(PREFIX_REGION,),
+        )
+        if data.window_boundary_contract == CAUSAL_PREFIX_TERMINAL_SUFFIX_V2:
+            materialize_dataset(
+                "val_tail",
+                dataset_episode_ids["val"],
+                selected_config=train_dataset_config,
+                allowed_regions=(TAIL_REGION,),
+            )
     goal_bank = load_t5_condition_bank(
         data.t5_condition,
         max_tokens=dims.goal_max_tokens,
@@ -659,6 +739,7 @@ def _load_mainline_data(
             if profile.name == "identity_7d_pen" and data.sampling_gripper_event_threshold is None
             else data.sampling_gripper_event_threshold
         ),
+        window_boundary_contract=data.window_boundary_contract,
         gripper_indices=profile.gripper_indices,
         task_order=task_order,
         episode_task_indices=episode_task_indices,

@@ -8,6 +8,8 @@ from typing import Mapping
 import h5py
 import numpy as np
 
+from clearvla.benchmarks.common import audit_benchmark_dataset
+from clearvla.benchmarks.config import build_benchmark_config
 from clearvla.benchmarks.libero import convert_libero
 from clearvla.benchmarks.libero_terminal import (
     augment_libero_terminal_suffix,
@@ -15,6 +17,9 @@ from clearvla.benchmarks.libero_terminal import (
 )
 from clearvla.data.hdf5_episode import load_episode
 from clearvla.mainline.data.loading import _normalizers
+
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def _observation(step: int, side: int = 4) -> dict[str, np.ndarray]:
     return {
@@ -295,3 +300,40 @@ def test_causal_prefix_and_terminal_conversion_align_rows_and_preserve_e8_chart(
         assert int(top[0, 0, 0, 0]) == 0
         assert int(top[1, 0, 0, 0]) == 1
         assert np.all(top[73:] == 73)
+
+
+def test_causal_manifests_build_their_owned_window_contract(tmp_path: Path) -> None:
+    _FakeEnv.instances.clear()
+    raw_root = tmp_path / "raw"
+    _, instruction = _write_raw(raw_root)
+    bddl_root = _write_bddl(tmp_path / "bddl", instruction)
+    legacy = tmp_path / "legacy"
+    convert_libero(
+        raw_root,
+        legacy,
+        suites=("libero_spatial",),
+        evaluator_bddl_root=bddl_root,
+    )
+    terminal = tmp_path / "terminal"
+    augment_libero_terminal_suffix(
+        legacy,
+        terminal,
+        raw_source=raw_root,
+        evaluator_bddl_root=bddl_root,
+        env_factory=_FakeEnv,
+        quat_to_axisangle=_quat_to_axisangle,
+    )
+    payload = build_benchmark_config(
+        ROOT / "configs/mainline/object_intent_dynamics_323.json",
+        tmp_path / "config.json",
+        hdf5_root=terminal,
+        cache_root=tmp_path / "cache",
+        language_bank=tmp_path / "language.pt",
+        run_root=tmp_path / "run",
+        gripper_event_threshold=0.1,
+    )
+    assert (
+        payload["data"]["window_boundary_contract"]
+        == "causal_prefix_terminal_suffix_v2"
+    )
+    assert audit_benchmark_dataset(terminal)["valid_windows"] == 219
