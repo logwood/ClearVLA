@@ -274,8 +274,10 @@ class _FixedBSpineView(nn.Module):
             )
             .abs()
             .amax(),
-            "bottom_spine_zero_intervention_active": physical.new_tensor(
-                float(zero_output), dtype=torch.float32
+            "bottom_spine_zero_intervention_active": (
+                physical.new_ones((), dtype=torch.float32)
+                if zero_output
+                else physical.new_zeros((), dtype=torch.float32)
             ),
         }
         return tokens, metrics

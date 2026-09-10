@@ -700,6 +700,21 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
             )
         return smooth_rms_contract(update, self.residual_max_update_rms)
 
+    def _variance_floored_centered_norm(
+        self, value: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """Expose the complete-contract reduction as a compile boundary.
+
+        Keeping this as a named method lets a training compile plan leave the
+        numerically sensitive mean/variance reduction eager while compiling
+        the surrounding block.  The method deliberately delegates to the
+        existing primitive without changing its expression or operation order.
+        """
+
+        return variance_floored_centered_norm(
+            value, self.normalization_floor
+        )
+
     @staticmethod
     def modulate(x: Tensor, shift: Tensor, scale: Tensor) -> Tensor:
         return x * (1 + scale[:, None]) + shift[:, None]
@@ -919,11 +934,11 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         def normalize(module: nn.LayerNorm, value: Tensor) -> Tensor:
             if not self.complete_numerical_contract:
                 return module(value)
-            normalized, denominator = variance_floored_centered_norm(
-                value, self.normalization_floor
+            normalized, denominator = self._variance_floored_centered_norm(
+                value
             )
-            gain = normalized.new_tensor(
-                1.0 / self.normalization_floor, dtype=torch.float32
+            gain = normalized.new_full(
+                (), 1.0 / self.normalization_floor, dtype=torch.float32
             )
             if module.elementwise_affine:
                 if module.weight is None or module.bias is None:
@@ -1665,8 +1680,8 @@ class ControlledResidualLatentDynamics(nn.Module):
             "rollout_delta_norm": delta_norm,
             "rollout_base_norm": base_norm,
             "rollout_decomposition_expansion_ratio": expansion_ratio,
-            "rollout_base_is_fixed_zero": base_norm.new_tensor(
-                float(self.base_mode == "fixed_zero")
+            "rollout_base_is_fixed_zero": base_norm.new_full(
+                (), float(self.base_mode == "fixed_zero")
             ),
             "rollout_delta_gain": self.delta_gain.detach().float().abs(),
         }

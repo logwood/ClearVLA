@@ -1,0 +1,9 @@
+# Version snapshots and archives are reproducibility inputs, not repository code.
+local/
+*.tar
+__pycache__/
+
+# Keep the small, reviewable result summaries tracked.
+!results/
+!results/*.json
+results/*_smoke.json

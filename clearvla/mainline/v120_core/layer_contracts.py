@@ -160,6 +160,16 @@ class LayerContractAdapterHeads(nn.Module):
         super().__init__()
         self.config = config
         self.layer_index = int(layer_index)
+        self.register_buffer(
+            "_residual_scale",
+            torch.tensor(float(config.layer_contract_residual_scale)),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_layer_index",
+            torch.tensor(self.layer_index, dtype=torch.long),
+            persistent=False,
+        )
         hidden = int(config.hidden_size)
         bottleneck = int(config.layer_contract_adapter_dim)
         self.adapter = nn.Sequential(
@@ -180,11 +190,7 @@ class LayerContractAdapterHeads(nn.Module):
         canvas: Tensor,
         slices: dict[str, slice],
     ) -> dict[str, Tensor]:
-        scale = torch.as_tensor(
-            float(self.config.layer_contract_residual_scale),
-            device=canvas.device,
-            dtype=canvas.dtype,
-        )
+        scale = self._residual_scale.to(device=canvas.device, dtype=canvas.dtype)
         adapted = canvas + scale * self.adapter(canvas)
         mid = self.readout(adapted, slices)
         output = {
@@ -192,11 +198,7 @@ class LayerContractAdapterHeads(nn.Module):
             for key, value in mid.items()
             if key.startswith("midcut_")
         }
-        output["layer_index"] = torch.as_tensor(
-            self.layer_index,
-            device=canvas.device,
-            dtype=torch.long,
-        )
+        output["layer_index"] = self._layer_index.to(device=canvas.device)
         return output
 
 

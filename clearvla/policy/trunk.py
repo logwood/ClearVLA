@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import torch
@@ -2663,6 +2664,19 @@ class LateRawDetailPolicyReader(nn.Module):
         )
 
     @staticmethod
+    def _configured_typed_microgrid_rgb_detail_contraction(
+        value_weight: Tensor,
+        rgb_detail: Tensor,
+    ) -> Tensor:
+        """Contract normalized BF16 factual values behind a stable boundary."""
+
+        return torch.einsum(
+            "bqgcijmku,bcijmkv->bqguv",
+            value_weight,
+            rgb_detail,
+        ).float()
+
+    @staticmethod
     def _typed_microgrid_expectation(
         route_weights: Tensor,
         fine_weights: Tensor,
@@ -2673,6 +2687,7 @@ class LateRawDetailPolicyReader(nn.Module):
         *,
         micro_tile: int = 1,
         mixed_precision_values: bool = False,
+        rgb_detail_contraction: Callable[[Tensor, Tensor], Tensor] | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Aggregate one micro cell at a time without a state x micro volume.
 
@@ -2740,11 +2755,17 @@ class LateRawDetailPolicyReader(nn.Module):
                 joint_weight = route_f[..., None, None] * local_weight
                 if mixed_precision_values:
                     value_weight = joint_weight.to(dtype=rgb_detail.dtype)
-                    rgb_detail_rows = torch.einsum(
-                        "bqgcijmku,bcijmkv->bqguv",
-                        value_weight,
-                        rgb_detail,
-                    ).float()
+                    if rgb_detail_contraction is None:
+                        rgb_detail_rows = torch.einsum(
+                            "bqgcijmku,bcijmkv->bqguv",
+                            value_weight,
+                            rgb_detail,
+                        ).float()
+                    else:
+                        rgb_detail_rows = rgb_detail_contraction(
+                            value_weight,
+                            rgb_detail,
+                        )
                     coordinate_tile = torch.einsum(
                         "bqgcijmku,bcijmkd->bqgud",
                         joint_weight,
@@ -2839,6 +2860,9 @@ class LateRawDetailPolicyReader(nn.Module):
                 self.p1_mixed_precision
                 if self.utility_precision_mainline
                 else False
+            ),
+            rgb_detail_contraction=(
+                self._configured_typed_microgrid_rgb_detail_contraction
             ),
         )
 

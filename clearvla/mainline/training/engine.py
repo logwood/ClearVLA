@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
@@ -11,6 +12,7 @@ from torch import Tensor
 
 from ..config import ExperimentConfig
 from ..interfaces import TrainingBatch
+from ..model.component_contracts import legacy_named_parameters
 from ..model.policy import (
     ClearVLAMainlinePolicy,
     OnlinePolicyCache,
@@ -25,7 +27,6 @@ from .gradient_audit import (
 )
 from .losses import LossLedger, compose_losses, sample_flow_matching
 from .optimizer import WarmupCosineSchedule, gradient_diagnostics, parameter_role
-from ..model.component_contracts import legacy_named_parameters, modular_to_legacy_name
 
 _R2_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
     (
@@ -205,6 +206,7 @@ class MainlineTrainingEngine:
         dtype: torch.dtype | None = None,
         train_flow_generator: torch.Generator | None = None,
         train_condition_generator: torch.Generator | None = None,
+        skip_postglobal_audit: bool = True,
         gradient_spike_audit_threshold: float | None = (
             DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD
         ),
@@ -218,6 +220,17 @@ class MainlineTrainingEngine:
         self.dtype = resolve_compute_dtype(config, dtype)
         self.train_flow_generator = train_flow_generator
         self.train_condition_generator = train_condition_generator
+        self.skip_postglobal_audit = bool(skip_postglobal_audit)
+        # Parameter ownership is structural and does not change during a
+        # training run.  Materialize the ordered legacy view once instead of
+        # rebuilding/modular-name resolving it on every optimizer step.
+        self._ordered_parameters = tuple(legacy_named_parameters(self.model))
+        self._parameter_by_name = dict(self._ordered_parameters)
+        self._decoder_parameters = tuple(
+            parameter
+            for name, parameter in self._ordered_parameters
+            if name.startswith("bottom.decoder.") and parameter.requires_grad
+        )
         if gradient_spike_audit_threshold is not None and (
             not math.isfinite(float(gradient_spike_audit_threshold))
             or float(gradient_spike_audit_threshold) <= 0.0
@@ -302,9 +315,7 @@ class MainlineTrainingEngine:
         before either clipping stage.
         """
 
-        parameters = {
-            name: parameter for name, parameter in legacy_named_parameters(self.model)
-        }
+        parameters = self._parameter_by_name
         metrics: dict[str, Tensor] = {}
         for parameter_name, metric_name in _R2_PARAMETER_GRADIENT_METRICS:
             try:
@@ -330,7 +341,7 @@ class MainlineTrainingEngine:
     ) -> tuple[Tensor, dict[str, Tensor], float]:
         """V120 finite-check -> decoder-local -> global clip lifecycle."""
 
-        ordered_parameters = legacy_named_parameters(self.model)
+        ordered_parameters = self._ordered_parameters
         parameters = [parameter for _, parameter in ordered_parameters if parameter.grad is not None]
         gradients = [parameter.grad for parameter in parameters]
         try:
@@ -383,8 +394,8 @@ class MainlineTrainingEngine:
             metrics.update(self._r2_parameter_gradient_metrics())
         decoder_parameters = [
             parameter
-            for name, parameter in ordered_parameters
-            if name.startswith("bottom.decoder.") and parameter.grad is not None
+            for parameter in self._decoder_parameters
+            if parameter.grad is not None
         ]
         decoder_norm: Tensor | None = None
         if decoder_parameters:
@@ -429,13 +440,22 @@ class MainlineTrainingEngine:
             postlocal_norm,
             foreach=True,
         )
-        postglobal_norm = torch.nn.utils.get_total_norm(
-            [parameter.grad for parameter in parameters],
-            norm_type=2.0,
-            error_if_nonfinite=True,
-            foreach=True,
-        )
+        postglobal_norm: Tensor | None = None
+        if collect_diagnostics or not self.skip_postglobal_audit:
+            # The post-global norm is an audit-only value.  Clipping has
+            # already consumed ``postlocal_norm`` and no later mathematical
+            # operation reads this reduction.  Avoiding it on ordinary
+            # batches removes one full-device reduction while preserving the
+            # exact gradient mutation and optimizer update.
+            postglobal_norm = torch.nn.utils.get_total_norm(
+                [parameter.grad for parameter in parameters],
+                norm_type=2.0,
+                error_if_nonfinite=True,
+                foreach=True,
+            )
         if collect_diagnostics:
+            if postglobal_norm is None:
+                raise RuntimeError("diagnostic gradient lifecycle lost post-global norm")
             metrics.update(gradient_diagnostics(self.model, stage="postglobal"))
             metrics["gradient_raw_global_l2"] = total_norm.detach().float()
             metrics["gradient_postlocal_global_l2"] = postlocal_norm.detach().float()
@@ -451,6 +471,78 @@ class MainlineTrainingEngine:
                 else total_norm.new_zeros((), dtype=torch.float32)
             )
         return total_norm, metrics, gradient_norm_scalar
+
+    def _captured_gradient_lifecycle(self) -> Tensor:
+        """Run the finite-path gradient mutations inside a CUDA Graph.
+
+        This helper is intentionally narrower than :meth:`_gradient_lifecycle`:
+        it contains only the deterministic norm reductions and the two
+        clipping mutations.  Host-side finite/spike attribution and all
+        diagnostics stay outside the graph.  Callers must opt in only when the
+        gradient-spike audit is disabled; otherwise the pre-clip owner scan
+        would no longer observe the required gradients.
+
+        ``error_if_nonfinite`` is disabled because its Python scalar branch is
+        not capture-safe.  The returned pre-clip norm is retained in graph
+        storage and checked immediately after replay; a non-finite result is
+        still fail-closed before the optimizer update.
+        """
+
+        ordered_parameters = self._ordered_parameters
+        parameters = tuple(
+            parameter
+            for _, parameter in ordered_parameters
+            if parameter.grad is not None
+        )
+        if not parameters:
+            raise RuntimeError("captured gradient lifecycle found no gradients")
+        total_norm = torch.nn.utils.get_total_norm(
+            [parameter.grad for parameter in parameters],
+            norm_type=2.0,
+            error_if_nonfinite=False,
+            foreach=True,
+        )
+        decoder_parameters = tuple(
+            parameter
+            for parameter in self._decoder_parameters
+            if parameter.grad is not None
+        )
+        if decoder_parameters:
+            decoder_norm = torch.nn.utils.get_total_norm(
+                [parameter.grad for parameter in decoder_parameters],
+                norm_type=2.0,
+                error_if_nonfinite=False,
+                foreach=True,
+            )
+            torch.nn.utils.clip_grads_with_norm_(
+                list(decoder_parameters),
+                1.0,
+                decoder_norm,
+                foreach=True,
+            )
+        postlocal_norm = torch.nn.utils.get_total_norm(
+            [parameter.grad for parameter in parameters],
+            norm_type=2.0,
+            error_if_nonfinite=False,
+            foreach=True,
+        )
+        torch.nn.utils.clip_grads_with_norm_(
+            list(parameters),
+            self.config.optimizer.grad_clip,
+            postlocal_norm,
+            foreach=True,
+        )
+        # The post-global norm is explicitly audit-only.  The ordinary graph
+        # path has already omitted it when ``skip_postglobal_audit`` is true;
+        # retaining that policy here keeps the captured arithmetic identical.
+        if not self.skip_postglobal_audit:
+            torch.nn.utils.get_total_norm(
+                [parameter.grad for parameter in parameters],
+                norm_type=2.0,
+                error_if_nonfinite=False,
+                foreach=True,
+            )
+        return total_norm
 
     def _clip_gradients_with_first_offender(self) -> Tensor:
         """Compatibility wrapper used by the non-finite regression test."""
@@ -656,6 +748,15 @@ class MainlineTrainingEngine:
             predicted_dynamics=encoded.cache.top.predicted_dynamics,
             action_codec=self.model.outlet_adapter.codec,
             collect_diagnostics=collect_diagnostics,
+            collect_execution_diagnostics=(
+                collect_diagnostics
+                or not self.model.training
+                or getattr(
+                    self,
+                    "_retain_training_execution_diagnostics",
+                    False,
+                )
+            ),
         )
         metrics = {**encoded.metrics, **teacher_metrics, **output.metrics}
         if collect_diagnostics:
@@ -688,14 +789,33 @@ class MainlineTrainingEngine:
         collect_diagnostics: bool = False,
         gradient_spike_handler: Callable[[FiniteGradientSpikeReport], None]
         | None = None,
+        phase_timing: dict[str, float] | None = None,
     ) -> TrainStepResult:
+        timing_started = time.perf_counter() if phase_timing is not None else 0.0
+
+        def timing_sync() -> None:
+            if phase_timing is not None and self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+
+        def timing_mark(name: str, started: float) -> None:
+            if phase_timing is not None:
+                timing_sync()
+                phase_timing[name] = time.perf_counter() - started
+
         self.model.train()
         # V120 intentionally keeps the execution controller and ordered
         # capacity bank out of the task graph for 200 steps, then opens them
         # continuously over 1000 steps.  Omitting this call left the recovered
         # mainline permanently at the warm-up identity boundary.
         self.model.set_training_step(self.global_step)
-        self.optimizer.zero_grad(set_to_none=True)
+        zero_started = time.perf_counter() if phase_timing is not None else 0.0
+        self.optimizer.zero_grad(
+            set_to_none=not bool(
+                getattr(self, "_preserve_static_gradient_buffers", False)
+            )
+        )
+        timing_mark("zero_grad_seconds", zero_started)
+        forward_started = time.perf_counter() if phase_timing is not None else 0.0
         with _autocast(self.device, self.dtype):
             ledger, metrics = self._forward(
                 batch,
@@ -704,13 +824,18 @@ class MainlineTrainingEngine:
                 generator=self.train_flow_generator,
                 condition_generator=self.train_condition_generator,
             )
+        timing_mark("forward_seconds", forward_started)
+        backward_started = time.perf_counter() if phase_timing is not None else 0.0
         ledger.total.backward()
+        timing_mark("backward_seconds", backward_started)
+        gradient_started = time.perf_counter() if phase_timing is not None else 0.0
         gradient_norm, gradient_metrics, gradient_norm_scalar = (
             self._gradient_lifecycle(
                 collect_diagnostics=collect_diagnostics,
                 gradient_spike_handler=gradient_spike_handler,
             )
         )
+        timing_mark("gradient_lifecycle_seconds", gradient_started)
         metrics.update(gradient_metrics)
         # Record the LR that owns this update.  Advancing the scheduler first
         # and then logging the optimizer group reported the *next* batch's LR
@@ -723,9 +848,13 @@ class MainlineTrainingEngine:
             self.config.optimizer.learning_rate
             * self.schedule.ratio(self.schedule.step_index)
         )
+        optimizer_started = time.perf_counter() if phase_timing is not None else 0.0
         self.optimizer.step()
         self.schedule.step()
         self.global_step += 1
+        timing_mark("optimizer_seconds", optimizer_started)
+        if phase_timing is not None:
+            phase_timing["total_seconds"] = time.perf_counter() - timing_started
         return TrainStepResult(
             loss=ledger.total.detach().float(),
             gradient_norm=gradient_norm.detach().float(),

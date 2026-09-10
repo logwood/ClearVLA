@@ -10,6 +10,8 @@ from torch import Tensor, nn
 
 from ..config import ExperimentConfig
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
+from ..training.acceleration_adapters import MainlineTrainingAccelerationAdapter
+from ..training.acceleration_contract import TrainingAccelerationAdapter
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from .action_contract import BottomOutput
 from .component_contracts import ComponentSelection, modular_to_legacy_name
@@ -377,6 +379,17 @@ class ClearVLAMainlinePolicy(nn.Module):
         """Advance the serialized V120 execution warm-up/transition schedule."""
 
         return self.execution_bottom.set_training_step(global_step)
+
+    def get_training_acceleration_adapter(self) -> TrainingAccelerationAdapter:
+        """Return the implementation hook used by optional training backends.
+
+        The adapter is deliberately a stateless object.  It is not a module,
+        owns no parameters and therefore cannot alter checkpoint or optimizer
+        ownership.  Other architecture branches can expose the same method
+        with their own adapter while sharing the generic CUDA-Graph runner.
+        """
+
+        return MainlineTrainingAccelerationAdapter()
 
     def encode_online(
         self,
