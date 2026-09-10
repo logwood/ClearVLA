@@ -8,8 +8,14 @@ import pytest
 import torch
 
 from clearvla.benchmarks.bridge import policy_observation
+from clearvla.mainline.checkpoint import SourceSnapshot
 from clearvla.mainline.config import ExperimentConfig
-from clearvla.simulation.checkpoint import _preflight_model_state, _validated_model_state
+from clearvla.mainline.model.component_contracts import ComponentSelection
+from clearvla.simulation.checkpoint import (
+    _preflight_model_state,
+    _validate_deployment_source_compatibility,
+    _validated_model_state,
+)
 from clearvla.simulation.clearvla_policy import ClearVLACheckpointPolicy
 from clearvla.simulation.history import CausalHistory
 from clearvla.simulation.vision import preprocess_rgb_history
@@ -174,9 +180,7 @@ def test_libero_policy_uses_executed_command_for_gripper_codec_boundary(
     action, online = policy.act_with_input(history.snapshot(), "move")
     assert action.shape == (24, 7)
     assert online.history.action_state[0, -1].item() == pytest.approx(-0.5)
-    assert online.history.executed_action_history[0, -1, -1].item() == pytest.approx(
-        0.75
-    )
+    assert online.history.executed_action_history[0, -1, -1].item() == pytest.approx(0.75)
     assert online.history.codec_gripper_boundary[0, 0].item() == pytest.approx(0.75)
 
 
@@ -212,3 +216,62 @@ def test_checkpoint_model_state_preflight_is_exact_and_finite() -> None:
         _preflight_model_state(stale)
     with pytest.raises(ValueError, match="ownership differs"):
         _validated_model_state({"weight": saved["weight"]}, current)
+
+
+@pytest.mark.parametrize(
+    ("profile", "arm_mode", "expected_outlet"),
+    (
+        ("identity_7d_pen", "legacy_independent", "pen_7d_continuous_v1"),
+        (
+            "rdt_right_arm_action_chart_v1",
+            "legacy_independent",
+            "rdt_right_arm_7d_v1",
+        ),
+        (
+            "libero_relative_7d_v1",
+            "relative_command_direct",
+            "libero_7d_continuous_v1",
+        ),
+    ),
+)
+def test_deployment_component_selection_round_trips_current_outlets(
+    profile: str,
+    arm_mode: str,
+    expected_outlet: str,
+) -> None:
+    base = ExperimentConfig()
+    config = replace(
+        base,
+        data=replace(base.data, data_profile=profile),
+        bottom=replace(base.bottom, arm_flow_mode=arm_mode),
+    )
+    selection = ComponentSelection.from_config(config)
+    assert selection.outlet_adapter == expected_outlet
+    assert (
+        ComponentSelection.from_mapping(
+            selection.as_dict(),
+            config=config,
+        )
+        == selection
+    )
+
+
+def test_deployment_source_gate_ignores_offline_loader_but_rejects_model_drift() -> None:
+    model_path = "clearvla/mainline/model/policy.py"
+    loader_path = "clearvla/mainline/data/loading.py"
+    saved = SourceSnapshot(
+        files=((loader_path, "a" * 64), (model_path, "b" * 64)),
+        digest="c" * 64,
+    )
+    data_only_change = SourceSnapshot(
+        files=((loader_path, "d" * 64), (model_path, "b" * 64)),
+        digest="e" * 64,
+    )
+    _validate_deployment_source_compatibility(saved, data_only_change)
+
+    model_change = SourceSnapshot(
+        files=((loader_path, "a" * 64), (model_path, "f" * 64)),
+        digest="0" * 64,
+    )
+    with pytest.raises(ValueError, match="model/runtime source differs"):
+        _validate_deployment_source_compatibility(saved, model_change)

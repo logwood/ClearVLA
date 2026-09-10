@@ -13,11 +13,15 @@ from torch import Tensor
 
 from clearvla.mainline.checkpoint import (
     CheckpointIdentity,
+    SourceSnapshot,
+    active_source_snapshot,
     checkpoint_identity_from_mapping,
 )
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.data.language import T5ConditionBank, load_t5_condition_bank
 from clearvla.mainline.data.normalizer import ArrayNormalizer
+from clearvla.mainline.manifest import architecture_manifest_for_bspine_implementation
+from clearvla.mainline.model.component_contracts import ComponentSelection
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.runtime.checkpoints import CHECKPOINT_SCHEMA
 from clearvla.mainline.runtime.deployment import (
@@ -40,6 +44,80 @@ class DeploymentBundle:
     language: T5ConditionBank
     global_step: int
     epoch: int
+
+
+# A training checkpoint owns a wider source closure than deployment needs.
+# Keep the deployment gate at source-file granularity: model composition,
+# inference/runtime code and artifact/chart interpretation are immutable, while
+# an edit to an offline loader, split resolver, loss or training engine does not
+# strand an otherwise compatible trained policy.
+_DEPLOYMENT_SOURCE_PREFIXES = (
+    "clearvla/action_representations/",
+    "clearvla/mainline/model/",
+    "clearvla/mainline/v120_core/",
+)
+_DEPLOYMENT_SOURCE_FILES = frozenset(
+    {
+        "clearvla/data/action_chart.py",
+        "clearvla/data/instructions.py",
+        "clearvla/data/physical_chart.py",
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/data/language.py",
+        "clearvla/mainline/data/normalizer.py",
+        "clearvla/mainline/interfaces.py",
+        "clearvla/mainline/manifest.py",
+        "clearvla/mainline/runtime/__init__.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/runtime/deployment.py",
+        "clearvla/mainline/runtime/numerics.py",
+        "clearvla/mainline/runtime/sampling.py",
+        "clearvla/mainline/training/acceleration_adapters.py",
+        "clearvla/mainline/training/acceleration_contract.py",
+        "clearvla/mainline/training/factual_contraction.py",
+        "clearvla/vision/preprocessing.py",
+    }
+)
+
+
+def _is_deployment_source(path: str) -> bool:
+    normalized = str(path).replace("\\", "/")
+    return normalized in _DEPLOYMENT_SOURCE_FILES or normalized.startswith(
+        _DEPLOYMENT_SOURCE_PREFIXES
+    )
+
+
+def _validate_deployment_source_compatibility(
+    saved: SourceSnapshot,
+    current: SourceSnapshot,
+) -> None:
+    """Require exact source identity only for executable deployment owners."""
+
+    saved_rows = {
+        path.replace("\\", "/"): digest
+        for path, digest in saved.files
+        if _is_deployment_source(path)
+    }
+    current_rows = {
+        path.replace("\\", "/"): digest
+        for path, digest in current.files
+        if _is_deployment_source(path)
+    }
+    if not saved_rows or not current_rows:
+        raise ValueError("deployment source identity has no model/runtime owners")
+    missing = tuple(sorted(set(saved_rows).difference(current_rows)))
+    added = tuple(sorted(set(current_rows).difference(saved_rows)))
+    changed = tuple(
+        sorted(
+            path
+            for path in set(saved_rows).intersection(current_rows)
+            if saved_rows[path] != current_rows[path]
+        )
+    )
+    if missing or added or changed:
+        raise ValueError(
+            "deployment model/runtime source differs: "
+            f"missing={missing[:8]} added={added[:8]} changed={changed[:8]}"
+        )
 
 
 def _sha256(path: Path) -> str:
@@ -139,9 +217,7 @@ def load_deployment_checkpoint(
     if not isinstance(payload, Mapping):
         raise ValueError("deployment checkpoint payload must be a mapping")
     if payload.get("schema") != CHECKPOINT_SCHEMA:
-        raise ValueError(
-            f"deployment requires {CHECKPOINT_SCHEMA}, got {payload.get('schema')!r}"
-        )
+        raise ValueError(f"deployment requires {CHECKPOINT_SCHEMA}, got {payload.get('schema')!r}")
     raw_config = payload.get("config")
     raw_identity = payload.get("identity")
     data_state = payload.get("data_state")
@@ -157,6 +233,29 @@ def load_deployment_checkpoint(
         raise ValueError("deployment ABI source config digest differs from checkpoint identity")
     if dict(cast(Mapping[str, object], abi["architecture_manifest"])) != identity.manifest:
         raise ValueError("deployment ABI architecture manifest differs from checkpoint identity")
+    current_manifest = architecture_manifest_for_bspine_implementation(
+        config.bottom.bspine_implementation
+    )
+    if identity.manifest != current_manifest.as_dict():
+        raise ValueError("deployment architecture manifest differs from the current implementation")
+    raw_selection = payload.get("component_selection")
+    if not isinstance(raw_selection, Mapping):
+        raise ValueError("deployment checkpoint has no complete component selection")
+    try:
+        saved_selection = ComponentSelection.from_mapping(
+            raw_selection,
+            config=config,
+        )
+    except ValueError as error:
+        raise ValueError("deployment checkpoint component selection is incompatible") from error
+    current_selection = ComponentSelection.from_config(config)
+    if saved_selection != current_selection:
+        raise ValueError("deployment component selection differs from the current config")
+    repo_root = Path(__file__).resolve().parents[2]
+    _validate_deployment_source_compatibility(
+        identity.source,
+        active_source_snapshot(repo_root),
+    )
 
     dims = config.dimensions
     action_normalizer = _normalizer(
@@ -213,6 +312,8 @@ def load_deployment_checkpoint(
     )
 
     model = ClearVLAMainlinePolicy(config)
+    if getattr(model, "selection", None) != saved_selection:
+        raise ValueError("live deployment model component selection differs from the checkpoint")
     state = _validated_model_state(saved_model, model.state_dict())
     model.load_state_dict(state, strict=True)
     # Synchronize Python execution caches with the serialized progress buffer.
