@@ -1,6 +1,6 @@
 # Training acceleration lab
 
-Updated: 2026-09-07
+Updated: 2026-09-10
 
 This ledger records controlled training-throughput experiments on branch
 `codex/training-acceleration`.  It is deliberately separate from the current
@@ -825,6 +825,65 @@ The ABCBA files use the prefix
 `runs/profile_atomic_vs_mixed_abcba60_*_b8_g2_atomic1_20260910`; the warm
 repeat is `runs/profile_atomic_warm_repeat60_b8_g2_warm1_20260910.json`.
 
+### Fast-RNG plus global cuDNN 10-FPS candidate (2026-09-10)
+
+The `fast-rng` profile is a deliberately narrow, explicit opt-in.  It keeps
+ordinary Inductor fusion and scheduling, while setting only
+`fallback_random=True` so random-producing operators stay on the eager
+fallback and preserve generator advancement.  It adds no module, parameter,
+buffer, checkpoint key, loss term or tensor shape.  The profile is therefore
+portable across the modular Pen and legacy RDT layouts, but it is not the same
+numerical policy as `precision`: reduction/epilogue fusion remains available.
+
+On the RTX 3090 (GPU6), the matched B8/BF16 profile used 16 warm-up and 60
+measured steps after a fixed-shape capture.  Two no-cuDNN-benchmark repeats
+measured `9.66799` and `9.68917 samples/s` (mean `9.67858`).  Enabling global
+fixed-shape cuDNN benchmarking produced `10.05801 samples/s`, a `1.0392x`
+(`+3.92%`) increment over that mean and `2.3337x` over the same-GPU
+`4.30986 samples/s` compile-era baseline.  The best run used 76 total steps,
+16 warm-up steps, 47.723 s measured time, 40.404 s capture setup, and
+`17.236 / 19.506 GiB` allocated/reserved peak.  These are training
+samples/second, not deployment-camera FPS.  The raw `fast` profile's earlier
+`10.06662 samples/s` number is retained only as a rejected upper bound because
+its independent gate changed RNG continuation (and once exceeded the gradient
+envelope).
+
+The requested full mathematical-behavior screen used 256 independent one-step
+cases at B4 per variant/mode (128 identity and 128 active, 1,024 sample slots),
+17 state checkpoints, `atol=1e-6`, `rtol=2e-5`, and exact RNG comparison.  All
+four processes returned code 0; result, clipped-gradient, optimizer, buffer and
+RNG surfaces passed their configured hard gates.  Parameter state is reported
+separately below because its sparse raw-flow tails exceed the strict envelope
+in the two unfrozen runs.  The complete state summary is:
+
+| Variant / observation | Result max / out | Clipped-gradient max / out | Parameter max / out checkpoints / elements | Optimizer max / out | Detached audit max / out | RNG |
+|---|---:|---:|---:|---:|---:|---|
+| Pen frozen | `2.265e-6 / 0` | `6.348e-8 / 0` | `8.011e-7 / 0 / 0` | `1.863e-9 / 0` | `5.960e-8 / 0` | exact |
+| Pen unfrozen | `2.563e-6 / 0` | `2.480e-7 / 0` | `6.571e-6 / 4 / 4` | `1.084e-8 / 0` | `5.960e-8 / 0` | exact |
+| RDT frozen | `3.576e-6 / 0` | `5.652e-8 / 0` | `2.915e-7 / 0 / 0` | `2.189e-9 / 0` | `8.404e-6 / 24` | exact |
+| RDT unfrozen | `2.146e-6 / 0` | `3.369e-7 / 0` | `1.004e-5 / 1 / 5` | `3.301e-8 / 0` | `9.865e-6 / 22` | exact |
+
+The four raw reports are retained remotely as:
+
+* `runs/pen_fastrng_cudnn_independent_256_b4_frozen_g6full_20260910.json`;
+* `runs/pen_fastrng_cudnn_independent_256_b4_unfrozen_g6full_20260910.json`;
+* `runs/rdt_fastrng_cudnn_independent_256_b4_frozen_g1full_20260910.json`;
+* `runs/rdt_fastrng_cudnn_independent_256_b4_unfrozen_g1full_20260910.json`.
+
+The sparse unfrozen parameter tails are concentrated in the trainable raw-flow
+observation path (`raw_flow.pyramid.stem.0.weight` for both variants).  They
+are larger than the strict parameter envelope even though the loss/result,
+gradient, optimizer and RNG surfaces pass.  RDT's detached
+`loss_execution_terminal_target_cost_margin` is an audit-only scalar (22/256
+outside cases in unfrozen RDT and 24/256 in frozen RDT); it is not sent to
+backward.  This reproduces
+the known sensitivity of CUDA `grid_sample`/pooling/convolution backward and
+does not demonstrate a changed optimizer rule, but the global cuDNN candidate
+must still be classified as **conditional**, not formally equivalent.  It is
+not enabled by default.  Promotion requires either a deterministic raw-flow
+backward implementation or an explicitly approved, repeated calibrated
+envelope that includes the parameter state.
+
 ### Decision
 
 Retain `factual-atomic` as the preferred opt-in B8 training candidate when a
@@ -835,4 +894,7 @@ the Pen/RDT training-behavior surfaces.  Keep `factual-shell-safe` as the
 cold-start and old-version fallback.  Do not describe either path as bitwise
 identical over a complete unfrozen CUDA update: both inherit the calibrated,
 sparse observation-convolution tail.  The verified `9.52 samples/s` is a
-training-throughput result, not a deployment-camera FPS measurement.
+training-throughput result, not a deployment-camera FPS measurement.  The
+`fast-rng + global cuDNN` path is retained as a separate 10-FPS performance
+ceiling, pending the conditional parameter-tail resolution above; it must not
+replace the formally accepted `precision`-based profile in a training release.

@@ -142,7 +142,7 @@ def _parser() -> argparse.ArgumentParser:
         "--selective-compile-profile",
         help=(
             "Apply a version-adapter-owned selective Inductor plan (for the "
-            "mainline adapter: fast|precision|autotune|partitioned "
+            "mainline adapter: fast|fast-rng|precision|autotune|partitioned "
             "followed "
             "by semantic families such as mainline+intent+factual; stable "
             "single scopes include flow, raw, visual, mainline, mmdit, "
