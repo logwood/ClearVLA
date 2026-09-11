@@ -433,10 +433,14 @@ class ObjectiveConfig:
     action_frame_weight_mode: str = "uniform"
     action_frame_event_gain: float = 0.0
     action_frame_motion_gain: float = 0.0
+    # Scope of target-derived event/motion frame weights for the continuous
+    # gripper transition/persistence owner. Main action rows keep the shared
+    # frame weighting in either mode.
+    gripper_trajectory_weight_mode: str = "shared_frame"
 
     def validate(self) -> None:
         for name, value in asdict(self).items():
-            if name == "action_frame_weight_mode":
+            if name in {"action_frame_weight_mode", "gripper_trajectory_weight_mode"}:
                 continue
             if not math.isfinite(float(value)) or float(value) < 0.0:
                 raise ValueError(f"objective.{name} must be finite and non-negative")
@@ -466,6 +470,10 @@ class ObjectiveConfig:
             and self.action_frame_motion_gain == 0.0
         ):
             raise ValueError("event_motion_v1 requires a positive event or motion gain")
+        if self.gripper_trajectory_weight_mode not in {"shared_frame", "horizon_only"}:
+            raise ValueError(
+                "objective.gripper_trajectory_weight_mode must be shared_frame or horizon_only"
+            )
 
 
 @dataclass(frozen=True)

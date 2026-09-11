@@ -7,6 +7,24 @@ Experiment labels never select model semantics. Historical evidence lives in
 `TOP_ARCHITECTURE_ISSUE_LEDGER.md`; only still-open work belongs in
 `CURRENT_MAINLINE_ISSUES.md`.
 
+### Pen trajectory frame-weight scope control (2026-09-11)
+
+This isolated candidate starts from shared-cumulative `cd43eee`, not the
+rejected anchored experiment. The new objective setting
+`gripper_trajectory_weight_mode=shared_frame` preserves the baseline;
+the Pen frame-scope preset selects `horizon_only`. Only the four continuous
+transition/persistence trajectory means use horizon weights without the
+event/motion row multiplier. All other objectives, their weights, masks,
+sampler, language anchor, network parameters, optimizer and two-pass deployed
+cumulative codec are unchanged. Transition/persistence each normalize their
+own selected weight mass, so this is within-owner row reweighting, not a new
+event-versus-hold budget. Constant event boosts and the common normalization
+cancel within each non-empty mean (apart from the existing denominator floor);
+the main changed responsibility is motion-conditioned row preference. Future
+targets never enter deployment; no-event trajectory masks remain zero, with
+hold still trained by the primary action losses. This is a fresh experimental
+identity, not an exact resume or a promoted default.
+
 ## Agent quick contract
 
 ```text

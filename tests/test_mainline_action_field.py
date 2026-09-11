@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import cast
 
@@ -15,10 +16,12 @@ from clearvla.mainline.model.policy import PolicyStepOutput
 from clearvla.mainline.model.types import PhysicalActionCondition
 from clearvla.mainline.training.losses import (
     FlowMatchingState,
+    action_frame_weights,
     action_terms,
     balanced_event_row_weights,
     causal_event_trajectory_mask,
     event_transition_persistence_masks,
+    gripper_trajectory_step_weight,
     sample_flow_matching,
 )
 
@@ -30,6 +33,103 @@ def _codec() -> PhysicalActionFieldCodec:
         gripper_field_dim=6,
         decode_delta_blend=0.25,
     )
+
+
+def test_gripper_trajectory_weight_scope_isolated_from_main_frame_weights() -> None:
+    config = ExperimentConfig()
+    candidate = replace(
+        config,
+        objectives=replace(
+            config.objectives,
+            action_frame_weight_mode="event_motion_v1",
+            action_frame_event_gain=0.75,
+            action_frame_motion_gain=0.35,
+            gripper_trajectory_weight_mode="horizon_only",
+        ),
+    )
+    candidate.validate()
+    horizon = anchor_horizon_weights(
+        horizon=24,
+        tail_emphasis=0.20,
+        first_step_protection=0.05,
+        device=torch.device("cpu"),
+    )
+    event = torch.zeros(2, 24)
+    event[0, 3] = 1.0
+    motion = torch.zeros_like(event)
+    motion[:, :4] = 1.0
+    frame = action_frame_weights(
+        event,
+        motion,
+        horizon,
+        mode="event_motion_v1",
+        event_gain=0.75,
+        motion_gain=0.35,
+    )
+    shared = gripper_trajectory_step_weight(
+        horizon, frame, mode="shared_frame"
+    )
+    horizon_only = gripper_trajectory_step_weight(
+        horizon, frame, mode="horizon_only"
+    )
+    torch.testing.assert_close(horizon_only, horizon[None].expand_as(frame))
+    assert not torch.equal(shared, horizon_only)
+    uniform_frame = torch.ones_like(frame)
+    assert torch.equal(
+        gripper_trajectory_step_weight(horizon, uniform_frame, mode="shared_frame"),
+        gripper_trajectory_step_weight(horizon, uniform_frame, mode="horizon_only"),
+    )
+    torch.testing.assert_close(
+        (horizon_only * event).sum(), (horizon * event).sum()
+    )
+    torch.testing.assert_close(
+        (horizon_only * motion).sum(), (horizon * motion).sum()
+    )
+
+
+def test_trajectory_scope_changes_no_other_loss_or_decode_and_has_finite_vjp() -> None:
+    codec = _codec()
+    base = ExperimentConfig()
+    shared_config = replace(base, objectives=replace(
+        base.objectives, action_frame_weight_mode="event_motion_v1",
+        action_frame_event_gain=0.75, action_frame_motion_gain=0.35,
+    ))
+    horizon_config = replace(shared_config, objectives=replace(
+        shared_config.objectives, gripper_trajectory_weight_mode="horizon_only",
+    ))
+    state = torch.zeros(2, 7)
+    action = torch.zeros(2, 24, 7)
+    action[:, :8, :6] = torch.arange(8).float()[None, :, None] * 0.05
+    action[:, 8:, :6] = 0.35
+    action[:, 3:17, -1] = 0.6
+    action[:, 17:, -1] = 1.0
+    encoded = codec.encode(action, state)
+    error = torch.linspace(0.01, 0.12, 24)[None, :, None].expand_as(encoded)
+    prediction = (encoded + error).detach().requires_grad_()
+    output = cast(PolicyStepOutput, SimpleNamespace(bottom=SimpleNamespace(
+        physical_velocity=prediction, motion_logits=torch.zeros(2, 24), decoder_tensors={},
+    )))
+    target = ActionSupervision(normalized=action, raw_units=action,
+        current_raw_units=state, gripper_transition_boundary=state,
+        gripper_transition_boundary_raw_units=state)
+    zero = torch.zeros_like(encoded)
+    flow = FlowMatchingState(time=torch.zeros(2), source_physical_noise=zero,
+        noisy_physical=zero, target_physical=encoded, target_physical_velocity=encoded)
+    history = cast(ObservableHistory, SimpleNamespace(action_state=state))
+    shared = action_terms(shared_config, codec, output, target, history, flow)
+    horizon = action_terms(horizon_config, codec, output, target, history, flow)
+    for key in shared:
+        if not key.startswith("gripper_trajectory"):
+            torch.testing.assert_close(shared[key], horizon[key], atol=0, rtol=0)
+    assert not torch.equal(shared["gripper_trajectory"], horizon["gripper_trajectory"])
+    assert horizon["gripper_trajectory_weight_mode_code"] == 1
+    assert shared["gripper_trajectory_weight_mode_code"] == 0
+    horizon["gripper_trajectory"].backward()
+    assert prediction.grad is not None and torch.isfinite(prediction.grad).all()
+    assert prediction.grad[..., 12].abs().sum() > 0
+    assert prediction.grad[..., 13].abs().sum() > 0
+    assert prediction.grad[..., :12].abs().sum() == 0
+    assert prediction.grad[..., 14:].abs().sum() == 0
 
 
 def test_formal_physical_action_field_is_exact_legacy_18d_chart() -> None:

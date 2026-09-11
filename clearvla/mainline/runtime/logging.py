@@ -272,6 +272,7 @@ class JsonlRunLogger:
                         "loss_contrib_execution_value",
                         "loss_gripper_trajectory_transition",
                         "loss_gripper_trajectory_persistence",
+                        "loss_gripper_trajectory_weight_mode_code",
                         "loss_gripper_trajectory_transition_mask_fraction",
                         "loss_gripper_trajectory_persistence_mask_fraction",
                         "loss_ledger_gap",

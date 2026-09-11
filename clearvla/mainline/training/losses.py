@@ -101,6 +101,25 @@ def action_frame_weights(
     return raw / normalization.clamp_min(1e-8)
 
 
+def gripper_trajectory_step_weight(
+    horizon_weight: Tensor,
+    frame_weight: Tensor,
+    *,
+    mode: str,
+) -> Tensor:
+    """Resolve the frame-weight scope for gripper trajectory supervision."""
+
+    if horizon_weight.ndim != 1 or frame_weight.ndim != 2:
+        raise ValueError("gripper trajectory weights require [T] and [B,T]")
+    if int(frame_weight.shape[1]) != int(horizon_weight.shape[0]):
+        raise ValueError("gripper trajectory weights do not align with horizon")
+    if mode == "shared_frame":
+        return horizon_weight[None] * frame_weight
+    if mode == "horizon_only":
+        return horizon_weight[None].expand_as(frame_weight)
+    raise ValueError("unknown gripper trajectory weight mode")
+
+
 def causal_event_trajectory_mask(event_mask: Tensor) -> Tensor:
     """Select each continuous event row and every later trajectory row."""
 
@@ -1043,6 +1062,11 @@ def action_terms(
     )
     gripper_error_unweighted = residual_parts.gripper_field.square().mean(dim=-1)
     step_weight = horizon_weight[None] * frame_weight
+    trajectory_step_weight = gripper_trajectory_step_weight(
+        horizon_weight,
+        frame_weight,
+        mode=objective.gripper_trajectory_weight_mode,
+    )
     event_row_weight = balanced_event_row_weights(event_mask, horizon_weight)
     gripper_error = gripper_error_unweighted * event_row_weight
     physical_error_unweighted = (
@@ -1170,8 +1194,8 @@ def action_terms(
         event_mask
     )
     event_and_after_mask = causal_event_trajectory_mask(event_mask)
-    transition_weight = transition_mask * step_weight
-    persistence_weight = persistence_mask * step_weight
+    transition_weight = transition_mask * trajectory_step_weight
+    persistence_weight = persistence_mask * trajectory_step_weight
 
     def owned_trajectory_mean(rows: Tensor, weight: Tensor) -> Tensor:
         numerator = (rows * weight).sum()
@@ -1469,6 +1493,10 @@ def action_terms(
         "smooth_delta": smooth_delta,
         "physical_delta_consistency": physical_delta_consistency,
         "gripper_trajectory": gripper_trajectory,
+        "gripper_trajectory_weight_mode_code": prediction.new_tensor(
+            float(objective.gripper_trajectory_weight_mode == "horizon_only"),
+            dtype=torch.float32,
+        ),
         "gripper_trajectory_absolute": gripper_trajectory_absolute.detach(),
         "gripper_trajectory_delta": gripper_trajectory_delta.detach(),
         "gripper_trajectory_mask_fraction": event_and_after_mask.detach().mean(),

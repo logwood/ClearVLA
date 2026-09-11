@@ -1,11 +1,35 @@
 from dataclasses import replace
+from pathlib import Path
 
 import torch
 
-from clearvla.mainline.config import ExperimentConfig
+from clearvla.mainline.config import ExperimentConfig, config_from_mapping, load_config
 from clearvla.mainline.model.action_codec import anchor_horizon_weights
 from clearvla.mainline.model.intent import StatelessObjectIntentOrganizer
 from clearvla.mainline.training.losses import action_frame_weights
+
+
+def test_frame_scope_preset_differs_only_in_trajectory_scope_and_output() -> None:
+    root = Path(__file__).resolve().parents[1] / "configs/mainline"
+    base = load_config(root / "object_intent_dynamics_323_pen_shared_v1.json")
+    candidate = load_config(root / "object_intent_dynamics_323_pen_gripper_frame_scope_v1.json")
+    expected = replace(base, objectives=replace(
+        base.objectives, gripper_trajectory_weight_mode="horizon_only",
+    ), data=replace(base.data, output_dir=candidate.data.output_dir))
+    assert candidate == expected
+    assert base.objectives.gripper_trajectory_weight_mode == "shared_frame"
+    assert candidate.digest() != base.digest()
+    assert config_from_mapping(candidate.as_dict()) == candidate
+    assert "gripper_persistence_mode" not in candidate.as_dict()["objectives"]
+    rdt = load_config(root / "object_intent_dynamics_323_rdt_shared_v1.json")
+    assert rdt.objectives.gripper_trajectory_weight_mode == "shared_frame"
+    try:
+        replace(candidate, objectives=replace(candidate.objectives,
+            gripper_trajectory_weight_mode="typo")).validate()
+    except ValueError as error:
+        assert "gripper_trajectory_weight_mode" in str(error)
+    else:
+        raise AssertionError("invalid trajectory scope accepted")
 
 
 def test_event_motion_frame_weights_keep_all_rows_and_unit_mass() -> None:

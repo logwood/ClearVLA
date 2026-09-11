@@ -50,3 +50,22 @@ behavior curves. Acceptance must report language anchor RMS/gradients, frame
 weight range and weighted fractions, RDT boundary closure, all horizon bands,
 decoded gripper event P/R/F1, and the exact loss ledger. No early loss or
 internal language/weight activation is a behavior claim.
+
+## Pen trajectory frame-weight scope control
+
+The 2026-09-11 preset
+`object_intent_dynamics_323_pen_gripper_frame_scope_v1.json` differs from the
+Pen shared preset only in output path and
+`objectives.gripper_trajectory_weight_mode=horizon_only`. The `.03` gripper
+trajectory budget and deployment-cumulative operands stay fixed. Frame weights
+still apply to flow, decoded action, motion, smooth-delta and physical-delta
+consistency. Separately normalized transition/persistence means now omit their
+within-owner event/motion multiplier. This primarily tests cross-task-channel
+motion reweighting, not dropping events or reallocating the two owner budgets.
+
+Acceptance compares every matched epoch against `20260908-pen-shared-core`:
+full/arm/gripper and three horizon bands, decoded event P/R/F1/counts,
+post-event 1-2/3-6/7+, actual cumulative-branch error and branch disagreement.
+Do not claim success from a lower auxiliary loss alone. Log the mode code in
+`metrics.jsonl` and the objective console row. No acceleration, B-spline,
+geometry gain, new solver or other integration-line change is included.
