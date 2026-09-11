@@ -863,12 +863,40 @@ parameter-VJP worst absolute delta: 2.06e-6 (relative-L2 5.17e-6)
 The full small-model CUDA-Graph screen with `64 cases × B2` retained exact
 loss/result/RNG surfaces, zero result/gradient/optimizer/buffer outliers, and
 a maximum parameter delta of `9.13e-7` under the existing
-`atol=1e-6, rtol=2e-5` gate.  This is encouraging but not a promotion: the
-remote Pen/RDT snapshots used for the formal compatibility gate predate the
-`_batched_samples` interface, so their fail-closed probe correctly stopped
-before running (`batched raw-flow sampling ... no refiner was found`).  A
-version-local backport plus fresh Pen and RDT 256-case gates is required before
-claiming a production speedup.  No default profile enables this candidate.
+`atol=1e-6, rtol=2e-5` gate.  The versioned Pen/RDT snapshots were then given
+the same narrow interface by
+`scripts/backport_batched_raw_flow_interface.py` in the authorized remote
+lab.  The fresh `256 cases × B4` gates retained zero outliers for result,
+clipped gradient, optimizer, buffers and RNG.  As with the accepted
+mixed-safe path, the trainable observation backward has sparse last-bit tails:
+Pen reached `4.657e-6` in two parameter cases (frozen observation:
+`4.917e-7`, zero cases), and RDT reached `5.603e-6` in four cases (frozen:
+`1.463e-6`, one case).  RDT's `27–32/256` detached audit outliers are the
+pre-existing `loss_execution_terminal_target_cost_margin` diagnostic and do
+not enter backward.  Thus the candidate is compatible for frozen-observation
+or calibrated conditional use, but is not a strict bitwise certification for
+unfrozen CUDA updates.
+
+The matched remote B8/BF16 CUDA-Graph profile used 16 warm-up and 60 measured
+steps in three fresh processes per mode (same GPU, source snapshot and batch
+for each pair):
+
+| Variant / GPU | Unbatched mean | Batched mean | Mean ratio | Median step (unbatched → batched) |
+|---|---:|---:|---:|---:|
+| Pen / 6 | `23.8094 samples/s` | `24.1387 samples/s` | `1.0138x` (`+1.38%`) | `0.33600 → 0.33143 s` |
+| RDT / 5 | `22.6591 samples/s` | `22.7315 samples/s` | `1.0032x` (`+0.32%`) | `0.35307 → 0.35193 s` |
+
+The three pairwise Pen ratios were `1.988%`, `0.765%` and `1.394%`; RDT's
+were `-0.146%`, `+1.254%` and `-0.139%`.  These increments are within the
+fresh-process timing spread and are far below the standalone refiner's
+`1.719x`: CUDA Graphs already amortize most launch overhead, and raw-flow
+sampling is only a small fraction of the full training step.  The remote
+profiles are retained as
+`runs/pen_profile_raw_{unbatched,batched}_graph_b8_g6_20260911*.json` and
+`runs/rdt_profile_raw_{unbatched,batched}_graph_b8_g5_20260911*.json`, while
+the four 256-case reports are `runs/{pen,rdt}_batched_raw_independent_256_b4_*_20260911.json`.
+This candidate therefore remains a useful version-migration/frozen-observation
+tool, but it is not a path to the 2x target and no default profile enables it.
 
 ### Fast-RNG plus global cuDNN 10-FPS candidate (2026-09-10)
 
