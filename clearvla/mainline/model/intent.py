@@ -606,7 +606,15 @@ class CoarseActionIntent(nn.Module):
         _, intent_delta, _ = self.intent_read(
             query, intent.public_interval_carrier
         )
-        _, object_delta, _ = self.object_read(query, intent.public_object_memory)
+        # CALVIN may provide a language-selected, validity-aware K memory at
+        # the outlet seam.  All other outlets leave this optional field empty
+        # and retain the exact historical public object memory.
+        object_memory = (
+            intent.public_object_memory
+            if intent.selected_object_context is None
+            else intent.selected_object_context
+        )
+        _, object_delta, _ = self.object_read(query, object_memory)
         _, history_delta, _ = self.history_read(query, intent.history_memory)
         token = self.block(
             query

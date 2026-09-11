@@ -14,6 +14,10 @@ from ..training.acceleration_adapters import MainlineTrainingAccelerationAdapter
 from ..training.acceleration_contract import TrainingAccelerationAdapter
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from .action_contract import BottomOutput
+from .calvin_object_binding import (
+    CALVIN_OBJECT_BINDING_INTENT,
+    CalvinObjectBindingBridge,
+)
 from .component_contracts import ComponentSelection, modular_to_legacy_name
 from .components import (
     BridgeStage,
@@ -221,6 +225,16 @@ class ClearVLAMainlinePolicy(nn.Module):
             config,
             physical_action_dim=raw_codec.physical_dim,
         )
+        # Construct the CALVIN-only bridge after all shared owners so the
+        # component-initialized checkpoint preserves the shared RNG/parameter
+        # initialization exactly.  Pen/RDT/LIBERO do not construct this child.
+        calvin_object_binding = None
+        if selection.intent == CALVIN_OBJECT_BINDING_INTENT:
+            calvin_object_binding = CalvinObjectBindingBridge(
+                hidden=dims.hidden_size,
+                route_dim=obs.address_route_dim,
+                objects=top.object_slots,
+            )
 
         # Capture the exact old traversal before changing registrations.  This
         # ledger is consumed by optimizer/clipping code and by checkpoint
@@ -233,6 +247,11 @@ class ClearVLAMainlinePolicy(nn.Module):
             ("observation", raw_observation),
             ("action_codec", raw_codec),
             ("top", raw_top),
+            *(
+                (("calvin_object_binding", calvin_object_binding),)
+                if calvin_object_binding is not None
+                else ()
+            ),
             ("history_proposal", raw_history_proposal),
             ("factual_reader", raw_factual_reader),
             ("transition", raw_transition),
@@ -292,7 +311,11 @@ class ClearVLAMainlinePolicy(nn.Module):
             content_mod_scale=grounding_content_mod_scale,
             grounder=grounder,
         )
-        self.intent = IntentStage(organizer, coarse_action)
+        self.intent = IntentStage(
+            organizer,
+            coarse_action,
+            object_binding=calvin_object_binding,
+        )
         self.world = WorldStage(
             hidden=dims.hidden_size,
             action_dim=dims.action_dim,
@@ -466,6 +489,11 @@ class ClearVLAMainlinePolicy(nn.Module):
             facts=facts,
             collect_diagnostics=collect_diagnostics,
         )
+        intent, binding_metrics = self.intent.bind_object(
+            intent,
+            facts,
+            collect_diagnostics=collect_diagnostics,
+        )
         action_intent = intent.action_dock()
         coarse = self.intent.propose_action(action_intent)
         action_condition = PhysicalActionCondition.from_interval_action(
@@ -487,6 +515,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         top_metrics = {
             **grounding_context_metrics,
             **intent_metrics,
+            **binding_metrics,
             **world_metrics,
         }
         if collect_diagnostics:

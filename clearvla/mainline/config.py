@@ -319,8 +319,16 @@ class TopConfig:
     proposal_summary_tokens: int = 3
     goal_condition_dropout: float = 0.05
     action_history_condition_dropout: float = 0.10
+    # CALVIN-only task-role pointer at the S/coarse-action seam.  The default
+    # remains disabled so existing Pen/RDT/LIBERO config/checkpoint identities
+    # do not acquire dormant parameters.
+    calvin_object_binding: str = "disabled"
 
     def validate(self) -> None:
+        if self.calvin_object_binding not in {"disabled", "calvin_primary_v1"}:
+            raise ValueError(
+                "top.calvin_object_binding must be disabled or calvin_primary_v1"
+            )
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")
         if (

@@ -33,6 +33,7 @@ from .compiler import (
     ZeroPreservingObjectConsequence,
 )
 from .component_contracts import OutletActionOutput
+from .calvin_object_binding import CalvinObjectBindingBridge
 from .grounding import DenseObjectGrounder
 from .intent import CoarseActionIntent, StatelessObjectIntentOrganizer
 from .observation_contract import GroundingObservationBank, ObservationEvidence
@@ -354,13 +355,63 @@ class GroundingStage(nn.Module):
 class IntentStage(nn.Module):
     """S intent organization and the four-interval coarse action proposal."""
 
-    def __init__(nself, organizer: StatelessObjectIntentOrganizer, coarse_action: CoarseActionIntent) -> None:
+    def __init__(
+        nself,
+        organizer: StatelessObjectIntentOrganizer,
+        coarse_action: CoarseActionIntent,
+        object_binding: CalvinObjectBindingBridge | None = None,
+    ) -> None:
         super().__init__()
         nself.organizer = organizer
         nself.coarse_action = coarse_action
+        # This child exists only for the CALVIN component selection.  Keeping
+        # it at the intent/coarse seam prevents a dormant parameter set from
+        # changing Pen/RDT/LIBERO checkpoint ownership.
+        nself.calvin_object_binding = object_binding
 
     def organize(self, **kwargs: Any):
         return self.organizer(**kwargs)
+
+    def bind_object(
+        nself,
+        intent: ObjectIntentState,
+        facts: ObjectFactSet,
+        *,
+        collect_diagnostics: bool = False,
+    ) -> tuple[ObjectIntentState, dict[str, Tensor]]:
+        if nself.calvin_object_binding is None:
+            return intent, {}
+        result, metrics = nself.calvin_object_binding(
+            protected_goal=intent.protected_goal_set,
+            history_tokens=intent.history_tokens,
+            object_tokens=intent.object_tokens,
+            facts=facts,
+        )
+        bound = replace(
+            intent,
+            object_binding_pointer=result.pointer,
+            object_binding_selected_context=result.selected_context,
+            object_binding_selected_geometry=result.selected_geometry,
+        )
+        bound.validate(
+            horizon=int(intent.temporal_queries.shape[1]),
+            hidden=int(intent.public_interval_carrier.shape[-1]),
+        )
+        if not collect_diagnostics:
+            return bound, {}
+        return bound, metrics
+
+    def object_binding_loss(self, intent: ObjectIntentState, target: Any) -> Tensor:
+        if self.calvin_object_binding is None or target is None:
+            return intent.public_interval_carrier.new_zeros(())
+        if intent.object_binding_pointer is None:
+            raise RuntimeError("CALVIN binding target exists but pointer was not materialized")
+        coverage = getattr(target, "coverage", None)
+        return self.calvin_object_binding.supervised_loss(
+            intent.object_binding_pointer,
+            target.pointer,
+            coverage,
+        )
 
     def propose_action(self, intent: Any, **kwargs: Any):
         return self.coarse_action(intent, **kwargs)

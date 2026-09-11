@@ -3450,6 +3450,11 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     relabeled_intent = organize(relabeled_facts)
     expected_intent = intent.permute(permutation)
     for field in fields(type(intent)):
+        # CALVIN object binding is an optional outlet-scoped sidecar; shared
+        # Pen/RDT/LIBERO intents intentionally carry these fields as None.
+        if getattr(relabeled_intent, field.name) is None:
+            assert getattr(expected_intent, field.name) is None, field.name
+            continue
         assert torch.allclose(
             getattr(relabeled_intent, field.name),
             getattr(expected_intent, field.name),

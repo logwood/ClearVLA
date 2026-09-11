@@ -20,6 +20,7 @@ from ..v120_core.bspine import (
     BSPINE_DISABLED_IMPLEMENTATION,
 )
 from .action_contract import V120SeedContext
+from .calvin_object_binding import CALVIN_OBJECT_BINDING_INTENT
 from .compiler import ObjectPolicyPlanDeltaBank
 from .observation_contract import ObservationEvidence
 from .types import (
@@ -88,6 +89,11 @@ class ComponentSelection:
             terminal = "continuous_physical_v1"
             outlet = "pen_7d_continuous_v1"
         selection = cls(
+            intent=(
+                CALVIN_OBJECT_BINDING_INTENT
+                if str(config.top.calvin_object_binding) == "calvin_primary_v1"
+                else "stateless_object_intent_v1"
+            ),
             execution_bottom=_execution_bottom_selection(config),
             terminal_controller=terminal,
             outlet_adapter=outlet,
@@ -127,6 +133,13 @@ class ComponentSelection:
             raise ValueError("selected component ABI requires the complete Schema30 axes")
         if int(dims.action_basis_tokens) <= 0:
             raise ValueError("selected component ABI requires a positive basis count")
+        if self.intent == CALVIN_OBJECT_BINDING_INTENT:
+            if config.data.data_profile != "calvin_relative_7d_v1":
+                raise ValueError("CALVIN object binding is valid only for the CALVIN outlet")
+            if str(config.top.calvin_object_binding) != "calvin_primary_v1":
+                raise ValueError("CALVIN binding component requires top.calvin_object_binding=calvin_primary_v1")
+        elif str(config.top.calvin_object_binding) != "disabled":
+            raise ValueError("an object-binding top selection requires the CALVIN intent component")
 
     @classmethod
     def from_config_without_validation(
@@ -135,6 +148,11 @@ class ComponentSelection:
         profile = str(config.data.data_profile)
         if profile == "calvin_relative_7d_v1":
             return cls(
+                intent=(
+                    CALVIN_OBJECT_BINDING_INTENT
+                    if str(config.top.calvin_object_binding) == "calvin_primary_v1"
+                    else "stateless_object_intent_v1"
+                ),
                 execution_bottom=_execution_bottom_selection(config),
                 terminal_controller="calvin_binary_command_v1",
                 outlet_adapter="calvin_7d_binary_v1",
@@ -300,6 +318,7 @@ MODULAR_TO_LEGACY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("grounding.grounder.", "top.grounder."),
     ("intent.organizer.", "top.intent."),
     ("intent.coarse_action.", "top.coarse_action."),
+    ("intent.calvin_object_binding.", "calvin_object_binding."),
     ("world.dynamics.", "top.dynamics."),
     ("training_targets.teacher.", "top.teacher."),
     ("training_targets.recognizer.", "top.recognizer."),
