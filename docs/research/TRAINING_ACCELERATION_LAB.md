@@ -898,6 +898,14 @@ the four 256-case reports are `runs/{pen,rdt}_batched_raw_independent_256_b4_*_2
 This candidate therefore remains a useful version-migration/frozen-observation
 tool, but it is not a path to the 2x target and no default profile enables it.
 
+As a third migration check, the current mainline lab source (`d8a77a1`, Pen
+`_bspine_config`) was profiled once on GPU4 with the same B8/BF16 protocol:
+`24.6855 → 24.7041 samples/s` (`1.0008x`, `+0.08%`; median step
+`0.32408 → 0.32383 s`).  Its independent `256 × B4` batched gate already
+reported zero result/gradient/optimizer/buffer/RNG outliers and no parameter
+outlier (maximum parameter delta `1.177e-6`).  The exploratory B8 files are
+`runs/mainline_profile_raw_{unbatched,batched}_graph_b8_g4_20260911.json`.
+
 ### Fast-RNG plus global cuDNN 10-FPS candidate (2026-09-10)
 
 The `fast-rng` profile is a deliberately narrow, explicit opt-in.  It keeps
