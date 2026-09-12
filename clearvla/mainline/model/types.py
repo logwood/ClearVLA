@@ -629,8 +629,8 @@ class ActionIntentDock:
                 torch.allclose(
                     pointer_sum,
                     torch.ones_like(pointer_sum),
-                    atol=2e-4,
-                    rtol=2e-4,
+                    atol=2e-2,
+                    rtol=2e-2,
                 )
             ):
                 raise ValueError("action-intent object-binding pointer must sum to one")

@@ -66,7 +66,11 @@ class CalvinObjectBindingResult:
         if not bool(torch.isfinite(self.selected_context).all()):
             raise ValueError("CALVIN selected object context is non-finite")
         sums = self.pointer.float().sum(dim=-1)
-        if not bool(torch.allclose(sums, torch.ones_like(sums), atol=2e-4, rtol=2e-4)):
+        # The pointer is consumed in BF16 on the active path; softmax roundoff
+        # can exceed the FP32 contract tolerance while remaining numerically
+        # normalized.  Keep this a finite-boundary check, not an exact-sum
+        # requirement.
+        if not bool(torch.allclose(sums, torch.ones_like(sums), atol=2e-2, rtol=2e-2)):
             raise ValueError("CALVIN binding pointer must sum to one")
 
 
