@@ -965,6 +965,63 @@ not enabled by default.  Promotion requires either a deterministic raw-flow
 backward implementation or an explicitly approved, repeated calibrated
 envelope that includes the parameter state.
 
+### Integration staging plan (2026-09-12)
+
+No merge into the main worktree has been performed.  The target checkout is
+currently user-dirty (`codex/schema29-mainline`, `e62b1b7`) and the active
+CALVIN formal run has not reached its checkpoint boundary.  Switching the
+training profile or rebasing the target while that run is live would make the
+resulting checkpoint and performance comparison ambiguous.  The agreed
+integration window is therefore **after the run has produced its final
+checkpoint (or has been explicitly stopped) and after the model/ABI contract
+is frozen for that checkpoint**.
+
+The acceleration history is a stack, not a two-commit patch.  The portable
+acceleration core spans 45 commits from `d585417` through `47a298b` and was
+merged on this branch as `1bcb14e`.  The later merge `2de8a80` also contains
+unrelated bottom-FFN/composite-action and integration changes, so it must not
+be cherry-picked wholesale.  The current candidate increments are:
+
+* `75f05a1` — record the fast-RNG/cuDNN ceiling (evidence only);
+* `61497bc` — exact factual contraction and raw-flow probe interfaces;
+* `f4dc058` — versioned raw-flow backport tool and Pen/RDT evidence;
+* `6cafb55` — current-mainline migration profile.
+
+The first two entries are the code-bearing candidates.  The latter two are
+lab tooling/evidence and should be carried only when the receiving checkout
+needs the migration probes.  Before applying anything, make a clean
+integration checkout at the exact target commit and inspect both the file
+overlap and the merge result:
+
+```text
+git worktree add <clean-integration-dir> <target-commit>
+git diff --name-status <target-commit>...1bcb14e
+git merge-tree --write-tree <target-commit> 1bcb14e
+```
+
+Review the overlapping core files (compiler policy, acceleration adapters,
+training entry points, and tests) manually; a textually clean merge is not a
+semantic ABI review.  Apply the core in a controlled integration branch, then
+run the following gates before exposing it to the active executor:
+
+1. local contract/unit suite (`84 passed, 1 skipped` baseline);
+2. Pen and RDT 256-case equivalence, both frozen and unfrozen observation,
+   including result, clipped gradient, optimizer, buffers and exact RNG;
+3. checkpoint load plus one-step continuation from the current formal-run
+   checkpoint;
+4. same-GPU BF16 B8 profile with 16 warm-up and 60 measured steps, compared
+   with the recorded unbatched baseline;
+5. memory peak and ABI/state-key check, followed by a short rollback smoke.
+
+Promote only `factual-atomic` (opt-in) when these gates pass and a persistent
+compiler cache is available.  Keep `factual-shell-safe` as the cold-start
+fallback.  Do not enable batched raw-flow sampling or fast-RNG plus global
+cuDNN in the production default: raw-flow batching measured only `+1.38%`
+(Pen) and `+0.32%` (RDT) end-to-end and has unfrozen backward tails, while the
+10-FPS path remains conditional on a calibrated parameter envelope.  If any
+loss/result/optimizer/RNG or ABI gate regresses, leave the target checkout
+unchanged and retain the candidate only on this research branch.
+
 ### Decision
 
 Retain `factual-atomic` as the preferred opt-in B8 training candidate when a
