@@ -1,5 +1,10 @@
 """Dataset, cache and typed-batch loading for the clean mainline."""
 
+from .calvin_object_binding import (
+    CALVIN_OBJECT_BINDING_SIDECAR_SCHEMA,
+    CalvinObjectBindingSidecar,
+    calvin_episode_inventory_digest,
+)
 from .dataset import (
     CachedTokenPolicyWindowDataset,
     ObservedStateDatasetConfig,
@@ -13,6 +18,9 @@ from .token_store import DinoTokenEpisodeMeta, DinoV2TokenStore
 __all__ = [
     "ArrayNormalizer",
     "CachedTokenPolicyWindowDataset",
+    "CALVIN_OBJECT_BINDING_SIDECAR_SCHEMA",
+    "CalvinObjectBindingSidecar",
+    "calvin_episode_inventory_digest",
     "DinoTokenEpisodeMeta",
     "DinoV2TokenStore",
     "GoalTemplate",

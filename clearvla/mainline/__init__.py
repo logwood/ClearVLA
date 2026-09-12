@@ -10,13 +10,14 @@ model, training and deployment paths pass the migration gates documented in
 """
 
 from .config import ExperimentConfig, load_config
-from .interfaces import OnlinePolicyInput, TrainingBatch
+from .interfaces import CalvinObjectBindingTarget, OnlinePolicyInput, TrainingBatch
 from .manifest import ARCHITECTURE_MANIFEST
 
 __all__ = [
     "ARCHITECTURE_MANIFEST",
     "ExperimentConfig",
     "OnlinePolicyInput",
+    "CalvinObjectBindingTarget",
     "TrainingBatch",
     "load_config",
 ]

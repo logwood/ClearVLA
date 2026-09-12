@@ -262,14 +262,27 @@ weight merely to make one logged magnitude look larger.
     use current action-state as the gripper boundary and RDT uses the previous
     executed command; this same boundary owns row-zero delta, horizon-wide
     `grip-anchor`, cumulative decode, loss, and evaluation.
-12. Future observation/action/state evidence may affect detached Teacher or
+12. CALVIN's opt-in `calvin_primary_object_binding_v1` is an outlet-scoped
+    bridge at the S/coarse-action seam. It consumes protected language/history
+    and the completed G `ObjectFactSet`, emits a validity-masked K+1 pointer
+    (K=4 plus explicit null) and an independent `[B,1,H]` selected context,
+    and is the only new CALVIN condition read by coarse action. It does not
+    replace the K-object scene memory, enter W/P2 directly, add a slot-index
+    embedding, or construct any parameter for Pen/RDT/LIBERO. Invalid slots
+    have zero pointer mass and an all-invalid row is exact null with zero
+    selected context/geometry. Its pointer/position target is a
+    training-only sidecar keyed by source episode and causal center; privileged
+    scene observations never enter OnlinePolicyInput, Teacher, W/P2 or
+    deployment. `open_drawer` is a separate handle/drawer role and is not
+    covered by the color-block binding claim.
+13. Future observation/action/state evidence may affect detached Teacher or
     training targets only; replacing it cannot change deployment action.
-13. One optimizer owns every trainable parameter exactly once. Decoder-local
+14. One optimizer owns every trainable parameter exactly once. Decoder-local
     clipping precedes global clipping; finite post-clip values cannot hide a
     missing raw owner gradient.
-14. Formal runs fail closed on missing language mappings, source/config/
+15. Formal runs fail closed on missing language mappings, source/config/
     manifest mismatch, stale CandidateWorld identity and non-finite values.
-15. Checkpoints, tensor caches, raw logs and full probe dumps never enter
+16. Checkpoints, tensor caches, raw logs and full probe dumps never enter
     architecture-memory documents.
 
 ## Typed boundary summary
@@ -277,7 +290,7 @@ weight merely to make one logged magnitude look larger.
 | Boundary | Required semantics |
 |---|---|
 | `ObjectFactSet` | K=4 physical objects plus explicit null; one exported content value; observable object/camera probability and log probability |
-| `ActionIntentDock` | public S context only; no typed fact re-entry |
+| `ActionIntentDock` | public S context plus optional CALVIN selected `[B,1,H]` context; no typed fact re-entry or direct W/P2 pointer |
 | `PhysicalActionCondition` | four absolute physical interval means plus current-anchored adjacent deltas, `[B,4,14]` |
 | `ObjectWorldBelief` | compact current G belief; no goal/S/Teacher/noisy-action field |
 | `CandidateWorld` | atomic action-condition identity plus one `FutureObjectDynamics` |
@@ -350,7 +363,7 @@ The target slots and their current function sources are:
 | `ExecutionBottomStage` | `RestoredV120EvidenceBottom.forward` and `compile_evidence_view` | `BottomDecoderOutput`; no observation, world, Teacher or outlet identity input |
 | `TerminalActionController` | `EvidenceLatentMMDiTActionDecoder._read_output_heads` and every direct terminal `velocity_head` candidate read | physical velocity, motion state and optional outlet command state |
 | `OutletActionAdapter` | `PhysicalActionFieldCodec`, sampling finalization, outlet action terms and validation accumulation | canonical core field plus explicit deployed/native outlet result |
-| `TrainingTargetStage` | `teacher_supports`, `build_training_targets` and history-proposal target construction | training-only detached Teacher and named target bundle |
+| `TrainingTargetStage` | `teacher_supports`, `build_training_targets` and history-proposal target construction | training-only detached Teacher, named target bundle and optional CALVIN sidecar pointer |
 
 These boundary rules are non-negotiable:
 
@@ -626,6 +639,22 @@ E8 chart continuity; it is never model evidence. Causal regions are admitted
 only on the training surface. Primary validation/test remain strict, and
 bounded `val_prefix`/`val_tail` deployment panels use isolated metrics that
 cannot select the best checkpoint.
+
+### CALVIN object-binding outlet
+
+CALVIN's native relative-command and binary-gripper adapter remains unchanged
+for the baseline outlet. The opt-in `calvin_primary_object_binding_v1`
+component adds only the language-to-object bridge described above. Its
+training target is a separate `clearvla-calvin-object-binding-v1` NPZ sidecar
+with episode/center keys, a soft K+1 pointer (four object slots plus null),
+coverage, ambiguity, a sorted episode-inventory SHA-256 and the split-manifest
+file SHA-256. The loader validates
+every model-facing window before materialization and rejects missing or
+duplicate joins. Sidecar provenance is serialized independently from the raw
+HDF5/DINO cache identity. Deployment and closed-loop evaluation do not read
+the sidecar or privileged simulator `scene_obs`. Color-block tasks and
+`open_drawer`/handle tasks are reported as separate role panels; a color
+binding result does not imply drawer-role coverage.
 
 ### Pen/RDT gripper boundary decision
 

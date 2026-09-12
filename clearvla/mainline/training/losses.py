@@ -1680,6 +1680,8 @@ def compose_losses(
     top_targets: ObjectTopTrainingTargets,
     predicted_dynamics: FutureObjectDynamics,
     action_codec: PhysicalActionFieldCodec,
+    calvin_object_binding_loss: Tensor | None = None,
+    calvin_object_binding_action_compatibility_loss: Tensor | None = None,
     collect_diagnostics: bool = False,
     collect_execution_diagnostics: bool | None = None,
 ) -> LossLedger:
@@ -1711,6 +1713,16 @@ def compose_losses(
         collect_diagnostics=collect_diagnostics,
     )
     objective = config.objectives
+    binding_loss = (
+        action["action_flow"].new_zeros(())
+        if calvin_object_binding_loss is None
+        else calvin_object_binding_loss
+    )
+    binding_compatibility_loss = (
+        action["action_flow"].new_zeros(())
+        if calvin_object_binding_action_compatibility_loss is None
+        else calvin_object_binding_action_compatibility_loss
+    )
     action_group = (
         action["action_flow"]
         + objective.decoded_action * action["decoded_action"]
@@ -1720,6 +1732,8 @@ def compose_losses(
         + objective.smooth_delta * action["smooth_delta"]
         + objective.physical_delta_consistency * action["physical_delta_consistency"]
         + objective.proposal * top_targets.history_proposal_loss
+        + objective.calvin_object_binding_action_compatibility
+        * binding_compatibility_loss
     )
     intent_structure_core = (
         0.25 * top_targets.object_reconstruction_loss
@@ -1743,6 +1757,7 @@ def compose_losses(
         + objective.flow_smoothness * geometry["flow_smoothness"]
         + objective.flow_uncertainty * geometry["flow_uncertainty"]
         + objective.flow_refinement_sequence * geometry["flow_refinement_sequence"]
+        + objective.calvin_object_binding * binding_loss
     )
     execution_group = objective.execution_value * execution["execution_value"]
     groups = {
@@ -1806,6 +1821,11 @@ def compose_losses(
         "flow_refinement_sequence": (
             objective.flow_refinement_sequence * geometry["flow_refinement_sequence"]
         ),
+        "calvin_object_binding": objective.calvin_object_binding * binding_loss,
+        "calvin_object_binding_action_compatibility": (
+            objective.calvin_object_binding_action_compatibility
+            * binding_compatibility_loss
+        ),
     }
     terms = {
         **action,
@@ -1817,6 +1837,8 @@ def compose_losses(
         "object_reconstruction": top_targets.object_reconstruction_loss,
         "coarse_action": top_targets.coarse_action_loss,
         "history_action_proposal": top_targets.history_proposal_loss,
+        "calvin_object_binding": binding_loss,
+        "calvin_object_binding_action_compatibility": binding_compatibility_loss,
     }
     ledger = LossLedger(
         total=action_group + representation_group + execution_group,

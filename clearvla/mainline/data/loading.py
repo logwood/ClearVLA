@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
@@ -55,12 +56,17 @@ from ..config import ExperimentConfig
 from ..interfaces import (
     ActionSupervision,
     AuditMetadata,
+    CalvinObjectBindingTarget,
     CurrentObservation,
     FutureSupervision,
     GoalCondition,
     ObservableHistory,
     OnlinePolicyInput,
     TrainingBatch,
+)
+from .calvin_object_binding import (
+    CalvinObjectBindingSidecar,
+    calvin_episode_inventory_digest,
 )
 from .dataset import (
     CachedTokenPolicyWindowDataset,
@@ -156,6 +162,7 @@ class MainlineDataBundle:
     data_profile_metadata: dict[str, object] = field(default_factory=dict)
     split_metadata: dict[str, object] = field(default_factory=dict)
     normalizer_metadata: dict[str, object] = field(default_factory=dict)
+    calvin_object_binding_metadata: dict[str, object] = field(default_factory=dict)
 
     @property
     def is_multitask(self) -> bool:
@@ -575,6 +582,25 @@ def _load_mainline_data(
             "schema": "clearvla-ordered-counts-split-v1",
             "split_counts": {name: len(values) for name, values in split_ids.items()},
         }
+    object_binding_sidecar = None
+    object_binding_metadata: dict[str, object] = {}
+    if data.calvin_object_binding_sidecar:
+        # The producer records its own source/manifest digests.  Until every
+        # historical split manifest exposes one uniform digest key, retain
+        # those values as independent serialized provenance and make the
+        # episode/center join itself fail closed below.
+        object_binding_sidecar = CalvinObjectBindingSidecar.load(
+            data.calvin_object_binding_sidecar,
+            expected_source_digest=calvin_episode_inventory_digest(
+                episode.episode_id for episode in episodes
+            ),
+            expected_manifest_digest=(
+                hashlib.sha256(Path(data.split_manifest).read_bytes()).hexdigest()
+                if data.split_mode == "episode-manifest"
+                else None
+            ),
+        )
+        object_binding_metadata = object_binding_sidecar.metadata()
     if materialized_splits is None:
         materialized_names = (
             RDT_MULTITASK_INTERNAL_SPLITS if data.task_selection_manifest else tuple(split_ids)
@@ -668,6 +694,7 @@ def _load_mainline_data(
             config=selected_config,
             gripper_transition_boundary=profile.gripper_transition_boundary,
             allowed_boundary_regions=allowed_regions,
+            object_binding_sidecar=object_binding_sidecar,
         )
         datasets[name] = CachedTokenPolicyWindowDataset(
             base,
@@ -778,6 +805,7 @@ def _load_mainline_data(
         },
         split_metadata=split_metadata,
         normalizer_metadata=normalizer_metadata,
+        calvin_object_binding_metadata=object_binding_metadata,
     )
 
 
@@ -941,7 +969,28 @@ def to_training_batch(
             else _audit_tensor(batch, "frame_progress", dtype=torch.float32)
         ),
     )
-    result = TrainingBatch(online=online, action_target=action, future=future, audit=audit)
+    binding_target = None
+    if config.top.calvin_object_binding == "calvin_primary_v1":
+        binding_target = CalvinObjectBindingTarget(
+            pointer=_device_tensor(
+                batch, "calvin_binding_pointer", device=device, dtype=torch.float32
+            ),
+            coverage=_device_tensor(
+                batch, "calvin_binding_coverage", device=device, dtype=torch.float32
+            ),
+            ambiguity=_device_tensor(
+                batch, "calvin_binding_ambiguity", device=device, dtype=torch.float32
+            ),
+            episode_index=_audit_tensor(batch, "episode_idx", dtype=torch.long),
+            center=_audit_tensor(batch, "center_index", dtype=torch.long),
+        )
+    result = TrainingBatch(
+        online=online,
+        action_target=action,
+        future=future,
+        audit=audit,
+        calvin_object_binding=binding_target,
+    )
     result.validate(config)
     return result
 

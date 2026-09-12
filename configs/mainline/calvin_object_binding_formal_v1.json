@@ -14,6 +14,7 @@
     "wrist_camera_key": "observations/images/cam_right_wrist",
     "split_mode": "episode-manifest",
     "split_manifest": "/data/senwang/data/calvin/converted/abc_d_full_raw_overlay_v2_splits.json",
+    "calvin_object_binding_sidecar": "/data/senwang/data/calvin/targets/abc_d_full_object_binding_v1.npz",
     "train_episodes": 0,
     "val_episodes": 0,
     "test_episodes": 0,
@@ -29,7 +30,9 @@
   },
   "objectives": {
     "gripper_command": 0.1,
-    "gripper_event_threshold": 0.1
+    "gripper_event_threshold": 0.1,
+    "calvin_object_binding": 0.05,
+    "calvin_object_binding_action_compatibility": 0.05
   },
   "optimizer": {
     "epochs": 20,

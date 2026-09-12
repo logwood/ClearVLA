@@ -84,6 +84,9 @@ class DataConfig:
     # identity profile.  Other source charts must opt into a threshold rather
     # than silently borrowing raw units from another dataset.
     sampling_gripper_event_threshold: float | None = None
+    # CALVIN-only training target sidecar. It is separate from the raw
+    # HDF5/cache identity and is never an online-policy input.
+    calvin_object_binding_sidecar: str = ""
     # Selects which causal episode centers are admitted for training. The
     # strict default is omitted from serialization to preserve old identities.
     window_boundary_contract: str = STRICT_COMPLETE_V1
@@ -147,6 +150,8 @@ class DataConfig:
             raise ValueError("image-store LRU capacity must be non-negative and files positive")
         if not isinstance(self.task_filter, str):
             raise ValueError("data.task_filter must be a string")
+        if not isinstance(self.calvin_object_binding_sidecar, str):
+            raise ValueError("data.calvin_object_binding_sidecar must be a string")
         if self.split_mode == "ordered-counts":
             if self.split_manifest or self.task_selection_manifest or self.normalizer_artifact:
                 raise ValueError(
@@ -552,6 +557,11 @@ class ObjectiveConfig:
     arm_motion_threshold: float = 0.02
     horizon_tail_emphasis: float = 0.20
     horizon_first_step_protection: float = 0.05
+    # CALVIN-only language-to-object binding terms. They remain zero on the
+    # default Pen/RDT/LIBERO paths and are omitted from their serialized
+    # payloads by ExperimentConfig.as_dict().
+    calvin_object_binding: float = 0.0
+    calvin_object_binding_action_compatibility: float = 0.0
 
     def validate(self) -> None:
         for name, value in asdict(self).items():
@@ -676,6 +686,41 @@ class ExperimentConfig:
             raise ValueError("data profile width must align with dimensions.action_dim")
         if profile.output_dim != self.dimensions.state_dim:
             raise ValueError("data profile width must align with dimensions.state_dim")
+        binding = str(self.top.calvin_object_binding)
+        sidecar = str(self.data.calvin_object_binding_sidecar)
+        pointer_weight = float(self.objectives.calvin_object_binding)
+        compatibility_weight = float(
+            self.objectives.calvin_object_binding_action_compatibility
+        )
+        if binding == "calvin_primary_v1":
+            if profile.name != "calvin_relative_7d_v1":
+                raise ValueError(
+                    "CALVIN object binding is valid only for the CALVIN action profile"
+                )
+            if not sidecar.strip():
+                raise ValueError(
+                    "CALVIN object binding requires data.calvin_object_binding_sidecar"
+                )
+            if pointer_weight <= 0.0 or compatibility_weight <= 0.0:
+                raise ValueError(
+                    "CALVIN object binding requires positive pointer and "
+                    "action-compatibility weights"
+                )
+        else:
+            if sidecar.strip():
+                raise ValueError(
+                    "calvin_object_binding_sidecar is valid only when the CALVIN "
+                    "binding is enabled"
+                )
+            if pointer_weight != 0.0 or compatibility_weight != 0.0:
+                raise ValueError(
+                    "CALVIN object-binding objective weights must be zero when "
+                    "the binding is disabled"
+                )
+        if profile.name != "calvin_relative_7d_v1" and binding != "disabled":
+            raise ValueError(
+                "non-CALVIN profiles must keep top.calvin_object_binding disabled"
+            )
         if self.data.window_boundary_contract in {
             CAUSAL_PREFIX_V1,
             CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
@@ -760,6 +805,19 @@ class ExperimentConfig:
             # Old configs acquire the strict dataclass default when parsed;
             # omitting it keeps their serialized/digest identity unchanged.
             data.pop("window_boundary_contract", None)
+        if not self.data.calvin_object_binding_sidecar:
+            data.pop("calvin_object_binding_sidecar", None)
+        top = cast(dict[str, object], payload["top"])
+        if self.top.calvin_object_binding == "disabled":
+            # Preserve the pre-binding Pen/RDT/LIBERO config and digest ABI.
+            top.pop("calvin_object_binding", None)
+        objectives = cast(dict[str, object], payload["objectives"])
+        if (
+            self.objectives.calvin_object_binding == 0.0
+            and self.objectives.calvin_object_binding_action_compatibility == 0.0
+        ):
+            objectives.pop("calvin_object_binding", None)
+            objectives.pop("calvin_object_binding_action_compatibility", None)
         bottom = cast(dict[str, object], payload["bottom"])
         if self.bottom.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
             for name in (
@@ -795,6 +853,7 @@ class ExperimentConfig:
                 "split_manifest",
                 "task_selection_manifest",
                 "normalizer_artifact",
+                "calvin_object_binding_sidecar",
             ):
                 data.pop(name, None)
             payload["data"] = data

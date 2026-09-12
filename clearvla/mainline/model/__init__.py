@@ -5,6 +5,12 @@ single typed ingress into the retained bottom action model.
 """
 
 from .action_contract import BottomDecoderOutput, BottomOutput
+from .calvin_object_binding import (
+    CALVIN_OBJECT_BINDING_COMPONENT,
+    CALVIN_OBJECT_BINDING_INTENT,
+    CalvinObjectBindingBridge,
+    CalvinObjectBindingResult,
+)
 from .component_contracts import (
     COMPONENT_ABI_REVISION,
     ComponentSelection,
@@ -77,9 +83,13 @@ from .types import (
 
 __all__ = [
     "ActionIntentDock",
+    "CALVIN_OBJECT_BINDING_COMPONENT",
+    "CALVIN_OBJECT_BINDING_INTENT",
     "COMPONENT_ABI_REVISION",
     "ComponentSelection",
     "CandidateWorld",
+    "CalvinObjectBindingBridge",
+    "CalvinObjectBindingResult",
     "BottomOutput",
     "BottomDecoderOutput",
     "BridgeStage",

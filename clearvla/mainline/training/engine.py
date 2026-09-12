@@ -737,6 +737,20 @@ class MainlineTrainingEngine:
             require_execution_supervision=True,
             collect_diagnostics=collect_diagnostics,
         )
+        binding_loss = self.model.intent.object_binding_loss(
+            encoded.training_state.top.intent,
+            batch.calvin_object_binding,
+        )
+        # This is the exact deployable coarse-action reconstruction target,
+        # evaluated through the optional selected-context route.  Giving it an
+        # explicit CALVIN-only weight makes the context gate and coarse reader
+        # trainable during the adapter gate instead of supervising only an
+        # action-disconnected pointer.
+        binding_compatibility_loss = (
+            top_targets.coarse_action_loss
+            if batch.calvin_object_binding is not None
+            else binding_loss.new_zeros(())
+        )
         ledger = compose_losses(
             self.config,
             policy_output=output,
@@ -747,6 +761,10 @@ class MainlineTrainingEngine:
             top_targets=top_targets,
             predicted_dynamics=encoded.cache.top.predicted_dynamics,
             action_codec=self.model.outlet_adapter.codec,
+            calvin_object_binding_loss=binding_loss,
+            calvin_object_binding_action_compatibility_loss=(
+                binding_compatibility_loss
+            ),
             collect_diagnostics=collect_diagnostics,
             collect_execution_diagnostics=(
                 collect_diagnostics
@@ -759,6 +777,21 @@ class MainlineTrainingEngine:
             ),
         )
         metrics = {**encoded.metrics, **teacher_metrics, **output.metrics}
+        if batch.calvin_object_binding is not None:
+            metrics.update(
+                {
+                    "calvin_binding_supervised_loss": binding_loss.detach(),
+                    "calvin_binding_action_compatibility_loss": (
+                        binding_compatibility_loss.detach()
+                    ),
+                    "calvin_binding_target_coverage": (
+                        batch.calvin_object_binding.coverage.detach().float().mean()
+                    ),
+                    "calvin_binding_target_ambiguity": (
+                        batch.calvin_object_binding.ambiguity.detach().float().mean()
+                    ),
+                }
+            )
         if collect_diagnostics:
             metrics.update(self._audit_progress_metrics(batch, encoded))
         return ledger, metrics

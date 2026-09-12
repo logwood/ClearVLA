@@ -578,6 +578,7 @@ def _data_state(
         "action_normalizer": bundle.action_normalizer.to_dict(),
         "state_normalizer": bundle.state_normalizer.to_dict(),
         "goal": bundle.goal.metadata,
+        "calvin_object_binding": bundle.calvin_object_binding_metadata,
     }
     state["deployment_abi"] = build_deployment_abi(
         config,
@@ -2155,6 +2156,7 @@ def main() -> None:
             "gripper_indices": list(bundle.gripper_indices),
             "sampling_gripper_event_threshold": bundle.gripper_event_threshold,
             "task_registry": bundle.task_registry_summary(),
+            "calvin_object_binding": bundle.calvin_object_binding_metadata,
         },
         "skipped": list(bundle.skipped),
         "information_sampling": getattr(

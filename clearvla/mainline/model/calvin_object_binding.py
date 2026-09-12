@@ -6,26 +6,27 @@ blue block rather than the red block).  This module provides that pointer as
 an outlet-scoped adapter.  It never reads privileged ``scene_obs`` and it is
 not constructed for Pen/RDT/LIBERO.
 
-The adapter is intentionally conservative at initialization: its context
-blend is zero, so a component-initialized checkpoint starts with the old
-coarse proposal.  The pointer is still available for its own supervision and
-diagnostics; training can open the bounded blend after the pointer becomes
-useful.
+The adapter starts with a small bounded context route.  This makes the frozen
+action-boundary intervention and owner VJP observable before short training;
+it is still an explicitly new CALVIN component identity rather than an exact
+resume alias for an older checkpoint.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
 
 from .types import ObjectFactSet
 
-
 CALVIN_OBJECT_BINDING_COMPONENT = "calvin_primary_object_binding_v1"
-CALVIN_OBJECT_BINDING_INTENT = "stateless_object_intent_calvin_binding_v1"
+# ComponentSelection.intent serializes the outlet-scoped implementation ID.
+# Keep one canonical value so policy construction cannot compare against a
+# different alias and silently omit the bridge.
+CALVIN_OBJECT_BINDING_INTENT = CALVIN_OBJECT_BINDING_COMPONENT
 
 
 def _normalized_entropy(probability: Tensor) -> Tensor:
@@ -96,6 +97,7 @@ class CalvinObjectBindingBridge(nn.Module):
         self.goal_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.object_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.route_projection = nn.Linear(3 * route_dim, hidden, bias=False)
+        self.coordinate_projection = nn.Linear(2, hidden, bias=False)
         self.scorer = nn.Sequential(
             nn.LayerNorm(2 * hidden, elementwise_affine=False),
             nn.Linear(2 * hidden, hidden, bias=False),
@@ -112,9 +114,14 @@ class CalvinObjectBindingBridge(nn.Module):
     def _object_features(self, object_tokens: Tensor, facts: ObjectFactSet) -> Tensor:
         routes = torch.cat((facts.semantic, facts.appearance, facts.geometry), dim=-1)
         route_context = self.route_projection(routes.to(dtype=object_tokens.dtype))
+        coordinate_context = self.coordinate_projection(
+            facts.coordinates.to(device=object_tokens.device, dtype=object_tokens.dtype)
+        )
         # Keep the route sidecar bounded relative to the learned visual token;
         # it is a selector feature, not a replacement for G's content value.
-        return self.object_norm(object_tokens + 0.25 * route_context)
+        return self.object_norm(
+            object_tokens + 0.25 * route_context + 0.10 * coordinate_context
+        )
 
     @staticmethod
     def _masked_pointer(logits: Tensor, null_logits: Tensor, valid: Tensor) -> Tensor:
@@ -170,7 +177,6 @@ class CalvinObjectBindingBridge(nn.Module):
         real_pointer = pointer[:, :objects]
         valid_mass = real_pointer.sum(dim=-1, keepdim=True)
         selected = (real_pointer[..., None] * features).sum(dim=1, keepdim=True)
-        selected = selected / valid_mass[..., None].clamp_min(1e-6)
         selected = torch.where(
             valid_mass[..., None] > 1e-6,
             selected,
@@ -182,7 +188,7 @@ class CalvinObjectBindingBridge(nn.Module):
         geometry = facts.coordinates.float()
         selected_geometry = (
             real_pointer.float()[..., None] * geometry
-        ).sum(dim=1) / valid_mass.float().clamp_min(1e-6)
+        ).sum(dim=1)
         selected_geometry = torch.where(
             valid_mass.float() > 1e-6,
             selected_geometry,
@@ -236,7 +242,6 @@ class CalvinObjectBindingBridge(nn.Module):
             raise ValueError("CALVIN binding coverage must be [B] or [B,1]")
         weight = coverage.to(device=pointer.device, dtype=torch.float32).clamp(0.0, 1.0)
         return (row_loss * weight).sum() / weight.sum().clamp_min(1.0)
-
 
 __all__ = [
     "CALVIN_OBJECT_BINDING_COMPONENT",

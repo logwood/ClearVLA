@@ -26,6 +26,7 @@ from .action_codec import (
     binary_gripper_command_from_logits,
 )
 from .action_contract import ActionQueryEncoder, BottomDecoderOutput, V120SeedContext
+from .calvin_object_binding import CalvinObjectBindingBridge
 from .compiler import (
     ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
@@ -33,7 +34,6 @@ from .compiler import (
     ZeroPreservingObjectConsequence,
 )
 from .component_contracts import OutletActionOutput
-from .calvin_object_binding import CalvinObjectBindingBridge
 from .grounding import DenseObjectGrounder
 from .intent import CoarseActionIntent, StatelessObjectIntentOrganizer
 from .observation_contract import GroundingObservationBank, ObservationEvidence
@@ -401,12 +401,16 @@ class IntentStage(nn.Module):
             return bound, {}
         return bound, metrics
 
-    def object_binding_loss(self, intent: ObjectIntentState, target: Any) -> Tensor:
+    def object_binding_loss(
+        self,
+        intent: ObjectIntentState,
+        target: Any,
+    ) -> Tensor:
         if self.calvin_object_binding is None or target is None:
             return intent.public_interval_carrier.new_zeros(())
         if intent.object_binding_pointer is None:
             raise RuntimeError("CALVIN binding target exists but pointer was not materialized")
-        coverage = getattr(target, "coverage", None)
+        coverage = target.effective_weight()
         return self.calvin_object_binding.supervised_loss(
             intent.object_binding_pointer,
             target.pointer,

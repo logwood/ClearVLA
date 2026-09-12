@@ -234,10 +234,11 @@ def build_optimizer(
         eps=config.optimizer.epsilon,
         **optimizer_kwargs,
     )
-    role_counts = {
-        role: sum(len(grouped.get((role, decay), ())) for decay in (False, True))
-        for role, _ in ROLE_PREFIXES
-    }
+    role_counts = {}
+    for role, _ in ROLE_PREFIXES:
+        count = sum(len(grouped.get((role, decay), ())) for decay in (False, True))
+        if count:
+            role_counts[role] = count
     for role, _ in OPTIONAL_ROLE_PREFIXES:
         count = sum(len(grouped.get((role, decay), ())) for decay in (False, True))
         if count:

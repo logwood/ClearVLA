@@ -32,6 +32,7 @@ from clearvla.data.window_boundaries import (
 from clearvla.vision.decoded_image_store import DecodedImageStore
 from clearvla.vision.online_store import OnlineVisualStore
 
+from .calvin_object_binding import CalvinObjectBindingSidecar
 from .normalizer import ArrayNormalizer
 from .token_store import DinoV2TokenStore
 
@@ -146,6 +147,7 @@ class ObservedStateWindowDataset(Dataset):
         config: ObservedStateDatasetConfig,
         gripper_transition_boundary: str = "current_action_state",
         allowed_boundary_regions: tuple[str, ...] | None = None,
+        object_binding_sidecar: CalvinObjectBindingSidecar | None = None,
     ) -> None:
         super().__init__()
         config.validate()
@@ -164,6 +166,7 @@ class ObservedStateWindowDataset(Dataset):
                 "gripper transition boundary must be current_action_state or previous_command"
             )
         self.gripper_transition_boundary = str(gripper_transition_boundary)
+        self.object_binding_sidecar = object_binding_sidecar
         if allowed_boundary_regions is not None:
             selected_regions = tuple(str(value) for value in allowed_boundary_regions)
             if (
@@ -234,6 +237,13 @@ class ObservedStateWindowDataset(Dataset):
                 self.refs.append(ObservedWindowRef(episode_idx, center, region))
         if not self.refs:
             raise ValueError("mainline dataset has no valid 48-frame windows")
+        if self.object_binding_sidecar is not None:
+            self.object_binding_sidecar.require_complete(
+                (
+                    (str(episodes[ref.episode_idx].episode_id), int(ref.center))
+                    for ref in self.refs
+                )
+            )
 
     @property
     def boundary_regions(self) -> np.ndarray:
@@ -481,6 +491,27 @@ class ObservedStateWindowDataset(Dataset):
             "history_obs_image": history_rgb,
             "history_keys": torch.from_numpy(history_keys),
             "future_keys": torch.from_numpy(future_keys),
+            **(
+                {
+                    "calvin_binding_pointer": torch.from_numpy(
+                        self.object_binding_sidecar.lookup(
+                            str(episode.episode_id), int(center)
+                        )[0].copy()
+                    ),
+                    "calvin_binding_coverage": torch.from_numpy(
+                        self.object_binding_sidecar.lookup(
+                            str(episode.episode_id), int(center)
+                        )[1].copy()
+                    ),
+                    "calvin_binding_ambiguity": torch.from_numpy(
+                        self.object_binding_sidecar.lookup(
+                            str(episode.episode_id), int(center)
+                        )[2].copy()
+                    ),
+                }
+                if self.object_binding_sidecar is not None
+                else {}
+            ),
         }
 
 
