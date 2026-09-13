@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from ..calvin_binding_contract import CALVIN_OBJECT_BINDING_TARGET_COUNT
 from ..manifest import INTERVALS
 
 INTERVAL_NAMES = ("h4_8", "h8_16", "h16_32", "h32_48")
@@ -586,13 +587,12 @@ class ActionIntentDock:
     public_interval_carrier: Tensor  # [B,I,H]
     history_memory: Tensor  # [B,L,H]
     public_object_memory: Tensor  # [B,K,H]
-    # Optional outlet-scoped replacement for the K object memory.  The shared
-    # Pen/RDT/LIBERO paths leave this ``None`` and therefore retain the exact
-    # historical coarse read.  CALVIN's object-binding bridge fills it with a
-    # validity-aware, language-selected K memory without entering W directly.
+    # Optional outlet-scoped additional context.  The shared Pen/RDT/LIBERO
+    # paths leave this ``None`` and therefore retain the exact historical
+    # coarse read.  CALVIN's object-binding bridge fills it with one
+    # validity-aware, language-selected summary token; the complete K-object
+    # memory remains available beside it and neither route enters W directly.
     selected_object_context: Tensor | None = None  # [B,1,H]
-    object_binding_pointer: Tensor | None = None  # [B,K+1], final column null
-    object_binding_selected_geometry: Tensor | None = None  # [B,2]
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -607,7 +607,6 @@ class ActionIntentDock:
             self.public_object_memory.shape[0]
         ) != batch:
             raise ValueError("action-intent object memory must be [B,K,H]")
-        objects = int(self.public_object_memory.shape[1])
         if int(self.public_object_memory.shape[2]) != hidden:
             raise ValueError("action-intent object memory has the wrong hidden width")
         if self.selected_object_context is not None:
@@ -615,30 +614,6 @@ class ActionIntentDock:
                 self.selected_object_context,
                 (batch, 1, hidden),
                 "action-intent selected object context",
-            )
-        if self.object_binding_pointer is not None:
-            _shape(
-                self.object_binding_pointer,
-                (batch, objects + 1),
-                "action-intent object-binding pointer",
-            )
-            if not bool(torch.isfinite(self.object_binding_pointer).all()):
-                raise ValueError("action-intent object-binding pointer is non-finite")
-            pointer_sum = self.object_binding_pointer.float().sum(dim=-1)
-            if not bool(
-                torch.allclose(
-                    pointer_sum,
-                    torch.ones_like(pointer_sum),
-                    atol=2e-2,
-                    rtol=2e-2,
-                )
-            ):
-                raise ValueError("action-intent object-binding pointer must sum to one")
-        if self.object_binding_selected_geometry is not None:
-            _shape(
-                self.object_binding_selected_geometry,
-                (batch, 2),
-                "action-intent selected object geometry",
             )
 
 
@@ -723,9 +698,9 @@ class ObjectIntentState:
     # CALVIN-only task-role binding.  These are optional so the shared
     # checkpoint/runtime ABI remains unchanged for outlets that do not select
     # the binding component.
-    object_binding_pointer: Tensor | None = None  # [B,K+1], final column null
+    object_binding_pointer: Tensor | None = None  # [B,K+1], diagnostic pointer
+    object_binding_role_distribution: Tensor | None = None  # [B,R+1], final null
     object_binding_selected_context: Tensor | None = None  # [B,1,H]
-    object_binding_selected_geometry: Tensor | None = None  # [B,2]
 
     @property
     def interval_queries(self) -> Tensor:
@@ -763,8 +738,6 @@ class ObjectIntentState:
             history_memory=self.history_tokens,
             public_object_memory=self.object_tokens,
             selected_object_context=self.object_binding_selected_context,
-            object_binding_pointer=self.object_binding_pointer,
-            object_binding_selected_geometry=self.object_binding_selected_geometry,
         )
 
     def factual_dock(self) -> FactualIntentDock:
@@ -841,18 +814,41 @@ class ObjectIntentState:
             )
             if not bool(torch.isfinite(self.object_binding_pointer).all()):
                 raise ValueError("object-binding pointer is non-finite")
+            if bool((self.object_binding_pointer < -1e-6).any()):
+                raise ValueError("object-binding pointer is negative")
+            pointer_sum = self.object_binding_pointer.float().sum(dim=-1)
+            if not bool(
+                torch.allclose(
+                    pointer_sum,
+                    torch.ones_like(pointer_sum),
+                    atol=2e-2,
+                    rtol=2e-2,
+                )
+            ):
+                raise ValueError("object-binding pointer must sum to one")
+        if self.object_binding_role_distribution is not None:
+            _shape(
+                self.object_binding_role_distribution,
+                (batch, CALVIN_OBJECT_BINDING_TARGET_COUNT),
+                "object-binding role distribution",
+            )
+            if not bool(torch.isfinite(self.object_binding_role_distribution).all()):
+                raise ValueError("object-binding role distribution is non-finite")
+            if bool((self.object_binding_role_distribution < -1e-6).any()):
+                raise ValueError("object-binding role distribution is negative")
+            role_sum = self.object_binding_role_distribution.float().sum(dim=-1)
+            if not bool(
+                torch.allclose(role_sum, torch.ones_like(role_sum), atol=2e-2, rtol=2e-2)
+            ):
+                raise ValueError("object-binding role distribution must sum to one")
         if self.object_binding_selected_context is not None:
             _shape(
                 self.object_binding_selected_context,
                 (batch, 1, hidden),
                 "object-binding selected context",
             )
-        if self.object_binding_selected_geometry is not None:
-            _shape(
-                self.object_binding_selected_geometry,
-                (batch, 2),
-                "object-binding selected geometry",
-            )
+            if not bool(torch.isfinite(self.object_binding_selected_context).all()):
+                raise ValueError("object-binding selected context is non-finite")
         self.action_dock().validate(hidden=hidden)
         self.factual_dock().validate(hidden=hidden)
         self.policy_dock().validate(horizon=horizon, hidden=hidden)
@@ -899,8 +895,8 @@ class ObjectIntentState:
                     dim=1,
                 )
             ),
+            object_binding_role_distribution=self.object_binding_role_distribution,
             object_binding_selected_context=self.object_binding_selected_context,
-            object_binding_selected_geometry=self.object_binding_selected_geometry,
         )
 
 

@@ -8,8 +8,19 @@ from .action_contract import BottomDecoderOutput, BottomOutput
 from .calvin_object_binding import (
     CALVIN_OBJECT_BINDING_COMPONENT,
     CALVIN_OBJECT_BINDING_INTENT,
+    CALVIN_OBJECT_BINDING_ROLE_COUNT,
+    CALVIN_OBJECT_BINDING_ROLE_NAMES,
+    CALVIN_OBJECT_BINDING_TARGET_COUNT,
     CalvinObjectBindingBridge,
     CalvinObjectBindingResult,
+)
+from .compiler import (
+    ObjectConsequenceState,
+    ObjectFutureEffectReader,
+    ObjectPolicyPlanCompiler,
+    ObjectPolicyPlanDeltaBank,
+    ObjectTypedEffect,
+    ZeroPreservingObjectConsequence,
 )
 from .component_contracts import (
     COMPONENT_ABI_REVISION,
@@ -34,14 +45,6 @@ from .components import (
     PolicyCompilerStage,
     TrainingTargetsStage,
     WorldStage,
-)
-from .compiler import (
-    ObjectConsequenceState,
-    ObjectFutureEffectReader,
-    ObjectPolicyPlanCompiler,
-    ObjectPolicyPlanDeltaBank,
-    ObjectTypedEffect,
-    ZeroPreservingObjectConsequence,
 )
 from .dynamics import ObjectFutureDynamicsCompiler, ObjectW1WorkingState
 from .grounding import DenseObjectGrounder
@@ -85,6 +88,9 @@ __all__ = [
     "ActionIntentDock",
     "CALVIN_OBJECT_BINDING_COMPONENT",
     "CALVIN_OBJECT_BINDING_INTENT",
+    "CALVIN_OBJECT_BINDING_ROLE_COUNT",
+    "CALVIN_OBJECT_BINDING_ROLE_NAMES",
+    "CALVIN_OBJECT_BINDING_TARGET_COUNT",
     "COMPONENT_ABI_REVISION",
     "ComponentSelection",
     "CandidateWorld",

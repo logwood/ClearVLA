@@ -24,7 +24,7 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("grounder", ("top.grounder.",)),
     ("intent", ("top.intent.",)),
     ("coarse_action", ("top.coarse_action.",)),
-    # CALVIN-only language/object pointer; absent from Pen/RDT/LIBERO.
+    # CALVIN-only language/role bridge; absent from Pen/RDT/LIBERO.
     ("calvin_object_binding", ("calvin_object_binding.",)),
     ("plan_recognizer", ("top.recognizer.",)),
     ("history_proposal", ("history_proposal.",)),

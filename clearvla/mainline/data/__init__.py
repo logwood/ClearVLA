@@ -1,5 +1,10 @@
 """Dataset, cache and typed-batch loading for the clean mainline."""
 
+from ..calvin_binding_contract import (
+    CALVIN_OBJECT_BINDING_ROLE_COUNT,
+    CALVIN_OBJECT_BINDING_ROLE_NAMES,
+    CALVIN_OBJECT_BINDING_TARGET_COUNT,
+)
 from .calvin_object_binding import (
     CALVIN_OBJECT_BINDING_SIDECAR_SCHEMA,
     CalvinObjectBindingSidecar,
@@ -19,6 +24,9 @@ __all__ = [
     "ArrayNormalizer",
     "CachedTokenPolicyWindowDataset",
     "CALVIN_OBJECT_BINDING_SIDECAR_SCHEMA",
+    "CALVIN_OBJECT_BINDING_ROLE_COUNT",
+    "CALVIN_OBJECT_BINDING_ROLE_NAMES",
+    "CALVIN_OBJECT_BINDING_TARGET_COUNT",
     "CalvinObjectBindingSidecar",
     "calvin_episode_inventory_digest",
     "DinoTokenEpisodeMeta",

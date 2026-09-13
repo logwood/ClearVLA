@@ -1,10 +1,13 @@
-"""Fail-closed CALVIN language-to-object binding target sidecar.
+"""Fail-closed CALVIN semantic-role supervision sidecar.
 
-The sidecar is a training-only join keyed by the source episode identity and
-causal window center.  It is deliberately independent of the HDF5/DINO cache
-digest: converting or relocating the raw data must not silently change the
-privileged target provenance, and a missing or duplicate join is an error
-before a formal loader can materialize a batch.
+The sidecar is a training-only join keyed by source episode identity and
+causal window center.  It stores language-derived *role* targets, never a
+claim that a particular anonymous K slot is red/blue/pink.  This distinction
+is essential because the global object axis is explicitly relabelable.
+
+The artifact is versioned independently from the model/checkpoint ABI.  The
+previous ``v1`` fixed-slot pointer artifact is intentionally rejected rather
+than reinterpreted.
 """
 
 from __future__ import annotations
@@ -17,15 +20,15 @@ from typing import Iterable
 
 import numpy as np
 
-CALVIN_OBJECT_BINDING_SIDECAR_SCHEMA = "clearvla-calvin-object-binding-v1"
+from ..calvin_binding_contract import (
+    CALVIN_OBJECT_BINDING_ROLE_NAMES,
+    CALVIN_OBJECT_BINDING_SIDECAR_SCHEMA,
+    CALVIN_OBJECT_BINDING_TARGET_COUNT,
+)
 
 
 def calvin_episode_inventory_digest(episode_ids: Iterable[str]) -> str:
-    """Digest the sorted source episode identity inventory.
-
-    This matches the compact benchmark split convention and intentionally
-    excludes local paths, cache locations and discovery order.
-    """
+    """Digest the sorted source episode identity inventory."""
 
     names = sorted(str(value) for value in episode_ids)
     if not names or len(names) != len(set(names)):
@@ -61,57 +64,82 @@ def _normalise_column(value: np.ndarray, *, name: str, rows: int) -> np.ndarray:
     return np.ascontiguousarray(array)
 
 
+def _role_names(value: object) -> tuple[str, ...]:
+    text = _scalar_text(value, name="role_names")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError("sidecar role_names must be JSON") from error
+    if not isinstance(parsed, list) or any(not isinstance(item, str) for item in parsed):
+        raise ValueError("sidecar role_names must be a JSON string list")
+    if tuple(parsed) != tuple(CALVIN_OBJECT_BINDING_ROLE_NAMES):
+        raise ValueError("sidecar role_names do not match the model role ABI")
+    return tuple(str(item) for item in parsed)
+
+
 @dataclass(frozen=True)
 class CalvinObjectBindingSidecar:
-    """Validated, immutable lookup table for one CALVIN target artifact."""
+    """Validated, immutable lookup table for one role-target artifact."""
 
     path: Path
     episode_ids: tuple[str, ...]
     centers: np.ndarray
-    pointer_targets: np.ndarray
+    role_targets: np.ndarray
     coverage: np.ndarray
     ambiguity: np.ndarray
     source_digest: str
     manifest_digest: str
+    role_names: tuple[str, ...] = CALVIN_OBJECT_BINDING_ROLE_NAMES
     schema: str = CALVIN_OBJECT_BINDING_SIDECAR_SCHEMA
+    target_policy: str = ""
     _lookup: dict[tuple[str, int], int] | None = None
 
     def __post_init__(self) -> None:
         rows = len(self.episode_ids)
         if self.schema != CALVIN_OBJECT_BINDING_SIDECAR_SCHEMA:
-            raise ValueError(f"unsupported CALVIN binding sidecar schema {self.schema!r}")
+            raise ValueError(
+                f"unsupported CALVIN binding sidecar schema {self.schema!r}; "
+                "the fixed-slot v1 artifact is not admissible"
+            )
+        if tuple(self.role_names) != tuple(CALVIN_OBJECT_BINDING_ROLE_NAMES):
+            raise ValueError("sidecar role_names do not match the model role ABI")
         if self.centers.shape != (rows,) or self.centers.dtype != np.int64:
             raise ValueError("sidecar centers must be contiguous int64 [N]")
-        if self.pointer_targets.ndim != 2 or self.pointer_targets.shape[0] != rows:
-            raise ValueError("sidecar pointer_targets must be [N,K+1]")
-        if self.pointer_targets.shape[1] != 5:
-            raise ValueError("CALVIN binding sidecar requires K=4 plus null")
-        if self.pointer_targets.dtype != np.float32:
-            raise TypeError("sidecar pointer_targets must be float32")
+        if self.role_targets.ndim != 2 or self.role_targets.shape != (
+            rows,
+            CALVIN_OBJECT_BINDING_TARGET_COUNT,
+        ):
+            raise ValueError(
+                "sidecar role_targets must be [N,R+1] with the explicit null class"
+            )
+        if self.role_targets.dtype != np.float32:
+            raise TypeError("sidecar role_targets must be float32")
         for name, value in (("coverage", self.coverage), ("ambiguity", self.ambiguity)):
             if value.shape != (rows, 1) or value.dtype != np.float32:
                 raise TypeError(f"sidecar {name} must be float32 [N,1]")
-            if not bool(np.isfinite(value).all()) or bool(((value < 0.0) | (value > 1.0)).any()):
+            if not bool(np.isfinite(value).all()) or bool(
+                ((value < 0.0) | (value > 1.0)).any()
+            ):
                 raise ValueError(f"sidecar {name} must be finite and lie in [0,1]")
-        if not bool(np.isfinite(self.pointer_targets).all()) or bool((self.pointer_targets < 0.0).any()):
-            raise ValueError("sidecar pointer_targets must be finite and non-negative")
-        sums = self.pointer_targets.sum(axis=1)
+        if not bool(np.isfinite(self.role_targets).all()) or bool(
+            (self.role_targets < 0.0).any()
+        ):
+            raise ValueError("sidecar role_targets must be finite and non-negative")
+        sums = self.role_targets.sum(axis=1)
         if not bool(np.allclose(sums, np.ones_like(sums), atol=2e-4, rtol=2e-4)):
-            raise ValueError("sidecar pointer_targets rows must sum to one")
+            raise ValueError("sidecar role_targets rows must sum to one")
         if any(not str(value).strip() for value in self.episode_ids):
             raise ValueError("sidecar episode_ids must be non-empty")
         if any(int(center) < 0 for center in self.centers.tolist()):
             raise ValueError("sidecar centers must be non-negative")
         if not str(self.source_digest).strip() or not str(self.manifest_digest).strip():
             raise ValueError("sidecar source_digest and manifest_digest are required")
+        if not str(self.target_policy).strip().startswith("instruction-role-v2"):
+            raise ValueError("sidecar target_policy must identify instruction-role-v2")
         keys = list(zip(self.episode_ids, self.centers.tolist(), strict=True))
         if len(set(keys)) != len(keys):
             raise ValueError("CALVIN binding sidecar contains duplicate episode/center keys")
-        object.__setattr__(
-            self,
-            "_lookup",
-            {key: index for index, key in enumerate(keys)},
-        )
+        object.__setattr__(self, "_lookup", {key: index for index, key in enumerate(keys)})
 
     @classmethod
     def load(
@@ -129,15 +157,17 @@ class CalvinObjectBindingSidecar:
                 "schema",
                 "episode_ids",
                 "centers",
-                "pointer_targets",
+                "role_targets",
                 "coverage",
                 "ambiguity",
                 "source_digest",
                 "manifest_digest",
+                "role_names",
+                "target_policy",
             }
             missing = sorted(required.difference(data.files))
             if missing:
-                raise ValueError(f"CALVIN binding sidecar is missing fields: {missing}")
+                raise ValueError(f"CALVIN role sidecar is missing fields: {missing}")
             schema = _scalar_text(data["schema"], name="schema")
             raw_ids = np.asarray(data["episode_ids"])
             if raw_ids.ndim != 1:
@@ -150,13 +180,15 @@ class CalvinObjectBindingSidecar:
             centers = np.asarray(data["centers"], dtype=np.int64)
             if centers.shape != (rows,):
                 raise ValueError("sidecar centers must align with episode_ids")
-            pointers = np.asarray(data["pointer_targets"], dtype=np.float32)
-            if pointers.shape != (rows, 5):
-                raise ValueError("sidecar pointer_targets must be [N,5]")
+            role_targets = np.asarray(data["role_targets"], dtype=np.float32)
+            if role_targets.shape != (rows, CALVIN_OBJECT_BINDING_TARGET_COUNT):
+                raise ValueError("sidecar role_targets have the wrong shape")
             coverage = _normalise_column(data["coverage"], name="coverage", rows=rows)
             ambiguity = _normalise_column(data["ambiguity"], name="ambiguity", rows=rows)
             source_digest = _scalar_text(data["source_digest"], name="source_digest")
             manifest_digest = _scalar_text(data["manifest_digest"], name="manifest_digest")
+            role_names = _role_names(data["role_names"])
+            target_policy = _scalar_text(data["target_policy"], name="target_policy")
         if expected_source_digest is not None and source_digest != str(expected_source_digest):
             raise ValueError("CALVIN binding sidecar source digest does not match the dataset")
         if expected_manifest_digest is not None and manifest_digest != str(expected_manifest_digest):
@@ -165,12 +197,14 @@ class CalvinObjectBindingSidecar:
             path=source,
             episode_ids=episode_ids,
             centers=np.ascontiguousarray(centers),
-            pointer_targets=np.ascontiguousarray(pointers),
+            role_targets=np.ascontiguousarray(role_targets),
             coverage=coverage,
             ambiguity=ambiguity,
             source_digest=source_digest,
             manifest_digest=manifest_digest,
+            role_names=role_names,
             schema=schema,
+            target_policy=target_policy,
         )
 
     @property
@@ -179,8 +213,9 @@ class CalvinObjectBindingSidecar:
 
     def require_complete(self, keys: Iterable[tuple[str, int]]) -> None:
         assert self._lookup is not None
-        index = self._lookup
-        missing = [key for key in keys if (str(key[0]), int(key[1])) not in index]
+        missing = [
+            key for key in keys if (str(key[0]), int(key[1])) not in self._lookup
+        ]
         if missing:
             preview = ", ".join(f"{episode}:{center}" for episode, center in missing[:4])
             raise KeyError(
@@ -188,18 +223,20 @@ class CalvinObjectBindingSidecar:
                 f"{len(missing)} windows (first: {preview})"
             )
 
-    def lookup(self, episode_id: str, center: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def lookup(
+        self, episode_id: str, center: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         assert self._lookup is not None
         row = self._lookup.get((str(episode_id), int(center)))
         if row is None:
             raise KeyError(f"CALVIN binding target missing for {episode_id!r} center={center}")
-        return self.pointer_targets[row], self.coverage[row], self.ambiguity[row]
+        return self.role_targets[row], self.coverage[row], self.ambiguity[row]
 
     def metadata(self) -> dict[str, object]:
         digest = hashlib.sha256()
         digest.update("\n".join(self.episode_ids).encode("utf-8"))
         digest.update(self.centers.tobytes())
-        digest.update(self.pointer_targets.tobytes())
+        digest.update(self.role_targets.tobytes())
         digest.update(self.coverage.tobytes())
         digest.update(self.ambiguity.tobytes())
         return {
@@ -209,6 +246,8 @@ class CalvinObjectBindingSidecar:
             "source_digest": self.source_digest,
             "manifest_digest": self.manifest_digest,
             "target_digest": digest.hexdigest(),
+            "role_names": list(self.role_names),
+            "target_policy": self.target_policy,
         }
 
 

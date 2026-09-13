@@ -52,6 +52,7 @@ from clearvla.vision.decoded_image_store import DecodedImageStore
 from clearvla.vision.online_store import OnlineVisualStore
 from clearvla.vision.preprocessing import PreprocessConfig
 
+from ..calvin_binding_contract import CALVIN_OBJECT_BINDING_CONFIG
 from ..config import ExperimentConfig
 from ..interfaces import (
     ActionSupervision,
@@ -585,14 +586,18 @@ def _load_mainline_data(
     object_binding_sidecar = None
     object_binding_metadata: dict[str, object] = {}
     if data.calvin_object_binding_sidecar:
-        # The producer records its own source/manifest digests.  Until every
-        # historical split manifest exposes one uniform digest key, retain
-        # those values as independent serialized provenance and make the
-        # episode/center join itself fail closed below.
+        # Match the producer's exact split inventory.  Hashing every file in a
+        # converted cache would reject a valid overlay whenever the cache also
+        # contains unselected episodes.
+        selected_inventory = [
+            episodes[index].episode_id
+            for split in ("train", "val", "test")
+            for index in split_ids[split]
+        ]
         object_binding_sidecar = CalvinObjectBindingSidecar.load(
             data.calvin_object_binding_sidecar,
             expected_source_digest=calvin_episode_inventory_digest(
-                episode.episode_id for episode in episodes
+                selected_inventory
             ),
             expected_manifest_digest=(
                 hashlib.sha256(Path(data.split_manifest).read_bytes()).hexdigest()
@@ -970,10 +975,10 @@ def to_training_batch(
         ),
     )
     binding_target = None
-    if config.top.calvin_object_binding == "calvin_primary_v1":
+    if config.top.calvin_object_binding == CALVIN_OBJECT_BINDING_CONFIG:
         binding_target = CalvinObjectBindingTarget(
-            pointer=_device_tensor(
-                batch, "calvin_binding_pointer", device=device, dtype=torch.float32
+            role_target=_device_tensor(
+                batch, "calvin_binding_role_target", device=device, dtype=torch.float32
             ),
             coverage=_device_tensor(
                 batch, "calvin_binding_coverage", device=device, dtype=torch.float32

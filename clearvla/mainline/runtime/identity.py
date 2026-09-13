@@ -124,26 +124,43 @@ def dataset_identity(
             }
         )
     )
+    inventory_payload: dict[str, object] = {
+        "episodes": inventory,
+        "splits": bundle.splits,
+        "data_profile": bundle.data_profile_metadata,
+        "split_contract": {
+            name: value
+            for name, value in bundle.split_metadata.items()
+            if name not in {"path", "file_sha256"}
+        },
+        "normalizer_contract": {
+            name: value
+            for name, value in getattr(bundle, "normalizer_metadata", {}).items()
+            if name not in {"path", "file_sha256"}
+        },
+    }
+    # The v2 CALVIN sidecar is an external, training-only target artifact.
+    # Keep its content identity in the dataset contract while deliberately
+    # omitting the relocatable filesystem path.  Otherwise exact resume could
+    # accept a replacement target file at the same path.
+    binding_metadata = getattr(bundle, "calvin_object_binding_metadata", {})
+    if binding_metadata:
+        inventory_payload["calvin_object_binding"] = {
+            name: binding_metadata[name]
+            for name in (
+                "schema",
+                "source_digest",
+                "manifest_digest",
+                "target_digest",
+                "role_names",
+                "target_policy",
+            )
+            if name in binding_metadata
+        }
     return DatasetIdentity(
         raw_root=str(Path(config.data.raw_hdf5_root)),
         hdf5_glob=config.data.hdf5_glob,
-        inventory_sha256=_digest(
-            {
-                "episodes": inventory,
-                "splits": bundle.splits,
-                "data_profile": bundle.data_profile_metadata,
-                "split_contract": {
-                    name: value
-                    for name, value in bundle.split_metadata.items()
-                    if name not in {"path", "file_sha256"}
-                },
-                "normalizer_contract": {
-                    name: value
-                    for name, value in getattr(bundle, "normalizer_metadata", {}).items()
-                    if name not in {"path", "file_sha256"}
-                },
-            }
-        ),
+        inventory_sha256=_digest(inventory_payload),
         state_normalizer_sha256=_digest(bundle.state_normalizer.to_dict()),
         action_normalizer_sha256=_digest(bundle.action_normalizer.to_dict()),
         decoded_cache_identity=decoded_identity,

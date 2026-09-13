@@ -493,7 +493,7 @@ class ObservedStateWindowDataset(Dataset):
             "future_keys": torch.from_numpy(future_keys),
             **(
                 {
-                    "calvin_binding_pointer": torch.from_numpy(
+                    "calvin_binding_role_target": torch.from_numpy(
                         self.object_binding_sidecar.lookup(
                             str(episode.episode_id), int(center)
                         )[0].copy()

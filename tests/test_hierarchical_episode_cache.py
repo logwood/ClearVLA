@@ -187,6 +187,32 @@ def test_hierarchical_identity_closes_decoded_dino_and_run_identity(
     assert len(identity.decoded_cache_identity) == 64
     assert len(identity.dino_cache_identity) == 64
 
+    # A v2 role sidecar is part of the exact-resume data contract by content,
+    # while its absolute path remains relocatable.  Replacing its targets at
+    # the same path must therefore invalidate the dataset identity.
+    sidecar_metadata = {
+        "schema": "clearvla-calvin-object-binding-v2",
+        "source_digest": "a" * 64,
+        "manifest_digest": "b" * 64,
+        "target_digest": "c" * 64,
+        "role_names": ["red_block", "blue_block", "pink_block"],
+        "target_policy": "instruction-role-v2",
+        "path": "/relocated/targets.npz",
+    }
+    sidecar_bundle_values = vars(bundle).copy()
+    sidecar_bundle_values["calvin_object_binding_metadata"] = sidecar_metadata
+    sidecar_bundle = SimpleNamespace(**sidecar_bundle_values)
+    sidecar_identity = dataset_identity(sidecar_bundle, config)  # type: ignore[arg-type]
+    replaced_sidecar_values = vars(sidecar_bundle).copy()
+    replaced_sidecar_values["calvin_object_binding_metadata"] = {
+        **sidecar_bundle.calvin_object_binding_metadata,
+        "target_digest": "d" * 64,
+    }
+    replaced_sidecar_bundle = SimpleNamespace(**replaced_sidecar_values)
+    replaced_identity = dataset_identity(replaced_sidecar_bundle, config)  # type: ignore[arg-type]
+    assert sidecar_identity.inventory_sha256 != identity.inventory_sha256
+    assert replaced_identity.inventory_sha256 != sidecar_identity.inventory_sha256
+
 
 def test_flat_episode_keeps_v1_cache_layout_and_metadata(tmp_path: Path) -> None:
     root = tmp_path / "flat"

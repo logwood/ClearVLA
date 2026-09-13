@@ -22,6 +22,7 @@ from clearvla.data.window_boundaries import (
     WINDOW_BOUNDARY_CONTRACTS,
 )
 
+from .calvin_binding_contract import CALVIN_OBJECT_BINDING_CONFIG
 from .manifest import ARCHITECTURE_MANIFEST
 from .v120_core.bspine import (
     BSPINE0_BASIS_DIGEST,
@@ -324,15 +325,16 @@ class TopConfig:
     proposal_summary_tokens: int = 3
     goal_condition_dropout: float = 0.05
     action_history_condition_dropout: float = 0.10
-    # CALVIN-only task-role pointer at the S/coarse-action seam.  The default
+    # CALVIN-only task-role bridge at the S/coarse-action seam.  The default
     # remains disabled so existing Pen/RDT/LIBERO config/checkpoint identities
     # do not acquire dormant parameters.
     calvin_object_binding: str = "disabled"
 
     def validate(self) -> None:
-        if self.calvin_object_binding not in {"disabled", "calvin_primary_v1"}:
+        if self.calvin_object_binding not in {"disabled", CALVIN_OBJECT_BINDING_CONFIG}:
             raise ValueError(
-                "top.calvin_object_binding must be disabled or calvin_primary_v1"
+                "top.calvin_object_binding must be disabled or "
+                f"{CALVIN_OBJECT_BINDING_CONFIG}"
             )
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")
@@ -688,11 +690,11 @@ class ExperimentConfig:
             raise ValueError("data profile width must align with dimensions.state_dim")
         binding = str(self.top.calvin_object_binding)
         sidecar = str(self.data.calvin_object_binding_sidecar)
-        pointer_weight = float(self.objectives.calvin_object_binding)
+        role_weight = float(self.objectives.calvin_object_binding)
         compatibility_weight = float(
             self.objectives.calvin_object_binding_action_compatibility
         )
-        if binding == "calvin_primary_v1":
+        if binding == CALVIN_OBJECT_BINDING_CONFIG:
             if profile.name != "calvin_relative_7d_v1":
                 raise ValueError(
                     "CALVIN object binding is valid only for the CALVIN action profile"
@@ -701,9 +703,9 @@ class ExperimentConfig:
                 raise ValueError(
                     "CALVIN object binding requires data.calvin_object_binding_sidecar"
                 )
-            if pointer_weight <= 0.0 or compatibility_weight <= 0.0:
+            if role_weight <= 0.0 or compatibility_weight <= 0.0:
                 raise ValueError(
-                    "CALVIN object binding requires positive pointer and "
+                    "CALVIN object binding requires positive role and "
                     "action-compatibility weights"
                 )
         else:
@@ -712,7 +714,7 @@ class ExperimentConfig:
                     "calvin_object_binding_sidecar is valid only when the CALVIN "
                     "binding is enabled"
                 )
-            if pointer_weight != 0.0 or compatibility_weight != 0.0:
+            if role_weight != 0.0 or compatibility_weight != 0.0:
                 raise ValueError(
                     "CALVIN object-binding objective weights must be zero when "
                     "the binding is disabled"

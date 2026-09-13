@@ -19,6 +19,10 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from .calvin_binding_contract import (
+    CALVIN_OBJECT_BINDING_CONFIG,
+    CALVIN_OBJECT_BINDING_TARGET_COUNT,
+)
 from .config import ExperimentConfig
 
 
@@ -273,15 +277,16 @@ class FutureSupervision:
 
 @dataclass(frozen=True)
 class CalvinObjectBindingTarget:
-    """Training-only CALVIN language-to-object correspondence target.
+    """Training-only CALVIN semantic-role target.
 
-    The pointer/weights live on the training device because they participate
-    in the bridge loss.  Episode/center keys remain detached CPU audit data;
+    ``role_target`` is ``[B,3+1]`` for red/blue/pink plus an explicit null
+    class.  It deliberately has no K-slot axis: global object
+    rows are relabelable.  Episode/center keys remain detached CPU audit data;
     they make a stale or misjoined sidecar visible without entering the model
     or deployment API.
     """
 
-    pointer: Tensor  # float32 [B,K+1], final column is explicit null
+    role_target: Tensor  # float32 [B,R+1], final column is explicit null
     coverage: Tensor  # float32 [B,1], [0,1]
     ambiguity: Tensor  # float32 [B,1], [0,1]
     episode_index: Tensor  # int64 [B], CPU audit key
@@ -289,7 +294,11 @@ class CalvinObjectBindingTarget:
 
     @property
     def batch(self) -> int:
-        return int(self.pointer.shape[0])
+        return int(self.role_target.shape[0])
+
+    @property
+    def role_count(self) -> int:
+        return int(self.role_target.shape[1] - 1)
 
     def effective_weight(self) -> Tensor:
         """Return conservative supervision mass after ambiguity discounting."""
@@ -297,33 +306,43 @@ class CalvinObjectBindingTarget:
         return self.coverage * (1.0 - self.ambiguity).clamp(0.0, 1.0)
 
     def validate(self, config: ExperimentConfig, *, device: torch.device) -> None:
-        if config.top.calvin_object_binding != "calvin_primary_v1":
+        if config.top.calvin_object_binding != CALVIN_OBJECT_BINDING_CONFIG:
             raise ValueError(
                 "CALVIN object-binding targets are legal only for the enabled CALVIN binding"
             )
         batch = self.batch
-        objects = int(config.top.object_slots)
-        _shape(self.pointer, (batch, objects + 1), "CALVIN binding pointer target")
+        _shape(
+            self.role_target,
+            (batch, CALVIN_OBJECT_BINDING_TARGET_COUNT),
+            "CALVIN binding role target",
+        )
         _shape(self.coverage, (batch, 1), "CALVIN binding coverage")
         _shape(self.ambiguity, (batch, 1), "CALVIN binding ambiguity")
-        if self.pointer.dtype != torch.float32:
-            raise TypeError("CALVIN binding pointer targets must be float32")
+        if self.role_target.dtype != torch.float32:
+            raise TypeError("CALVIN binding role targets must be float32")
         if self.coverage.dtype != torch.float32 or self.ambiguity.dtype != torch.float32:
             raise TypeError("CALVIN binding coverage/ambiguity must be float32")
-        if not (self.pointer.device == self.coverage.device == self.ambiguity.device == device):
+        if not (
+            self.role_target.device
+            == self.coverage.device
+            == self.ambiguity.device
+            == device
+        ):
             raise ValueError("CALVIN binding target tensors must share the online device")
         for name, value in (
-            ("pointer", self.pointer),
+            ("role_target", self.role_target),
             ("coverage", self.coverage),
             ("ambiguity", self.ambiguity),
         ):
             if not bool(torch.isfinite(value).all()):
                 raise ValueError(f"CALVIN binding {name} targets must be finite")
-        if bool((self.pointer < 0.0).any()):
-            raise ValueError("CALVIN binding pointer targets must be non-negative")
-        pointer_sum = self.pointer.float().sum(dim=-1)
-        if not bool(torch.allclose(pointer_sum, torch.ones_like(pointer_sum), atol=2e-4, rtol=2e-4)):
-            raise ValueError("CALVIN binding pointer targets must sum to one")
+        if bool((self.role_target < 0.0).any()):
+            raise ValueError("CALVIN binding role targets must be non-negative")
+        role_sum = self.role_target.float().sum(dim=-1)
+        if not bool(
+            torch.allclose(role_sum, torch.ones_like(role_sum), atol=2e-4, rtol=2e-4)
+        ):
+            raise ValueError("CALVIN binding role targets must sum to one")
         for name, value in (("coverage", self.coverage), ("ambiguity", self.ambiguity)):
             if bool(((value < 0.0) | (value > 1.0)).any()):
                 raise ValueError(f"CALVIN binding {name} must lie in [0,1]")
@@ -442,7 +461,7 @@ class TrainingBatch:
             == self.future.dino_supports.device
         ):
             raise ValueError("training batch partitions must share a device")
-        if config.top.calvin_object_binding == "calvin_primary_v1":
+        if config.top.calvin_object_binding == CALVIN_OBJECT_BINDING_CONFIG:
             if self.calvin_object_binding is None:
                 raise ValueError(
                     "formal CALVIN object binding requires a training target sidecar row"

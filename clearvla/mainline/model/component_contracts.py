@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Mapping, Protocol
 
 from torch import Tensor, nn
 
+from ..calvin_binding_contract import CALVIN_OBJECT_BINDING_CONFIG
 from ..v120_core.bspine import (
     BSPINE0_IMPLEMENTATION,
     BSPINE_ARM_ONLY_IMPLEMENTATION,
@@ -91,7 +92,7 @@ class ComponentSelection:
         selection = cls(
             intent=(
                 CALVIN_OBJECT_BINDING_INTENT
-                if str(config.top.calvin_object_binding) == "calvin_primary_v1"
+                if str(config.top.calvin_object_binding) == CALVIN_OBJECT_BINDING_CONFIG
                 else "stateless_object_intent_v1"
             ),
             execution_bottom=_execution_bottom_selection(config),
@@ -136,8 +137,11 @@ class ComponentSelection:
         if self.intent == CALVIN_OBJECT_BINDING_INTENT:
             if config.data.data_profile != "calvin_relative_7d_v1":
                 raise ValueError("CALVIN object binding is valid only for the CALVIN outlet")
-            if str(config.top.calvin_object_binding) != "calvin_primary_v1":
-                raise ValueError("CALVIN binding component requires top.calvin_object_binding=calvin_primary_v1")
+            if str(config.top.calvin_object_binding) != CALVIN_OBJECT_BINDING_CONFIG:
+                raise ValueError(
+                    "CALVIN binding component requires "
+                    f"top.calvin_object_binding={CALVIN_OBJECT_BINDING_CONFIG}"
+                )
         elif str(config.top.calvin_object_binding) != "disabled":
             raise ValueError("an object-binding top selection requires the CALVIN intent component")
 
@@ -150,7 +154,7 @@ class ComponentSelection:
             return cls(
                 intent=(
                     CALVIN_OBJECT_BINDING_INTENT
-                    if str(config.top.calvin_object_binding) == "calvin_primary_v1"
+                    if str(config.top.calvin_object_binding) == CALVIN_OBJECT_BINDING_CONFIG
                     else "stateless_object_intent_v1"
                 ),
                 execution_bottom=_execution_bottom_selection(config),

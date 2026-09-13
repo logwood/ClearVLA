@@ -125,6 +125,27 @@ bash scripts/build_remote_benchmark_artifacts.sh calvin --language --caches
 bash scripts/build_remote_benchmark_artifacts.sh libero --language --caches
 ```
 
+For the opt-in CALVIN language/structure bridge, build the v2 role sidecar
+from the exact ABC→D episode manifest and run the structural gate before any
+formal job:
+
+```bash
+python scripts/build_calvin_object_binding_sidecar.py \
+  --hdf5-root /data/senwang/data/calvin/converted/abc_d_full \
+  --manifest /data/senwang/data/calvin/converted/abc_d_full_raw_overlay_v2_splits.json \
+  --output /data/senwang/data/calvin/targets/abc_d_full_object_binding_v2.npz
+python scripts/audit_calvin_object_binding_structure.py
+bash scripts/train_calvin_object_binding_formal_v2.sh
+```
+
+This release has one multitask training line.  Fit on the trajectory-disjoint
+ABC→D train split, select a checkpoint on converted validation, and use the
+converted test split only as a diagnostic.  The release result is the official
+raw-trajectory CALVIN ABC→D long-horizon evaluator; report color-block and
+drawer/handle panels separately.  A single-task color run is a smoke gate and
+must not be presented as the benchmark result.  The sidecar is training-only:
+closed-loop evaluation never loads it or simulator `scene_obs`.
+
 Audit ingress and typing before training:
 
 ```bash
