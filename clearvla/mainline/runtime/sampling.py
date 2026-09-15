@@ -1,0 +1,607 @@
+"""Five-step deployment runtime with an explicit static evidence cache."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from typing import Any, Literal, Mapping
+
+import torch
+from torch import Tensor
+
+from clearvla.action_solvers.flow_solver.spec import ScheduleSpec
+
+from ..config import ExperimentConfig
+from ..interfaces import OnlinePolicyInput
+from ..model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
+from ..model.types import FlowStepContext
+from .flow_schedule import (
+    DeploymentFlowSchedule,
+    legacy_uniform_runtime,
+    resolve_deployment_flow_schedule,
+)
+from .numerics import resolve_compute_dtype
+
+
+@dataclass(frozen=True)
+class SamplingResult:
+    action: Tensor
+    physical_field: Tensor
+    motion_logits: Tensor
+    initial_physical_noise: Tensor
+    step_times: Tensor
+    metrics: dict[str, Tensor]
+    # Binary-outlet command readout. Continuous samples leave these fields as
+    # ``None`` so their result ABI remains unchanged semantically.
+    gripper_command_logits: Tensor | None = None
+    gripper_command: Tensor | None = None
+    continuous_action: Tensor | None = None
+    # Appended defaults preserve positional construction of the historical
+    # result ABI while new samplers always fill the explicit schedule fields.
+    step_sizes: tuple[float, ...] = ()
+    flow_schedule_identity: dict[str, Any] | None = None
+    flow_schedule_pass_role: str = "legacy_unspecified"
+
+
+def _accepts_flow_step_context(model: object) -> bool:
+    """Return whether a velocity owner exposes the new optional boundary.
+
+    The production policy always accepts the context.  A small amount of
+    signature tolerance keeps the standalone numerical sampler compatible with
+    historical test/dummy fields that intentionally implement only
+    ``velocity(cache, noisy_action_field, time, ...)``.
+    """
+
+    try:
+        import inspect
+
+        parameters = inspect.signature(model.velocity).parameters  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return "flow_step_context" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
+def _velocity_at(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    *,
+    noisy_action_field: Tensor,
+    time: Tensor,
+    execution_mode: str,
+    deployment_fastpath: bool,
+    collect_diagnostics: bool,
+    flow_step_context: FlowStepContext | None,
+    accepts_flow_step_context: bool,
+):
+    """Call a velocity owner while keeping the context an optional ABI field."""
+
+    kwargs: dict[str, object] = {
+        "noisy_action_field": noisy_action_field,
+        "time": time,
+        "execution_mode": execution_mode,
+        "deployment_fastpath": deployment_fastpath,
+        "collect_diagnostics": collect_diagnostics,
+    }
+    if flow_step_context is not None and accepts_flow_step_context:
+        kwargs["flow_step_context"] = flow_step_context
+    return model.velocity(cache, **kwargs)  # type: ignore[arg-type]
+
+
+def _integrate_cache(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    config: ExperimentConfig,
+    *,
+    generator: torch.Generator | None,
+    initial_physical_noise: Tensor | None,
+    collect_diagnostics: bool,
+    dtype: torch.dtype,
+    static_metrics: dict[str, Tensor] | None = None,
+    execution_mode: str = "learned",
+    deployment_fastpath: bool = False,
+    schedule: ScheduleSpec,
+    flow_schedule_identity: Mapping[str, Any],
+    pass_role: Literal["proposal", "refined"],
+) -> SamplingResult:
+    """Integrate one already materialized static cache."""
+
+    cache.validate(config)
+    batch = cache.history.batch
+    device = cache.history.state.device
+    autocast_enabled = device.type in {"cuda", "cpu"} and dtype in {
+        torch.bfloat16,
+        torch.float16,
+    }
+    dims = config.dimensions
+    if initial_physical_noise is None:
+        value = model.outlet_adapter.sample_noise(
+            batch,
+            device=device,
+            dtype=cache.history.action_state.dtype,
+            generator=generator,
+        )
+    else:
+        expected = (batch, dims.action_horizon, model.outlet_adapter.physical_dim)
+        if tuple(initial_physical_noise.shape) != expected:
+            raise ValueError(f"initial physical action noise must be {expected}")
+        value = initial_physical_noise.to(device=device)
+    noise = value.clone()
+    steps = config.runtime.inference_steps
+    if schedule.interval_count != steps:
+        raise ValueError(
+            f"{pass_role} schedule has {schedule.interval_count} intervals; "
+            f"runtime requires {steps}"
+        )
+    # Preserve the exact historical expression for the default grid.  This is
+    # intentionally separate from the general boundary-difference path:
+    # subtracting decimal Python boundaries would produce slightly different
+    # scalar values for the third through fifth nominal 0.2 updates.
+    legacy_uniform = legacy_uniform_runtime(schedule, steps=steps)
+    if legacy_uniform:
+        legacy_dt = 1.0 / float(steps)
+        step_sizes = (legacy_dt,) * steps
+        # V120 evaluates [1,.8,.6,.4,.2] on its noise-to-clean chart.  The
+        # reversed mainline chart therefore queries [0,.2,.4,.6,.8].
+        times = torch.arange(steps, device=device, dtype=torch.float32) * legacy_dt
+    else:
+        # Schedule validation happens once before the loop on CPU.  The hot
+        # path has no tensor-to-Python finite checks or other host syncs.
+        step_sizes = schedule.step_sizes
+        times = torch.tensor(
+            schedule.query_times,
+            device=device,
+            dtype=torch.float32,
+        )
+    accepts_flow_step_context = _accepts_flow_step_context(model)
+    context_enabled = not legacy_uniform
+    dynamic_metrics: dict[str, Tensor] = {}
+    for index, step_size in enumerate(step_sizes):
+        time = times[index].expand(batch)
+        flow_step_context = (
+            FlowStepContext(
+                time=time,
+                step_size=time.new_full((batch,), float(step_size)),
+                normalized_index=time.new_full(
+                    (batch,), float(index) / float(max(steps, 1))
+                ),
+                endpoint=time.new_zeros((batch,)),
+            )
+            if context_enabled
+            else None
+        )
+        with torch.autocast(
+            device_type=device.type,
+            dtype=dtype,
+            enabled=autocast_enabled,
+        ):
+            output = _velocity_at(
+                model,
+                cache,
+                noisy_action_field=value,
+                time=time,
+                execution_mode=execution_mode,
+                deployment_fastpath=deployment_fastpath,
+                collect_diagnostics=collect_diagnostics and index == steps - 1,
+                flow_step_context=flow_step_context,
+                accepts_flow_step_context=accepts_flow_step_context,
+            )
+        value = value + step_size * output.bottom.physical_velocity.to(
+            dtype=value.dtype
+        )
+        if collect_diagnostics and index == steps - 1:
+            dynamic_metrics = output.metrics
+    # V120 evaluates the retained motion head once more at the clean endpoint.
+    # This is a head-producing dynamic forward, not a sixth integration step:
+    # the resulting physical field is deliberately left unchanged.
+    endpoint_time = torch.ones(batch, device=device, dtype=torch.float32)
+    endpoint_context = (
+        FlowStepContext(
+            time=endpoint_time,
+            step_size=endpoint_time.new_zeros((batch,)),
+            normalized_index=endpoint_time.new_ones((batch,)),
+            endpoint=endpoint_time.new_ones((batch,)),
+        )
+        if context_enabled
+        else None
+    )
+    with torch.autocast(
+        device_type=device.type,
+        dtype=dtype,
+        enabled=autocast_enabled,
+    ):
+        endpoint_output = _velocity_at(
+            model,
+            cache,
+            noisy_action_field=value,
+            time=endpoint_time,
+            execution_mode=execution_mode,
+            deployment_fastpath=deployment_fastpath,
+            collect_diagnostics=False,
+            flow_step_context=endpoint_context,
+            accepts_flow_step_context=accepts_flow_step_context,
+        )
+    outlet_output = model.outlet_adapter.finalize(
+        value,
+        cache.history.action_state,
+        codec_gripper_boundary=cache.history.codec_gripper_boundary,
+        command_logits=endpoint_output.bottom.gripper_command_logits,
+    )
+    outlet_metrics = model.outlet_adapter.sampling_metrics(outlet_output)
+    output_mode_metric = outlet_metrics.pop("sampling_gripper_output_mode_code")
+    result_metrics = {
+        **(static_metrics or {}),
+        **dynamic_metrics,
+        "sampling_gripper_output_mode_code": output_mode_metric,
+        "sampling_update_time_first": times[0].detach().float(),
+        "sampling_update_time_last": times[-1].detach().float(),
+        "sampling_endpoint_head_time": endpoint_time[0].detach().float(),
+        "sampling_velocity_update_calls": times.new_tensor(float(steps)),
+        "sampling_endpoint_head_calls": times.new_ones(()),
+        "sampling_flow_step_context_enabled": times.new_tensor(
+            float(context_enabled and accepts_flow_step_context)
+        ),
+    }
+    result_metrics.update(outlet_metrics)
+    return SamplingResult(
+        action=outlet_output.deployed_action,
+        physical_field=value,
+        motion_logits=endpoint_output.bottom.motion_logits.float(),
+        initial_physical_noise=noise,
+        step_times=times,
+        step_sizes=tuple(float(value) for value in step_sizes),
+        flow_schedule_identity=dict(flow_schedule_identity),
+        flow_schedule_pass_role=pass_role,
+        metrics=result_metrics,
+        gripper_command_logits=outlet_output.command_logits,
+        gripper_command=outlet_output.command,
+        continuous_action=outlet_output.continuous_action,
+    )
+
+
+def refine_cached_world(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    world_condition_action: Tensor,
+    config: ExperimentConfig,
+    *,
+    collect_diagnostics: bool = False,
+    dtype: torch.dtype | None = None,
+) -> tuple[OnlinePolicyCache, dict[str, Tensor]]:
+    """Re-materialize W once for the decoded outer proposal.
+
+    The first deployment pass produces a concrete 24-row outlet proposal.
+    This helper converts its explicitly normalized W view to the canonical
+    four-interval physical ABI and rebuilds only W from the cached compact
+    belief.  G, S, P1 and all dense source charts remain untouched.  Callers
+    can then run a second integration with the same initial noise, making the
+    refinement explicit without rerunning W at every ODE node.
+    """
+
+    config.validate()
+    cache.validate(config)
+    if world_condition_action.ndim != 3 or tuple(world_condition_action.shape[1:]) != (
+        config.dimensions.action_horizon,
+        config.dimensions.action_dim,
+    ):
+        raise ValueError("outer proposal W action must be [B,24,7]")
+    if int(world_condition_action.shape[0]) != cache.history.batch:
+        raise ValueError("outer proposal action batch does not align with cache")
+    runtime_dtype = resolve_compute_dtype(config, dtype)
+    action_condition = model.outlet_adapter.world_condition_from_horizon_action(
+        world_condition_action.to(device=cache.history.action_state.device),
+        cache.history.action_state,
+    )
+    device = cache.history.state.device
+    autocast_enabled = device.type in {"cuda", "cpu"} and runtime_dtype in {
+        torch.bfloat16,
+        torch.float16,
+    }
+    with torch.autocast(
+        device_type=device.type,
+        dtype=runtime_dtype,
+        enabled=autocast_enabled,
+    ):
+        refined_top, metrics = model.world.refine_deployment_world(
+            cache.top,
+            action_condition=action_condition,
+            collect_diagnostics=collect_diagnostics,
+        )
+    refined_cache = replace(cache, top=refined_top)
+    refined_cache.validate(config)
+    return refined_cache, metrics
+
+
+@torch.no_grad()
+def sample_refined_cached_action_with_cache(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    config: ExperimentConfig,
+    *,
+    generator: torch.Generator | None = None,
+    initial_physical_noise: Tensor | None = None,
+    collect_diagnostics: bool = False,
+    dtype: torch.dtype | None = None,
+    execution_mode: str = "learned",
+    deployment_fastpath: bool = False,
+    flow_schedule: DeploymentFlowSchedule | Mapping[str, Any] | None = None,
+) -> tuple[SamplingResult, OnlinePolicyCache]:
+    """Run one proposal pass, one W rerun, and one refined pass.
+
+    This remains the Schema28-compatible deployment surface used by Schema29/30.
+    ``sample_cached_action`` remains
+    the single-pass primitive so matched ablations can hold the world cache
+    fixed; normal deployment and validation use this explicit outer closure.
+    """
+
+    config.validate()
+    runtime_dtype = resolve_compute_dtype(config, dtype)
+    resolved_flow_schedule = resolve_deployment_flow_schedule(
+        getattr(config.runtime, "deployment_flow_schedule", None)
+        if flow_schedule is None
+        else flow_schedule
+    )
+    schedule_identity = resolved_flow_schedule.identity
+    model.eval()
+    proposal = _integrate_cache(
+        model,
+        cache,
+        config,
+        generator=generator,
+        initial_physical_noise=initial_physical_noise,
+        collect_diagnostics=False,
+        dtype=runtime_dtype,
+        execution_mode=execution_mode,
+        deployment_fastpath=deployment_fastpath,
+        schedule=resolved_flow_schedule.proposal,
+        flow_schedule_identity=schedule_identity,
+        pass_role="proposal",
+    )
+    proposal_world_action = model.outlet_adapter.world_condition_action_from_deployed(
+        proposal.action,
+        command=proposal.gripper_command,
+    )
+    refined_cache, refinement_metrics = refine_cached_world(
+        model,
+        cache,
+        proposal_world_action,
+        config,
+        collect_diagnostics=collect_diagnostics,
+        dtype=runtime_dtype,
+    )
+    refined = _integrate_cache(
+        model,
+        refined_cache,
+        config,
+        generator=None,
+        initial_physical_noise=proposal.initial_physical_noise,
+        collect_diagnostics=collect_diagnostics,
+        dtype=runtime_dtype,
+        execution_mode=execution_mode,
+        deployment_fastpath=deployment_fastpath,
+        schedule=resolved_flow_schedule.refined,
+        flow_schedule_identity=schedule_identity,
+        pass_role="refined",
+    )
+    proposal_action = proposal.action.detach().float()
+    refined_action = refined.action.detach().float()
+    # The second ODE pass is intentionally bounded to one outer refinement.
+    # Its final decoded action can therefore move away from the action that
+    # conditioned the cached W.  Project the final 24-row action through the
+    # same deterministic four-interval ABI and expose that residual instead
+    # of silently claiming fixed-point closure.
+    final_world_action = model.outlet_adapter.world_condition_action_from_deployed(
+        refined.action.detach().float(),
+        command=refined.gripper_command,
+    )
+    final_world_condition = model.outlet_adapter.world_condition_from_horizon_action(
+        final_world_action,
+        cache.history.action_state,
+    )
+    refined_world_condition = refined_cache.top.action_condition
+    final_interval = final_world_condition.interval_action.detach().float()
+    final_delta = final_world_condition.interval_delta.detach().float()
+    refined_interval = refined_world_condition.interval_action.detach().float()
+    refined_delta = refined_world_condition.interval_delta.detach().float()
+    outer_metrics = {
+        **refinement_metrics,
+        "sampling_outer_world_refinement": refined.action.new_ones(
+            (), dtype=torch.float32
+        ),
+        "sampling_outer_proposal_action_rms": proposal_action.square().mean().sqrt(),
+        "sampling_outer_refined_action_rms": refined_action.square().mean().sqrt(),
+        "sampling_outer_refined_action_delta_rms": (
+            refined_action - proposal_action
+        ).square().mean().sqrt(),
+        "sampling_outer_final_world_action_interval_rms": final_interval.square()
+        .mean()
+        .sqrt(),
+        "sampling_outer_final_world_action_delta_rms": final_delta.square().mean().sqrt(),
+        "sampling_outer_final_world_action_interval_mismatch_rms": (
+            final_interval - refined_interval
+        ).square()
+        .mean()
+        .sqrt(),
+        "sampling_outer_final_world_action_delta_mismatch_rms": (
+            final_delta - refined_delta
+        ).square()
+        .mean()
+        .sqrt(),
+    }
+    return replace(refined, metrics={**refined.metrics, **outer_metrics}), refined_cache
+
+
+@torch.no_grad()
+def sample_refined_cached_action(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    config: ExperimentConfig,
+    *,
+    generator: torch.Generator | None = None,
+    initial_physical_noise: Tensor | None = None,
+    collect_diagnostics: bool = False,
+    dtype: torch.dtype | None = None,
+    execution_mode: str = "learned",
+    deployment_fastpath: bool = False,
+    flow_schedule: DeploymentFlowSchedule | Mapping[str, Any] | None = None,
+) -> SamplingResult:
+    """Run the bounded outer closure and return only its final sample."""
+
+    result, _ = sample_refined_cached_action_with_cache(
+        model,
+        cache,
+        config,
+        generator=generator,
+        initial_physical_noise=initial_physical_noise,
+        collect_diagnostics=collect_diagnostics,
+        dtype=dtype,
+        execution_mode=execution_mode,
+        deployment_fastpath=deployment_fastpath,
+        flow_schedule=flow_schedule,
+    )
+    return result
+
+
+@torch.no_grad()
+def sample_action(
+    model: ClearVLAMainlinePolicy,
+    policy_input: OnlinePolicyInput,
+    config: ExperimentConfig,
+    *,
+    generator: torch.Generator | None = None,
+    initial_physical_noise: Tensor | None = None,
+    collect_diagnostics: bool = False,
+    dtype: torch.dtype | None = None,
+    deployment_fastpath: bool = False,
+    flow_schedule: DeploymentFlowSchedule | Mapping[str, Any] | None = None,
+) -> SamplingResult:
+    """Integrate five updates, then evaluate heads at the clean endpoint."""
+
+    config.validate()
+    dtype = resolve_compute_dtype(config, dtype)
+    model.eval()
+    autocast_enabled = policy_input.device.type in {"cuda", "cpu"} and dtype in {
+        torch.bfloat16,
+        torch.float16,
+    }
+    with torch.autocast(
+        device_type=policy_input.device.type,
+        dtype=dtype,
+        enabled=autocast_enabled,
+    ):
+        cache, training_state, static_metrics = model.encode_online(
+            policy_input,
+            training_mask=False,
+            geometry_supervision=False,
+            collect_diagnostics=collect_diagnostics,
+        )
+    # High-resolution source charts are required only while G and P1 are
+    # materialized.  They are deliberately not retained across ODE steps.
+    del training_state
+    # Keep the static encoding metrics on the final result while performing
+    # the bounded outer proposal -> W -> correction closure.
+    result = sample_refined_cached_action(
+        model,
+        cache,
+        config,
+        generator=generator,
+        initial_physical_noise=initial_physical_noise,
+        collect_diagnostics=collect_diagnostics,
+        dtype=dtype,
+        deployment_fastpath=deployment_fastpath,
+        flow_schedule=flow_schedule,
+    )
+    return replace(result, metrics={**static_metrics, **result.metrics})
+
+
+@torch.no_grad()
+def sample_cached_action(
+    model: ClearVLAMainlinePolicy,
+    cache: OnlinePolicyCache,
+    config: ExperimentConfig,
+    *,
+    generator: torch.Generator | None = None,
+    initial_physical_noise: Tensor | None = None,
+    collect_diagnostics: bool = False,
+    dtype: torch.dtype | None = None,
+    execution_mode: str = "learned",
+    deployment_fastpath: bool = False,
+    flow_schedule: DeploymentFlowSchedule | Mapping[str, Any] | None = None,
+    pass_role: Literal["proposal", "refined"] = "refined",
+) -> SamplingResult:
+    """Deploy from a cache already built for another read-only consumer."""
+
+    config.validate()
+    dtype = resolve_compute_dtype(config, dtype)
+    resolved_flow_schedule = resolve_deployment_flow_schedule(
+        getattr(config.runtime, "deployment_flow_schedule", None)
+        if flow_schedule is None
+        else flow_schedule
+    )
+    if pass_role not in {"proposal", "refined"}:
+        raise ValueError("pass_role must be 'proposal' or 'refined'")
+    schedule = (
+        resolved_flow_schedule.proposal
+        if pass_role == "proposal"
+        else resolved_flow_schedule.refined
+    )
+    model.eval()
+    return _integrate_cache(
+        model,
+        cache,
+        config,
+        generator=generator,
+        initial_physical_noise=initial_physical_noise,
+        collect_diagnostics=collect_diagnostics,
+        dtype=dtype,
+        execution_mode=execution_mode,
+        deployment_fastpath=deployment_fastpath,
+        schedule=schedule,
+        flow_schedule_identity=resolved_flow_schedule.identity,
+        pass_role=pass_role,
+    )
+
+
+def deployment_cache(
+    model: ClearVLAMainlinePolicy,
+    policy_input: OnlinePolicyInput,
+    config: ExperimentConfig,
+    *,
+    collect_diagnostics: bool = False,
+    dtype: torch.dtype | None = None,
+) -> tuple[OnlinePolicyCache, dict[str, Tensor]]:
+    """Expose cache construction for deployment integration and profiling."""
+
+    config.validate()
+    dtype = resolve_compute_dtype(config, dtype)
+    model.eval()
+    autocast_enabled = policy_input.device.type in {"cuda", "cpu"} and dtype in {
+        torch.bfloat16,
+        torch.float16,
+    }
+    with torch.no_grad():
+        with torch.autocast(
+            device_type=policy_input.device.type,
+            dtype=dtype,
+            enabled=autocast_enabled,
+        ):
+            cache, training_state, metrics = model.encode_online(
+                policy_input,
+                training_mask=False,
+                geometry_supervision=False,
+                collect_diagnostics=collect_diagnostics,
+            )
+        del training_state
+        return cache, metrics
+
+
+__all__ = [
+    "SamplingResult",
+    "deployment_cache",
+    "refine_cached_world",
+    "sample_action",
+    "sample_cached_action",
+    "sample_refined_cached_action",
+    "sample_refined_cached_action_with_cache",
+]

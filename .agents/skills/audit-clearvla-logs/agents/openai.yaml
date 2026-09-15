@@ -1,0 +1,4 @@
+interface:
+  display_name: "Audit ClearVLA Logs"
+  short_description: "Summarize loss, validation, gradient, and control health"
+  default_prompt: "Use $audit-clearvla-logs to audit these training logs against the current workspace and summarize the most decision-relevant signals."

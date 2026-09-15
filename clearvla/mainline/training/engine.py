@@ -1,0 +1,999 @@
+"""Single-stage training engine for the capability-named mainline."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import asdict, dataclass
+from typing import Any, Callable
+
+import torch
+from torch import Tensor
+
+from ..config import ExperimentConfig
+from ..interfaces import TrainingBatch
+from ..model.component_contracts import legacy_named_parameters
+from ..model.policy import (
+    ClearVLAMainlinePolicy,
+    OnlinePolicyCache,
+    OnlineTrainingState,
+)
+from ..runtime.logging import tensor_scalars
+from ..runtime.numerics import resolve_compute_dtype
+from ..runtime.flow_schedule import DeploymentFlowSchedule
+from .gradient_audit import (
+    DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD,
+    FiniteGradientSpikeReport,
+    build_finite_gradient_spike_report,
+)
+from .losses import LossLedger, compose_losses, sample_flow_matching
+from .optimizer import WarmupCosineSchedule, gradient_diagnostics, parameter_role
+
+_R2_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
+    (
+        "top.dynamics.transport_head.weight",
+        "gradient_parameter_w_transport_head_weight_rms",
+    ),
+    (
+        "top.effect_reader.source_query.0.weight",
+        "gradient_parameter_p2_semantic_spatial_query_weight_rms",
+    ),
+    (
+        "top.effect_reader.source_query.1.weight",
+        "gradient_parameter_p2_geometry_spatial_query_weight_rms",
+    ),
+    (
+        "top.effect_reader.terminal_query.0.weight",
+        "gradient_parameter_p2_semantic_terminal_query_weight_rms",
+    ),
+    (
+        "top.effect_reader.terminal_query.1.weight",
+        "gradient_parameter_p2_geometry_terminal_query_weight_rms",
+    ),
+    (
+        "top.effect_reader.semantic_value.weight",
+        "gradient_parameter_p2_semantic_value_weight_rms",
+    ),
+    (
+        "top.effect_reader.transport_value.weight",
+        "gradient_parameter_p2_geometry_value_weight_rms",
+    ),
+    (
+        "top.consequence.semantic_interaction.weight",
+        "gradient_parameter_consequence_semantic_interaction_weight_rms",
+    ),
+    (
+        "top.consequence.geometry_interaction.weight",
+        "gradient_parameter_consequence_geometry_interaction_weight_rms",
+    ),
+    (
+        "bottom.decoder.velocity_head.gripper_gate.weight",
+        "gradient_parameter_gripper_private_gate_weight_rms",
+    ),
+)
+
+
+def _autocast(
+    device: torch.device,
+    dtype: torch.dtype,
+    *,
+    cache_enabled: bool = True,
+):
+    enabled = device.type in {"cuda", "cpu"} and dtype in {
+        torch.bfloat16,
+        torch.float16,
+    }
+    return torch.autocast(
+        device_type=device.type,
+        dtype=dtype,
+        enabled=enabled,
+        cache_enabled=bool(cache_enabled),
+    )
+
+
+def validate_finite_training_batch(batch: TrainingBatch) -> None:
+    """Expensive value audit for preflight only, never the hot path."""
+
+    values = {
+        "online.dino_history": batch.online.observation.dino_history,
+        "online.raw": batch.online.observation.raw_rgb,
+        "online.state": batch.online.history.state,
+        "online.state_history": batch.online.history.state_history,
+        "online.executed_history": batch.online.history.executed_action_history,
+        "online.goal": batch.online.goal.tokens,
+        "target.action": batch.action_target.normalized,
+        "target.action_raw_units": batch.action_target.raw_units,
+        "target.current_raw_units": batch.action_target.current_raw_units,
+        "target.gripper_transition_boundary": (
+            batch.action_target.gripper_transition_boundary
+        ),
+        "target.gripper_transition_boundary_raw_units": (
+            batch.action_target.gripper_transition_boundary_raw_units
+        ),
+        "future.dino": batch.future.dino_supports,
+        "future.action": batch.future.action_sequence,
+        "future.state": batch.future.state_sequence,
+    }
+    invalid = [name for name, value in values.items() if not bool(torch.isfinite(value).all())]
+    if invalid:
+        raise ValueError(f"training batch contains non-finite tensors: {', '.join(invalid)}")
+    expected_offsets = torch.arange(
+        4,
+        49,
+        4,
+        device=batch.future.offsets.device,
+        dtype=torch.long,
+    )[None].expand(batch.future.batch, -1)
+    if not torch.equal(batch.future.offsets, expected_offsets):
+        raise ValueError("future teacher offsets must be exactly 4,8,...,48")
+
+
+@dataclass(frozen=True)
+class TrainStepResult:
+    loss: Tensor
+    gradient_norm: Tensor
+    learning_rate: float
+    metrics: dict[str, Tensor]
+    gradient_norm_scalar: float | None = None
+
+    def materialize(self) -> dict[str, float]:
+        """Synchronize scalar metrics only when the logger actually emits."""
+
+        values = {
+            "loss_total": self.loss,
+            "gradient_global_preclip_l2": self.gradient_norm,
+            **self.metrics,
+        }
+        result = tensor_scalars(values)
+        result["learning_rate"] = float(self.learning_rate)
+        return result
+
+
+@dataclass(frozen=True)
+class NonFiniteGradientReport:
+    """JSON-safe identity of the first non-finite parameter gradient."""
+
+    parameter_name: str
+    parameter_role: str
+    optimizer_group: str
+    shape: tuple[int, ...]
+    dtype: str
+    finite_fraction: float
+    finite_max_abs: float
+    nan_count: int
+    positive_inf_count: int
+    negative_inf_count: int
+    global_norm: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class NonFiniteGradientError(FloatingPointError):
+    """Fail before clipping/optimizer mutation with a named owner report."""
+
+    def __init__(self, report: NonFiniteGradientReport) -> None:
+        self.report = report
+        super().__init__(
+            "non-finite gradient before clipping: "
+            f"parameter={report.parameter_name} role={report.parameter_role} "
+            f"optimizer_group={report.optimizer_group} "
+            f"finite_fraction={report.finite_fraction:.6f} "
+            f"finite_max_abs={report.finite_max_abs:.6g} "
+            f"global_norm={report.global_norm}"
+        )
+
+
+@dataclass(frozen=True)
+class EncodedTrainingBatch:
+    """One current-only static graph shared by validation loss and sampling."""
+
+    cache: OnlinePolicyCache
+    training_state: OnlineTrainingState
+    metrics: dict[str, Tensor]
+
+
+class MainlineTrainingEngine:
+    """Own one forward/backward/update without legacy runtime side effects."""
+
+    def __init__(
+        self,
+        *,
+        model: ClearVLAMainlinePolicy,
+        config: ExperimentConfig,
+        optimizer: torch.optim.Optimizer,
+        schedule: WarmupCosineSchedule,
+        device: torch.device,
+        dtype: torch.dtype | None = None,
+        train_flow_generator: torch.Generator | None = None,
+        train_condition_generator: torch.Generator | None = None,
+        gradient_spike_audit_threshold: float | None = (
+            DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD
+        ),
+    ) -> None:
+        config.validate()
+        self.model = model
+        self.config = config
+        self.optimizer = optimizer
+        self.schedule = schedule
+        self.device = device
+        self.dtype = resolve_compute_dtype(config, dtype)
+        self.train_flow_generator = train_flow_generator
+        self.train_condition_generator = train_condition_generator
+        if gradient_spike_audit_threshold is not None and (
+            not math.isfinite(float(gradient_spike_audit_threshold))
+            or float(gradient_spike_audit_threshold) <= 0.0
+        ):
+            raise ValueError("gradient spike audit threshold must be finite and positive")
+        self.gradient_spike_audit_threshold = (
+            None
+            if gradient_spike_audit_threshold is None
+            else float(gradient_spike_audit_threshold)
+        )
+        self.global_step = 0
+
+    def _optimizer_group_name(self, parameter_name: str) -> str:
+        for group in self.optimizer.param_groups:
+            raw_names = group.get("parameter_names", ())
+            if parameter_name in raw_names:
+                return str(group.get("name", "unnamed"))
+        return "unowned"
+
+    @staticmethod
+    def _nonfinite_scalar_label(value: Tensor) -> str:
+        scalar = value.detach().float().reshape(())
+        if bool(torch.isnan(scalar)):
+            return "nan"
+        if bool(torch.isposinf(scalar)):
+            return "+inf"
+        if bool(torch.isneginf(scalar)):
+            return "-inf"
+        return f"{float(scalar):.9g}"
+
+    def _first_nonfinite_gradient_report(
+        self,
+        *,
+        global_norm: Tensor,
+    ) -> NonFiniteGradientReport:
+        for name, parameter in legacy_named_parameters(self.model):
+            gradient = parameter.grad
+            if gradient is None:
+                continue
+            detached = gradient.detach()
+            finite = torch.isfinite(detached)
+            parameter_norm = torch.nn.utils.get_total_norm(
+                [detached],
+                norm_type=2.0,
+                error_if_nonfinite=False,
+                foreach=True,
+            )
+            # A parameter can contain only finite FP32 elements and still make
+            # its L2 reduction overflow.  That tensor is the first actionable
+            # owner and must not fall through to an unstructured RuntimeError.
+            if bool(finite.all()) and bool(torch.isfinite(parameter_norm)):
+                continue
+            finite_count = int(finite.sum().item())
+            finite_values = detached[finite]
+            finite_max_abs = (
+                float(finite_values.float().abs().amax().item())
+                if finite_count
+                else 0.0
+            )
+            return NonFiniteGradientReport(
+                parameter_name=name,
+                parameter_role=parameter_role(name),
+                optimizer_group=self._optimizer_group_name(name),
+                shape=tuple(int(value) for value in detached.shape),
+                dtype=str(detached.dtype).removeprefix("torch."),
+                finite_fraction=float(finite_count) / float(max(detached.numel(), 1)),
+                finite_max_abs=finite_max_abs,
+                nan_count=int(torch.isnan(detached).sum().item()),
+                positive_inf_count=int(torch.isposinf(detached).sum().item()),
+                negative_inf_count=int(torch.isneginf(detached).sum().item()),
+                global_norm=self._nonfinite_scalar_label(global_norm),
+            )
+        raise RuntimeError("global gradient norm was non-finite without a named owner")
+
+    def _r2_parameter_gradient_metrics(self) -> dict[str, Tensor]:
+        """Read raw parameter gradients without installing persistent hooks.
+
+        Intermediate activation hooks die with their forward graph. Parameter
+        hooks do not: registering them on each diagnostic batch would retain
+        every old scalar slot and make a long run progressively slower. These
+        named R2 owners are therefore sampled once, after backward and
+        before either clipping stage.
+        """
+
+        parameters = {
+            name: parameter for name, parameter in legacy_named_parameters(self.model)
+        }
+        metrics: dict[str, Tensor] = {}
+        for parameter_name, metric_name in _R2_PARAMETER_GRADIENT_METRICS:
+            try:
+                parameter = parameters[parameter_name]
+            except KeyError as error:
+                raise RuntimeError(
+                    f"R2 gradient diagnostic lost parameter {parameter_name!r}"
+                ) from error
+            gradient = parameter.grad
+            metrics[metric_name] = (
+                parameter.new_zeros((), dtype=torch.float32)
+                if gradient is None
+                else gradient.detach().float().square().mean().sqrt()
+            )
+        return metrics
+
+    @staticmethod
+    def _gradient_probe_vector(
+        gradients: tuple[Tensor | None, ...],
+        parameters: tuple[Tensor, ...],
+    ) -> Tensor:
+        """Materialize a finite FP32 vector while preserving unused owners.
+
+        ``autograd.grad(..., allow_unused=True)`` returns ``None`` for an
+        owner that is not on a selected loss path.  Filling those entries with
+        zeros keeps every probe in the same parameter coordinate system, so a
+        cosine or projection is meaningful and does not silently drop an
+        owner.  This helper never returns a tensor attached to the training
+        graph.
+        """
+
+        if len(gradients) != len(parameters):
+            raise ValueError("gradient probe owner and gradient counts differ")
+        pieces: list[Tensor] = []
+        for parameter, gradient in zip(parameters, gradients, strict=True):
+            if gradient is None:
+                pieces.append(
+                    torch.zeros(
+                        parameter.numel(),
+                        device=parameter.device,
+                        dtype=torch.float32,
+                    )
+                )
+            else:
+                pieces.append(gradient.detach().float().reshape(-1))
+        if not pieces:
+            return torch.zeros(0, dtype=torch.float32)
+        return torch.cat(pieces, dim=0)
+
+    def _bspine_gradient_direction_probe(
+        self,
+        ledger: LossLedger,
+    ) -> dict[str, Tensor]:
+        """Observe training-time arm/gripper pulls on the B-spine owner.
+
+        This is deliberately a diagnostic-only ``autograd.grad`` probe.  It
+        runs before the ordinary ``ledger.total.backward()`` and retains the
+        graph until that backward, so it cannot alter accumulated optimizer
+        gradients, loss weights, parameter ownership or the one-forward
+        training contract.  The two channel probes are the differentiable
+        direct physical-flow terms returned by :func:`action_terms`; the
+        group probes use the actual weighted ledger groups.  They therefore
+        answer different questions and are named separately.
+        """
+
+        execution_bottom = getattr(self.model, "execution_bottom", None)
+        decoder = getattr(execution_bottom, "decoder", None)
+        spine = getattr(decoder, "spine", None)
+        if spine is None:
+            return {}
+        arm_private_reader = getattr(decoder, "arm_private_reader", None)
+        spine_parameters = tuple(
+            parameter for parameter in spine.parameters() if parameter.requires_grad
+        )
+        reader_parameters = tuple(
+            parameter
+            for parameter in (
+                arm_private_reader.parameters()
+                if arm_private_reader is not None
+                else ()
+            )
+            if parameter.requires_grad
+        )
+        parameters = spine_parameters + reader_parameters
+        if not parameters:
+            return {}
+
+        spine_width = sum(parameter.numel() for parameter in spine_parameters)
+
+        def probe(loss: Tensor | None) -> Tensor:
+            if loss is None or not loss.requires_grad:
+                return torch.zeros(
+                    sum(parameter.numel() for parameter in parameters),
+                    device=parameters[0].device,
+                    dtype=torch.float32,
+                )
+            gradients = torch.autograd.grad(
+                loss,
+                parameters,
+                retain_graph=True,
+                create_graph=False,
+                allow_unused=True,
+            )
+            return self._gradient_probe_vector(gradients, parameters)
+
+        def split_owner_vector(value: Tensor) -> tuple[Tensor, Tensor]:
+            return value[:spine_width], value[spine_width:]
+
+        def direction_metrics(
+            prefix: str,
+            arm: Tensor,
+            gripper: Tensor,
+            action_group: Tensor,
+            representation_group: Tensor,
+            execution_group: Tensor,
+        ) -> dict[str, Tensor]:
+            """Summarize one owner coordinate system without mixing owners."""
+
+            arm_norm = torch.linalg.vector_norm(arm)
+            gripper_norm = torch.linalg.vector_norm(gripper)
+            dot = torch.dot(arm, gripper)
+            denominator = (arm_norm * gripper_norm).clamp_min(
+                torch.finfo(torch.float32).tiny
+            )
+            cosine = torch.where(
+                (arm_norm > 0.0) & (gripper_norm > 0.0),
+                dot / denominator,
+                torch.zeros_like(dot),
+            )
+            arm_projection = torch.where(
+                arm_norm > 0.0,
+                dot / arm_norm.square().clamp_min(torch.finfo(torch.float32).tiny),
+                torch.zeros_like(dot),
+            )
+            return {
+                f"gradient_probe_{prefix}_arm_flow_l2": arm_norm.detach(),
+                f"gradient_probe_{prefix}_gripper_flow_l2": gripper_norm.detach(),
+                f"gradient_probe_{prefix}_gripper_to_arm_ratio": torch.where(
+                    arm_norm > 0.0,
+                    gripper_norm / arm_norm.clamp_min(torch.finfo(torch.float32).tiny),
+                    torch.zeros_like(gripper_norm),
+                ).detach(),
+                f"gradient_probe_{prefix}_arm_gripper_cosine": cosine.detach(),
+                f"gradient_probe_{prefix}_gripper_on_arm_projection": (
+                    arm_projection.detach()
+                ),
+                f"gradient_probe_{prefix}_action_group_l2": (
+                    torch.linalg.vector_norm(action_group).detach()
+                ),
+                f"gradient_probe_{prefix}_representation_group_l2": (
+                    torch.linalg.vector_norm(representation_group).detach()
+                ),
+                f"gradient_probe_{prefix}_execution_group_l2": (
+                    torch.linalg.vector_norm(execution_group).detach()
+                ),
+            }
+
+        arm_spine, arm_reader = split_owner_vector(
+            probe(ledger.terms.get("action_arm_flow"))
+        )
+        # Probe the differentiable gripper term that actually enters the
+        # formal direct-flow objective.  ``action_gripper_flow`` remains a
+        # legacy six-channel audit metric; using it here would hide the
+        # deployed-vs-compatibility ownership switch.
+        gripper_term = ledger.terms.get("action_gripper_flow_owned")
+        if gripper_term is None:
+            # Backward-compatible fallback for hand-built legacy ledgers used
+            # by older diagnostic fixtures.
+            gripper_term = ledger.terms.get("action_gripper_flow")
+        gripper_spine, gripper_reader = split_owner_vector(probe(gripper_term))
+        action_spine, action_reader = split_owner_vector(
+            probe(ledger.groups.get("action"))
+        )
+        representation_spine, representation_reader = split_owner_vector(
+            probe(ledger.groups.get("representation"))
+        )
+        execution_spine, execution_reader = split_owner_vector(
+            probe(ledger.groups.get("execution"))
+        )
+
+        result = {
+            "gradient_probe_bottom_spine_active": parameters[0].new_ones(
+                (), dtype=torch.float32
+            ),
+            **direction_metrics(
+                "bottom_spine",
+                arm_spine,
+                gripper_spine,
+                action_spine,
+                representation_spine,
+                execution_spine,
+            ),
+        }
+        if reader_parameters:
+            result["gradient_probe_bottom_spine_private_reader_active"] = (
+                parameters[0].new_ones((), dtype=torch.float32)
+            )
+            result.update(
+                direction_metrics(
+                    "bottom_spine_private_reader",
+                    arm_reader,
+                    gripper_reader,
+                    action_reader,
+                    representation_reader,
+                    execution_reader,
+                )
+            )
+        return result
+
+    def _gradient_lifecycle(
+        self,
+        *,
+        collect_diagnostics: bool,
+        gradient_spike_handler: Callable[[FiniteGradientSpikeReport], None]
+        | None = None,
+    ) -> tuple[Tensor, dict[str, Tensor], float]:
+        """V120 finite-check -> decoder-local -> global clip lifecycle."""
+
+        ordered_parameters = legacy_named_parameters(self.model)
+        parameters = [parameter for _, parameter in ordered_parameters if parameter.grad is not None]
+        gradients = [parameter.grad for parameter in parameters]
+        try:
+            total_norm = torch.nn.utils.get_total_norm(
+                gradients,
+                norm_type=2.0,
+                error_if_nonfinite=True,
+                foreach=True,
+            )
+        except RuntimeError as error:
+            # Recompute only on the failure path so the report owns the
+            # observed global value while normal batches pay for one norm.
+            nonfinite_norm = torch.nn.utils.get_total_norm(
+                gradients,
+                norm_type=2.0,
+                error_if_nonfinite=False,
+                foreach=True,
+            )
+            raise NonFiniteGradientError(
+                self._first_nonfinite_gradient_report(global_norm=nonfinite_norm)
+            ) from error
+        # One host scalar owns both the spike boundary and the training-window
+        # mean/max/current record.  The expensive parameter scan remains
+        # conditional and happens before any clipping or optimizer mutation.
+        gradient_norm_scalar = float(total_norm.detach().float().cpu().item())
+        if (
+            gradient_spike_handler is not None
+            and self.gradient_spike_audit_threshold is not None
+            and gradient_norm_scalar > self.gradient_spike_audit_threshold
+        ):
+            named_parameters = [
+                (name, parameter)
+                for name, parameter in ordered_parameters
+                if parameter.grad is not None
+            ]
+            gradient_spike_handler(
+                build_finite_gradient_spike_report(
+                    named_parameters,
+                    global_norm=gradient_norm_scalar,
+                    audit_threshold=self.gradient_spike_audit_threshold,
+                    optimizer_group_name=self._optimizer_group_name,
+                )
+            )
+        metrics = (
+            gradient_diagnostics(self.model, stage="raw")
+            if collect_diagnostics
+            else {}
+        )
+        if collect_diagnostics:
+            metrics.update(self._r2_parameter_gradient_metrics())
+        decoder_parameters = [
+            parameter
+            for name, parameter in ordered_parameters
+            if name.startswith("bottom.decoder.") and parameter.grad is not None
+        ]
+        decoder_norm: Tensor | None = None
+        if decoder_parameters:
+            decoder_norm = torch.nn.utils.get_total_norm(
+                [parameter.grad for parameter in decoder_parameters],
+                norm_type=2.0,
+                error_if_nonfinite=True,
+                foreach=True,
+            )
+            torch.nn.utils.clip_grads_with_norm_(
+                decoder_parameters,
+                1.0,
+                decoder_norm,
+                foreach=True,
+            )
+        if collect_diagnostics:
+            metrics.update(gradient_diagnostics(self.model, stage="postlocal"))
+            metrics["gradient_raw_bottom_decoder_l2"] = (
+                decoder_norm.detach().float()
+                if decoder_norm is not None
+                else total_norm.new_zeros((), dtype=torch.float32)
+            )
+            metrics["gradient_postlocal_bottom_decoder_l2"] = (
+                torch.nn.utils.get_total_norm(
+                    [parameter.grad for parameter in decoder_parameters],
+                    norm_type=2.0,
+                    error_if_nonfinite=True,
+                    foreach=True,
+                ).detach().float()
+                if decoder_parameters
+                else total_norm.new_zeros((), dtype=torch.float32)
+            )
+        postlocal_norm = torch.nn.utils.get_total_norm(
+            [parameter.grad for parameter in parameters],
+            norm_type=2.0,
+            error_if_nonfinite=True,
+            foreach=True,
+        )
+        torch.nn.utils.clip_grads_with_norm_(
+            parameters,
+            self.config.optimizer.grad_clip,
+            postlocal_norm,
+            foreach=True,
+        )
+        postglobal_norm = torch.nn.utils.get_total_norm(
+            [parameter.grad for parameter in parameters],
+            norm_type=2.0,
+            error_if_nonfinite=True,
+            foreach=True,
+        )
+        if collect_diagnostics:
+            metrics.update(gradient_diagnostics(self.model, stage="postglobal"))
+            metrics["gradient_raw_global_l2"] = total_norm.detach().float()
+            metrics["gradient_postlocal_global_l2"] = postlocal_norm.detach().float()
+            metrics["gradient_postglobal_global_l2"] = postglobal_norm.detach().float()
+            metrics["gradient_postglobal_bottom_decoder_l2"] = (
+                torch.nn.utils.get_total_norm(
+                    [parameter.grad for parameter in decoder_parameters],
+                    norm_type=2.0,
+                    error_if_nonfinite=True,
+                    foreach=True,
+                ).detach().float()
+                if decoder_parameters
+                else total_norm.new_zeros((), dtype=torch.float32)
+            )
+        return total_norm, metrics, gradient_norm_scalar
+
+    def _clip_gradients_with_first_offender(self) -> Tensor:
+        """Compatibility wrapper used by the non-finite regression test."""
+
+        total_norm, _, _ = self._gradient_lifecycle(collect_diagnostics=False)
+        return total_norm
+
+    @staticmethod
+    def _tensor_metrics(
+        ledger: LossLedger,
+        values: dict[str, Tensor],
+    ) -> dict[str, Tensor]:
+        tensors = {
+            "loss_total": ledger.total,
+            **{f"loss_group_{name}": value for name, value in ledger.groups.items()},
+            **{
+                f"loss_contrib_{name}": value
+                for name, value in ledger.contributions.items()
+            },
+            **{f"loss_{name}": value for name, value in ledger.terms.items()},
+            **values,
+        }
+        result: dict[str, Tensor] = {}
+        for name, value in tensors.items():
+            if value.ndim != 0:
+                continue
+            result[name] = value.detach().float()
+        result["loss_ledger_gap"] = ledger.total.detach().float() - sum(
+            value.detach().float() for value in ledger.groups.values()
+        )
+        result["loss_contribution_gap"] = ledger.total.detach().float() - sum(
+            value.detach().float() for value in ledger.contributions.values()
+        )
+        return result
+
+    @staticmethod
+    def _detached_pearson(left: Tensor, right: Tensor) -> Tensor:
+        """Batch-local audit correlation with a legal zero-variance result."""
+
+        left_f = left.detach().float().flatten()
+        right_f = right.detach().float().flatten()
+        if left_f.numel() != right_f.numel():
+            raise ValueError("audit correlation rows must align")
+        if left_f.numel() < 2:
+            return left_f.new_zeros(())
+        left_centered = left_f - left_f.mean()
+        right_centered = right_f - right_f.mean()
+        denominator = (left_centered.square().sum() * right_centered.square().sum()).sqrt()
+        correlation = (left_centered * right_centered).sum() / denominator.clamp_min(1e-8)
+        return torch.where(denominator > 1e-8, correlation, correlation.new_zeros(()))
+
+    @classmethod
+    def _audit_progress_metrics(
+        cls,
+        batch: TrainingBatch,
+        encoded: EncodedTrainingBatch,
+        *,
+        formal_cache: OnlinePolicyCache | None = None,
+    ) -> dict[str, Tensor]:
+        """Compare real frame position with S/W behaviour without training on it.
+
+        The derived interval centroid is explicitly an energy audit, not a
+        phase estimate and not a forward input.  It answers whether S keeps
+        emitting one fixed interval pattern as trajectories advance.  Every
+        value is detached and this function is called only on logging rows.
+        """
+
+        if batch.audit.frame_progress is None:
+            return {}
+        intent = encoded.training_state.top.intent
+        # The recovery path has one formal training pass, so the online cache
+        # is also the loss-owning W cache.  ``formal_cache`` remains accepted
+        # for compatibility with archived callers, but is not created by the
+        # active recovery engine.
+        dynamics = (
+            encoded.training_state.top.predicted_dynamics
+            if formal_cache is None
+            else formal_cache.top.predicted_dynamics
+        )
+        progress = batch.audit.frame_progress.to(
+            device=intent.public_interval_carrier.device,
+            dtype=torch.float32,
+        )
+
+        def sample_rms(value: Tensor) -> Tensor:
+            return value.detach().float().flatten(1).square().mean(dim=1).sqrt()
+
+        # Audit the supervised public carrier.  Optional typed values keep
+        # their own interval/K/type metrics and must not silently redefine the
+        # public progress diagnostic.
+        interval_energy = (
+            intent.public_interval_carrier.detach().float().square().mean(dim=-1).sqrt()
+        )
+        centers = interval_energy.new_tensor((6.0, 12.0, 24.0, 40.0)) / 48.0
+        energy_total = interval_energy.sum(dim=1)
+        centroid = (interval_energy * centers[None]).sum(dim=1) / energy_total.clamp_min(1e-8)
+        centroid = torch.where(energy_total > 1e-8, centroid, centroid.new_zeros(centroid.shape))
+
+        interval_variation = sample_rms(
+            intent.public_interval_carrier.detach().float()
+            - intent.public_interval_carrier.detach().float().mean(dim=1, keepdim=True)
+        )
+        state_change = sample_rms(intent.state_change_evidence)
+        successor_innovation = sample_rms(
+            dynamics.successor_content.detach().float()
+            - dynamics.current_reference.detach().float()[:, None]
+        )
+        w_interval_variation = sample_rms(
+            dynamics.semantic_delta.detach().float()
+            - dynamics.semantic_delta.detach().float().mean(dim=1, keepdim=True)
+        )
+        return {
+            "object_intent_audit_frame_progress_mean": progress.mean(),
+            "object_intent_audit_frame_progress_std": progress.std(unbiased=False),
+            "object_intent_audit_interval_energy_centroid": centroid.mean(),
+            "object_intent_audit_interval_energy_centroid_std": centroid.std(unbiased=False),
+            "object_intent_audit_interval_centroid_frame_absolute_gap": (centroid - progress)
+            .abs()
+            .mean(),
+            "object_intent_audit_frame_progress_centroid_correlation": cls._detached_pearson(
+                progress, centroid
+            ),
+            "object_intent_audit_frame_progress_interval_variation_correlation": (
+                cls._detached_pearson(progress, interval_variation)
+            ),
+            "object_intent_audit_frame_progress_state_change_correlation": (
+                cls._detached_pearson(progress, state_change)
+            ),
+            "object_w_audit_frame_progress_successor_correlation": cls._detached_pearson(
+                progress, successor_innovation
+            ),
+            "object_w_audit_frame_progress_interval_variation_correlation": (
+                cls._detached_pearson(progress, w_interval_variation)
+            ),
+        }
+
+    def _forward(
+        self,
+        batch: TrainingBatch,
+        *,
+        training: bool,
+        collect_diagnostics: bool,
+        generator: torch.Generator | None,
+        condition_generator: torch.Generator | None = None,
+    ) -> tuple[LossLedger, dict[str, Tensor]]:
+        batch.validate(self.config)
+        cache, training_state, static_metrics = self.model.encode_online(
+            batch.online,
+            training_mask=training,
+            collect_diagnostics=collect_diagnostics,
+            condition_generator=condition_generator,
+        )
+        return self._forward_encoded(
+            batch,
+            encoded=EncodedTrainingBatch(cache, training_state, static_metrics),
+            collect_diagnostics=collect_diagnostics,
+            generator=generator,
+        )
+
+    def _forward_encoded(
+        self,
+        batch: TrainingBatch,
+        *,
+        encoded: EncodedTrainingBatch,
+        collect_diagnostics: bool,
+        generator: torch.Generator | None,
+    ) -> tuple[LossLedger, dict[str, Tensor]]:
+        encoded.cache.validate(self.config)
+        encoded.training_state.validate(self.config)
+        top_targets, teacher_metrics = self.model.build_training_targets(
+            encoded.training_state,
+            batch.future,
+            collect_diagnostics=collect_diagnostics,
+        )
+        flow_state = sample_flow_matching(
+            batch.action_target.normalized,
+            action_state=batch.online.history.action_state,
+            codec_gripper_boundary=batch.online.history.codec_gripper_boundary,
+            codec=self.model.outlet_adapter.codec,
+            distribution=self.config.bottom.flow_time_distribution,
+            generator=generator,
+            schedule=(
+                None
+                if self.config.runtime.deployment_flow_schedule is None
+                else DeploymentFlowSchedule.from_dict(
+                    self.config.runtime.deployment_flow_schedule
+                ).refined
+            ),
+        )
+
+        output = self.model.velocity(
+            encoded.cache,
+            noisy_action_field=flow_state.noisy_physical,
+            time=flow_state.time,
+            flow_step_context=flow_state.flow_step_context,
+            # Execution-value regression is part of the loss on every train
+            # and validation batch.  It owns non-scalar candidate tensors and
+            # therefore cannot be coupled to the optional diagnostic-batch
+            # budget used only for logging and interventions.
+            require_execution_supervision=True,
+            collect_diagnostics=collect_diagnostics,
+        )
+        ledger = compose_losses(
+            self.config,
+            policy_output=output,
+            action_target=batch.action_target,
+            history=batch.online.history,
+            flow_state=flow_state,
+            observation=encoded.training_state.observation,
+            top_targets=top_targets,
+            predicted_dynamics=encoded.cache.top.predicted_dynamics,
+            action_codec=(
+                self.model.outlet_adapter
+                if (
+                    self.model.outlet_adapter.is_binary_command
+                    or getattr(self.model.outlet_adapter, "is_relative_command", False)
+                )
+                else self.model.outlet_adapter.codec
+            ),
+            collect_diagnostics=collect_diagnostics,
+        )
+        metrics = {**encoded.metrics, **teacher_metrics, **output.metrics}
+        if collect_diagnostics:
+            metrics.update(self._audit_progress_metrics(batch, encoded))
+        return ledger, metrics
+
+    @torch.no_grad()
+    def encode_eval(
+        self,
+        batch: TrainingBatch,
+        *,
+        collect_diagnostics: bool,
+    ) -> EncodedTrainingBatch:
+        """Build the static validation graph once for loss and deployment."""
+
+        batch.validate(self.config)
+        self.model.eval()
+        with _autocast(self.device, self.dtype):
+            cache, training_state, metrics = self.model.encode_online(
+                batch.online,
+                training_mask=False,
+                collect_diagnostics=collect_diagnostics,
+            )
+        return EncodedTrainingBatch(cache, training_state, metrics)
+
+    def train_step(
+        self,
+        batch: TrainingBatch,
+        *,
+        collect_diagnostics: bool = False,
+        gradient_spike_handler: Callable[[FiniteGradientSpikeReport], None]
+        | None = None,
+    ) -> TrainStepResult:
+        self.model.train()
+        # V120 intentionally keeps the execution controller and ordered
+        # capacity bank out of the task graph for 200 steps, then opens them
+        # continuously over 1000 steps.  Omitting this call left the recovered
+        # mainline permanently at the warm-up identity boundary.
+        self.model.set_training_step(self.global_step)
+        self.optimizer.zero_grad(set_to_none=True)
+        with _autocast(self.device, self.dtype):
+            ledger, metrics = self._forward(
+                batch,
+                training=True,
+                collect_diagnostics=collect_diagnostics,
+                generator=self.train_flow_generator,
+                condition_generator=self.train_condition_generator,
+            )
+        if collect_diagnostics:
+            # Keep the joint arm/gripper route intact.  These probes expose
+            # where the real training losses pull the B-spine; they do not
+            # detach, reweight or otherwise participate in the update.
+            metrics.update(self._bspine_gradient_direction_probe(ledger))
+        ledger.total.backward()
+        gradient_norm, gradient_metrics, gradient_norm_scalar = (
+            self._gradient_lifecycle(
+                collect_diagnostics=collect_diagnostics,
+                gradient_spike_handler=gradient_spike_handler,
+            )
+        )
+        metrics.update(gradient_metrics)
+        # Record the LR that owns this update.  Advancing the scheduler first
+        # and then logging the optimizer group reported the *next* batch's LR
+        # beside the current batch loss, an off-by-one semantic error during
+        # the entire warmup.
+        # Optimizer groups intentionally have different V120-resolved scales.
+        # The public ``learning_rate`` metric therefore owns the base schedule,
+        # not whichever alphabetically sorted role happens to be group zero.
+        learning_rate = float(
+            self.config.optimizer.learning_rate
+            * self.schedule.ratio(self.schedule.step_index)
+        )
+        self.optimizer.step()
+        self.schedule.step()
+        self.global_step += 1
+        return TrainStepResult(
+            loss=ledger.total.detach().float(),
+            gradient_norm=gradient_norm.detach().float(),
+            learning_rate=learning_rate,
+            metrics=self._tensor_metrics(ledger, metrics),
+            gradient_norm_scalar=gradient_norm_scalar,
+        )
+
+    @torch.no_grad()
+    def eval_step(
+        self,
+        batch: TrainingBatch,
+        *,
+        collect_diagnostics: bool = True,
+        generator: torch.Generator | None = None,
+        encoded: EncodedTrainingBatch | None = None,
+    ) -> TrainStepResult:
+        self.model.eval()
+        with _autocast(self.device, self.dtype):
+            if encoded is None:
+                ledger, metrics = self._forward(
+                    batch,
+                    training=False,
+                    collect_diagnostics=collect_diagnostics,
+                    generator=generator,
+                    condition_generator=None,
+                )
+            else:
+                ledger, metrics = self._forward_encoded(
+                    batch,
+                    encoded=encoded,
+                    collect_diagnostics=collect_diagnostics,
+                    generator=generator,
+                )
+        return TrainStepResult(
+            loss=ledger.total.detach().float(),
+            gradient_norm=ledger.total.new_zeros((), dtype=torch.float32),
+            # Optimizer group zero is alphabetic, not the public/base role.
+            # Report the same base schedule semantic as train_step instead of
+            # whichever role-specific LR happens to sort first.
+            learning_rate=float(
+                self.config.optimizer.learning_rate
+                * self.schedule.ratio(self.schedule.step_index)
+            ),
+            metrics=self._tensor_metrics(ledger, metrics),
+            gradient_norm_scalar=0.0,
+        )
+
+
+__all__ = [
+    "EncodedTrainingBatch",
+    "MainlineTrainingEngine",
+    "NonFiniteGradientError",
+    "NonFiniteGradientReport",
+    "TrainStepResult",
+    "validate_finite_training_batch",
+]

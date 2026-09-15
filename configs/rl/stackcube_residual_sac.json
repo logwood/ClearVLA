@@ -1,0 +1,14 @@
+{
+  "hidden": 256,
+  "batch_size": 128,
+  "replay_capacity": 10000,
+  "learning_starts": 512,
+  "gamma": 0.99,
+  "tau": 0.005,
+  "learning_rate": 0.0003,
+  "alpha": 0.02,
+  "residual_fraction": 0.1,
+  "initial_log_std": -3.0,
+  "grad_clip": 10.0,
+  "seed": 0
+}

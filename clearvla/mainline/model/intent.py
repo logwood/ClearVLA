@@ -1,0 +1,850 @@
+"""Recovered V120 stateless intent, plan recognition and coarse action."""
+
+from __future__ import annotations
+
+import torch
+from torch import Tensor, nn
+
+from .routing import register_gradient_rms_metric, smooth_rms_contract
+from .types import (
+    INTERVAL_BOUNDS,
+    ActionIntentDock,
+    CoarseActionIntentState,
+    FutureObjectDynamics,
+    FuturePlanRecognition,
+    ObjectFactSet,
+    ObjectIntentState,
+    normalized_entropy,
+)
+
+TYPED_INTENT_NAMES = ("semantic", "appearance", "geometry")
+
+
+def _causal_mask(length: int, device: torch.device) -> Tensor:
+    return torch.triu(
+        torch.ones(length, length, device=device, dtype=torch.bool), diagonal=1
+    )
+
+
+def _interval_slices(length: int) -> tuple[slice, ...]:
+    if length < 1:
+        raise ValueError("future sequence cannot be empty")
+    rows: list[slice] = []
+    for lower, upper in INTERVAL_BOUNDS:
+        start = min(max(int(lower) - 1, 0), length - 1)
+        stop = min(max(int(upper), start + 1), length)
+        rows.append(slice(start, stop))
+    return tuple(rows)
+
+
+def _interval_common_residual(value: Tensor) -> tuple[Tensor, Tensor]:
+    """Express four interval rows as one common value plus exact residuals."""
+
+    if value.ndim < 2 or int(value.shape[1]) != 4:
+        raise ValueError("S decomposition requires four interval rows")
+    common = value.mean(dim=1)
+    residual = value - common[:, None]
+    return common, residual
+
+
+class _CrossRead(nn.Module):
+    def __init__(self, hidden: int, heads: int, maximum_rms: float = 0.35) -> None:
+        super().__init__()
+        self.query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.memory_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.attention = nn.MultiheadAttention(
+            hidden, heads, bias=False, dropout=0.0, batch_first=True
+        )
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(hidden, elementwise_affine=False),
+            nn.Linear(hidden, 2 * hidden, bias=False),
+            nn.SiLU(),
+            nn.Linear(2 * hidden, hidden, bias=False),
+        )
+        self.maximum_rms = float(maximum_rms)
+
+    def forward(
+        self,
+        query: Tensor,
+        memory: Tensor,
+        *,
+        padding_mask: Tensor | None = None,
+        diagnostics: bool = False,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        # ``MultiheadAttention`` returns NaNs when every key in one batch row
+        # is masked.  More importantly, normalizing a padded/invalid key before
+        # masking still lets a malformed cache leak through the reduction.  A
+        # dummy zero key keeps the kernel finite for the all-invalid row; its
+        # update is discarded below so that the row is an exact identity read.
+        all_invalid: Tensor | None = None
+        effective_padding_mask = padding_mask
+        if padding_mask is not None:
+            if padding_mask.ndim != 2 or tuple(padding_mask.shape) != tuple(
+                memory.shape[:2]
+            ):
+                raise ValueError("cross-read padding mask must align with memory")
+            if int(memory.shape[1]) < 1:
+                raise ValueError("cross-read memory cannot be empty")
+            effective_padding_mask = padding_mask.to(
+                device=memory.device,
+                dtype=torch.bool,
+            )
+            valid = ~effective_padding_mask
+            all_invalid = ~valid.any(dim=-1)
+            safe_memory = torch.where(
+                valid[..., None],
+                memory,
+                torch.zeros_like(memory),
+            )
+            normalized_memory = self.memory_norm(safe_memory)
+            # Unmask one zero key only for rows with no legal key.  The
+            # resulting attention weight is removed after the kernel call.
+            effective_padding_mask = effective_padding_mask.clone()
+            effective_padding_mask[all_invalid, 0] = False
+        else:
+            normalized_memory = self.memory_norm(memory)
+        update, weights = self.attention(
+            self.query_norm(query),
+            normalized_memory,
+            normalized_memory,
+            key_padding_mask=effective_padding_mask,
+            need_weights=diagnostics,
+            average_attn_weights=True,
+        )
+        update, _ = smooth_rms_contract(update, self.maximum_rms)
+        value = query + update
+        ffn, _ = smooth_rms_contract(self.ffn(value), self.maximum_rms)
+        innovation = update + ffn
+        value = value + ffn
+        if all_invalid is not None:
+            invalid = all_invalid[:, None, None]
+            # No valid object/evidence is an exact no-op, including its FFN
+            # residual.  This is intentionally a value-level mask rather than
+            # a detached loss-side convention.
+            value = torch.where(invalid, query, value)
+            innovation = torch.where(invalid, torch.zeros_like(innovation), innovation)
+            if weights is not None:
+                weights = torch.where(
+                    all_invalid[:, None, None],
+                    torch.zeros_like(weights),
+                    weights,
+                )
+        if weights is None:
+            weights = query.new_zeros(query.shape[0], query.shape[1], memory.shape[1])
+        return value, innovation, weights
+
+
+class _SelfBlock(nn.Module):
+    def __init__(self, hidden: int, heads: int) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.attention = nn.MultiheadAttention(
+            hidden, heads, bias=False, dropout=0.0, batch_first=True
+        )
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(hidden, elementwise_affine=False),
+            nn.Linear(hidden, 2 * hidden, bias=False),
+            nn.GELU(),
+            nn.Linear(2 * hidden, hidden, bias=False),
+        )
+
+    def forward(self, value: Tensor, *, causal: bool = False) -> Tensor:
+        normalized = self.norm(value)
+        update, _ = self.attention(
+            normalized,
+            normalized,
+            normalized,
+            attn_mask=_causal_mask(int(value.shape[1]), value.device) if causal else None,
+            need_weights=False,
+        )
+        update, _ = smooth_rms_contract(update, 0.35)
+        value = value + update
+        ffn, _ = smooth_rms_contract(self.ffn(value), 0.35)
+        return value + ffn
+
+
+class StatelessObjectIntentOrganizer(nn.Module):
+    """V120 observable intent without scalar progress or synthetic phases."""
+
+    def __init__(
+        self,
+        *,
+        hidden: int,
+        goal_dim: int,
+        state_dim: int,
+        action_dim: int,
+        content_dim: int,
+        route_dim: int,
+        horizon: int,
+        heads: int,
+    ) -> None:
+        super().__init__()
+        self.hidden = int(hidden)
+        self.horizon = int(horizon)
+        self.goal_input = nn.Linear(goal_dim, hidden, bias=False)
+        self.goal_queries = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
+        self.goal_read = _CrossRead(hidden, heads)
+        self.goal_self = _SelfBlock(hidden, heads)
+        history_width = state_dim + action_dim + state_dim + 1
+        self.history_input = nn.Sequential(
+            nn.LayerNorm(history_width, elementwise_affine=False),
+            nn.Linear(history_width, hidden, bias=False),
+        )
+        self.history_blocks = nn.ModuleList(_SelfBlock(hidden, heads) for _ in range(2))
+        self.object_content = nn.Linear(content_dim, hidden, bias=False)
+        self.object_semantic = nn.Linear(route_dim, hidden, bias=False)
+        self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
+        self.object_geometry = nn.Linear(route_dim, hidden, bias=False)
+        self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
+        self.interval_goal = _CrossRead(hidden, heads)
+        self.interval_history = _CrossRead(hidden, heads)
+        self.interval_object = _CrossRead(hidden, heads)
+        self.typed_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.typed_relevance_queries = nn.ModuleList(
+            nn.Linear(hidden, route_dim, bias=False) for _ in TYPED_INTENT_NAMES
+        )
+        # Initial temperature is exactly one.  It remains bounded in [0.25, 4]
+        # and therefore cannot turn the fixed-zero null comparison into an
+        # unbounded selector gain.
+        self.typed_temperature_logit = nn.Parameter(
+            torch.full((len(TYPED_INTENT_NAMES),), -1.3862943611198906)
+        )
+        self.interval_self = _SelfBlock(hidden, heads)
+        self.temporal_identity = nn.Parameter(torch.randn(1, horizon, hidden) * 0.02)
+        self.temporal_read = _CrossRead(hidden, heads)
+        self.state_change_query = nn.Parameter(torch.randn(1, 1, hidden) * 0.02)
+        self.state_change_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.state_change_key_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.state_change_read = nn.MultiheadAttention(
+            hidden, heads, bias=False, dropout=0.0, batch_first=True
+        )
+        self.state_change_input = nn.Linear(state_dim, hidden, bias=False)
+        self.state_change_transport = nn.Linear(2, hidden, bias=False)
+        self.state_change_fuse = nn.Linear(2 * hidden, hidden, bias=False)
+
+    @staticmethod
+    def _paired_history(
+        state_history: Tensor,
+        state: Tensor,
+        executed_history: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        if state_history.ndim != 3 or state.ndim != 2 or executed_history.ndim != 3:
+            raise ValueError("intent history requires state/action sequences")
+        state_sequence = torch.cat((state_history, state[:, None]), dim=1)
+        length = max(int(state_sequence.shape[1]), int(executed_history.shape[1]))
+
+        def left_pad(value: Tensor, target: int) -> Tensor:
+            missing = target - int(value.shape[1])
+            if missing <= 0:
+                return value[:, -target:]
+            return torch.cat((value[:, :1].expand(-1, missing, -1), value), dim=1)
+
+        states = left_pad(state_sequence, length)
+        actions = left_pad(executed_history, length)
+        previous = torch.cat((states[:, :1], states[:, :-1]), dim=1)
+        delta = states - previous
+        offset = torch.linspace(
+            -1.0, 0.0, length, device=states.device, dtype=states.dtype
+        )[None, :, None].expand(states.shape[0], -1, -1)
+        return torch.cat((states, actions, delta, offset), dim=-1), delta
+
+    def _object_tokens(self, facts: ObjectFactSet) -> Tensor:
+        facts.validate()
+        validity = torch.nan_to_num(
+            facts.validity.to(device=facts.content.device, dtype=torch.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp(0.0, 1.0)
+        support = validity[..., 0] > 0.0
+        content = torch.where(
+            support[..., None],
+            facts.content,
+            torch.zeros_like(facts.content),
+        )
+        return self.object_content(content)
+
+    @staticmethod
+    def _bounded_unit(value: Tensor, *, floor: float = 0.25) -> Tensor:
+        value_f = value.float()
+        return value_f / (
+            value_f.square().sum(dim=-1, keepdim=True) + float(floor) ** 2
+        ).sqrt()
+
+    def _typed_relevance(
+        self,
+        *,
+        public_interval_carrier: Tensor,
+        facts: ObjectFactSet,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Build fixed-zero, per-type relevance without collapsing K."""
+
+        query_source = self.typed_query_norm(public_interval_carrier)
+        typed_query = torch.stack(
+            tuple(projection(query_source) for projection in self.typed_relevance_queries),
+            dim=2,
+        )  # [B,I,type,R]
+        validity_values = torch.nan_to_num(
+            facts.validity.to(device=public_interval_carrier.device, dtype=torch.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp(0.0, 1.0)
+        object_support = validity_values[..., 0] > 0.0
+        typed_route = torch.stack(
+            (facts.semantic, facts.appearance, facts.geometry), dim=2
+        )  # [B,K,type,R]
+        # Quarantine invalid producer rows before the bounded cosine and the
+        # subsequent type/object reductions.  Multiplying after a projection
+        # would still allow NaN * 0 to poison the upstream VJP.
+        typed_route = torch.where(
+            object_support[..., None, None],
+            typed_route,
+            torch.zeros_like(typed_route),
+        )
+        score = torch.einsum(
+            "bitr,bktr->bikt",
+            self._bounded_unit(typed_query),
+            self._bounded_unit(typed_route),
+        ).clamp(-1.0, 1.0)
+        temperature = 0.25 + 3.75 * torch.sigmoid(
+            self.typed_temperature_logit.float()
+        )
+        signal_probability = torch.sigmoid(
+            score * temperature.to(device=score.device)[None, None, None]
+        )
+        validity = validity_values[:, None, :, None, :]
+        relevance_mass = signal_probability[..., None] * validity
+        relevance_mass = relevance_mass.to(dtype=typed_route.dtype)
+        relevance_value = (
+            relevance_mass * typed_route[:, None].to(dtype=relevance_mass.dtype)
+        )
+
+        components: list[Tensor] = []
+        for type_index, projection in enumerate(
+            (self.object_semantic, self.object_appearance, self.object_geometry)
+        ):
+            # K is a fixed identity axis.  A fixed mean preserves zero and
+            # cannot cancel the optionality by renormalizing selected mass.
+            selected_route = relevance_value[..., type_index, :].mean(dim=2)
+            component, _ = smooth_rms_contract(projection(selected_route), 0.35)
+            components.append(component)
+        typed_components = torch.stack(components, dim=2)
+        raw_context = typed_components.sum(dim=2) / (3.0**0.5)
+        _, context_scale = smooth_rms_contract(raw_context, 0.35)
+        typed_components = typed_components * context_scale[:, :, None].to(
+            dtype=typed_components.dtype
+        )
+        return (
+            relevance_mass,
+            relevance_value,
+            typed_components,
+            score,
+            temperature,
+        )
+
+    def forward(
+        self,
+        *,
+        goal_tokens: Tensor,
+        goal_mask: Tensor,
+        state_history: Tensor,
+        state: Tensor,
+        executed_history: Tensor,
+        facts: ObjectFactSet,
+        collect_diagnostics: bool,
+    ) -> tuple[ObjectIntentState, dict[str, Tensor]]:
+        if goal_tokens.ndim != 3 or goal_mask.ndim != 2:
+            raise ValueError("intent organizer requires full T5 tokens and mask")
+        batch = int(goal_tokens.shape[0])
+        goal_memory = self.goal_input(goal_tokens)
+        goal_query = self.goal_queries.to(
+            device=goal_memory.device, dtype=goal_memory.dtype
+        ).expand(batch, -1, -1)
+        protected_goal, _, goal_attention = self.goal_read(
+            goal_query,
+            goal_memory,
+            padding_mask=~goal_mask.to(device=goal_memory.device, dtype=torch.bool),
+            diagnostics=collect_diagnostics,
+        )
+        protected_goal = self.goal_self(protected_goal)
+        paired_history, observed_state_delta = self._paired_history(
+            state_history, state, executed_history
+        )
+        history = self.history_input(paired_history)
+        for block in self.history_blocks:
+            history = block(history, causal=True)
+        # Materialize the producer-owned object support before any learned
+        # projection.  This keeps invalid/unknown rows out of both the S
+        # language read and the backward graph.
+        validity_values = torch.nan_to_num(
+            facts.validity.to(device=facts.content.device, dtype=torch.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp(0.0, 1.0)
+        object_validity = validity_values[..., 0] > 0.0
+        object_mask = object_validity[..., None]
+        content_input = torch.where(
+            object_mask,
+            facts.content,
+            torch.zeros_like(facts.content),
+        )
+        semantic_input = torch.where(
+            object_mask,
+            facts.semantic,
+            torch.zeros_like(facts.semantic),
+        )
+        appearance_input = torch.where(
+            object_mask,
+            facts.appearance,
+            torch.zeros_like(facts.appearance),
+        )
+        geometry_input = torch.where(
+            object_mask,
+            facts.geometry,
+            torch.zeros_like(facts.geometry),
+        )
+        content_objects = self.object_content(content_input)
+        # Fuse the three observable object routes before the language read.
+        # The sum is shared over K and symmetric over semantic/appearance/
+        # geometry, so it supplies affordance/appearance evidence without
+        # creating a color-specific slot or a learned role sidecar.  Keep the
+        # update bounded and quarantine producer-invalid rows before any
+        # attention reduction.
+        typed_object_context = (
+            self.object_semantic(semantic_input)
+            + self.object_appearance(appearance_input)
+            + self.object_geometry(geometry_input)
+        ) / (3.0**0.5)
+        typed_object_context, _ = smooth_rms_contract(typed_object_context, 0.35)
+        # Keep the original content-only memory as the interval evidence
+        # source so typed S relevance remains owned by its named routes.  The
+        # symmetric route-enriched view is exported as the public K memory for
+        # the language-conditioned coarse compiler below; this prevents an
+        # appearance/geometry helper from becoming a second public interval
+        # owner while still making those facts available to action selection.
+        objects = content_objects + typed_object_context
+        interval_objects = content_objects
+        # Keep the public K memory physically safe before it reaches either
+        # S's language-conditioned read or the coarse-action compiler.  The
+        # producer-owned validity mask is not a learned confidence and is not
+        # renormalized into a task-dependent selector.
+        objects = torch.where(
+            object_validity[..., None],
+            objects,
+            torch.zeros_like(objects),
+        )
+        interval_objects = torch.where(
+            object_validity[..., None],
+            interval_objects,
+            torch.zeros_like(interval_objects),
+        )
+        interval_base = self.interval_identity.to(
+            device=objects.device, dtype=objects.dtype
+        ).expand(batch, -1, -1)
+        _, goal_innovation, interval_goal_attention = self.interval_goal(
+            interval_base, protected_goal, diagnostics=collect_diagnostics
+        )
+        _, history_innovation, interval_history_attention = self.interval_history(
+            interval_base, history, diagnostics=collect_diagnostics
+        )
+        # This is the repaired language/object seam.  The old query was only
+        # ``interval_base``; consequently its K attention and object update
+        # were invariant to an instruction swap.  Goal/history innovations are
+        # already S-owned, bounded deltas, so using them as the object-read
+        # query preserves the K axis while making object identity conditional
+        # on the instruction and the current causal context.
+        language_object_query = interval_base + goal_innovation + history_innovation
+        _, object_innovation, interval_object_attention = self.interval_object(
+            language_object_query,
+            interval_objects,
+            padding_mask=~object_validity,
+            diagnostics=collect_diagnostics,
+        )
+        public_intervals = self.interval_self(
+            interval_base
+            + goal_innovation
+            + history_innovation
+            + object_innovation
+        )
+        (
+            typed_relevance_mass,
+            typed_relevance_value,
+            typed_policy_components,
+            typed_relevance_score,
+            typed_temperature,
+        ) = self._typed_relevance(
+            public_interval_carrier=public_intervals,
+            facts=facts,
+        )
+        typed_common_mass, typed_interval_residual_mass = (
+            _interval_common_residual(typed_relevance_mass)
+        )
+        typed_common_value, typed_interval_residual_value = (
+            _interval_common_residual(typed_relevance_value)
+        )
+        typed_policy_context = typed_policy_components.sum(dim=2) / (3.0**0.5)
+        policy_intervals = public_intervals + typed_policy_context
+        temporal_base = self.temporal_identity.to(
+            device=public_intervals.device, dtype=public_intervals.dtype
+        ).expand(batch, -1, -1)
+        temporal, _, _ = self.temporal_read(
+            temporal_base, public_intervals, diagnostics=False
+        )
+        state_change_values = self.state_change_input(observed_state_delta)
+        state_change_history, state_change_attention = self.state_change_read(
+            self.state_change_query_norm(
+                self.state_change_query.to(
+                    device=history.device, dtype=history.dtype
+                ).expand(batch, -1, -1)
+            ),
+            self.state_change_key_norm(history),
+            state_change_values,
+            need_weights=collect_diagnostics,
+            average_attn_weights=True,
+        )
+        if state_change_attention is None:
+            state_change_attention = history.new_zeros(batch, 1, history.shape[1])
+        state_change_history = state_change_history[:, 0]
+        transport_prior = facts.transport_prior.to(
+            device=objects.device,
+            dtype=objects.dtype,
+        )
+        transport_prior = torch.where(
+            object_mask.to(device=transport_prior.device),
+            transport_prior,
+            torch.zeros_like(transport_prior),
+        )
+        transport_tokens = self.state_change_transport(transport_prior)
+        transport_validity = validity_values.to(
+            device=transport_tokens.device, dtype=transport_tokens.dtype
+        )
+        state_change_transport = (
+            transport_tokens * transport_validity
+        ).sum(dim=1) / transport_validity.sum(dim=1).clamp_min(1.0)
+        state_change_evidence, _ = smooth_rms_contract(
+            self.state_change_fuse(
+                torch.cat((state_change_history, state_change_transport), dim=-1)
+            ),
+            0.20,
+        )
+        state_out = ObjectIntentState(
+            protected_goal_set=protected_goal,
+            history_tokens=history,
+            object_tokens=objects,
+            public_interval_carrier=public_intervals,
+            policy_interval_context=policy_intervals,
+            temporal_queries=temporal,
+            state_change_evidence=state_change_evidence,
+            typed_common_mass=typed_common_mass,
+            typed_common_value=typed_common_value,
+            typed_interval_residual_mass=typed_interval_residual_mass,
+            typed_interval_residual_value=typed_interval_residual_value,
+            typed_policy_components=typed_policy_components,
+            goal_attention=goal_attention,
+            interval_goal_attention=interval_goal_attention,
+            interval_history_attention=interval_history_attention,
+            interval_object_attention=interval_object_attention,
+            object_validity=validity_values.detach().to(
+                device=objects.device,
+                dtype=torch.float32,
+            ),
+        )
+        state_out.validate(horizon=self.horizon, hidden=self.hidden)
+        if not collect_diagnostics:
+            return state_out, {}
+        metrics: dict[str, Tensor] = {
+            "object_intent_goal_attention_entropy": normalized_entropy(
+                goal_attention, dim=-1
+            ).detach().mean(),
+            "object_intent_interval_goal_entropy": normalized_entropy(
+                interval_goal_attention, dim=-1
+            ).detach().mean(),
+            "object_intent_interval_history_entropy": normalized_entropy(
+                interval_history_attention, dim=-1
+            ).detach().mean(),
+            "object_intent_interval_object_entropy": normalized_entropy(
+                interval_object_attention, dim=-1
+            ).detach().mean(),
+            "object_intent_language_object_attention_entropy": normalized_entropy(
+                interval_object_attention, dim=-1
+            ).detach().mean(),
+            "object_intent_language_object_attention_valid_fraction": (
+                object_validity.detach().float().mean()
+            ),
+            "object_intent_public_interval_variation": public_intervals.detach().float().std(
+                dim=1, unbiased=False
+            ).mean(),
+            "object_intent_policy_interval_variation": policy_intervals.detach().float().std(
+                dim=1, unbiased=False
+            ).mean(),
+            "object_intent_temporal_variation": temporal.detach().float().std(
+                dim=1, unbiased=False
+            ).mean(),
+            "object_intent_goal_innovation_rms": goal_innovation.detach().float().square().mean().sqrt(),
+            "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
+            "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
+            "object_intent_typed_action_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
+            "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
+            "object_intent_observed_transport_rms": transport_prior.detach().float().square().mean().sqrt(),
+            "object_intent_state_change_history_rms": state_change_history.detach().float().square().mean().sqrt(),
+            "object_intent_state_change_transport_rms": state_change_transport.detach().float().square().mean().sqrt(),
+            "object_intent_state_change_evidence_rms": state_change_evidence.detach().float().square().mean().sqrt(),
+            "object_intent_state_change_attention_entropy": normalized_entropy(
+                state_change_attention, dim=-1
+            ).detach().mean(),
+        }
+        # The returned attention probability is an auxiliary observation; it
+        # is not consumed by the action path and therefore has no ordinary
+        # owner VJP.  Observe the two value tensors that actually carry the
+        # repaired language/object edge instead: the conditioned K query and
+        # its bounded object innovation.  Keep the historical attention name
+        # as a compatibility alias, but bind it to the consumed innovation
+        # rather than reporting a guaranteed zero from a sibling output.
+        register_gradient_rms_metric(
+            language_object_query,
+            metrics,
+            "gradient_tensor_s_language_object_query_rms",
+        )
+        register_gradient_rms_metric(
+            object_innovation,
+            metrics,
+            "gradient_tensor_s_language_object_update_rms",
+        )
+        register_gradient_rms_metric(
+            object_innovation,
+            metrics,
+            "gradient_tensor_s_language_object_attention_rms",
+        )
+        raw_routes = (semantic_input, appearance_input, geometry_input)
+        for type_index, name in enumerate(TYPED_INTENT_NAMES):
+            mass = typed_relevance_mass[..., type_index, 0].detach().float()
+            selected = typed_relevance_value[..., type_index, :].detach().float()
+            component = typed_policy_components[..., type_index, :].detach().float()
+            metrics.update(
+                {
+                    f"object_intent_{name}_route_raw_rms": raw_routes[type_index]
+                    .detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    f"object_intent_{name}_relevance_mass": mass.mean(),
+                    f"object_intent_{name}_null_mass": (1.0 - mass).mean(),
+                    f"object_intent_{name}_selected_value_rms": selected.square()
+                    .mean()
+                    .sqrt(),
+                    f"object_intent_{name}_object_variation": selected.std(
+                        dim=2, unbiased=False
+                    ).mean(),
+                    f"object_intent_{name}_interval_variation": selected.std(
+                        dim=1, unbiased=False
+                    ).mean(),
+                    f"object_intent_{name}_action_context_rms": component.square()
+                    .mean()
+                    .sqrt(),
+                    f"object_intent_{name}_score_abs": typed_relevance_score[
+                        ..., type_index
+                    ]
+                    .detach()
+                    .abs()
+                    .mean(),
+                    f"object_intent_{name}_temperature": typed_temperature[
+                        type_index
+                    ].detach(),
+                }
+            )
+        return state_out, metrics
+
+
+class FuturePlanRecognizer(nn.Module):
+    """Training-only V120 whole-segment posterior."""
+
+    def __init__(
+        self,
+        *,
+        hidden: int,
+        action_dim: int,
+        state_dim: int,
+        content_dim: int,
+        heads: int,
+    ) -> None:
+        super().__init__()
+        self.hidden = int(hidden)
+        self.content_dim = int(content_dim)
+        self.action_input = nn.Linear(action_dim, hidden, bias=False)
+        self.state_input = nn.Linear(state_dim, hidden, bias=False)
+        self.effect_input = nn.Linear(content_dim, hidden, bias=False)
+        self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
+        self.block = _SelfBlock(hidden, heads)
+        self.action_reconstruction = nn.Linear(hidden, action_dim, bias=False)
+        self.state_reconstruction = nn.Linear(hidden, state_dim, bias=False)
+        self.effect_reconstruction = nn.Linear(hidden, content_dim, bias=False)
+
+    def forward(
+        self,
+        *,
+        future_action: Tensor,
+        future_state: Tensor,
+        teacher: FutureObjectDynamics | None,
+        current_loss_support: Tensor,
+    ) -> FuturePlanRecognition:
+        if future_action.ndim != 3 or future_state.ndim != 3:
+            raise ValueError("plan recognizer requires full future action/state sequences")
+        length = min(int(future_action.shape[1]), int(future_state.shape[1]))
+        slices = _interval_slices(length)
+        action_summary = torch.stack(
+            [future_action[:, row].mean(dim=1) for row in slices], dim=1
+        )
+        state_summary = torch.stack(
+            [future_state[:, row].mean(dim=1) for row in slices], dim=1
+        )
+        if current_loss_support.ndim != 4 or int(current_loss_support.shape[-1]) != 1:
+            raise ValueError("recognizer current loss support must be [B,K,C,1]")
+        if int(current_loss_support.shape[0]) != int(future_action.shape[0]):
+            raise ValueError("recognizer current loss support batch does not align")
+        # This is the same detached current-fact support used by the object
+        # losses.  Future reliability and selector validity are deliberately
+        # absent: neither may shrink a supervised target or create a routing
+        # shortcut.  A camera reduction is performed exactly once because W
+        # exports object-level future geometry/content.
+        object_support = current_loss_support.detach().float().amax(dim=2)
+        if teacher is None:
+            effect_summary = future_action.new_zeros(
+                future_action.shape[0], 4, self.content_dim
+            )
+            teacher_valid = future_action.new_zeros(future_action.shape[0], 4, 1)
+        else:
+            teacher.validate()
+            expected_support = (
+                teacher.semantic_delta.shape[0],
+                teacher.semantic_delta.shape[2],
+                1,
+            )
+            if tuple(object_support.shape) != expected_support:
+                raise ValueError("recognizer object support does not align with teacher")
+            support = object_support[:, None]
+            denominator = support.sum(dim=2).clamp_min(1.0)
+            effect_summary = (
+                teacher.semantic_delta.detach().float() * support
+            ).sum(dim=2) / denominator
+            effect_summary = effect_summary.to(dtype=teacher.semantic_delta.dtype)
+            teacher_valid = (support.sum(dim=2) > 0).to(
+                dtype=teacher.semantic_delta.dtype
+            ).expand(-1, teacher.semantic_delta.shape[1], -1)
+        token = (
+            self.action_input(action_summary)
+            + self.state_input(state_summary)
+            + self.effect_input(effect_summary)
+            + self.interval_identity.to(
+                device=future_action.device, dtype=future_action.dtype
+            )
+        )
+        token = self.block(token)
+        action_pred = self.action_reconstruction(token)
+        state_pred = self.state_reconstruction(token)
+        effect_pred = self.effect_reconstruction(token)
+        effect_error = (
+            (effect_pred.float() - effect_summary.detach().float()).square()
+            * teacher_valid.detach().float()
+        ).sum() / teacher_valid.detach().float().sum().clamp_min(1.0) / float(
+            self.content_dim
+        )
+        reconstruction = (
+            (action_pred.float() - action_summary.detach().float()).square().mean()
+            + (state_pred.float() - state_summary.detach().float()).square().mean()
+            + 0.25 * effect_error
+        )
+        result = FuturePlanRecognition(
+            interval_targets=token.detach(),
+            action_summary=action_summary.detach(),
+            state_summary=state_summary.detach(),
+            effect_summary=effect_summary.detach(),
+            reconstruction_loss=reconstruction,
+        )
+        result.validate(hidden=self.hidden)
+        return result
+
+
+class CoarseActionIntent(nn.Module):
+    """V120 online clean action intent used exactly once by W."""
+
+    def __init__(self, *, hidden: int, action_dim: int, heads: int) -> None:
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
+        self.intent_read = _CrossRead(hidden, heads)
+        self.object_read = _CrossRead(hidden, heads)
+        self.history_read = _CrossRead(hidden, heads)
+        self.block = _SelfBlock(hidden, heads)
+        self.action_head = nn.Linear(hidden, action_dim, bias=False)
+
+    def forward(
+        self,
+        intent: ActionIntentDock,
+        *,
+        future_action: Tensor | None = None,
+        collect_diagnostics: bool = False,
+    ) -> CoarseActionIntentState:
+        intent.validate(hidden=int(self.query.shape[-1]))
+        batch = int(intent.public_interval_carrier.shape[0])
+        query = self.query.to(
+            device=intent.public_interval_carrier.device,
+            dtype=intent.public_interval_carrier.dtype,
+        ).expand(batch, -1, -1)
+        _, intent_delta, _ = self.intent_read(
+            query,
+            intent.public_interval_carrier,
+            diagnostics=collect_diagnostics,
+        )
+        # Carry the language-conditioned interval read into both auxiliary
+        # memories.  This keeps the object and history reads in the same S
+        # query frame instead of letting a learned query silently wash out the
+        # instruction before the physical proposal is formed.
+        conditioned_query = query + intent_delta
+        object_padding_mask = None
+        if intent.public_object_validity is not None:
+            validity = intent.public_object_validity.to(
+                device=intent.public_object_memory.device,
+                dtype=torch.float32,
+            ).squeeze(-1).clamp(0.0, 1.0)
+            object_padding_mask = ~(validity > 0.0)
+        _, object_delta, _ = self.object_read(
+            conditioned_query,
+            intent.public_object_memory,
+            padding_mask=object_padding_mask,
+            diagnostics=collect_diagnostics,
+        )
+        _, history_delta, _ = self.history_read(
+            conditioned_query,
+            intent.history_memory,
+            diagnostics=collect_diagnostics,
+        )
+        token = self.block(
+            conditioned_query
+            + object_delta
+            + history_delta
+        )
+        action_prediction = self.action_head(token)
+        if future_action is None:
+            target = None
+            loss = action_prediction.new_zeros(())
+        else:
+            slices = _interval_slices(int(future_action.shape[1]))
+            target = torch.stack(
+                [future_action[:, row].mean(dim=1) for row in slices], dim=1
+            ).detach()
+            loss = (action_prediction.float() - target.float()).square().mean()
+        return CoarseActionIntentState(
+            tokens=token,
+            action_prediction=action_prediction,
+            target=target,
+            loss=loss,
+        )
+
+
+__all__ = [
+    "CoarseActionIntent",
+    "FuturePlanRecognizer",
+    "StatelessObjectIntentOrganizer",
+]

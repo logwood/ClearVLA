@@ -1,0 +1,260 @@
+"""Compact serialized identity for the capability-named mainline.
+
+Experiment labels and host paths are deliberately absent.  The manifest says
+which mathematical components a checkpoint owns; executable tensor contracts
+remain in :mod:`clearvla.mainline.interfaces` and the typed top modules.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from typing import Mapping, cast
+
+from .v120_core.bspine import (
+    BSPINE0_IMPLEMENTATION,
+    BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
+    BSPINE_ARM_ONLY_IMPLEMENTATION,
+    BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
+    BSPINE_DISABLED_IMPLEMENTATION,
+)
+
+CAPABILITY_NAME = "object_intent_dynamics_323"
+CAPABILITY_SCHEMA = 30
+BSPINE_CAPABILITY_SCHEMA = 31
+CURRENT_CAPABILITY_SCHEMAS = frozenset({CAPABILITY_SCHEMA, BSPINE_CAPABILITY_SCHEMA})
+LAYOUT_NAME = "clearvla_mainline"
+# Layout 2 is the atomic component-owner hierarchy.  Layout 1 is readable only
+# for explicit validation/migration; it is never an exact-resume target.
+LAYOUT_SCHEMA = 2
+LEGACY_LAYOUT_SCHEMAS = frozenset({1})
+TOPOLOGY = (3, 2, 3)
+INTERVALS = ((4, 8), (8, 16), (16, 32), (32, 48))
+
+
+@dataclass(frozen=True)
+class ComponentABI:
+    """Stable component identities used for explicit checkpoint migration."""
+
+    observation: str = "restored_v120_three_frame_flow_dino_progressive_g123_fp32_owner_logs_zero_preserving_variance"
+    top: str = "v120_progressive_g123_dense_grounder_fp32_support_logs_exact_p1_s_owned_relevance_goal_invariant_physical_action_conditioned_w_single_consequence_refinement_p2_transport_address_typed_consequence_two_optional_p3_schema28_core_recovery"
+    bottom: str = "restored_v120_shared_seed_dynamic_p1_terminal_layer_contracts_lane_local_p3_evidence_mmdit_dense512_execution_fp32_capacity_gripper_private_continuous_field_no_event_head"
+    training: str = "v120_mirrored_physical_flow_exact_teacher_current_support_raw_transport_event_transition_persistence_gripper_trajectory_v120_decay_local_global_clip_physical_w_ingress_gradient_probes_schema28_core_recovery_profile_owned_full_horizon_gripper_codec_boundary"
+    runtime: str = "cached_observation_progressive_gsw_exact_p1_physical_action_tagged_w_single_refinement_v120_nodes_clean_endpoint_decoded_gripper_events_teacher_isolated_finite_spike_matched_p2_value_address_capacity_metrics_schema28_core_recovery_profile_owned_full_horizon_gripper_codec_boundary_source_native_metrics"
+
+    def validate(self) -> None:
+        for name, value in self.as_dict().items():
+            if not value or value.strip() != value or " " in value:
+                raise ValueError(f"component ABI {name} is not a stable identifier")
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "observation": self.observation,
+            "top": self.top,
+            "bottom": self.bottom,
+            "training": self.training,
+            "runtime": self.runtime,
+        }
+
+
+@dataclass(frozen=True)
+class ArchitectureManifest:
+    """Architecture identity without experiment or legacy launcher state."""
+
+    capability: str = CAPABILITY_NAME
+    schema: int = CAPABILITY_SCHEMA
+    layout: str = LAYOUT_NAME
+    layout_schema: int = LAYOUT_SCHEMA
+    topology: tuple[int, int, int] = TOPOLOGY
+    intervals: tuple[tuple[int, int], ...] = INTERVALS
+    object_slots: int = 4
+    language_required: bool = True
+    components: ComponentABI = ComponentABI()
+
+    def validate(self, *, require_current_schema: bool = True) -> None:
+        """Validate the stable graph boundary.
+
+        Stored mainline checkpoints may carry an older top/schema while still
+        owning a byte-for-byte compatible bottom ABI.  Such a manifest is not
+        a legal current graph or exact-resume target, but it must remain
+        parseable for the explicit bottom-only migration path.  The relaxed
+        mode therefore relaxes only the positive capability schema number; all
+        structural identities and component ABIs remain validated.
+        """
+
+        if self.capability != CAPABILITY_NAME:
+            raise ValueError("mainline capability identity is incompatible")
+        if int(self.schema) <= 0 or (
+            require_current_schema and int(self.schema) not in CURRENT_CAPABILITY_SCHEMAS
+        ):
+            raise ValueError("mainline capability identity/schema is incompatible")
+        accepted_layout_schemas = (
+            {LAYOUT_SCHEMA}
+            if require_current_schema
+            else {LAYOUT_SCHEMA, *LEGACY_LAYOUT_SCHEMAS}
+        )
+        if self.layout != LAYOUT_NAME or int(self.layout_schema) not in accepted_layout_schemas:
+            raise ValueError("mainline code-layout identity is incompatible")
+        if tuple(self.topology) != TOPOLOGY:
+            raise ValueError("mainline topology must be G3/W2/P3")
+        if tuple(self.intervals) != INTERVALS:
+            raise ValueError("mainline requires the four canonical future intervals")
+        if int(self.object_slots) != 4:
+            raise ValueError("mainline requires four global object slots")
+        if not bool(self.language_required):
+            raise ValueError("formal mainline training requires language")
+        self.components.validate()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "capability": self.capability,
+            "schema": int(self.schema),
+            "layout": self.layout,
+            "layout_schema": int(self.layout_schema),
+            "topology": list(self.topology),
+            "intervals": [list(interval) for interval in self.intervals],
+            "object_slots": int(self.object_slots),
+            "language_required": bool(self.language_required),
+            "components": self.components.as_dict(),
+        }
+
+    def digest(self) -> str:
+        """Return the canonical manifest digest stored in a checkpoint."""
+
+        payload = json.dumps(
+            self.as_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+ARCHITECTURE_MANIFEST = ArchitectureManifest()
+BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
+    schema=BSPINE_CAPABILITY_SCHEMA,
+    components=ComponentABI(
+        bottom=(
+            ComponentABI().bottom
+            + "_parallel_fixed_bspline_coarse_detail_v1_cubic_k12_fp32"
+        )
+    ),
+)
+ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
+    schema=BSPINE_CAPABILITY_SCHEMA,
+    components=ComponentABI(
+        bottom=(
+            ComponentABI().bottom
+            + "_parallel_fixed_bspline_arm_only_v1_cubic_k12_fp32_raw_gripper"
+        )
+    ),
+)
+ARM_COARSE_CONTEXT_BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
+    schema=BSPINE_CAPABILITY_SCHEMA,
+    components=ComponentABI(
+        bottom=(
+            ComponentABI().bottom
+            + "_parallel_fixed_bspline_arm_coarse_context_v1_cubic_k12_fp32_raw_detail_gripper"
+        )
+    ),
+)
+ARM_PRIVATE_READER_BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
+    schema=BSPINE_CAPABILITY_SCHEMA,
+    components=ComponentABI(
+        bottom=(
+            ComponentABI().bottom
+            + "_parallel_fixed_bspline_arm_private_reader_v1_cubic_k12_fp32_raw_gripper_arm_private_correction"
+        )
+    ),
+)
+
+
+def architecture_manifest_for_bspine_implementation(
+    implementation: str,
+) -> ArchitectureManifest:
+    """Resolve the behavioral schema without making the baseline Schema31."""
+
+    if str(implementation) == BSPINE_DISABLED_IMPLEMENTATION:
+        return ARCHITECTURE_MANIFEST
+    if str(implementation) == BSPINE0_IMPLEMENTATION:
+        return BSPINE_ARCHITECTURE_MANIFEST
+    if str(implementation) == BSPINE_ARM_ONLY_IMPLEMENTATION:
+        return ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST
+    if str(implementation) == BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION:
+        return ARM_COARSE_CONTEXT_BSPINE_ARCHITECTURE_MANIFEST
+    if str(implementation) == BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION:
+        return ARM_PRIVATE_READER_BSPINE_ARCHITECTURE_MANIFEST
+    raise ValueError(f"unsupported B-spine implementation: {implementation!r}")
+
+
+def _integer(value: object, *, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"manifest {name} must be an integer")
+    return int(value)
+
+
+def _boolean(value: object, *, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ValueError(f"manifest {name} must be a boolean")
+
+
+def manifest_from_mapping(
+    value: Mapping[str, object],
+    *,
+    require_current_schema: bool = True,
+) -> ArchitectureManifest:
+    """Restore and validate one compact mainline architecture manifest."""
+
+    topology_value = value.get("topology")
+    intervals_value = value.get("intervals")
+    components_value = value.get("components")
+    if not isinstance(topology_value, (tuple, list)):
+        raise ValueError("manifest topology must be a sequence")
+    if not isinstance(intervals_value, (tuple, list)):
+        raise ValueError("manifest intervals must be a sequence")
+    if not isinstance(components_value, Mapping):
+        raise ValueError("manifest components must be a mapping")
+
+    topology_items = cast(tuple[object, ...] | list[object], topology_value)
+    topology = tuple(
+        _integer(item, name=f"topology[{index}]") for index, item in enumerate(topology_items)
+    )
+    if len(topology) != 3:
+        raise ValueError("manifest topology must have three entries")
+
+    interval_rows: list[tuple[int, int]] = []
+    for index, raw_interval in enumerate(intervals_value):
+        if not isinstance(raw_interval, (tuple, list)) or len(raw_interval) != 2:
+            raise ValueError(f"manifest interval {index} must be a pair")
+        interval_rows.append(
+            (
+                _integer(raw_interval[0], name=f"intervals[{index}][0]"),
+                _integer(raw_interval[1], name=f"intervals[{index}][1]"),
+            )
+        )
+
+    component_mapping = cast(Mapping[str, object], components_value)
+    components = ComponentABI(
+        observation=str(component_mapping.get("observation", "")),
+        top=str(component_mapping.get("top", "")),
+        bottom=str(component_mapping.get("bottom", "")),
+        training=str(component_mapping.get("training", "")),
+        runtime=str(component_mapping.get("runtime", "")),
+    )
+    manifest = ArchitectureManifest(
+        capability=str(value.get("capability", "")),
+        schema=_integer(value.get("schema", -1), name="schema"),
+        layout=str(value.get("layout", "")),
+        layout_schema=_integer(value.get("layout_schema", -1), name="layout_schema"),
+        topology=cast(tuple[int, int, int], topology),
+        intervals=tuple(interval_rows),
+        object_slots=_integer(value.get("object_slots", -1), name="object_slots"),
+        language_required=_boolean(value.get("language_required", False), name="language_required"),
+        components=components,
+    )
+    manifest.validate(require_current_schema=require_current_schema)
+    return manifest

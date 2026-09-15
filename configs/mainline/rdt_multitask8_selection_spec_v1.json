@@ -1,0 +1,71 @@
+{
+  "schema": "clearvla-rdt-multitask-selection-spec-v1",
+  "task_order": [
+    "put_cherry_bowl",
+    "stack_tomato_cans",
+    "draw_triangle",
+    "wipe_glass_water",
+    "press_stapler",
+    "grab_stick_into_bottle",
+    "shake_glass",
+    "pour_water_can2cup"
+  ],
+  "tasks": {
+    "put_cherry_bowl": {
+      "behavior_tags": ["grasp", "place", "receptacle"],
+      "selection_reason": "A compact right-arm grasp-and-place task; the HDF5 instruction, not the misleading directory suffix, identifies the destination as the glass.",
+      "left_role_reason": "Across every episode the left joints/gripper stay near their inactive chart while the high-view review shows the right arm moving the cherry; the glass is supported by the table."
+    },
+    "stack_tomato_cans": {
+      "behavior_tags": ["grasp", "place", "stack", "contact"],
+      "selection_reason": "Adds placement with a height/contact constraint rather than another unconstrained receptacle drop.",
+      "left_role_reason": "Every episode places the right can with the right arm while the destination can remains table-supported; no left-arm hold or cooperative handoff is present."
+    },
+    "draw_triangle": {
+      "behavior_tags": ["grasp", "contact", "trajectory", "long_horizon"],
+      "selection_reason": "Adds sustained surface contact and a structured multi-segment trajectory with substantially longer episodes.",
+      "left_role_reason": "All episode-level left-arm activity is near-static and the complete-episode contact sheet shows only the right arm holding the pen against the fixed whiteboard."
+    },
+    "wipe_glass_water": {
+      "behavior_tags": ["grasp", "contact", "trajectory", "return_object"],
+      "selection_reason": "Adds free-form contact/coverage motion plus an explicit return-to-table phase.",
+      "left_role_reason": "The right arm alone picks, wipes, and returns the sponge in every reviewed episode; the glass/table supplies the physical support and no left-arm brace is required."
+    },
+    "press_stapler": {
+      "behavior_tags": ["contact", "press", "short_horizon"],
+      "selection_reason": "Adds a non-grasp force/contact behavior and balances the longer trajectory tasks with a concise press action.",
+      "left_role_reason": "The stapler is table-supported and every episode shows a right-arm-only downward press; left-arm motion is not required to stabilize or actuate it."
+    },
+    "grab_stick_into_bottle": {
+      "behavior_tags": ["grasp", "insert", "precision"],
+      "selection_reason": "Provides the required insertion/precision family with a narrow target opening.",
+      "left_role_reason": "All reviewed episodes use the right arm to insert the stick into a bottle that remains upright on the table; no left-arm bottle support or cooperative alignment is present."
+    },
+    "shake_glass": {
+      "behavior_tags": ["grasp", "rotate", "trajectory", "long_horizon", "return_object"],
+      "selection_reason": "Adds repeated rotations and a long-horizon return phase that differs from drawing and wiping trajectories.",
+      "left_role_reason": "The right arm alone lifts, rotates, and replaces the goblet throughout all episodes; the left arm never provides required support or a handoff."
+    },
+    "pour_water_can2cup": {
+      "behavior_tags": ["grasp", "pour", "trajectory", "long_horizon", "return_object"],
+      "selection_reason": "Adds orientation-sensitive pouring and a return phase while keeping the receiving cup externally supported.",
+      "left_role_reason": "The right arm handles the can in every episode while the cup remains on the table; no left-arm cup stabilization or collaborative pour is used."
+    }
+  },
+  "role_review": {
+    "scope": "all_available_episodes_per_task",
+    "visual_evidence": "five_uniform_high_frames_per_episode",
+    "numeric_evidence": "all_rows_native_action_and_qpos_plus_both_grippers",
+    "required_support_or_collaboration": false
+  },
+  "model_abi": {
+    "action_profile": "rdt_right_arm_action_chart_v1",
+    "action_dim": 7,
+    "action_horizon": 24,
+    "model_cameras": ["high", "right_wrist"],
+    "cache_camera_order": ["high", "left_wrist", "right_wrist"],
+    "depth_consumed": false,
+    "native_bimanual_consumed": false,
+    "three_camera_model_consumed": false
+  }
+}

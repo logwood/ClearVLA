@@ -1,0 +1,541 @@
+"""Strict loader for a precomputed T5 goal condition."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Sequence
+
+import torch
+from torch import Tensor
+
+from clearvla.data.instructions import instruction_key, normalize_instruction
+
+T5_INSTRUCTION_CACHE_SCHEMA = "clearvla-t5-instruction-cache-v1"
+CALVIN_LANGUAGE_BANK_SCHEMA = "clearvla-language-bank-v1"
+T5_ENCODER_ID = "google/t5-v1_1-xxl"
+T5_SOURCE_MAX_TOKENS = 120
+
+
+def _is_sha256(value: object) -> bool:
+    text = str(value).lower()
+    return len(text) == 64 and all(character in "0123456789abcdef" for character in text)
+
+
+def _tensor_storage_sha256(value: Tensor) -> str:
+    tensor = value.detach().to(device="cpu").contiguous()
+    if tensor.dtype == torch.bfloat16:
+        raw = tensor.view(torch.uint16).numpy().tobytes()
+    else:
+        raw = tensor.numpy().tobytes()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _rdt_precomputed_metadata(
+    payload: dict[str, Any],
+    instructions: tuple[str, ...],
+    raw_tokens: Tensor,
+    raw_mask: Tensor,
+) -> dict[str, Any]:
+    """Validate optional RDT precomputed-row provenance and expose its summary."""
+
+    source = payload.get("embedding_source")
+    if source is None:
+        return {}
+    if str(source) != "rdt_precomputed_lang_embed_0":
+        raise ValueError("unsupported instruction-bank embedding source")
+    if str(payload.get("embedding_name", "")) != "lang_embed_0.pt":
+        raise ValueError("RDT precomputed bank must identify lang_embed_0.pt")
+    duplicate_policy = str(payload.get("embedding_duplicate_policy", ""))
+    if duplicate_policy not in {"error", "lexicographic"}:
+        raise ValueError("RDT precomputed bank has an invalid duplicate policy")
+    tokenizer_verification = str(payload.get("embedding_tokenizer_verification", ""))
+    if tokenizer_verification not in {"local_only", "skipped_explicitly"}:
+        raise ValueError("RDT precomputed bank has invalid tokenizer verification")
+    records = payload.get("embedding_records")
+    if not isinstance(records, list) or len(records) != len(instructions):
+        raise ValueError("RDT precomputed bank must have one provenance record per instruction")
+    candidate_total = 0
+    variant_groups = 0
+    policy_tokens = int(raw_tokens.shape[1])
+    for row, (instruction, record_value) in enumerate(zip(instructions, records, strict=True)):
+        if not isinstance(record_value, Mapping):
+            raise TypeError("RDT embedding provenance records must be mappings")
+        record = dict(record_value)
+        if str(record.get("instruction_sha256", "")) != instruction_sha256(instruction):
+            raise ValueError("RDT embedding provenance instruction digest is stale")
+        selected_path = str(record.get("selected_relative_path", ""))
+        selected_file_digest = str(record.get("selected_file_sha256", ""))
+        selected_tensor_digest = str(record.get("selected_tensor_sha256", ""))
+        selected_policy_digest = str(record.get("selected_policy_tensor_sha256", ""))
+        selected_policy_tokens = int(record.get("selected_policy_tokens", 0))
+        if (
+            not selected_path
+            or not _is_sha256(selected_file_digest)
+            or not _is_sha256(selected_tensor_digest)
+            or not _is_sha256(selected_policy_digest)
+        ):
+            raise ValueError("RDT embedding selected-source identity is invalid")
+        candidates = record.get("candidates")
+        candidate_count = int(record.get("candidate_count", 0))
+        distinct_count = int(record.get("distinct_tensor_count", 0))
+        if (
+            not isinstance(candidates, list)
+            or candidate_count != len(candidates)
+            or candidate_count <= 0
+            or distinct_count <= 0
+            or distinct_count > candidate_count
+        ):
+            raise ValueError("RDT embedding candidate counts are inconsistent")
+        candidate_total += candidate_count
+        variant_groups += int(distinct_count > 1)
+        selected_matches = 0
+        selected_source_tokens = 0
+        tensor_digests: set[str] = set()
+        for candidate_value in candidates:
+            if not isinstance(candidate_value, Mapping):
+                raise TypeError("RDT embedding candidates must be mappings")
+            candidate = dict(candidate_value)
+            relative_path = str(candidate.get("relative_path", ""))
+            file_digest = str(candidate.get("file_sha256", ""))
+            tensor_digest = str(candidate.get("tensor_sha256", ""))
+            shape = candidate.get("shape")
+            dtype = str(candidate.get("dtype", ""))
+            if (
+                not relative_path
+                or not _is_sha256(file_digest)
+                or not _is_sha256(tensor_digest)
+                or not isinstance(shape, list)
+                or len(shape) != 2
+                or int(shape[0]) <= 0
+                or int(shape[1]) != 4096
+                or not dtype
+            ):
+                raise ValueError("RDT embedding candidate identity is invalid")
+            tensor_digests.add(tensor_digest)
+            selected_matches += int(
+                relative_path == selected_path
+                and file_digest == selected_file_digest
+                and tensor_digest == selected_tensor_digest
+            )
+            if (
+                relative_path == selected_path
+                and file_digest == selected_file_digest
+                and tensor_digest == selected_tensor_digest
+            ):
+                selected_source_tokens = int(shape[0])
+        if len(tensor_digests) != distinct_count or selected_matches != 1:
+            raise ValueError("RDT embedding selected candidate is inconsistent")
+        expected_retained = min(selected_source_tokens, policy_tokens)
+        expected_mask = torch.arange(policy_tokens) < expected_retained
+        if (
+            selected_policy_tokens != expected_retained
+            or not torch.equal(raw_mask[row].to(device="cpu"), expected_mask)
+            or _tensor_storage_sha256(raw_tokens[row, :expected_retained]) != selected_policy_digest
+        ):
+            raise ValueError("RDT embedding selected policy row does not match its provenance")
+    if int(payload.get("embedding_candidate_file_count", -1)) != candidate_total:
+        raise ValueError("RDT embedding candidate total is inconsistent")
+    if int(payload.get("embedding_variant_group_count", -1)) != variant_groups:
+        raise ValueError("RDT embedding variant-group count is inconsistent")
+    encoded = json.dumps(
+        records,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    inventory_digest = hashlib.sha256(encoded).hexdigest()
+    if str(payload.get("embedding_inventory_sha256", "")) != inventory_digest:
+        raise ValueError("RDT embedding provenance inventory digest is inconsistent")
+    return {
+        "model_source": str(payload.get("model_source", "")),
+        "embedding_source": str(source),
+        "embedding_name": "lang_embed_0.pt",
+        "embedding_duplicate_policy": duplicate_policy,
+        "embedding_tokenizer_verification": tokenizer_verification,
+        "embedding_candidate_file_count": candidate_total,
+        "embedding_variant_group_count": variant_groups,
+        "embedding_inventory_sha256": inventory_digest,
+    }
+
+
+def instruction_sha256(instruction: str) -> str:
+    value = str(instruction)
+    if not value.strip():
+        raise ValueError("instruction must be non-empty")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def instruction_inventory_sha256(instructions: Sequence[str]) -> str:
+    encoded = json.dumps(
+        [str(value) for value in instructions],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def source_instruction_inventory_sha256(instructions: Sequence[str]) -> str:
+    """Digest the exact source instruction multiset used to build a bank."""
+
+    counts = Counter(str(value) for value in instructions)
+    if not counts or any(not value.strip() for value in counts):
+        raise ValueError("source instructions must be non-empty text")
+    encoded = json.dumps(
+        sorted((instruction, int(count)) for instruction, count in counts.items()),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class T5ConditionBank:
+    """CPU condition rows plus an exact instruction-to-row mapping."""
+
+    tokens: Tensor  # float32 [N,L,D]
+    mask: Tensor  # bool [N,L]
+    instructions: tuple[str, ...]
+    metadata: dict[str, Any]
+
+    @property
+    def is_instruction_bank(self) -> bool:
+        return bool(self.instructions)
+
+    def condition_indices(self, values: Sequence[str | None]) -> Tensor:
+        if not self.is_instruction_bank:
+            return torch.zeros(len(values), dtype=torch.long)
+        index = {instruction: row for row, instruction in enumerate(self.instructions)}
+        missing = sorted(
+            {
+                "<missing>" if value is None else str(value)
+                for value in values
+                if value is None or str(value) not in index
+            }
+        )
+        if missing:
+            raise KeyError(
+                f"T5 instruction cache does not cover episode instructions: {missing[:5]}"
+            )
+        return torch.tensor([index[str(value)] for value in values], dtype=torch.long)
+
+
+def _load_instruction_bank(
+    source: Path,
+    payload: dict[str, Any],
+    *,
+    max_tokens: int,
+    expected_width: int,
+) -> T5ConditionBank:
+    if str(payload.get("schema", "")) != T5_INSTRUCTION_CACHE_SCHEMA:
+        raise ValueError("unsupported T5 instruction cache schema")
+    if str(payload.get("encoder_id", "")) != T5_ENCODER_ID:
+        raise ValueError(f"instruction cache must use {T5_ENCODER_ID}")
+    if int(payload.get("source_tokenizer_max_length", 0)) != T5_SOURCE_MAX_TOKENS:
+        raise ValueError(
+            f"instruction cache source tokenizer length must be {T5_SOURCE_MAX_TOKENS}"
+        )
+    instructions_value = payload.get("instructions")
+    digests_value = payload.get("instruction_sha256")
+    if not isinstance(instructions_value, (tuple, list)) or not isinstance(
+        digests_value, (tuple, list)
+    ):
+        raise TypeError("instruction cache identities must be sequences")
+    instructions = tuple(str(value) for value in instructions_value)
+    digests = tuple(str(value) for value in digests_value)
+    if not instructions or any(not value.strip() for value in instructions):
+        raise ValueError("instruction cache must contain non-empty instructions")
+    if tuple(sorted(instructions)) != instructions or len(set(instructions)) != len(instructions):
+        raise ValueError("instruction cache instructions must be sorted and unique")
+    expected_digests = tuple(instruction_sha256(value) for value in instructions)
+    if digests != expected_digests:
+        raise ValueError("instruction cache text digests are inconsistent")
+    if str(payload.get("instruction_inventory_sha256", "")) != instruction_inventory_sha256(
+        instructions
+    ):
+        raise ValueError("instruction cache inventory digest is inconsistent")
+    source_episode_count = int(payload.get("source_episode_count", 0))
+    source_inventory_digest = str(payload.get("source_instruction_inventory_sha256", "")).lower()
+    if source_episode_count <= 0:
+        raise ValueError("instruction cache source episode count must be positive")
+    if not _is_sha256(source_inventory_digest):
+        raise ValueError("instruction cache source inventory identity must be SHA-256")
+
+    if "tokens" not in payload or "attention_mask" not in payload:
+        raise KeyError("instruction cache is missing tokens or attention_mask")
+    raw_tokens = torch.as_tensor(payload["tokens"])
+    raw_mask = torch.as_tensor(payload["attention_mask"], dtype=torch.bool)
+    if raw_tokens.ndim != 3 or raw_mask.ndim != 2:
+        raise ValueError("instruction cache tensors must be [N,L,D] and [N,L]")
+    stored_max_tokens = int(payload.get("policy_max_tokens", 0))
+    if stored_max_tokens != int(raw_tokens.shape[1]) or stored_max_tokens < int(max_tokens):
+        raise ValueError("instruction cache does not cover the requested policy token length")
+    if tuple(raw_mask.shape) != tuple(raw_tokens.shape[:2]):
+        raise ValueError("instruction cache mask does not align with tokens")
+    if int(raw_tokens.shape[0]) != len(instructions):
+        raise ValueError("instruction cache tensor rows do not match instruction identities")
+    if int(raw_tokens.shape[2]) != int(expected_width):
+        raise ValueError(
+            f"T5 width {raw_tokens.shape[2]} does not match configured width {expected_width}"
+        )
+    if int(payload.get("embedding_width", 0)) != int(raw_tokens.shape[2]):
+        raise ValueError("instruction cache embedding width metadata is inconsistent")
+    tokens = raw_tokens[:, :max_tokens].detach().to(device="cpu", dtype=torch.float32)
+    mask = raw_mask[:, :max_tokens].detach().to(device="cpu", dtype=torch.bool)
+    if not bool(torch.isfinite(tokens).all()):
+        raise ValueError("instruction cache contains NaN or infinity")
+    if not bool(mask.any(dim=1).all()):
+        raise ValueError("every instruction cache row must retain at least one token")
+    if bool(tokens.masked_select(~mask[..., None].expand_as(tokens)).ne(0).any()):
+        raise ValueError("masked instruction-cache tokens must be exact zero")
+    metadata = {
+        "source": "precomputed_t5_instruction_cache",
+        "path": str(source.resolve()),
+        "schema": T5_INSTRUCTION_CACHE_SCHEMA,
+        "encoder_id": T5_ENCODER_ID,
+        "instructions": len(instructions),
+        "instruction_inventory_sha256": instruction_inventory_sha256(instructions),
+        "source_episode_count": source_episode_count,
+        "source_instruction_inventory_sha256": source_inventory_digest,
+        "original_shape": list(raw_tokens.shape),
+        "original_dtype": str(raw_tokens.dtype).removeprefix("torch."),
+        "effective_tokens": int(tokens.shape[1]),
+        **_rdt_precomputed_metadata(payload, instructions, raw_tokens, raw_mask),
+    }
+    return T5ConditionBank(
+        tokens=tokens.contiguous(),
+        mask=mask.contiguous(),
+        instructions=instructions,
+        metadata=metadata,
+    )
+
+
+def _load_calvin_language_bank(
+    source: Path,
+    payload: Mapping[str, Any],
+    *,
+    max_tokens: int,
+    expected_width: int,
+) -> T5ConditionBank:
+    """Load the content-addressed bank emitted by the benchmark adapters."""
+
+    if str(payload.get("schema", "")) != CALVIN_LANGUAGE_BANK_SCHEMA:
+        raise ValueError("unsupported external language bank schema")
+    if str(payload.get("encoder_model", "")) != T5_ENCODER_ID:
+        raise ValueError(f"external language bank must use {T5_ENCODER_ID}")
+    raw_conditions = payload.get("conditions")
+    if not isinstance(raw_conditions, Mapping) or not raw_conditions:
+        raise ValueError("external language bank must contain a non-empty conditions map")
+
+    rows: list[tuple[str, Tensor, Tensor]] = []
+    for raw_key, raw_value in raw_conditions.items():
+        key = str(raw_key)
+        if not isinstance(raw_value, Mapping):
+            raise TypeError(f"external language condition {key!r} must be a mapping")
+        instruction = normalize_instruction(str(raw_value.get("instruction", "")))
+        if instruction_key(instruction) != key:
+            raise ValueError(f"external language key does not identify {instruction!r}")
+        if "tokens" not in raw_value:
+            raise KeyError(f"external language condition {key!r} has no tokens")
+        raw_tokens = torch.as_tensor(raw_value["tokens"])
+        if raw_tokens.ndim == 2:
+            raw_tokens = raw_tokens.unsqueeze(0)
+        if raw_tokens.ndim != 3 or int(raw_tokens.shape[0]) != 1:
+            raise ValueError(
+                f"external language tokens must be [L,D] or [1,L,D], got {tuple(raw_tokens.shape)}"
+            )
+        tokens = raw_tokens.detach().to(device="cpu", dtype=torch.float32)
+        tokens = tokens[:, : int(max_tokens)]
+        if int(tokens.shape[1]) < 1 or int(tokens.shape[2]) != int(expected_width):
+            raise ValueError("external language token dimensions do not match the model")
+        mask_value = raw_value.get("mask", raw_value.get("attention_mask"))
+        if mask_value is None:
+            mask = torch.ones(tokens.shape[:2], dtype=torch.bool)
+        else:
+            mask = torch.as_tensor(mask_value, dtype=torch.bool, device="cpu")
+            if mask.ndim == 1:
+                mask = mask.unsqueeze(0)
+            mask = mask[:, : tokens.shape[1]]
+        if tuple(mask.shape) != tuple(tokens.shape[:2]) or not bool(mask.any()):
+            raise ValueError(f"external language mask is invalid for {instruction!r}")
+        if not bool(torch.isfinite(tokens).all()):
+            raise ValueError("external language bank contains NaN or infinity")
+        # The bank may store a short, unpadded row.  Materialize one fixed
+        # policy length so the collated condition tensor has a stable ABI.
+        padded_tokens = torch.zeros(1, int(max_tokens), int(expected_width), dtype=torch.float32)
+        padded_mask = torch.zeros(1, int(max_tokens), dtype=torch.bool)
+        length = int(tokens.shape[1])
+        padded_tokens[:, :length].copy_(tokens)
+        padded_mask[:, :length].copy_(mask)
+        padded_tokens.masked_fill_(~padded_mask[..., None], 0.0)
+        rows.append((instruction, padded_tokens, padded_mask))
+
+    rows.sort(key=lambda row: row[0])
+    instructions = tuple(row[0] for row in rows)
+    if len(set(instructions)) != len(instructions):
+        raise ValueError("external language bank contains duplicate instructions")
+    tokens = torch.cat([row[1] for row in rows], dim=0).contiguous()
+    mask = torch.cat([row[2] for row in rows], dim=0).contiguous()
+    metadata = {
+        "source": "precomputed_external_language_bank",
+        "path": str(source.resolve()),
+        "schema": CALVIN_LANGUAGE_BANK_SCHEMA,
+        "encoder_id": T5_ENCODER_ID,
+        "instructions": len(instructions),
+        "effective_tokens": int(max_tokens),
+        "storage_dtype": str(payload.get("storage_dtype", "unknown")),
+    }
+    return T5ConditionBank(
+        tokens=tokens,
+        mask=mask,
+        instructions=instructions,
+        metadata=metadata,
+    )
+
+
+def load_t5_condition(
+    path: str | Path,
+    *,
+    max_tokens: int,
+    expected_width: int,
+    allow_null: bool = False,
+) -> tuple[Tensor, Tensor, dict[str, Any]]:
+    """Return CPU float32 ``[1,L,D]`` tokens and a boolean mask.
+
+    Formal runs fail when the file is absent.  The all-zero null condition is
+    available only through the explicit smoke-only ``allow_null`` argument.
+    """
+
+    source = Path(path).expanduser()
+    if not source.is_file():
+        if not allow_null:
+            raise FileNotFoundError(f"required T5 condition does not exist: {source}")
+        tokens = torch.zeros(1, 1, expected_width, dtype=torch.float32)
+        mask = torch.ones(1, 1, dtype=torch.bool)
+        return tokens, mask, {"source": "explicit_null_goal_smoke"}
+    if source.suffix.lower() not in {".pt", ".pth"}:
+        raise ValueError(f"T5 condition must be .pt/.pth, got {source}")
+    payload = torch.load(source, map_location="cpu", weights_only=False)
+    mask_value: object | None = None
+    if isinstance(payload, dict):
+        token_value: object | None = None
+        for name in (
+            "tokens",
+            "embeddings",
+            "embedding",
+            "language_embedding",
+            "last_hidden_state",
+        ):
+            if name in payload:
+                token_value = payload[name]
+                break
+        for name in ("mask", "attention_mask", "language_mask"):
+            if name in payload:
+                mask_value = payload[name]
+                break
+        if token_value is None:
+            ignored = {"mask", "attention_mask", "language_mask"}
+            tensors = [
+                value
+                for name, value in payload.items()
+                if name not in ignored and torch.is_tensor(value)
+            ]
+            if len(tensors) != 1:
+                raise ValueError("T5 dict does not contain one identifiable token tensor")
+            token_value = tensors[0]
+    else:
+        token_value = payload
+    raw = torch.as_tensor(token_value)
+    original_shape = tuple(int(value) for value in raw.shape)
+    original_dtype = str(raw.dtype).removeprefix("torch.")
+    tokens = raw.detach().to(dtype=torch.float32, device="cpu")
+    if tokens.ndim == 2:
+        tokens = tokens.unsqueeze(0)
+    if tokens.ndim != 3 or int(tokens.shape[0]) != 1:
+        raise ValueError(f"T5 tokens must be [L,D] or [1,L,D], got {original_shape}")
+    tokens = tokens[:, :max_tokens]
+    if int(tokens.shape[-1]) != expected_width:
+        raise ValueError(
+            f"T5 width {tokens.shape[-1]} does not match configured width {expected_width}"
+        )
+    if not bool(torch.isfinite(tokens).all()):
+        raise ValueError("T5 condition contains NaN or infinity")
+    if mask_value is None:
+        mask = torch.ones(tokens.shape[:2], dtype=torch.bool)
+    else:
+        mask = torch.as_tensor(mask_value, dtype=torch.bool)
+        if mask.ndim == 1:
+            mask = mask.unsqueeze(0)
+        mask = mask[:, : tokens.shape[1]]
+    if tuple(mask.shape) != tuple(tokens.shape[:2]) or not bool(mask.any()):
+        raise ValueError("T5 mask must align with and retain at least one token")
+    return (
+        tokens.contiguous(),
+        mask.contiguous(),
+        {
+            "source": "precomputed_t5_condition",
+            "path": str(source.resolve()),
+            "original_shape": list(original_shape),
+            "original_dtype": original_dtype,
+            "effective_tokens": int(tokens.shape[1]),
+        },
+    )
+
+
+def load_t5_condition_bank(
+    path: str | Path,
+    *,
+    max_tokens: int,
+    expected_width: int,
+    allow_null: bool = False,
+) -> T5ConditionBank:
+    """Load either the legacy single condition or a typed instruction bank."""
+
+    source = Path(path).expanduser()
+    if source.is_file():
+        payload = torch.load(source, map_location="cpu", weights_only=False)
+        if isinstance(payload, dict):
+            if payload.get("schema") == T5_INSTRUCTION_CACHE_SCHEMA:
+                return _load_instruction_bank(
+                    source,
+                    payload,
+                    max_tokens=max_tokens,
+                    expected_width=expected_width,
+                )
+            if payload.get("schema") == CALVIN_LANGUAGE_BANK_SCHEMA:
+                return _load_calvin_language_bank(
+                    source,
+                    payload,
+                    max_tokens=max_tokens,
+                    expected_width=expected_width,
+                )
+    tokens, mask, metadata = load_t5_condition(
+        source,
+        max_tokens=max_tokens,
+        expected_width=expected_width,
+        allow_null=allow_null,
+    )
+    return T5ConditionBank(
+        tokens=tokens,
+        mask=mask,
+        instructions=(),
+        metadata=metadata,
+    )
+
+
+__all__ = [
+    "T5ConditionBank",
+    "T5_ENCODER_ID",
+    "T5_INSTRUCTION_CACHE_SCHEMA",
+    "CALVIN_LANGUAGE_BANK_SCHEMA",
+    "T5_SOURCE_MAX_TOKENS",
+    "instruction_inventory_sha256",
+    "instruction_sha256",
+    "load_t5_condition",
+    "load_t5_condition_bank",
+    "source_instruction_inventory_sha256",
+]

@@ -1,0 +1,920 @@
+"""Dense-chart to global-object binding for G3."""
+
+from __future__ import annotations
+
+import math
+
+import torch
+import torch.nn.functional as F
+from torch import Tensor, nn
+
+from .routing import smooth_rms_contract
+from .types import DenseFactChart, LocalFactSet, ObjectFactSet, normalized_entropy
+
+
+def _finite_log_measure(measure: Tensor) -> Tensor:
+    """Return finite FP32 logs; zero support is represented by finite zero."""
+
+    measure_f = measure.float().clamp_min(0.0)
+    support = measure_f > 0.0
+    safe = torch.where(support, measure_f, torch.ones_like(measure_f))
+    return torch.where(support, safe.log(), torch.zeros_like(measure_f))
+
+
+def _supported_values(value: Tensor, support: Tensor) -> Tensor:
+    """Quarantine producer-invalid rows before any learned reduction.
+
+    A later multiplication by zero is not sufficient: ``NaN * 0`` remains
+    ``NaN`` and can also poison a projection's parameter VJP.  This helper
+    masks the raw value first, while leaving all finite supported values
+    unchanged.
+    """
+
+    support_f = torch.nan_to_num(
+        support.float(), nan=0.0, posinf=0.0, neginf=0.0
+    )
+    mask = support_f > 0.0
+    while mask.ndim < value.ndim:
+        mask = mask.unsqueeze(-1)
+    return torch.where(mask, value, torch.zeros_like(value))
+
+
+def _masked_log_softmax(
+    log_measure: Tensor,
+    support: Tensor,
+    *,
+    dim: int,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Normalize finite log measures with exact-zero all-invalid rows."""
+
+    log_measure_f = log_measure.float()
+    if tuple(log_measure_f.shape) != tuple(support.shape):
+        raise ValueError("log measure and support must align")
+    support_b = support.bool()
+    has_support = support_b.any(dim=dim, keepdim=True)
+    masked = log_measure_f.masked_fill(~support_b, -torch.inf)
+    safe_masked = torch.where(has_support, masked, torch.zeros_like(masked))
+    log_probability = torch.log_softmax(safe_masked, dim=dim)
+    log_probability = torch.where(
+        support_b & has_support,
+        log_probability,
+        torch.zeros_like(log_probability),
+    )
+    probability = torch.where(
+        support_b & has_support,
+        log_probability.exp(),
+        torch.zeros_like(log_probability),
+    )
+    return probability, log_probability, has_support
+
+
+def _coordinate_basis(coordinates: Tensor, width: int) -> Tensor:
+    frequencies = torch.arange(
+        1,
+        max(int(width) // 4, 1) + 1,
+        device=coordinates.device,
+        dtype=torch.float32,
+    )
+    angle = math.pi * coordinates.float()[..., None] * frequencies
+    value = torch.cat((angle.sin(), angle.cos()), dim=-1).flatten(-2)
+    if int(value.shape[-1]) < int(width):
+        value = F.pad(value, (0, int(width) - int(value.shape[-1])))
+    return value[..., : int(width)].to(dtype=coordinates.dtype)
+
+
+def _conditional_k_reconstruction_assignment(
+    conditional_owner: Tensor,
+    candidate_prior: Tensor,
+    candidate_validity: Tensor,
+) -> Tensor:
+    """Apply observable local support outside a conditional-K posterior."""
+
+    if conditional_owner.ndim != 3:
+        raise ValueError("conditional owner must be [B,N,K]")
+    expected_support = (*conditional_owner.shape[:-1], 1)
+    if tuple(candidate_prior.shape) != expected_support:
+        raise ValueError("candidate prior must align as [B,N,1]")
+    if tuple(candidate_validity.shape) != expected_support:
+        raise ValueError("candidate validity must align as [B,N,1]")
+    safe_owner = _supported_values(conditional_owner, candidate_validity)
+    safe_prior = _supported_values(candidate_prior, candidate_validity)
+    validity = torch.nan_to_num(
+        candidate_validity.float(), nan=0.0, posinf=0.0, neginf=0.0
+    ).clamp(0.0, 1.0)
+    return (
+        safe_owner.float().clamp_min(0.0)
+        * safe_prior.float().clamp_min(0.0)
+        * validity
+    )
+
+
+def dense_chart_from_local_facts(local: LocalFactSet) -> DenseFactChart:
+    """Preserve every local hypothesis while exposing a dense DINO target."""
+
+    local.validate()
+    # The observable reconstruction target must not be regenerated from the
+    # online hypotheses being judged.  The active observation producer
+    # supplies the detached current DINO chart and a separate observed mask;
+    # neither becomes a binder input or an online object value.
+    dense_content = local.target_dino_content.detach()
+    # This is a conditional mixture over the local M hypotheses.  Candidate
+    # validity is a separate Bernoulli support variable and must not be folded
+    # into this distribution: doing so turns the complement of a perfectly
+    # legal (for example uniform 1/M) prior into false null evidence.
+    if (
+        local.semantic_owner_log_probs is not None
+        and local.appearance_owner_log_probs is not None
+        and local.geometry_owner_log_probs is not None
+    ):
+        semantic_log_prior = local.semantic_owner_log_probs.float()
+        appearance_log_prior = local.appearance_owner_log_probs.float()
+        geometry_log_prior = local.geometry_owner_log_probs.float()
+        owner_log_prior = torch.log_softmax(
+            0.5 * (semantic_log_prior + geometry_log_prior),
+            dim=-1,
+        )
+        owner_prior = owner_log_prior.exp()
+        semantic_prior = semantic_log_prior.exp()
+        appearance_prior = appearance_log_prior.exp()
+        geometry_prior = geometry_log_prior.exp()
+    else:
+        semantic_prior = local.semantic_owner_probs.float().clamp_min(0.0)
+        appearance_prior = local.appearance_owner_probs.float().clamp_min(0.0)
+        geometry_prior = local.geometry_owner_probs.float().clamp_min(0.0)
+        owner_prior = torch.sqrt(semantic_prior * geometry_prior)
+        prior_mass = owner_prior.sum(dim=-1, keepdim=True)
+        uniform_prior = torch.full_like(
+            owner_prior,
+            1.0 / float(max(int(owner_prior.shape[-1]), 1)),
+        )
+        safe_mass = torch.where(
+            prior_mass > 0.0,
+            prior_mass,
+            torch.ones_like(prior_mass),
+        )
+        owner_prior = torch.where(
+            prior_mass > 0.0,
+            owner_prior / safe_mass,
+            uniform_prior,
+        )
+        owner_log_prior = _finite_log_measure(owner_prior)
+        semantic_log_prior = _finite_log_measure(semantic_prior)
+        appearance_log_prior = _finite_log_measure(appearance_prior)
+        geometry_log_prior = _finite_log_measure(geometry_prior)
+    chart = DenseFactChart(
+        public_scene_base=local.public_scene_base,
+        dino_content=dense_content,
+        cell_observed=local.cell_observed,
+        candidate_content=local.content_slots,
+        candidate_semantic=local.semantic_slots,
+        candidate_appearance=local.appearance_slots,
+        candidate_geometry=local.geometry_slots,
+        candidate_coordinates=local.slot_coordinates,
+        candidate_support=local.slot_support,
+        candidate_validity=local.slot_validity.float(),
+        candidate_owner_prior=owner_prior.float(),
+        candidate_owner_log_prior=owner_log_prior.float(),
+        candidate_semantic_prior=semantic_prior.float(),
+        candidate_appearance_prior=appearance_prior.float(),
+        candidate_geometry_prior=geometry_prior.float(),
+        candidate_semantic_log_prior=semantic_log_prior.float(),
+        candidate_appearance_log_prior=appearance_log_prior.float(),
+        candidate_geometry_log_prior=geometry_log_prior.float(),
+        candidate_transport_prior=(
+            local.slot_transport_prior
+            if local.slot_transport_prior is not None
+            else torch.zeros_like(local.slot_coordinates)
+        ),
+    )
+    chart.validate()
+    return chart
+
+
+class DenseObjectGrounder(nn.Module):
+    """Competition-normalized Slot Attention over the complete current chart.
+
+    Local ``M`` hypotheses are candidates; global ``K`` objects are the first
+    identity-bearing representation.  Candidate competition is normalized
+    across objects plus a null owner before each object's read posterior is
+    normalized across candidates.  Consequently the same dense fact cannot be
+    copied independently into all objects.
+    """
+
+    def __init__(
+        self,
+        *,
+        hidden: int,
+        content_dim: int,
+        route_dim: int,
+        objects: int = 4,
+        iterations: int = 3,
+        maximum_update_rms: float = 0.35,
+    ) -> None:
+        super().__init__()
+        self.hidden = int(hidden)
+        self.content_dim = int(content_dim)
+        self.route_dim = int(route_dim)
+        self.objects = int(objects)
+        self.iterations = int(iterations)
+        if min(self.hidden, self.content_dim, self.route_dim, self.objects, self.iterations) < 1:
+            raise ValueError("object grounder dimensions must be positive")
+        self.content_key = nn.Sequential(
+            nn.LayerNorm(content_dim, elementwise_affine=False),
+            nn.Linear(content_dim, hidden, bias=False),
+        )
+        self.semantic_key = nn.Linear(route_dim, hidden, bias=False)
+        self.appearance_key = nn.Linear(route_dim, hidden, bias=False)
+        self.geometry_key = nn.Linear(route_dim, hidden, bias=False)
+        self.coordinate_key = nn.Linear(16, hidden, bias=False)
+        self.candidate_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        self.slot_norm = nn.LayerNorm(hidden, elementwise_affine=False)
+        # Slot identities only break symmetry.  All transition/read modules
+        # are shared across K and therefore cannot assign role-specific heads.
+        self.slot_seed = nn.Parameter(torch.randn(1, objects, hidden) * 0.02)
+        self.null_key = nn.Parameter(torch.zeros(1, 1, hidden))
+        self.gru = nn.GRUCell(hidden, hidden)
+        self.update_ffn = nn.Sequential(
+            nn.LayerNorm(hidden, elementwise_affine=False),
+            nn.Linear(hidden, 2 * hidden, bias=False),
+            nn.SiLU(),
+            nn.Linear(2 * hidden, hidden, bias=False),
+        )
+        self.g3_residual = nn.Sequential(
+            nn.LayerNorm(2 * hidden, elementwise_affine=False),
+            nn.Linear(2 * hidden, hidden, bias=False),
+            nn.SiLU(),
+            nn.Linear(hidden, 1, bias=False),
+        )
+        g3_output = self.g3_residual[-1]
+        if not isinstance(g3_output, nn.Linear):
+            raise TypeError("G3 residual output must remain a linear layer")
+        nn.init.zeros_(g3_output.weight)
+        self.decode_content_residual = nn.Linear(hidden, content_dim, bias=False)
+        nn.init.zeros_(self.decode_content_residual.weight)
+        self.decode_position = nn.Linear(16, content_dim, bias=False)
+        self.maximum_update_rms = float(maximum_update_rms)
+
+    def _candidate_tokens(self, chart: DenseFactChart) -> Tensor:
+        """Return the exact shared V120 key/value candidate representation."""
+
+        # Candidate validity is a producer-owned support boundary.  Apply it
+        # before LayerNorm/linear projections so an invalid NaN slot cannot
+        # leak through a later zero multiplication or its parameter VJP.
+        content_input = _supported_values(
+            chart.candidate_content,
+            chart.candidate_validity,
+        )
+        semantic_input = _supported_values(
+            chart.candidate_semantic,
+            chart.candidate_validity,
+        )
+        appearance_input = _supported_values(
+            chart.candidate_appearance,
+            chart.candidate_validity,
+        )
+        geometry_input = _supported_values(
+            chart.candidate_geometry,
+            chart.candidate_validity,
+        )
+        coordinate_input = _supported_values(
+            chart.candidate_coordinates,
+            chart.candidate_validity,
+        )
+        content = self.content_key(content_input)
+        typed = (
+            self.semantic_key(semantic_input)
+            + self.appearance_key(appearance_input)
+            + self.geometry_key(geometry_input)
+        ) / math.sqrt(3.0)
+        coordinate = self.coordinate_key(_coordinate_basis(coordinate_input, 16))
+        return self.candidate_norm(content + typed + coordinate)
+
+    def _competition(
+        self,
+        slots: Tensor,
+        candidates: Tensor,
+        validity: Tensor,
+        candidate_prior: Tensor,
+        candidate_log_prior: Tensor,
+        candidate_prior_support: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        batch, count, _ = candidates.shape
+        valid = torch.nan_to_num(
+            validity.float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).reshape(batch, count, 1).clamp(0.0, 1.0)
+        # Close the private competition boundary as well as the public
+        # candidate-token boundary.  A direct caller (or a malformed cached
+        # chart) may still hand us NaNs in an unsupported candidate.  Remove
+        # those values before either the real-owner or null projection; a
+        # later ``masked_fill`` would be too late for the null path and could
+        # leave NaNs in its backward graph.
+        safe_candidates = _supported_values(candidates, valid)
+        slot_key = self.slot_norm(slots)
+        logits = torch.einsum("bkh,bnh->bnk", slot_key.float(), safe_candidates.float())
+        logits = logits / math.sqrt(float(self.hidden))
+        null = torch.einsum(
+            "bnh,bqh->bnq",
+            safe_candidates.float(),
+            self.null_key.to(device=safe_candidates.device, dtype=safe_candidates.dtype)
+            .expand(batch, -1, -1)
+            .float(),
+        )
+        prior = torch.nan_to_num(
+            candidate_prior.float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).reshape(batch, count, 1).clamp_min(0.0)
+        log_prior = torch.nan_to_num(
+            candidate_log_prior.float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).reshape(batch, count, 1)
+        # ``owner`` is conditional on one local candidate.  The local prior
+        # is applied afterwards as joint mixture mass.  Only true invalidity
+        # may move probability to null; ``1 - candidate_prior`` denotes other
+        # hypotheses at the same cell, not absence.  Invalid candidates must
+        # nevertheless be removed from the real-object softmax support before
+        # normalization; letting them compete and multiplying their mass by
+        # zero later steals owner probability from valid candidates.
+        owner_logits = torch.cat((logits, null), dim=-1)
+        owner_logits = owner_logits.clone()
+        owner_logits[..., : self.objects] = owner_logits[..., : self.objects].masked_fill(
+            valid <= 0.0,
+            -torch.inf,
+        )
+        owner_log_probability = torch.log_softmax(owner_logits, dim=-1)
+        owner = owner_log_probability.exp()
+        object_mass = owner[..., : self.objects] * valid * prior
+        null_mass = (owner[..., self.objects] * valid[..., 0] + (1.0 - valid[..., 0])) * prior[
+            ..., 0
+        ]
+        prior_support = candidate_prior_support.reshape(batch, count).bool()
+        read_support = (
+            (valid[..., 0] > 0.0) & prior_support
+        )[:, None].expand(
+            -1, self.objects, -1
+        )
+        log_validity = _finite_log_measure(valid[..., 0])
+        read_log_measure = (
+            owner_log_probability[..., : self.objects].transpose(1, 2)
+            + log_prior[..., 0][:, None]
+            + log_validity[:, None]
+        )
+        read, read_log_probability, _ = _masked_log_softmax(
+            read_log_measure,
+            read_support,
+            dim=-1,
+        )
+        return (
+            owner,
+            object_mass,
+            null_mass,
+            read,
+            owner_log_probability,
+            read_log_probability,
+        )
+
+    def forward(
+        self,
+        local_facts: LocalFactSet,
+        *,
+        collect_diagnostics: bool = True,
+    ) -> tuple[ObjectFactSet, dict[str, Tensor]]:
+        chart = dense_chart_from_local_facts(local_facts)
+        candidates_structured = self._candidate_tokens(chart)
+        batch = int(candidates_structured.shape[0])
+        candidate_shape = candidates_structured.shape[1:-1]
+        count = math.prod(int(value) for value in candidate_shape)
+        candidates = candidates_structured.reshape(batch, count, self.hidden)
+        validity = torch.nan_to_num(
+            chart.candidate_validity.float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(0.0, 1.0).reshape(batch, count, 1)
+        candidate_prior = torch.nan_to_num(
+            chart.candidate_owner_prior.float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp_min(0.0).reshape(batch, count, 1)
+        candidate_log_prior = torch.nan_to_num(
+            chart.candidate_owner_log_prior.float(),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).reshape(batch, count, 1)
+        candidate_prior_support = (
+            torch.ones_like(candidate_prior[..., 0], dtype=torch.bool)
+            if local_facts.semantic_owner_log_probs is not None
+            else candidate_prior[..., 0] > 0.0
+        )
+        slots = self.slot_seed.to(
+            device=candidates.device,
+            dtype=candidates.dtype,
+        ).expand(
+            batch, -1, -1
+        )
+        for _ in range(self.iterations):
+            _, _, _, iteration_read, _, _ = self._competition(
+                slots,
+                candidates,
+                validity,
+                candidate_prior,
+                candidate_log_prior,
+                candidate_prior_support,
+            )
+            update = torch.einsum(
+                "bkn,bnh->bkh",
+                iteration_read.to(dtype=candidates.dtype),
+                candidates,
+            )
+            update, _ = smooth_rms_contract(update, self.maximum_update_rms)
+            next_slots = (
+                self.gru(
+                    update.reshape(batch * self.objects, self.hidden).float(),
+                    slots.reshape(batch * self.objects, self.hidden).float(),
+                )
+                .reshape(batch, self.objects, self.hidden)
+                .to(dtype=slots.dtype)
+            )
+            ffn, _ = smooth_rms_contract(self.update_ffn(next_slots), self.maximum_update_rms)
+            slots = next_slots + ffn
+        # The final GRU/FFN update changes the slot queries.  Reusing the
+        # pre-update posterior here would combine a stale G2 assignment with
+        # a new G3 slot state.  Recompute the parent posterior once so the
+        # bounded G3 correction is genuinely relative to the final binder.
+        (
+            parent_owner,
+            _,
+            _,
+            read,
+            parent_owner_log,
+            _,
+        ) = self._competition(
+            slots,
+            candidates,
+            validity,
+            candidate_prior,
+            candidate_log_prior,
+            candidate_prior_support,
+        )
+        # G3 is a bounded correction over the actual G2/binder posterior.  Its
+        # zero initialization makes the initial graph an exact identity.
+        pair = torch.cat(
+            (
+                slots[:, None].expand(-1, count, -1, -1),
+                candidates[:, :, None].expand(-1, -1, self.objects, -1),
+            ),
+            dim=-1,
+        )
+        residual = 0.50 * torch.tanh(self.g3_residual(pair).squeeze(-1).float())
+        # G3 refines only identity inside the parent's real-object event.  The
+        # physical binder remains the sole owner of real-versus-null mass.
+        # Local-hypothesis prior and observable validity remain outside both
+        # softmaxes and therefore retain their existing units.
+        parent_k_log_mass = torch.logsumexp(
+            parent_owner_log[..., : self.objects],
+            dim=-1,
+            keepdim=True,
+        )
+        has_real_owner = torch.isfinite(parent_k_log_mass)
+        safe_parent_k_log_mass = torch.where(
+            has_real_owner,
+            parent_k_log_mass,
+            torch.zeros_like(parent_k_log_mass),
+        )
+        parent_k_log_conditional = torch.where(
+            has_real_owner,
+            parent_owner_log[..., : self.objects] - safe_parent_k_log_mass,
+            torch.zeros_like(parent_owner_log[..., : self.objects]),
+        )
+        corrected_k_log_conditional = torch.log_softmax(
+            parent_k_log_conditional + residual,
+            dim=-1,
+        )
+        corrected_k_log_conditional = torch.where(
+            has_real_owner,
+            corrected_k_log_conditional,
+            torch.full_like(corrected_k_log_conditional, -torch.inf),
+        )
+        corrected_k_conditional = corrected_k_log_conditional.exp()
+        corrected_log_owner = torch.cat(
+            (
+                safe_parent_k_log_mass + corrected_k_log_conditional,
+                parent_owner_log[..., self.objects :],
+            ),
+            dim=-1,
+        )
+        corrected = corrected_log_owner.exp()
+        valid = torch.nan_to_num(
+            validity.float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(0.0, 1.0)
+        prior = torch.nan_to_num(
+            candidate_prior.float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp_min(0.0)
+        reconstruction_assignment = _conditional_k_reconstruction_assignment(
+            corrected_k_conditional,
+            prior,
+            valid,
+        )
+        assignment = corrected[..., : self.objects] * valid * prior
+        null_assignment = (
+            corrected[..., self.objects] * valid[..., 0] + (1.0 - valid[..., 0])
+        ) * prior[..., 0]
+        read_support = (
+            (valid[..., 0] > 0.0) & candidate_prior_support
+        )[:, None].expand(-1, self.objects, -1)
+        corrected_read_log_measure = (
+            corrected_log_owner[..., : self.objects].transpose(1, 2)
+            + candidate_log_prior[..., 0][:, None]
+            + _finite_log_measure(valid[..., 0])[:, None]
+        )
+        read, read_log_probability, _ = _masked_log_softmax(
+            corrected_read_log_measure,
+            read_support,
+            dim=-1,
+        )
+
+        def aggregate(value: Tensor, weight: Tensor = read) -> Tensor:
+            flat = value.reshape(batch, count, int(value.shape[-1]))
+            weight_f = torch.nan_to_num(
+                weight.float(), nan=0.0, posinf=0.0, neginf=0.0
+            ).clamp_min(0.0)
+            safe_flat = torch.where(
+                weight_f[..., None] > 0.0,
+                flat[:, None],
+                torch.zeros(
+                    batch,
+                    self.objects,
+                    count,
+                    int(value.shape[-1]),
+                    device=flat.device,
+                    dtype=flat.dtype,
+                ),
+            )
+            return (
+                safe_flat * weight_f[..., None].to(dtype=flat.dtype)
+            ).sum(dim=2)
+
+        def typed_reweight(
+            name: str,
+            value: Tensor,
+        ) -> tuple[Tensor, Tensor, Tensor]:
+            flat = value.reshape(batch, count, int(value.shape[-1]))
+            # Parameter-free conditional reweighting inside physical support.
+            # A typed prior cannot resurrect a candidate with zero K mass.
+            typed_prior = torch.nan_to_num(
+                getattr(chart, f"candidate_{name}_prior")
+                .reshape(batch, count)
+                .float(),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp_min(0.0)
+            typed_log_prior = getattr(
+                chart,
+                f"candidate_{name}_log_prior",
+            ).reshape(batch, count).float()
+            typed_log_measure = (
+                read_log_probability
+                + typed_log_prior[:, None]
+                - candidate_log_prior[..., 0][:, None]
+            )
+            typed_support = read_support
+            if local_facts.semantic_owner_log_probs is None:
+                typed_support = typed_support & (typed_prior[:, None] > 0.0)
+            typed_read, _, _ = _masked_log_softmax(
+                typed_log_measure,
+                typed_support,
+                dim=-1,
+            )
+            # ``assignment.sum(dim=1)`` is [B,K]; keep exactly the physical
+            # allocation owned by each K object while redistributing evidence
+            # only inside that support.
+            object_mass = assignment.sum(dim=1)
+            typed_joint = typed_read * object_mass[..., None]
+            typed_weight = torch.nan_to_num(
+                typed_read.float(), nan=0.0, posinf=0.0, neginf=0.0
+            ).clamp_min(0.0)
+            safe_flat = torch.where(
+                typed_weight[..., None] > 0.0,
+                flat[:, None],
+                torch.zeros(
+                    batch,
+                    self.objects,
+                    count,
+                    int(value.shape[-1]),
+                    device=flat.device,
+                    dtype=flat.dtype,
+                ),
+            )
+            typed_value = (
+                safe_flat * typed_weight[..., None].to(dtype=flat.dtype)
+            ).sum(dim=2)
+            return typed_value, typed_read, typed_joint
+
+        aggregated_content = aggregate(chart.candidate_content)
+        # Preserve the existing reconstruction bandwidth without retaining a
+        # loss-private object value.  The zero-initialized slot residual is now
+        # part of the one exported content consumed by S, W and Teacher.
+        content = aggregated_content + self.decode_content_residual(slots)
+        semantic, semantic_read, semantic_assignment = typed_reweight(
+            "semantic", chart.candidate_semantic
+        )
+        appearance, appearance_read, appearance_assignment = typed_reweight(
+            "appearance", chart.candidate_appearance
+        )
+        geometry, geometry_read, geometry_assignment = typed_reweight(
+            "geometry", chart.candidate_geometry
+        )
+        support = aggregate(chart.candidate_support[..., None])
+        # Presence is not an object's fraction of the complete chart.  That
+        # quantity systematically penalizes small objects and, when reused as
+        # P2 validity, suppresses every one of K mutually exclusive slots.
+        # Instead measure object-vs-null confidence only where that object's
+        # own read posterior places mass.  This remains soft and naturally
+        # becomes zero when an object receives no valid candidate support.
+        object_vs_null = (
+            corrected_log_owner[..., : self.objects]
+            - torch.logaddexp(
+                corrected_log_owner[..., : self.objects],
+                corrected_log_owner[..., self.objects, None],
+            )
+        ).exp()
+        existence = (
+            (read * object_vs_null.transpose(1, 2)).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
+        )
+        object_validity = (
+            read * valid[..., 0][:, None]
+        ).sum(dim=-1, keepdim=True).clamp(0.0, 1.0).float()
+        valid_prior_mass = (valid * prior).sum(dim=1).clamp_min(1e-6)
+        allocation_share = assignment.sum(dim=1)[..., None] / valid_prior_mass[:, None]
+        structured_read = read.reshape(
+            batch, self.objects, *candidate_shape
+        )
+        structured_geometry_read = geometry_read.reshape(
+            batch, self.objects, *candidate_shape
+        )
+        structured_assignment = assignment.transpose(1, 2).reshape(
+            batch, self.objects, *candidate_shape
+        )
+        structured_semantic_assignment = semantic_assignment.reshape(
+            batch, self.objects, *candidate_shape
+        )
+        structured_appearance_assignment = appearance_assignment.reshape(
+            batch, self.objects, *candidate_shape
+        )
+        structured_geometry_assignment = geometry_assignment.reshape(
+            batch, self.objects, *candidate_shape
+        )
+        structured_null = null_assignment.reshape(batch, *candidate_shape)
+        structured_reconstruction_assignment = reconstruction_assignment.transpose(
+            1, 2
+        ).reshape(batch, self.objects, *candidate_shape)
+
+        def camera_aggregate(value: Tensor, weight: Tensor) -> Tensor:
+            """Aggregate inside each real camera without recreating C later."""
+
+            cameras = int(value.shape[1])
+            output_dtype = value.dtype
+            flat_value = value.reshape(
+                batch, cameras, -1, int(value.shape[-1])
+            ).float()
+            flat_weight = torch.nan_to_num(
+                weight.reshape(batch, self.objects, cameras, -1).float(),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp_min(0.0)
+            safe_value = torch.where(
+                flat_weight[..., None] > 0.0,
+                flat_value[:, None],
+                torch.zeros(
+                    batch,
+                    self.objects,
+                    cameras,
+                    flat_value.shape[2],
+                    flat_value.shape[3],
+                    device=flat_value.device,
+                    dtype=flat_value.dtype,
+                ),
+            )
+            numerator = (safe_value * flat_weight[..., None]).sum(dim=-2)
+            denominator = flat_weight.sum(dim=-1, keepdim=True)
+            supported = denominator > 0.0
+            safe_denominator = torch.where(
+                supported,
+                denominator,
+                torch.ones_like(denominator),
+            )
+            result = torch.where(
+                supported,
+                numerator / safe_denominator,
+                torch.zeros_like(numerator),
+            )
+            return result.to(dtype=output_dtype)
+
+        camera_coordinates = camera_aggregate(
+            chart.candidate_coordinates,
+            structured_geometry_read,
+        )
+        camera_transport_prior = camera_aggregate(
+            chart.candidate_transport_prior,
+            structured_geometry_read,
+        )
+        camera_support = camera_aggregate(
+            chart.candidate_support[..., None],
+            structured_geometry_read,
+        )
+        camera_validity = camera_aggregate(
+            chart.candidate_validity.float(),
+            structured_read,
+        ).float().clamp(0.0, 1.0)
+        log_camera_validity = _finite_log_measure(camera_validity)
+        # ``chart_read`` is the reverse lookup used by Teacher/P2 and is
+        # normalized over space for each object.  It is *not* a per-cell owner
+        # posterior.  The old draft used it for reconstruction, which divided
+        # every object's value by the complete chart area and made the object
+        # reconstruction pressure almost vanish.
+        chart_read = structured_read.sum(dim=-1)
+        coordinate_weight = torch.nan_to_num(
+            chart.candidate_validity.float()
+            * chart.candidate_owner_prior[..., None].float(),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp_min(0.0)
+        safe_coordinates = _supported_values(
+            chart.candidate_coordinates,
+            coordinate_weight,
+        ).float()
+        chart_coordinate = (safe_coordinates * coordinate_weight).sum(dim=-2) / (
+            coordinate_weight.sum(dim=-2).clamp_min(1e-6)
+        )
+        position = _coordinate_basis(
+            chart_coordinate.to(dtype=chart.candidate_coordinates.dtype), 16
+        )
+        # Conditional K owns reconstruction assignment independently of the
+        # learned association null.  ``content`` is the only K-specific value.
+        # The retained coordinate decoder has no K input; write it explicitly
+        # as a shared spatial term behind summed observable support instead of
+        # hiding it inside K-valued prototypes.
+        reconstruction_owner = structured_reconstruction_assignment.sum(dim=-1)
+        shared_support = reconstruction_owner.sum(dim=1)
+        decoded_position = self.decode_position(position)
+        reconstructed = torch.einsum(
+            "bkcyx,bkd->bcyxd",
+            reconstruction_owner.to(dtype=content.dtype),
+            content,
+        ) + (
+            shared_support.to(dtype=decoded_position.dtype)[..., None]
+            * decoded_position
+        )
+        reconstructed = reconstructed.to(dtype=chart.dino_content.dtype)
+        observed = chart.cell_observed.detach().float()
+        # The observed mask is an objective support boundary.  Apply it before
+        # the subtraction so an unobserved/placeholder target containing NaN
+        # cannot survive as ``NaN * 0`` in the reconstruction scalar or its
+        # backward graph.
+        target_content = _supported_values(
+            chart.dino_content.detach(),
+            observed,
+        ).float()
+        safe_reconstructed = _supported_values(reconstructed, observed).float()
+        reconstruction_per_cell = (
+            safe_reconstructed - target_content
+        ).square().mean(dim=-1, keepdim=True)
+        reconstruction_per_cell = torch.where(
+            observed > 0.0,
+            reconstruction_per_cell,
+            torch.zeros_like(reconstruction_per_cell),
+        )
+        reconstruction_error = reconstruction_per_cell.sum() / observed.sum().clamp_min(1.0)
+        facts = ObjectFactSet(
+            dense_chart=chart,
+            content=content,
+            semantic=semantic,
+            appearance=appearance,
+            geometry=geometry,
+            camera_coordinates=camera_coordinates,
+            camera_transport_prior=camera_transport_prior,
+            camera_support=camera_support,
+            camera_validity=camera_validity,
+            log_camera_validity=log_camera_validity,
+            support=support,
+            existence=existence,
+            validity=object_validity,
+            log_validity=_finite_log_measure(object_validity),
+            object_to_chart=chart_read,
+            candidate_assignment=structured_assignment,
+            semantic_candidate_assignment=structured_semantic_assignment,
+            appearance_candidate_assignment=structured_appearance_assignment,
+            geometry_candidate_assignment=structured_geometry_assignment,
+            null_assignment=structured_null,
+            reconstructed_dino=reconstructed,
+            reconstruction_error=reconstruction_error,
+        )
+        facts.validate()
+        # The single dense reconstruction scalar above is the only G-side
+        # objective. Everything below is a detached audit reduction.
+        if not collect_diagnostics:
+            return facts, {}
+        metrics = {
+            "object_grounding_reconstruction_mse": reconstruction_error.detach(),
+            "object_grounding_dense_objective_count": reconstruction_error.new_ones(
+                (), dtype=torch.float32
+            ),
+            "object_grounding_existence_mean": existence.detach().float().mean(),
+            "object_grounding_validity_mean": object_validity.detach().float().mean(),
+            "object_grounding_allocation_share_mean": allocation_share.detach().float().mean(),
+            # Null is a per-cell probability after summing the mutually
+            # exclusive local-M hypotheses, not a mean over those hypotheses.
+            "object_grounding_null_mass": structured_null.detach().float().sum(dim=-1).mean(),
+            "object_grounding_mass_conservation_error": (
+                (
+                    structured_assignment.detach().float().sum(dim=1)
+                    + structured_null.detach().float()
+                ).sum(dim=-1)
+                - chart.candidate_owner_prior.detach().float().sum(dim=-1)
+            )
+            .abs()
+            .mean(),
+            "object_grounding_candidate_owner_entropy": normalized_entropy(corrected, dim=-1)
+            .detach()
+            .mean(),
+            "object_grounding_local_prior_entropy": normalized_entropy(
+                chart.candidate_owner_prior, dim=-1
+            )
+            .detach()
+            .mean(),
+            "object_grounding_chart_entropy": normalized_entropy(chart_read.flatten(2), dim=-1)
+            .detach()
+            .mean(),
+            "object_grounding_g3_parent_l1": (
+                corrected.detach().float() - parent_owner.detach().float()
+            )
+            .abs()
+            .mean(),
+            "object_grounding_g3_null_identity_error": (
+                corrected[..., self.objects]
+                - parent_owner[..., self.objects]
+            )
+            .detach()
+            .float()
+            .abs()
+            .amax(),
+            "object_grounding_object_content_pair_cosine": self._pair_cosine(content),
+            "object_grounding_object_chart_pair_overlap": self._pair_overlap(chart_read.flatten(2)),
+            "object_grounding_semantic_appearance_posterior_l1": (
+                0.5
+                * (semantic_read.detach().float() - appearance_read.detach().float())
+                .abs()
+                .sum(dim=-1)
+                .mean()
+            ),
+            "object_grounding_semantic_geometry_posterior_l1": (
+                0.5
+                * (semantic_read.detach().float() - geometry_read.detach().float())
+                .abs()
+                .sum(dim=-1)
+                .mean()
+            ),
+            "object_grounding_appearance_geometry_posterior_l1": (
+                0.5
+                * (appearance_read.detach().float() - geometry_read.detach().float())
+                .abs()
+                .sum(dim=-1)
+                .mean()
+            ),
+            "object_grounding_transport_prior_rms": camera_transport_prior.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_grounding_camera_coordinate_variation": camera_coordinates.detach()
+            .float()
+            .std(dim=2, unbiased=False)
+            .mean(),
+            "object_grounding_candidate_key_rms": candidates.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_grounding_candidate_value_rms": candidates.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+        }
+        return facts, metrics
+
+    @staticmethod
+    def _pair_cosine(value: Tensor) -> Tensor:
+        normalized = F.normalize(value.detach().float(), dim=-1, eps=1e-4)
+        similarity = torch.einsum("bkd,bjd->bkj", normalized, normalized)
+        objects = int(value.shape[1])
+        mask = ~torch.eye(objects, device=value.device, dtype=torch.bool)
+        return similarity[:, mask].mean() if objects > 1 else similarity.new_zeros(())
+
+    @staticmethod
+    def _pair_overlap(probability: Tensor) -> Tensor:
+        probability = probability.detach().float()
+        overlap = torch.einsum(
+            "bkn,bjn->bkj",
+            probability.clamp_min(0.0).sqrt(),
+            probability.clamp_min(0.0).sqrt(),
+        )
+        objects = int(probability.shape[1])
+        mask = ~torch.eye(objects, device=probability.device, dtype=torch.bool)
+        return overlap[:, mask].mean() if objects > 1 else overlap.new_zeros(())
