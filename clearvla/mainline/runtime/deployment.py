@@ -253,10 +253,10 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         raise ValueError("deployment DINO model identity is empty")
     if str(dino.get("compute_dtype", "")) not in {"bf16", "fp32"}:
         raise ValueError("deployment DINO compute_dtype must be bf16 or fp32")
-    try:
-        reference_batch_size = int(dino.get("reference_batch_size", 0))
-    except (TypeError, ValueError) as error:
-        raise ValueError("deployment DINO reference_batch_size must be an integer") from error
+    reference_batch_size = _strict_int(
+        dino.get("reference_batch_size"),
+        name="observation.dinov2.reference_batch_size",
+    )
     if reference_batch_size <= 0:
         raise ValueError("deployment DINO reference_batch_size must be positive")
     cameras = tuple(str(name) for name in observation.get("camera_names", ()))
@@ -277,7 +277,10 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         -1,
     ):
         raise ValueError("deployment ABI executed-action history differs")
-    if int(action.get("receding_horizon_execute_rows", 0)) != 1:
+    if _strict_int(
+        action.get("receding_horizon_execute_rows"),
+        name="action.receding_horizon_execute_rows",
+    ) != 1:
         raise ValueError("deployment must execute exactly one predicted action row")
     output_mode = str(action.get("gripper_output_mode", "continuous"))
     if output_mode not in {"continuous", "calvin_binary_command"}:
