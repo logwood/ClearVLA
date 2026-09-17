@@ -1,0 +1,16 @@
+{
+  "schema": "clearvla-training-acceleration-cpu-golden-summary-v1",
+  "variant": "pen",
+  "revision": "a4a170e",
+  "layout": "modular",
+  "comparison": "cpu_golden",
+  "atol": 0.0,
+  "rtol": 0.0,
+  "pass": true,
+  "metadata_paths": 206326,
+  "shared_tensor_count": 15014,
+  "shared_tensor_numel": 10443735,
+  "exact_tensor_values": true,
+  "nonfinite_allowed": false,
+  "difference_count": 0
+}

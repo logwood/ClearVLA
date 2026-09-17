@@ -14,6 +14,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from clearvla.data.window_boundaries import PREFIX_REGION, TAIL_REGION
+
 from .checkpoint import (
     CheckpointIdentity,
     build_checkpoint_identity,
@@ -55,18 +57,27 @@ from .runtime.sampling import (
     sample_refined_cached_action,
     sample_refined_cached_action_with_cache,
 )
+from .training.acceleration_adapters import MainlineTrainingAccelerationAdapter
+from .training.acceleration_contract import (
+    TrainingAccelerationAdapter,
+    resolve_training_acceleration_adapter,
+)
+from .training.cuda_graph import CudaGraphTrainingStepRunner
 from .training.engine import (
     MainlineTrainingEngine,
     NonFiniteGradientError,
     validate_finite_training_batch,
 )
 from .training.gradient_audit import (
+    DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD,
     FiniteGradientSpikeReport,
     GradientPreclipWindowAccumulator,
 )
 from .training.losses import sample_flow_matching
 from .training.optimizer import WarmupCosineSchedule, build_optimizer, role_lr_scale
 from .v120_core.bspine import BSPINE_DISABLED_IMPLEMENTATION
+
+BOUNDARY_VALIDATION_MAX_BATCHES = 4
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -94,6 +105,56 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-train-batches", type=int)
     parser.add_argument("--max-val-batches", type=int)
     parser.add_argument(
+        "--log-every",
+        type=int,
+        help="Override the training diagnostic/logging interval in batches.",
+    )
+    parser.add_argument(
+        "--disable-gradient-spike-audit",
+        action="store_true",
+        help=(
+            "Skip the read-only finite-gradient spike attribution scan. "
+            "This changes diagnostics only; clipping, gradients, optimizer "
+            "updates and RNG state remain unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--cuda-graph-training",
+        action="store_true",
+        help=(
+            "Replay ordinary training forward/loss/backward with the shared "
+            "CUDA Graph runner; diagnostic steps retain the eager path."
+        ),
+    )
+    parser.add_argument(
+        "--training-acceleration-context-reuse",
+        action="store_true",
+        help=(
+            "Enable the active version adapter's equivalence-gated attached "
+            "block/controller common-subexpression reuse."
+        ),
+    )
+    parser.add_argument(
+        "--disable-training-checkpoint-scope",
+        action="append",
+        default=[],
+        choices=("p1", "raw_flow", "raw_pyramid", "raw_mid", "raw_high", "raw_context"),
+        help=(
+            "Disable one adapter-owned activation recompute surface; repeat "
+            "for multiple scopes. This changes memory/compute only."
+        ),
+    )
+    parser.add_argument(
+        "--raw-mid-checkpoint-save-operation",
+        action="append",
+        default=[],
+        choices=("convolution", "linear", "grid_sample"),
+        help=(
+            "Keep raw-mid activation checkpointing enabled while caching one "
+            "expensive operator family; repeat to combine families."
+        ),
+    )
+    parser.add_argument(
         "--gripper-event-threshold",
         type=float,
         help=(
@@ -113,6 +174,18 @@ def _device(value: str) -> torch.device:
     if result.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     return result
+
+
+def _resolve_mainline_training_acceleration_adapter(
+    model: ClearVLAMainlinePolicy,
+) -> TrainingAccelerationAdapter:
+    """Install the current mainline adapter when the policy has no bespoke hook."""
+
+    adapter = resolve_training_acceleration_adapter(model)
+    if adapter.name == "generic-static-v1":
+        model.training_acceleration_adapter = MainlineTrainingAccelerationAdapter()
+        adapter = resolve_training_acceleration_adapter(model)
+    return adapter
 
 
 def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
@@ -144,6 +217,8 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         runtime = replace(runtime, max_train_batches=int(args.max_train_batches))
     if args.max_val_batches is not None:
         runtime = replace(runtime, max_val_batches=int(args.max_val_batches))
+    if args.log_every is not None:
+        runtime = replace(runtime, log_every=int(args.log_every))
     if args.dtype is not None:
         runtime = replace(runtime, compute_dtype=str(args.dtype))
     if args.smoke:
@@ -155,7 +230,7 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         )
         runtime = replace(
             runtime,
-            log_every=1,
+            log_every=1 if args.log_every is None else runtime.log_every,
             max_train_batches=(2 if args.max_train_batches is None else runtime.max_train_batches),
             max_val_batches=1 if args.max_val_batches is None else runtime.max_val_batches,
         )
@@ -1768,6 +1843,95 @@ def _validate(
     return ValidationReport(metrics=result, multitask=multitask)
 
 
+@torch.no_grad()
+def _validate_boundary_panel(
+    *,
+    region: str,
+    engine: MainlineTrainingEngine,
+    loader,
+    bundle: MainlineDataBundle,
+    config: ExperimentConfig,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, float]:
+    """Measure one causal boundary region through deployment sampling only.
+
+    These panels deliberately omit the teacher/loss forward and causal
+    ablations. Their isolated metric namespace prevents reset-prefix or
+    terminal-tail rows from affecting strict checkpoint selection.
+    """
+
+    if region not in {PREFIX_REGION, TAIL_REGION}:
+        raise ValueError(f"unknown boundary validation region {region!r}")
+    if config.data.data_profile != "libero_relative_7d_v1":
+        raise ValueError("boundary validation panels are LIBERO-only")
+    deployment = ValidationAccumulator.from_action_normalizer(
+        bundle.action_normalizer,
+        device=device,
+        gripper_event_threshold=config.objectives.gripper_event_threshold,
+        arm_motion_threshold=config.objectives.arm_motion_threshold,
+        gripper_output_mode=config.bottom.gripper_output_mode,
+        arm_flow_mode=config.bottom.arm_flow_mode,
+    )
+    completed_batches = 0
+    seed_offset = 61_003 if region == PREFIX_REGION else 71_003
+    for batch_index, raw_batch in enumerate(loader, start=1):
+        batch = to_training_batch(
+            raw_batch,
+            goal=bundle.goal,
+            config=config,
+            device=device,
+        )
+        encoded = engine.encode_eval(batch, collect_diagnostics=False)
+        cache = encoded.cache
+        del encoded
+        prediction, refined_cache = sample_refined_cached_action_with_cache(
+            engine.model,
+            cache,
+            config,
+            collect_diagnostics=False,
+            dtype=dtype,
+            generator=_owned_generator(device, seed_offset + batch_index),
+        )
+        motion_target = (
+            engine.model.outlet_adapter.arm_motion_magnitude(
+                batch.action_target.normalized,
+                batch.online.history.action_state,
+            )
+            >= float(config.objectives.arm_motion_threshold)
+        )
+        deployment.update(
+            prediction.action,
+            batch,
+            motion_logits=prediction.motion_logits,
+            motion_target=motion_target,
+            physical_field=prediction.physical_field,
+            gripper_decode_delta_blend=(
+                engine.model.outlet_adapter.decode_delta_blend
+            ),
+            gripper_command_logits=prediction.gripper_command_logits,
+            gripper_command=prediction.gripper_command,
+            gripper_output_mode=config.bottom.gripper_output_mode,
+        )
+        completed_batches += 1
+        del cache, refined_cache, prediction, batch
+    if completed_batches <= 0:
+        raise ValueError(
+            f"boundary validation panel {region!r} consumed no batches"
+        )
+    result: dict[str, float] = {}
+    for name, value in deployment.means().items():
+        if not name.startswith("validation_"):
+            raise AssertionError(
+                "validation accumulator emitted an unscoped metric"
+            )
+        result[
+            f"validation_boundary_{region}_{name.removeprefix('validation_')}"
+        ] = float(value)
+    result[f"validation_boundary_{region}_batches"] = float(completed_batches)
+    return result
+
+
 def main() -> None:
     args = _parser().parse_args()
     validation_checkpoint = args.validate_checkpoint
@@ -1775,6 +1939,30 @@ def main() -> None:
     config = _overrides(load_config(args.config), args)
     _seed(config.data.seed)
     device = _device(args.device)
+    checkpoint_scopes = tuple(dict.fromkeys(args.disable_training_checkpoint_scope))
+    raw_mid_save_operations = tuple(
+        dict.fromkeys(args.raw_mid_checkpoint_save_operation)
+    )
+    if (
+        args.training_acceleration_context_reuse
+        or checkpoint_scopes
+        or raw_mid_save_operations
+    ) and not args.cuda_graph_training:
+        raise ValueError(
+            "training acceleration context/checkpoint policies require "
+            "--cuda-graph-training"
+        )
+    if raw_mid_save_operations and (
+        "raw_mid" in checkpoint_scopes or "raw_flow" in checkpoint_scopes
+    ):
+        raise ValueError(
+            "raw-mid selective checkpoint caching cannot be combined with "
+            "disabling the raw-mid checkpoint"
+        )
+    if args.cuda_graph_training and device.type != "cuda":
+        raise ValueError("CUDA Graph training requires a CUDA device")
+    if args.cuda_graph_training and validation_checkpoint is not None:
+        raise ValueError("CUDA Graph training is not used for validation-only replay")
     dtype = resolve_compute_dtype(config)
     output_dir = Path(config.data.output_dir)
     _prepare_output_directory(output_dir, exact_resume=args.resume is not None)
@@ -1799,6 +1987,18 @@ def main() -> None:
             config.runtime.max_val_batches if bundle.is_multitask else None
         ),
     )
+    boundary_loaders = {
+        region: bundle.loader(
+            f"val_{region}",
+            batch_size=config.optimizer.batch_size,
+            workers=config.data.num_workers,
+            device=device,
+            shuffle=False,
+            coverage_panel_max_batches=BOUNDARY_VALIDATION_MAX_BATCHES,
+        )
+        for region in (PREFIX_REGION, TAIL_REGION)
+        if f"val_{region}" in bundle.datasets
+    }
     model = ClearVLAMainlinePolicy(config).to(device)
     optimizer, ownership = build_optimizer(model, config)
     steps_per_epoch = _limit(len(train_loader), config.runtime.max_train_batches)
@@ -1817,6 +2017,11 @@ def main() -> None:
         dtype=dtype,
         train_flow_generator=train_flow_generator,
         train_condition_generator=train_condition_generator,
+        gradient_spike_audit_threshold=(
+            None
+            if args.disable_gradient_spike_audit
+            else DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD
+        ),
     )
     identity = build_checkpoint_identity(
         config,
@@ -1875,6 +2080,63 @@ def main() -> None:
             f"rejected={len(report.rejected)}",
             flush=True,
         )
+    training_step_runner: MainlineTrainingEngine | CudaGraphTrainingStepRunner = engine
+    acceleration_adapter_name: str | None = None
+    if args.cuda_graph_training:
+        acceleration_adapter = _resolve_mainline_training_acceleration_adapter(model)
+        acceleration_adapter_name = acceleration_adapter.name
+        if args.training_acceleration_context_reuse:
+            context_hook = getattr(acceleration_adapter, "set_context_reuse", None)
+            if not callable(context_hook):
+                raise RuntimeError(
+                    f"training adapter {acceleration_adapter.name!r} does not "
+                    "support context reuse"
+                )
+            if int(context_hook(engine, enabled=True)) == 0:
+                raise RuntimeError("context reuse found no supported model surface")
+        if checkpoint_scopes:
+            checkpoint_hook = getattr(
+                acceleration_adapter,
+                "set_activation_checkpointing",
+                None,
+            )
+            if not callable(checkpoint_hook):
+                raise RuntimeError(
+                    f"training adapter {acceleration_adapter.name!r} does not "
+                    "support checkpoint policy overrides"
+                )
+            if int(
+                checkpoint_hook(
+                    engine,
+                    enabled=False,
+                    scopes=checkpoint_scopes,
+                )
+            ) == 0:
+                raise RuntimeError(
+                    "checkpoint policy override found no supported model surface"
+                )
+        if raw_mid_save_operations:
+            selective_checkpoint_hook = getattr(
+                acceleration_adapter,
+                "set_selective_checkpoint_save_operations",
+                None,
+            )
+            if not callable(selective_checkpoint_hook):
+                raise RuntimeError(
+                    f"training adapter {acceleration_adapter.name!r} does not "
+                    "support selective checkpoint caching"
+                )
+            if int(
+                selective_checkpoint_hook(
+                    engine,
+                    scope="raw_mid",
+                    operations=raw_mid_save_operations,
+                )
+            ) == 0:
+                raise RuntimeError(
+                    "selective checkpoint caching found no supported model surface"
+                )
+        training_step_runner = CudaGraphTrainingStepRunner(engine)
     context = {
         "config": config.as_dict(),
         "identity": identity.as_dict(),
@@ -1901,6 +2163,19 @@ def main() -> None:
         "validation_panel": getattr(
             getattr(val_loader, "batch_sampler", None), "summary", None
         ),
+        "window_boundaries": {
+            "training_contract": bundle.window_boundary_contract,
+            "datasets": {
+                name: dataset.boundary_summary()
+                for name, dataset in bundle.datasets.items()
+            },
+            "deployment_validation_panels": {
+                region: getattr(
+                    getattr(loader, "batch_sampler", None), "summary", None
+                )
+                for region, loader in boundary_loaders.items()
+            },
+        },
         "normalizer_fingerprints": {
             "action_v120": v120_normalizer_fingerprint(bundle.action_normalizer),
             "state_v120": v120_normalizer_fingerprint(bundle.state_normalizer),
@@ -1914,6 +2189,16 @@ def main() -> None:
             "parameter_scan_policy": (
                 "only_after_finite_global_threshold_crossing"
             ),
+        },
+        "training_acceleration": {
+            "cuda_graph_training": bool(args.cuda_graph_training),
+            "adapter": acceleration_adapter_name,
+            "context_reuse": bool(args.training_acceleration_context_reuse),
+            "disabled_checkpoint_scopes": list(checkpoint_scopes),
+            "raw_mid_checkpoint_save_operations": list(
+                raw_mid_save_operations
+            ),
+            "diagnostic_steps_eager": True,
         },
         "execution_mode": (
             "validation_only" if validation_state is not None else "training"
@@ -1980,7 +2265,20 @@ def main() -> None:
             device=device,
             dtype=dtype,
         )
-        validation = archival_metrics(validation_report.metrics)
+        validation_metrics = dict(validation_report.metrics)
+        for region, boundary_loader in boundary_loaders.items():
+            validation_metrics.update(
+                _validate_boundary_panel(
+                    region=region,
+                    engine=engine,
+                    loader=boundary_loader,
+                    bundle=bundle,
+                    config=config,
+                    device=device,
+                    dtype=dtype,
+                )
+            )
+        validation = archival_metrics(validation_metrics)
         runtime = archival_metrics(
             {
                 "runtime_validation_seconds": time.perf_counter() - validation_started,
@@ -2074,15 +2372,19 @@ def main() -> None:
                     task_sample_counts[int(task)] += 1
             emit = batch_index % config.runtime.log_every == 0
             try:
-                result = engine.train_step(
+                result = training_step_runner.train_step(
                     batch,
                     collect_diagnostics=emit,
-                    gradient_spike_handler=lambda report: _write_gradient_spike(
-                        logger,
-                        report,
-                        epoch=epoch,
-                        batch=batch_index,
-                        step=engine.global_step,
+                    gradient_spike_handler=(
+                        None
+                        if args.disable_gradient_spike_audit
+                        else lambda report: _write_gradient_spike(
+                            logger,
+                            report,
+                            epoch=epoch,
+                            batch=batch_index,
+                            step=engine.global_step,
+                        )
                     ),
                 )
             except NonFiniteGradientError as error:
@@ -2175,6 +2477,16 @@ def main() -> None:
         train_values["runtime_epoch_seconds"] = epoch_seconds
         train_values["runtime_seconds_per_batch"] = epoch_seconds / max(epoch_batches, 1)
         train_values["runtime_samples_per_second"] = epoch_samples / max(epoch_seconds, 1e-8)
+        if isinstance(training_step_runner, CudaGraphTrainingStepRunner):
+            train_values["runtime_cuda_graph_capture_count"] = float(
+                training_step_runner.capture_count
+            )
+            train_values["runtime_cuda_graph_replay_count"] = float(
+                training_step_runner.replay_count
+            )
+            train_values["runtime_cuda_graph_diagnostic_eager_count"] = float(
+                training_step_runner.diagnostic_eager_count
+            )
         train_task_mix = _task_sample_mix(bundle, task_sample_counts)
         validation_report = _validate(
             engine=engine,
@@ -2184,7 +2496,20 @@ def main() -> None:
             device=device,
             dtype=dtype,
         )
-        validation = archival_metrics(validation_report.metrics)
+        validation_metrics = dict(validation_report.metrics)
+        for region, boundary_loader in boundary_loaders.items():
+            validation_metrics.update(
+                _validate_boundary_panel(
+                    region=region,
+                    engine=engine,
+                    loader=boundary_loader,
+                    bundle=bundle,
+                    config=config,
+                    device=device,
+                    dtype=dtype,
+                )
+            )
+        validation = archival_metrics(validation_metrics)
         # Capture the peak after validation as well: a production memory claim
         # covers the complete train/eval epoch, not only the backward path.
         train_values.update(_cuda_memory_metrics(device))
@@ -2200,6 +2525,9 @@ def main() -> None:
         runtime_names = (
             "runtime_seconds_per_batch",
             "runtime_samples_per_second",
+            "runtime_cuda_graph_capture_count",
+            "runtime_cuda_graph_replay_count",
+            "runtime_cuda_graph_diagnostic_eager_count",
             "runtime_cuda_peak_reserved_gib",
             "runtime_cuda_peak_process_estimate_gib",
         )

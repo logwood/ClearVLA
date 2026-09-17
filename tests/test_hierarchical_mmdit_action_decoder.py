@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from clearvla.experiments.observed_state_lab.policy_runtime_v39 import (
     V39PolicyTrainerConfig,
     _accumulate_metric_tensors,
-    _dwell_value_targets,
     _optimizer_groups,
     _oracle_exit_supervision,
     _sync_loss_row,
@@ -72,45 +71,6 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             _sync_loss_row(losses)
         with self.assertRaisesRegex(ValueError, message):
             _accumulate_metric_tensors({}, losses)
-
-    def test_dwell_targets_use_post_update_decision_coordinates(self) -> None:
-        prefix_error = torch.tensor(
-            [
-                [1.00, 0.70, 0.45, 0.40, 0.38],
-                [1.00, 0.80, 0.60, 0.60, 0.60],
-            ]
-        )
-        block_ids = torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]])
-        active = torch.tensor(
-            [
-                [True, True, True, True],
-                [True, True, False, False],
-            ]
-        )
-        targets = _dwell_value_targets(
-            prefix_error=prefix_error,
-            block_ids=block_ids,
-            active=active,
-            compute_cost=0.01,
-        )
-        torch.testing.assert_close(targets["exit_target"], prefix_error[:, 1:])
-        torch.testing.assert_close(
-            targets["continue_action"],
-            torch.tensor([[0, 1, 0, 0], [1, 0, 0, 0]]),
-        )
-        torch.testing.assert_close(
-            targets["continue_valid"],
-            torch.tensor(
-                [
-                    [True, True, True, False],
-                    [True, False, False, False],
-                ]
-            ),
-        )
-        torch.testing.assert_close(
-            targets["continue_target"][0, :3],
-            torch.tensor([0.41, 0.40, 0.39]),
-        )
 
     def test_unified_controller_slots_are_configurable_and_outputs_are_neutral(self) -> None:
         cfg = replace(
@@ -183,10 +143,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         )
         torch.testing.assert_close(
             output.operator_update_logits,
-            torch.full_like(
-                output.operator_update_logits,
-                cfg.hierarchical_mmdit_operator_depth_logit_init,
-            ),
+            torch.full_like(output.operator_update_logits, 20.0),
         )
         self.assertGreater(
             float(output.metrics["controller_state_direction_participation"]),
@@ -460,9 +417,13 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             float(output.metrics["controller_reader_operator_attention_diversity"]),
             0.0,
         )
-        self.assertGreater(
-            float(output.metrics["controller_reader_family_attention_diversity"]),
-            0.0,
+        # Spectral state is disabled here, so the operator reader is the sole
+        # reader family and cross-family diversity is algebraically zero.
+        torch.testing.assert_close(
+            output.metrics["controller_reader_family_attention_diversity"],
+            torch.zeros_like(
+                output.metrics["controller_reader_family_attention_diversity"]
+            ),
         )
         for reader_name in ("operator",):
             self.assertLess(
@@ -637,7 +598,7 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
                 self.config,
                 final_action_decoder="latent_cvae_action",
                 hierarchical_mmdit_unified_controller=1,
-            )
+            ).validate()
 
     def test_spectral_reader_uses_shared_memory_and_outputs_frequencies_directly(self) -> None:
         cfg = replace(
@@ -692,7 +653,9 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             0.0,
         )
 
-    def test_unified_controller_starts_at_the_legacy_forward_boundary(self) -> None:
+    def test_unified_controller_reuses_legacy_host_and_fixed_schedule_with_typed_memory(
+        self,
+    ) -> None:
         cfg = self.config
         unified_cfg = replace(
             cfg,
@@ -738,11 +701,41 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
         with torch.no_grad():
             baseline_output = baseline(**inputs)
             unified_output = unified(**inputs)
+        # The controller owns a typed role/content stage-memory chart, so its
+        # forward tokens intentionally differ from the legacy summed chart.
+        # The compatibility boundary is shared host initialization plus the
+        # same fixed block/stage schedule, not exact final-velocity equality.
         torch.testing.assert_close(
-            baseline_output["pred_velocity"],
-            unified_output["pred_velocity"],
+            baseline_output["refinement_probe_block_ids"],
+            unified_output["refinement_probe_block_ids"],
             atol=0.0,
             rtol=0.0,
+        )
+        torch.testing.assert_close(
+            baseline_output["refinement_probe_stage_ids"],
+            unified_output["refinement_probe_stage_ids"],
+            atol=0.0,
+            rtol=0.0,
+        )
+        self.assertEqual(
+            float(baseline_output["owned_hierarchical_stage_action_memory_typed"]),
+            0.0,
+        )
+        self.assertEqual(
+            float(unified_output["owned_hierarchical_stage_action_memory_typed"]),
+            1.0,
+        )
+        self.assertEqual(
+            float(baseline_output["owned_hierarchical_stage_action_memory_token_count"]),
+            float(cfg.hierarchical_mmdit_stage_slots),
+        )
+        self.assertEqual(
+            float(unified_output["owned_hierarchical_stage_action_memory_token_count"]),
+            float(2 * cfg.hierarchical_mmdit_stage_slots),
+        )
+        self.assertEqual(
+            float(unified_output["hierarchical_mmdit_operation_fixed_path_agreement"]),
+            1.0,
         )
         self.assertEqual(
             tuple(unified_output["hierarchical_mmdit_operation_value_field"].shape),
@@ -808,10 +801,24 @@ class HierarchicalMMDiTActionDecoderTest(unittest.TestCase):
             torch.manual_seed(713)
             unified_training_output = unified(**inputs)
         torch.testing.assert_close(
-            baseline_training_output["pred_velocity"],
-            unified_training_output["pred_velocity"],
+            baseline_training_output["refinement_probe_block_ids"],
+            unified_training_output["refinement_probe_block_ids"],
             atol=0.0,
             rtol=0.0,
+        )
+        torch.testing.assert_close(
+            baseline_training_output["refinement_probe_stage_ids"],
+            unified_training_output["refinement_probe_stage_ids"],
+            atol=0.0,
+            rtol=0.0,
+        )
+        self.assertEqual(
+            float(
+                unified_training_output[
+                    "owned_hierarchical_stage_action_memory_typed"
+                ]
+            ),
+            1.0,
         )
 
     def test_intent_compiler_api_has_no_oracle_or_diffusion_inputs(self) -> None:

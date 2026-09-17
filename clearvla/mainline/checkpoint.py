@@ -236,12 +236,19 @@ def active_source_snapshot(repo_root: str | Path) -> SourceSnapshot:
     # Source identity follows the executable entry point.  This is stricter
     # than hashing a hand-maintained file list and more accurate than hashing
     # every prototype that happens to remain under ``mainline``: only modules
-    # reachable from the formal trainer (including imported V120 extraction
+    # reachable from the formal trainer or checkpoint-backed online policy (including imported V120 extraction
     # modules and package initializers) can alter a run's graph identity.
     # Archived/inactive alternatives must not make an exact resume fail.
     seeds = [package / "train.py"]
     if not seeds[0].is_file():
         raise FileNotFoundError("mainline training entry point is missing")
+    # A formal checkpoint also owns its online observation/action assembly,
+    # not merely modules imported by the offline trainer. Include the actual
+    # inference entry's static closure so history, DINO preprocessing and
+    # restoration changes cannot bypass the deployment source gate.
+    deployment_entry = root / "clearvla" / "simulation" / "clearvla_policy.py"
+    if deployment_entry.is_file():
+        seeds.append(deployment_entry)
     sources = list(_active_python_closure(root, seeds))
     preset = root / "configs" / "mainline" / "object_intent_dynamics_323.json"
     if preset.is_file():

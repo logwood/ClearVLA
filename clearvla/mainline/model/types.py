@@ -586,6 +586,14 @@ class ActionIntentDock:
     public_interval_carrier: Tensor  # [B,I,H]
     history_memory: Tensor  # [B,L,H]
     public_object_memory: Tensor  # [B,K,H]
+    # Optional outlet-scoped replacement for the K object memory.  The shared
+    # Pen/RDT/LIBERO paths leave this ``None`` and therefore retain the exact
+    # historical coarse read.  CALVIN's object-binding bridge fills it with a
+    # validity-aware, language-selected K memory without entering W directly.
+    selected_object_context: Tensor | None = None  # [B,1,H]
+    object_binding_pointer: Tensor | None = None  # [B,K+1], final column null
+    object_binding_selected_geometry: Tensor | None = None  # [B,2]
+    object_binding_context_scale: Tensor | None = None  # v2 post-read [B,1]
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -600,6 +608,45 @@ class ActionIntentDock:
             self.public_object_memory.shape[0]
         ) != batch:
             raise ValueError("action-intent object memory must be [B,K,H]")
+        objects = int(self.public_object_memory.shape[1])
+        if int(self.public_object_memory.shape[2]) != hidden:
+            raise ValueError("action-intent object memory has the wrong hidden width")
+        if self.object_binding_context_scale is not None:
+            _shape(self.object_binding_context_scale, (batch, 1), "object-binding context scale")
+            if self.selected_object_context is None or self.object_binding_pointer is None:
+                raise ValueError("object-binding context scale requires context and pointer")
+            if not bool(torch.isfinite(self.object_binding_context_scale).all()):
+                raise ValueError("object-binding context scale is non-finite")
+        if self.selected_object_context is not None:
+            _shape(
+                self.selected_object_context,
+                (batch, 1, hidden),
+                "action-intent selected object context",
+            )
+        if self.object_binding_pointer is not None:
+            _shape(
+                self.object_binding_pointer,
+                (batch, objects + 1),
+                "action-intent object-binding pointer",
+            )
+            if not bool(torch.isfinite(self.object_binding_pointer).all()):
+                raise ValueError("action-intent object-binding pointer is non-finite")
+            pointer_sum = self.object_binding_pointer.float().sum(dim=-1)
+            if not bool(
+                torch.allclose(
+                    pointer_sum,
+                    torch.ones_like(pointer_sum),
+                    atol=2e-2,
+                    rtol=2e-2,
+                )
+            ):
+                raise ValueError("action-intent object-binding pointer must sum to one")
+        if self.object_binding_selected_geometry is not None:
+            _shape(
+                self.object_binding_selected_geometry,
+                (batch, 2),
+                "action-intent selected object geometry",
+            )
 
 
 @dataclass(frozen=True)
@@ -680,6 +727,13 @@ class ObjectIntentState:
     interval_goal_attention: Tensor  # [B,4,4]
     interval_history_attention: Tensor  # [B,4,L]
     interval_object_attention: Tensor  # [B,4,K]
+    # CALVIN-only task-role binding.  These are optional so the shared
+    # checkpoint/runtime ABI remains unchanged for outlets that do not select
+    # the binding component.
+    object_binding_pointer: Tensor | None = None  # [B,K+1], final column null
+    object_binding_selected_context: Tensor | None = None  # [B,1,H]
+    object_binding_selected_geometry: Tensor | None = None  # [B,2]
+    object_binding_context_scale: Tensor | None = None  # v2 post-read [B,1]
 
     @property
     def interval_queries(self) -> Tensor:
@@ -716,6 +770,10 @@ class ObjectIntentState:
             public_interval_carrier=self.public_interval_carrier,
             history_memory=self.history_tokens,
             public_object_memory=self.object_tokens,
+            selected_object_context=self.object_binding_selected_context,
+            object_binding_pointer=self.object_binding_pointer,
+            object_binding_selected_geometry=self.object_binding_selected_geometry,
+            object_binding_context_scale=self.object_binding_context_scale,
         )
 
     def factual_dock(self) -> FactualIntentDock:
@@ -784,6 +842,26 @@ class ObjectIntentState:
             (batch, 4, 3, hidden),
             "typed policy components",
         )
+        if self.object_binding_pointer is not None:
+            _shape(
+                self.object_binding_pointer,
+                (batch, objects + 1),
+                "object-binding pointer",
+            )
+            if not bool(torch.isfinite(self.object_binding_pointer).all()):
+                raise ValueError("object-binding pointer is non-finite")
+        if self.object_binding_selected_context is not None:
+            _shape(
+                self.object_binding_selected_context,
+                (batch, 1, hidden),
+                "object-binding selected context",
+            )
+        if self.object_binding_selected_geometry is not None:
+            _shape(
+                self.object_binding_selected_geometry,
+                (batch, 2),
+                "object-binding selected geometry",
+            )
         self.action_dock().validate(hidden=hidden)
         self.factual_dock().validate(hidden=hidden)
         self.policy_dock().validate(horizon=horizon, hidden=hidden)
@@ -819,6 +897,20 @@ class ObjectIntentState:
             interval_goal_attention=self.interval_goal_attention,
             interval_history_attention=self.interval_history_attention,
             interval_object_attention=self.interval_object_attention[:, :, index],
+            object_binding_pointer=(
+                None
+                if self.object_binding_pointer is None
+                else torch.cat(
+                    (
+                        self.object_binding_pointer[:, index],
+                        self.object_binding_pointer[:, -1:],
+                    ),
+                    dim=1,
+                )
+            ),
+            object_binding_selected_context=self.object_binding_selected_context,
+            object_binding_selected_geometry=self.object_binding_selected_geometry,
+            object_binding_context_scale=self.object_binding_context_scale,
         )
 
 

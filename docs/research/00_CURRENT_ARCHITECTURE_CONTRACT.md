@@ -1,6 +1,6 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-04
+Updated: 2026-09-17
 
 This is the compact source of truth for the active independent mainline. Read
 it before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
@@ -55,6 +55,30 @@ fresh CALVIN run from commit `f9cee96a` is active; no historical checkpoint was
 resumed or migrated. These are interface observations, not an accepted
 behavior release; live Pen, RDT and CALVIN process state remains in the rolling
 handoff.
+
+## Integration candidate boundary (2026-09-17)
+
+`codex/integrated-mainline-20260917` starts from `d7ebf00` and is a reviewed
+integration candidate, not a promoted behavior release. The shared G/S/W/P,
+single-pass training, detached Teacher and bounded two-pass deployment remain
+unchanged. The optional CALVIN mode `calvin_primary_v2` uses intent component
+`stateless_object_intent_calvin_binding_v2`: S carries conditional object
+context and a separate `tanh(context_gate) * P(real)` scalar, consumed after the
+complete coarse object read. This preserves null ownership through LayerNorm;
+no new parameter or objective is introduced. V1 remains explicitly selected
+by its existing config and identity; neither mode is an implicit migration.
+
+Deployment history retains only its addressable 9 observation / 24 action
+rows. All outlet deployment profiles and redundant dimensions are checked
+against their registry/graph, including RDT's ordered high/right-wrist aliases.
+The source snapshot includes the checkpoint-backed online policy closure;
+older sources must not be relabelled as exact-resume compatible. Ingress
+preflight also checks both normalized online action/codec anchors. Candidate
+provenance, exclusions and reproducible CPU gates are documented in
+[`../development/INTEGRATION_REVIEW.md`](../development/INTEGRATION_REVIEW.md).
+Real CUDA/BF16, production-checkpoint and closed-loop behavior gates remain
+required before promotion. Rolling run-state statements above remain historical
+observations; this review did not inspect or change live training processes.
 
 ## Authority order
 
@@ -601,6 +625,31 @@ hidden model condition. This outlet validates the adapter and cross-task
 ecology. It does not claim native three-camera, depth or bimanual 14-D model
 consumption. Details live in
 [`auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md`](auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md).
+
+### LIBERO causal-window outlet
+
+LIBERO uses the independent outlet identity `libero_7d_continuous_v1` and the
+existing `relative_command_direct` arm path. The official released
+observations are post-action rows; the audited causal converter renders reset
+row 0 from the recorded simulator state, shifts released row `t-1` to causal
+row `t>0`, and retains the released final row as the genuine terminal
+observation.
+
+Window admission is explicit and data-only. `strict_complete_v1` remains the
+default. `causal_prefix_v1` adds reset-prefix centers, while
+`causal_prefix_terminal_suffix_v2` also materializes 48 absorbing rows so the
+last real action owns complete Teacher support. Pre-reset state/RGB history
+repeats the reset observation; missing executed-command history uses
+`action_state[0]`, never the unexecuted `action[0]`. Terminal padding repeats
+the terminal observation, emits zero arm commands and holds the final gripper
+command. Legal centers stop at the last real source action.
+
+Synthetic suffix rows do not enter action/state normalizer fitting. Causally
+realigned LIBERO data carries a numeric-only legacy state reference for exact
+E8 chart continuity; it is never model evidence. Causal regions are admitted
+only on the training surface. Primary validation/test remain strict, and
+bounded `val_prefix`/`val_tail` deployment panels use isolated metrics that
+cannot select the best checkpoint.
 
 ### Pen/RDT gripper boundary decision
 

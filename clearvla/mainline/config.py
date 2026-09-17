@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Mapping, TypeVar, cast
 
 from clearvla.data.action_chart import resolve_action_state_profile
+from clearvla.data.window_boundaries import (
+    CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    CAUSAL_PREFIX_V1,
+    STRICT_COMPLETE_V1,
+    WINDOW_BOUNDARY_CONTRACTS,
+)
 
 from .manifest import ARCHITECTURE_MANIFEST
 from .v120_core.bspine import (
@@ -78,6 +84,9 @@ class DataConfig:
     # identity profile.  Other source charts must opt into a threshold rather
     # than silently borrowing raw units from another dataset.
     sampling_gripper_event_threshold: float | None = None
+    # Selects which causal episode centers are admitted for training. The
+    # strict default is omitted from serialization to preserve old identities.
+    window_boundary_contract: str = STRICT_COMPLETE_V1
 
     def camera_key_map(self) -> dict[str, str]:
         if self.camera_key_overrides:
@@ -176,6 +185,18 @@ class DataConfig:
             raise ValueError("data stride must be positive and worker count non-negative")
         if self.seed < 0:
             raise ValueError("data seed must be non-negative")
+        if self.window_boundary_contract not in WINDOW_BOUNDARY_CONTRACTS:
+            raise ValueError(
+                "data.window_boundary_contract must be one of "
+                f"{WINDOW_BOUNDARY_CONTRACTS}"
+            )
+        if (
+            self.window_boundary_contract != STRICT_COMPLETE_V1
+            and self.data_profile != "libero_relative_7d_v1"
+        ):
+            raise ValueError(
+                "causal prefix/terminal boundary contracts are valid only for LIBERO"
+            )
         resolve_action_state_profile(self.data_profile).validate()
         if self.sampling_gripper_event_threshold is not None:
             threshold = float(self.sampling_gripper_event_threshold)
@@ -298,8 +319,16 @@ class TopConfig:
     proposal_summary_tokens: int = 3
     goal_condition_dropout: float = 0.05
     action_history_condition_dropout: float = 0.10
+    # CALVIN-only task-role pointer at the S/coarse-action seam.  The default
+    # remains disabled so existing Pen/RDT/LIBERO config/checkpoint identities
+    # do not acquire dormant parameters.
+    calvin_object_binding: str = "disabled"
 
     def validate(self) -> None:
+        if self.calvin_object_binding not in {"disabled", "calvin_primary_v1", "calvin_primary_v2"}:
+            raise ValueError(
+                "top.calvin_object_binding must be disabled, calvin_primary_v1 or calvin_primary_v2"
+            )
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")
         if (
@@ -647,6 +676,13 @@ class ExperimentConfig:
             raise ValueError("data profile width must align with dimensions.action_dim")
         if profile.output_dim != self.dimensions.state_dim:
             raise ValueError("data profile width must align with dimensions.state_dim")
+        if self.data.window_boundary_contract in {
+            CAUSAL_PREFIX_V1,
+            CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+        } and self.optimizer.batch_size != 8:
+            raise ValueError(
+                "controlled LIBERO boundary experiments require batch size 8"
+            )
         sampling_threshold = self.data.sampling_gripper_event_threshold
         if profile.name == "identity_7d_pen":
             if self.objectives.gripper_event_threshold != 0.10:
@@ -686,6 +722,22 @@ class ExperimentConfig:
                     "CALVIN relative-command profile requires bottom.arm_flow_mode="
                     "relative_command_direct"
                 )
+        elif profile.name == "libero_relative_7d_v1":
+            if mode != "continuous":
+                raise ValueError(
+                    "LIBERO profile requires bottom.gripper_output_mode=continuous"
+                )
+            if profile_grippers != (6,):
+                raise ValueError("LIBERO continuous gripper must own native action dimension 7")
+            if float(self.objectives.gripper_command) != 0.0:
+                raise ValueError(
+                    "LIBERO continuous gripper requires objective.gripper_command=0"
+                )
+            if arm_mode != "relative_command_direct":
+                raise ValueError(
+                    "LIBERO relative-command profile requires bottom.arm_flow_mode="
+                    "relative_command_direct"
+                )
         else:
             if mode != "continuous":
                 raise ValueError(
@@ -697,11 +749,17 @@ class ExperimentConfig:
                 )
             if arm_mode != "legacy_independent":
                 raise ValueError(
-                    "relative_command_direct is valid only for the CALVIN action profile"
+                    "relative_command_direct is valid only for CALVIN or LIBERO "
+                    "action profiles"
                 )
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        data = cast(dict[str, object], payload["data"])
+        if self.data.window_boundary_contract == STRICT_COMPLETE_V1:
+            # Old configs acquire the strict dataclass default when parsed;
+            # omitting it keeps their serialized/digest identity unchanged.
+            data.pop("window_boundary_contract", None)
         bottom = cast(dict[str, object], payload["bottom"])
         if self.bottom.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
             for name in (

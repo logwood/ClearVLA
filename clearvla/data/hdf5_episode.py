@@ -18,6 +18,18 @@ from .schema import (
     resolve_key,
 )
 
+RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING = "relative-action-absorbing-v1"
+LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING = "libero-terminal-replay-absorbing-v2"
+LIBERO_E8_STATE_NORMALIZER_REFERENCE = (
+    "legacy-libero-v1-post-action-real-rows-for-e8-continuation-v1"
+)
+SUPPORTED_TERMINAL_PADDING_MODES = frozenset(
+    {
+        RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING,
+        LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING,
+    }
+)
+
 
 @dataclass
 class LoadedEpisode:
@@ -41,6 +53,34 @@ class LoadedEpisode:
     language_key: str | None = None
     valid_center_start: int | None = None
     valid_center_end: int | None = None
+    strict_valid_center_start: int | None = None
+    strict_valid_center_end: int | None = None
+    # Fixed-horizon policies may need future Teacher support beyond a task's
+    # terminal state.  CALVIN materializes an absorbing suffix: terminal
+    # state/images repeat, relative arm commands are zero and the binary
+    # gripper command is held.  ``terminal_state_index`` is the first index at
+    # which actions are synthetic and the last real state/image index.
+    terminal_state_index: int | None = None
+    terminal_padding_mode: str = ""
+    source_action_count: int | None = None
+    # A causally realigned LIBERO episode replaces the legacy post-action
+    # observation rows with pre-action rows.  Model-only continuation from E8
+    # must nevertheless retain E8's exact affine state chart.  The converter
+    # therefore stores the old real-row state array as a small numeric-only
+    # reference; it is used only while fitting the state normalizer and never
+    # enters a model sample.
+    state_normalizer_reference_raw: np.ndarray | None = None
+    state_normalizer_reference_semantics: str = ""
+    # A CALVIN raw-overlay episode can extend the numeric action/state arrays
+    # with a virtual absorbing terminal suffix while retaining an older,
+    # verified cache for the real source prefix.  In that case cache readers
+    # clamp only the virtual suffix to the cached terminal observation.  The
+    # default keeps the historical one-cache-row-per-logical-row contract.
+    cache_frame_count: int | None = None
+    source_start: int | None = None
+    source_end: int | None = None
+    context_start: int | None = None
+    source_trajectory_id: str = ""
     source_action_dim: int = 0
     source_state_dim: int = 0
     data_profile: str = "source_native"
@@ -58,6 +98,47 @@ class LoadedEpisode:
     @property
     def length(self) -> int:
         return int(self.actions_raw.shape[0])
+
+    @property
+    def cached_frame_count(self) -> int:
+        return (
+            int(self.length)
+            if self.cache_frame_count is None
+            else int(self.cache_frame_count)
+        )
+
+    def resolve_cached_frame_indices(self, indices: np.ndarray) -> np.ndarray:
+        """Map logical visual rows onto a verified physical cache prefix.
+
+        Only the explicit relative-action absorbing contract may reuse a
+        shorter cache.  Its logical suffix repeats the terminal RGB/DINO row,
+        so no visual information is fabricated and no stale row is silently
+        admitted for another dataset type.
+        """
+
+        rows = np.asarray(indices, dtype=np.int64)
+        if rows.ndim != 1 or len(rows) == 0:
+            raise ValueError(f"cache indices must be non-empty [H], got {rows.shape}")
+        if int(rows.min()) < 0 or int(rows.max()) >= self.length:
+            raise IndexError(
+                f"logical cache indices [{int(rows.min())},{int(rows.max())}] "
+                f"outside episode length={self.length}"
+            )
+        cached = self.cached_frame_count
+        if cached == self.length:
+            return rows
+        if (
+            self.terminal_padding_mode
+            != RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING
+            or self.terminal_state_index is None
+            or cached != int(self.terminal_state_index) + 1
+            or not 0 < cached < self.length
+        ):
+            raise ValueError(
+                "a shortened visual cache is valid only for an explicit "
+                "relative-action absorbing terminal suffix"
+            )
+        return np.minimum(rows, cached - 1)
 
 
 def find_hdf5_files(root: Path, pattern: str) -> list[Path]:
@@ -219,6 +300,69 @@ def load_episode(
         raw_valid_end = f.attrs.get("valid_center_end")
         valid_center_start = None if raw_valid_start is None else int(raw_valid_start)
         valid_center_end = None if raw_valid_end is None else int(raw_valid_end)
+        raw_strict_valid_start = f.attrs.get("strict_valid_center_start")
+        raw_strict_valid_end = f.attrs.get("strict_valid_center_end")
+        strict_valid_center_start = (
+            None if raw_strict_valid_start is None else int(raw_strict_valid_start)
+        )
+        strict_valid_center_end = (
+            None if raw_strict_valid_end is None else int(raw_strict_valid_end)
+        )
+        raw_terminal_index = f.attrs.get("terminal_state_index")
+        terminal_state_index = (
+            None if raw_terminal_index is None else int(raw_terminal_index)
+        )
+        raw_padding_mode = f.attrs.get("terminal_padding_mode", "")
+        if isinstance(raw_padding_mode, (bytes, np.bytes_)):
+            raw_padding_mode = bytes(raw_padding_mode).decode("utf-8")
+        terminal_padding_mode = str(raw_padding_mode).strip()
+        raw_source_action_count = f.attrs.get("source_action_count")
+        source_action_count = (
+            None if raw_source_action_count is None else int(raw_source_action_count)
+        )
+        raw_state_normalizer_reference_key = f.attrs.get(
+            "state_normalizer_reference_key"
+        )
+        if isinstance(
+            raw_state_normalizer_reference_key, (bytes, np.bytes_)
+        ):
+            raw_state_normalizer_reference_key = bytes(
+                raw_state_normalizer_reference_key
+            ).decode("utf-8")
+        state_normalizer_reference_key = (
+            ""
+            if raw_state_normalizer_reference_key is None
+            else str(raw_state_normalizer_reference_key).strip()
+        )
+        if state_normalizer_reference_key:
+            reference_dataset = f.get(state_normalizer_reference_key)
+            if not isinstance(reference_dataset, h5py.Dataset):
+                raise ValueError(
+                    f"{path}: state normalizer reference key does not name a dataset"
+                )
+            state_normalizer_reference_raw = np.asarray(
+                reference_dataset, dtype=np.float32
+            )
+        else:
+            state_normalizer_reference_raw = None
+        raw_state_normalizer_reference_semantics = f.attrs.get(
+            "state_normalizer_reference_semantics", ""
+        )
+        if isinstance(
+            raw_state_normalizer_reference_semantics, (bytes, np.bytes_)
+        ):
+            raw_state_normalizer_reference_semantics = bytes(
+                raw_state_normalizer_reference_semantics
+            ).decode("utf-8")
+        state_normalizer_reference_semantics = str(
+            raw_state_normalizer_reference_semantics
+        ).strip()
+        raw_source_start = f.attrs.get("source_start")
+        raw_source_end = f.attrs.get("source_end")
+        raw_context_start = f.attrs.get("context_start")
+        raw_source_trajectory_id = f.attrs.get("source_trajectory_id", "")
+        if isinstance(raw_source_trajectory_id, (bytes, np.bytes_)):
+            raw_source_trajectory_id = bytes(raw_source_trajectory_id).decode("utf-8")
 
     if actions.ndim != 2:
         raise ValueError(f"{path}: action must have shape [T,D], got {actions.shape}")
@@ -262,6 +406,72 @@ def load_episode(
                 f"{path}: invalid center bounds "
                 f"[{valid_center_start},{valid_center_end}] for T={actions.shape[0]}"
             )
+    if (strict_valid_center_start is None) != (strict_valid_center_end is None):
+        raise ValueError(
+            f"{path}: strict valid center bounds must be both present or both absent"
+        )
+    if strict_valid_center_start is not None and strict_valid_center_end is not None:
+        if not 0 <= strict_valid_center_start <= strict_valid_center_end < int(actions.shape[0]):
+            raise ValueError(
+                f"{path}: invalid strict center bounds "
+                f"[{strict_valid_center_start},{strict_valid_center_end}] for T={actions.shape[0]}"
+            )
+    if (terminal_state_index is None) != (not terminal_padding_mode):
+        raise ValueError(
+            f"{path}: terminal_state_index and terminal_padding_mode must be declared together"
+        )
+    if terminal_state_index is not None:
+        if terminal_padding_mode not in SUPPORTED_TERMINAL_PADDING_MODES:
+            raise ValueError(
+                f"{path}: unsupported terminal padding mode {terminal_padding_mode!r}"
+            )
+        if not 1 <= terminal_state_index < int(actions.shape[0]) - 1:
+            raise ValueError(
+                f"{path}: terminal state index {terminal_state_index} leaves no absorbing suffix"
+            )
+        if valid_center_end is not None and valid_center_end >= terminal_state_index:
+            raise ValueError(
+                f"{path}: valid center end must precede terminal state index"
+            )
+    if source_action_count is not None:
+        if terminal_padding_mode != LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING:
+            raise ValueError(
+                f"{path}: source_action_count is reserved for LIBERO terminal replay"
+            )
+        if terminal_state_index != source_action_count:
+            raise ValueError(
+                f"{path}: LIBERO terminal_state_index must equal source_action_count"
+            )
+        if int(actions.shape[0]) != source_action_count + 48:
+            raise ValueError(f"{path}: LIBERO terminal replay must append exactly 48 rows")
+    if state_normalizer_reference_raw is not None:
+        reference_count = (
+            int(source_action_count)
+            if source_action_count is not None
+            else int(actions.shape[0])
+        )
+        if (
+            state_normalizer_reference_raw.ndim != 2
+            or state_normalizer_reference_raw.shape
+            != (reference_count, int(states.shape[1]))
+            or not np.isfinite(state_normalizer_reference_raw).all()
+        ):
+            raise ValueError(
+                f"{path}: state normalizer reference must be finite "
+                f"[{reference_count},{states.shape[1]}]"
+            )
+        if (
+            state_normalizer_reference_semantics
+            != LIBERO_E8_STATE_NORMALIZER_REFERENCE
+        ):
+            raise ValueError(
+                f"{path}: state normalizer reference has unsupported semantics "
+                f"{state_normalizer_reference_semantics!r}"
+            )
+    elif state_normalizer_reference_semantics:
+        raise ValueError(
+            f"{path}: state normalizer reference semantics exist without a dataset"
+        )
     misaligned_cameras = {
         camera: length
         for camera, length in camera_lengths.items()
@@ -289,6 +499,17 @@ def load_episode(
         language_key=language_key,
         valid_center_start=valid_center_start,
         valid_center_end=valid_center_end,
+        strict_valid_center_start=strict_valid_center_start,
+        strict_valid_center_end=strict_valid_center_end,
+        terminal_state_index=terminal_state_index,
+        terminal_padding_mode=terminal_padding_mode,
+        source_action_count=source_action_count,
+        state_normalizer_reference_raw=state_normalizer_reference_raw,
+        state_normalizer_reference_semantics=state_normalizer_reference_semantics,
+        source_start=None if raw_source_start is None else int(raw_source_start),
+        source_end=None if raw_source_end is None else int(raw_source_end),
+        context_start=None if raw_context_start is None else int(raw_context_start),
+        source_trajectory_id=str(raw_source_trajectory_id).strip(),
         source_action_dim=int(actions.shape[1]),
         source_state_dim=int(states.shape[1]),
     )
@@ -392,6 +613,10 @@ def resolve_too_short_episode_exclusions(
 
 
 __all__ = [
+    "LIBERO_E8_STATE_NORMALIZER_REFERENCE",
+    "LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING",
+    "RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING",
+    "SUPPORTED_TERMINAL_PADDING_MODES",
     "LoadedEpisode",
     "decode_hdf5_instruction",
     "episode_identity",
@@ -401,3 +626,5 @@ __all__ = [
     "load_episodes",
     "resolve_too_short_episode_exclusions",
 ]
+
+

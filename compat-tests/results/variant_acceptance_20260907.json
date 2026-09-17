@@ -1,0 +1,64 @@
+{
+  "schema": "clearvla-training-acceleration-variant-acceptance-v1",
+  "host": "local RTX 4060 Laptop",
+  "torch": "2.11.0+cu126",
+  "cuda_gate": {
+    "rtol": 2e-05,
+    "atol": 1e-06,
+    "identity_step": 0,
+    "active_step": 700,
+    "batch_size_short_gate": 2,
+    "pen": {
+      "revision": "a4a170e",
+      "layout": "modular",
+      "observed_run_count": 4,
+      "strict_pass_count": 4,
+      "strict_failure_count": 0,
+      "observed_runs": [
+        {"status": "pass", "marker": "cuda_graph_equivalence_ok"}
+      ],
+      "checkpoint_rng_exact": true,
+      "production_runner_capture_count": 1,
+      "topology_recapture_count": 2,
+      "checkpoint_bytes": 12213030
+    },
+    "rdt": {
+      "revision": "f8d0c2f",
+      "layout": "legacy",
+      "observed_run_count": 7,
+      "strict_pass_count": 3,
+      "strict_failure_count": 4,
+      "observed_runs": [
+        {"status": "diagnostic_tail_failure", "stage": "eager_diagnostic", "max_abs": 2.7865171432495117e-06},
+        {"status": "diagnostic_tail_failure", "stage": "copied_input", "max_abs": 1.3920071069151163e-06},
+        {"status": "pass", "marker": "cuda_graph_runner_equivalence_ok"},
+        {"status": "pass", "marker": "cuda_graph_equivalence_ok"},
+        {"status": "diagnostic_tail_failure", "stage": "copied_input", "max_abs": 1.3940734821558006e-06},
+        {"status": "raw_gradient_tail_failure", "stage": "identity_or_active_graph", "max_abs": 1.0069052228748798e-06},
+        {"status": "pass", "marker": "cuda_graph_equivalence_ok"}
+      ],
+      "checkpoint_rng_exact": true,
+      "production_runner_capture_count": 1,
+      "topology_recapture_count": 2,
+      "checkpoint_bytes": 12188710,
+      "note": "Three of seven strict invocations passed; failures were single-element CUDA backward tails with no RNG or ledger divergence."
+    }
+  },
+  "long_diagnostic": {
+    "cases": 256,
+    "batch_size": 4,
+    "sample_slots": 1024,
+    "identity_cases": 128,
+    "active_cases": 128,
+    "pen_graph_result_max_abs": 5.960464477539063e-08,
+    "pen_graph_clipped_gradient_max_abs": 1.3952376320958138e-07,
+    "pen_graph_parameter_sample_max_abs": 4.023313522338867e-06,
+    "pen_graph_parameter_sample_outside_cases": 2,
+    "pen_eager_parameter_sample_max_abs": 2.682209014892578e-06,
+    "rdt_graph_result_max_abs": 5.960464477539063e-08,
+    "rdt_graph_clipped_gradient_max_abs": 1.1746305972337723e-07,
+    "rdt_graph_parameter_sample_max_abs": 1.5348196029663086e-06,
+    "rdt_graph_parameter_sample_max_tolerance_ratio": 0.5930202007293701,
+    "rng_exact": true
+  }
+}

@@ -1,6 +1,12 @@
 # ClearVLA current mainline consolidation and refactor plan
 
-Updated: 2026-09-04
+Current remote integration inventory (2026-09-17): see
+[`../development/INTEGRATION_REVIEW.md`](../development/INTEGRATION_REVIEW.md).
+`codex/integrated-mainline-20260917` is the current review candidate. The older
+local-worktree/process observations below are historical snapshots, not a
+claim about currently running jobs or permission to merge incompatible donors.
+
+Updated: 2026-09-10
 
 Status: planning only.  This file orders future repository and source work; it
 does not authorize a merge, branch/worktree deletion, checkpoint migration,
@@ -21,7 +27,7 @@ here.
 
 | Surface | Current fact | Planning consequence |
 |---|---|---|
-| Git identity | At the 2026-09-04 repository audit, the active checkout and both verified remote refs were `b8163cb`; the working tree has unpublished changes on the historically named `codex/schema29-mainline`. | Treat that branch as the current WIP line until its changes are preserved. Make `master` the sole formal trunk afterward because it is already the remote default; re-fetch and compare immediately before any branch action. |
+| Git identity | The root worktree is at `e62b1b7` on the historically named `codex/schema29-mainline`; `origin/master` is its ancestor by four commits at the 2026-09-10 local snapshot.  The isolated `codex/mainline-integration-20260910` branch starts at the same commit and owns convergence work only. | Treat neither commit date nor an experiment branch name as release status. Preserve and review semantic units on the integration line, then make `master` the sole formal trunk; re-fetch immediately before any remote action. |
 | Active default | Manifest format 30, component layout 2 and the Schema28-core recovery behavior are the default.  The branch's `schema29` text is historical. | Do not infer behavior, checkpoint compatibility or release status from a branch/run name. |
 | Pen evidence | The recovery Pen E8 curve is complete and is the current comparable behavior baseline. | The old “wait for E8” phase is closed.  Remaining far-horizon/event weakness stays in the issue ledger and does not automatically select a mechanism. |
 | RDT evidence | The recovery artifact at `0973f192` declared a previous-command gripper boundary but used current qpos in loss/evaluation. | Its event/F1 surface cannot close the RDT contract.  Only a newly initialized run from the corrected boundary can replace it. |
@@ -30,10 +36,42 @@ here.
 | Working tree | The root contains several WIP lanes, including CALVIN outlet work, benchmark/simulation work, physical/B-spline assets, dependency/script changes and history cleanup. | Isolate distinct behavior changes, while allowing behavior-neutral cleanup to accompany the owner it clarifies.  Never promote an unclassified dirty tree as one commit. |
 | Protected provenance | The `pre-schema29-root-promotion-20260901` stash is based on `codex/v94-latent-ownership-execution`. | Keep the branch and stash untouched until the stash is explicitly inventoried and resolved. |
 
+## Documentation ownership
+
+Repository memory follows the same one-owner rule as source code:
+
+| Surface | Owns | Must not own |
+|---|---|---|
+| Architecture contract | Current graph, typed boundaries, accepted outlet semantics and invariants | Epoch narration, active PIDs, old-version deltas or feasibility reports |
+| Current issue ledger | Unresolved questions, latest comparable observations and source-entry conditions | Closed repair diary, full probe output or execution checklist |
+| Repair plan | Future repository/refactor order, safety gates and completion criteria | Current architecture truth or volatile run state |
+| Active handoff | Timestamped PIDs, paths, process health and immediate next actions | Architecture decisions or permanent experiment history |
+| Package README | Stable package purpose, public API, ownership boundary and entry points | Release claims, live run state or future design backlog |
+| Archive/index | Historical reasoning and retrieval pointers | Authority over current source |
+
+Prefer Git history over new versioned archive documents when removing obsolete
+narration.  Update a package README only for a stable interface or command;
+learned results belong in the issue ledger or raw run record.  Temporary
+B-spine audits and old conversation ledgers remain evidence, not competing
+architecture contracts.
+
 ## Repository convergence
 
 Repository convergence precedes further architectural refactoring.  It is a
 review sequence, not permission to execute destructive Git operations.
+
+Generate the current factual inventory from the integration checkout with:
+
+```text
+python scripts/audit_repository_convergence.py --base HEAD
+```
+
+The command is read-only and reports worktree dirtiness, exact tracked-path
+sets and cross-worktree overlaps, local and remote-tracking divergence, merge
+bases, patch-equivalent versus unique commits, and stashes.  Its output is a
+transient review input, not a committed status ledger or an automatic
+disposition.  A new inventory is required immediately before any merge,
+archive or removal.
 
 ### Preserve and classify the root WIP
 
@@ -66,6 +104,29 @@ behavior hypotheses must never be hidden inside one “cleanup” change.
 
 ### Promote one formal trunk
 
+The first candidate prefix is the four-commit operational sequence
+`origin/master..e62b1b7`: it changes only README/handoff text,
+the standard-library workspace tool and its tests.  Local compilation, Ruff
+and the Windows workspace tests pass.  The exact committed `e62b1b7` workspace
+tool and test were also exported from the Git object database into an isolated
+Linux temporary directory; all 17 workspace tests passed, including the
+POSIX-only open-file rename, process-identity and virtualenv-symlink cases,
+without modifying a tracked checkout.  This closes the platform lifecycle
+gate.  The prefix remains a candidate rather than a release claim until the
+shared WIP is protected/reviewed and the volatile handoff is refreshed.
+
+The initial Windows CPU baseline after removing one stale test/API mismatch is
+`792 passed, 10 skipped, 4 failed`.  The removed test imported
+`_dwell_value_targets`, which existed only at historical commit `82700f3` and
+was removed from the runtime at `b2c1fa8`; restoring unused runtime code would
+have hidden the test drift.  The four remaining failures are all in the
+historical hierarchical-controller experiment: family-attention diversity,
+scope validation, neutral update-logit initialization and exact legacy-forward
+identity.  They are an explicit baseline debt, not an allowed-failure list and
+not evidence against the current default mainline.  Resolve that experiment as
+a separate semantic unit before claiming a fully green repository baseline;
+do not import the active `v86-slot-controller` WIP wholesale.
+
 After the WIP units are preserved and reviewed:
 
 1. advance local `master` only to the accepted ordered commit sequence;
@@ -85,16 +146,66 @@ Revalidate every row immediately before acting.
 
 | Ref | Current disposition |
 |---|---|
-| `codex/schema29-mainline` | Current capability/WIP line.  Promote accepted commits to `master`, then delete only when redundant. |
+| `codex/mainline-integration-20260910` | Sole convergence staging line.  Admit reviewed semantic units only; do not run model experiments from it or call it the formal trunk. |
+| `codex/schema29-mainline` | Shared root capability/WIP line.  Preserve its unpublished units independently; do not write integration-only changes back into its dirty worktree. |
 | local `master` | Behind the local `origin/master` snapshot.  Fast-forward after WIP protection; do not merge the old local tip as a side line. |
-| `codex/rdt-multitask-prep` | Do not merge wholesale.  Preserve only explicitly selected documentation/provenance, then archive and remove the branch/worktree. |
-| `codex/schema28-core-recovery-pen-20260903` | Retain an immutable provenance tag for the formal recovery run, then remove the redundant branch/worktree. |
-| `codex/schema25-r1-replay` | Code is already patch-equivalent in mainline; first preserve or reject its dirty/staged documentation, then remove it. |
-| `codex/schema28-estimator-gate` | Estimator code/tests are already patch-equivalent in mainline; preserve decision-relevant documentation only, then archive/remove. |
+| `codex/training-acceleration` | Active, divergent acceleration line with local WIP.  Admit only completed equivalence-gated units after its owner closes the worktree; never merge the dirty branch wholesale. |
+| `codex/pen-rdt-shared-core-schema28-20260908` | Formal shared-core experiment provenance, not an early merge unit.  Its recovery parent is already classified as superseded and `cd43eee` jointly changes Pen/RDT gripper boundaries, objectives and presets.  The apparent local source WIP is two LF/CRLF-only paths; the only real dirty file is an older Pen-run handoff.  Preserve the run artifacts/ref, not that volatile snapshot, and extract a later accepted outlet/loss decision only as its own reviewed unit. |
+| `codex/pen-gripper-anchored-ablation-20260909` | Single-variable Pen persistence experiment layered on the shared-core candidate.  Retain its run provenance until disposed; its loss/config/test/launcher unit does not select the default persistence contract, and the remaining untracked `.audit/pytest-abi` files are generated test artifacts rather than another source unit. |
+| `codex/pen-rdt-shared-core-20260908` and `codex/remove-bspine-keep-solver-20260906` | Both point at `c7eccde`.  Their common standalone solver subtree is admitted separately; the remaining commits replace the current optional B-spine/default graph with a raw-only Q5 Pen experiment and then alter local P2 reads, so they are not early-convergence units.  The former worktree is clean.  The latter's apparent 12-file WIP is ten LF/CRLF-only paths plus two older Pen-run documents; preserve that run provenance outside the rolling handoff before removal, but admit no source WIP. |
+| `codex/pen-geometry-gripper-repair-20260907` | Retain experiment provenance; do not merge its coupled raw-only/Q5, geometry-ingress or six-channel gripper changes wholesale. Its independent FFN configuration gap was subsequently fixed on the active line by `ed90020`: `_build_decoder_config` now forwards `BottomConfig.ffn_expansion`. It is not an open repair on the 2026-09-17 integration candidate. |
+| `codex/pen-bspline-routing-20260906` | Mixed donor.  Admit only the source-independent `clearvla/action_solvers/flow_solver` package and its own tests from `fc633af`: all 16 missing blobs exactly match the root's untracked copies, the package has no mainline import, and its 31 tests, Ruff and Pyright pass on the integration line.  It remains disconnected from the default sampler.  Do not admit the bundled B-spine routing implementations, Q5 schedule, configs, launchers or mainline wiring until their matched behavior and interface gates close; the follow-up `a4a170e` only formats tests owned by those deferred candidates. |
+| `codex/rdt-multitask-prep` | Its four unique commits are reviewed and none is an admissible standalone early-convergence unit.  `f6d2a0d` couples accurate historical audit relabeling to an unapproved reversal of the current threshold/config/launcher policy; `2bebd43` is a one-time v1-to-v3 reconciliation producer; and `ffe5c64`/`f8d0c2f` form an untested task/machine-specific gate with `/data`, an eight-GPU inventory, an old workspace command and an old source-scope baseline embedded in its report.  Its own saved result is `BLOCKED`/`DO_NOT_START`.  Preserve the untracked audits, reconciliation, repeated acceptance reports, launch-gate report and `new_logs` evidence before archiving/removing the branch/worktree; do not promote these historical producers into the active tool surface.  Rebuild a future launch gate against the then-current outlet and identity contracts. |
+| `codex/schema28-core-recovery-pen-20260903` | No code admission remains.  Commit `0973f19` is not whole-commit patch-equivalent, but 13 of its 24 per-file patches—including `dynamics.py`, `intent.py` and `types.py`—are stable-patch identical in later mainline commit `cb7f0fd`; the remaining surfaces replay the recovery together with layout-2, optional B-spine and the stricter profile-owned gripper boundary.  Current manifest, single-forward training, profile-boundary, validation-boundary and resume-schema tests close that supersession.  Retain an immutable provenance tag for the formal recovery run before removing the redundant branch/worktree. |
+| `codex/schema25-r1-replay` | Its sole branch commit `90557b6` is confirmed patch-equivalent to the integration line, so no code admission remains.  Its remaining WIP is fully classified below: admit none of it to active source or documentation, and preserve only the named external run-provenance bundle before removing the worktree. |
+| `codex/schema28-estimator-gate` | No source or test admission remains.  Whole-commit patch identity differs because `6a43e8e` edited an intermediate repair-plan state, but its `logging.py`, `train.py`, architecture-contract and two test-file patches have the same stable patch IDs as mainline commit `ab80fe3`; the unmatched plan narration is superseded by this living plan.  Preserve the untracked `.audit/schema28_estimator_gate_6a43e8e_gate2` replay record as experiment provenance before archiving/removing the branch and worktree. |
 | `codex/v94-latent-ownership-execution` | Keep while the protected stash depends on it. |
-| `codex/v86-slot-controller` | Extract the small real source/test/launcher WIP from line-ending noise before removal. |
-| `codex/v76-recovered` | Historical ancestor.  Verify its retained tag/provenance, then remove the branch. |
-| `origin/codex/rdt-data-adaptation` | Remote ancestor and later deletion candidate; revalidate against the server before deletion. |
+| `codex/v86-slot-controller` | No admission remains.  The branch tip `82700f3` is a strict integration-line ancestor and its dirty worktree is classified below as line-ending noise plus a superseded, incomplete controller prototype. |
+| `codex/v76-recovered` | Historical ancestor whose exact tip `1e9363b` is already retained by `v76-owned-intent-mmdit-checkpoint`.  It has no worktree, upstream or stash dependency and is deletion-ready after the formal trunk is selected; revalidate those facts immediately before removing the local branch. |
+| `origin/codex/hybrid-v1` | Three unique commits form an optional hybrid Pen experiment and must not be merged wholesale.  The final `cd9489a` exposes a separable deployment-identity gap—the committed validator writes but does not validate `architecture_manifest`—but its patch is hybrid-schema-specific, has no focused negative test, and overlaps the root worktree's active `deployment.py`/`manifest.py` edits.  After that owner closes the WIP, either confirm the gap was superseded or extract a current-schema manifest-validation unit with explicit legacy compatibility tests.  Retain the remote ref until then. |
+| `origin/codex/rdt-data-adaptation` | The local remote-tracking tip `8672c5f` is a strict integration-line ancestor (`44` base-only / `0` ref-only commits), so no code or provenance admission remains.  It is remote-deletion-ready only after a fresh fetch confirms the server ref and a separate remote-write authorization is given. |
+
+The `schema25-r1-replay` dirty worktree is not an unpublished implementation
+lane.  Its exact WIP disposition is:
+
+- reject its `AGENTS.md` and auxiliary README edits because they make an
+  isolated replay workspace authoritative and incorrectly declare the current
+  optional B-spine retired;
+- reject the 354-line R2-plan append because it turns a compact historical
+  worksheet back into an active Schema26/27 queue.  Its accepted gripper and
+  FP32-capacity repairs are already implemented by `097330a` and its remaining
+  current questions are represented in the issue ledger;
+- do not import the two untracked B-spline/MIP candidate memos.  The former is
+  superseded by the committed standalone B-spline package, Schema31 candidate
+  and later arm-only implementation; the latter assumes the old single-pass
+  Schema27 graph, while the compact WAM research map already retains MIP as an
+  independent, conditional hypothesis;
+- do not promote the staged 523-line Schema27 checkpoint as current memory.
+  Its decision-bearing proof was the pre-event cumulative-delta responsibility
+  leak and the BF16 capacity dead zone (`838/1,126` positive-progress rows at
+  exact-one capacity with zero contraction-bank gradient); both selected the
+  `097330a` repairs.  Later recovery evidence supersedes its behavior tables;
+- before removal, preserve outside Git one provenance bundle containing the
+  checkpoint, its extraction script, and the exact Schema27 run artifacts:
+  `metrics.jsonl` (70,915,801 bytes, SHA-256
+  `D808820ADBE9A556E6418E8A948FFE2C31BE15D292907279BEF2B5C4858F263F`)
+  plus `run_context.json` (28,177 bytes, SHA-256
+  `8AAACC7F6BCA131A5D48A2EFF9866EC99145A8B87B971C47668AE21044E0CE8A`).
+  The raw JSONL and the one-off Schema28 CPU probe do not enter the repository.
+
+The `v86-slot-controller` worktree has 49 tracked paths reported modified, but
+46 are LF/CRLF-only.  Its real delta is one controller prototype, two attached
+logging/test edits and an untracked launcher.  Later commit `b2c1fa8` already
+integrates and extends the useful independent-slot GRU update, selector-only
+reader and output-diversity diagnostics.  It deliberately uses separate
+dispatch/ownership without an equal-load target, rejecting this prototype's
+three-step equal-marginal projection because that made every slot read the same
+mixture.  The launcher only wraps the historical V86 chart and has no separate
+run evidence.  The exact dirty test file produces `50 passed, 1 skipped, 2
+failed`: the hierarchical-MMDiT scope guard and legacy-forward boundary remain
+open.  Treat all four substantive dirty files as superseded/rejected, not as a
+patch donor; retain neither the line-ending churn nor the launcher when the
+worktree is eventually removed.
 
 Before removing any worktree or branch, require: clean/understood status,
 recoverable unique commits, preserved intentional untracked files, no dependent

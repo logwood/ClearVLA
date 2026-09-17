@@ -469,6 +469,29 @@ def load_episode_split_manifest(
         "split_counts": {name: len(resolved[name]) for name in ("train", "val", "test")},
         "task_filter": str(payload.get("task_filter", "")),
     }
+    # External benchmark manifests may carry a verified source-side task
+    # registry and overlay provenance.  Preserve these declarative fields so
+    # the loader can build task-balanced samplers and serialize the exact
+    # raw/cache lineage without making the generic split ABI benchmark-aware.
+    for name in (
+        "split_unit",
+        "split_seed",
+        "train_validation_fraction",
+        "task_order",
+        "task_counts",
+        "raw_source",
+        "cached_prefix_root",
+        "terminal_overlay",
+        "terminal_padding_frames",
+        "selected_episode_count",
+        "raw_eligible_episode_count",
+        "raw_eligible_without_cached_prefix_count",
+        "cached_prefix_without_raw_eligibility_count",
+        "raw_eligible_without_cached_prefix_examples",
+        "cached_prefix_without_raw_eligibility_examples",
+    ):
+        if name in payload:
+            metadata[name] = payload[name]
     return resolved["train"], resolved["val"], resolved["test"], metadata
 
 
@@ -514,3 +537,5 @@ __all__ = [
     "split_episode_ids_ordered",
     "split_partitioned_episodes_per_task",
 ]
+
+

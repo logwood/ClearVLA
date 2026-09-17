@@ -26,6 +26,7 @@ from .action_codec import (
     binary_gripper_command_from_logits,
 )
 from .action_contract import ActionQueryEncoder, BottomDecoderOutput, V120SeedContext
+from .calvin_object_binding import CalvinObjectBindingBridge
 from .compiler import (
     ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
@@ -354,13 +355,64 @@ class GroundingStage(nn.Module):
 class IntentStage(nn.Module):
     """S intent organization and the four-interval coarse action proposal."""
 
-    def __init__(nself, organizer: StatelessObjectIntentOrganizer, coarse_action: CoarseActionIntent) -> None:
+    def __init__(
+        nself,
+        organizer: StatelessObjectIntentOrganizer,
+        coarse_action: CoarseActionIntent,
+        object_binding: CalvinObjectBindingBridge | None = None,
+    ) -> None:
         super().__init__()
         nself.organizer = organizer
         nself.coarse_action = coarse_action
+        # This child exists only for the CALVIN component selection.  Keeping
+        # it at the intent/coarse seam prevents a dormant parameter set from
+        # changing Pen/RDT/LIBERO checkpoint ownership.
+        nself.calvin_object_binding = object_binding
 
     def organize(self, **kwargs: Any):
         return self.organizer(**kwargs)
+
+    def bind_object(
+        nself,
+        intent: ObjectIntentState,
+        facts: ObjectFactSet,
+        *,
+        collect_diagnostics: bool = False,
+    ) -> tuple[ObjectIntentState, dict[str, Tensor]]:
+        if nself.calvin_object_binding is None:
+            return intent, {}
+        result, metrics = nself.calvin_object_binding(
+            protected_goal=intent.protected_goal_set,
+            history_tokens=intent.history_tokens,
+            object_tokens=intent.object_tokens,
+            facts=facts,
+        )
+        bound = replace(
+            intent,
+            object_binding_pointer=result.pointer,
+            object_binding_selected_context=result.selected_context,
+            object_binding_selected_geometry=result.selected_geometry,
+            object_binding_context_scale=result.context_scale,
+        )
+        bound.validate(
+            horizon=int(intent.temporal_queries.shape[1]),
+            hidden=int(intent.public_interval_carrier.shape[-1]),
+        )
+        if not collect_diagnostics:
+            return bound, {}
+        return bound, metrics
+
+    def object_binding_loss(self, intent: ObjectIntentState, target: Any) -> Tensor:
+        if self.calvin_object_binding is None or target is None:
+            return intent.public_interval_carrier.new_zeros(())
+        if intent.object_binding_pointer is None:
+            raise RuntimeError("CALVIN binding target exists but pointer was not materialized")
+        coverage = getattr(target, "coverage", None)
+        return self.calvin_object_binding.supervised_loss(
+            intent.object_binding_pointer,
+            target.pointer,
+            coverage,
+        )
 
     def propose_action(self, intent: Any, **kwargs: Any):
         return self.coarse_action(intent, **kwargs)
@@ -1154,9 +1206,14 @@ class ExecutionBottomStage(nn.Module):
         event_evidence = layer_contracts[-1]["event_logits"]
         run_diagnostics = bool(
             collect_diagnostics
-            or self.training
-            or require_execution_supervision
             or execution_mode != "learned"
+            or (require_execution_supervision and not self.training)
+            or getattr(self, "_retain_training_decoder_diagnostics", False)
+        )
+        collect_execution_tensors = bool(
+            self.training
+            or require_execution_supervision
+            or run_diagnostics
         )
 
         self._set_eval_intervention(execution_mode)
@@ -1185,6 +1242,7 @@ class ExecutionBottomStage(nn.Module):
                 visual_value_tokens=None,
                 visual_key_bias=None,
                 collect_diagnostics=run_diagnostics,
+                collect_execution_tensors=collect_execution_tensors,
                 # Execution-value supervision needs the decoder's candidate
                 # tensors on every training batch, but the R2 gripper state/
                 # VJP observation is an outer logging concern.  Keep that
@@ -1286,7 +1344,7 @@ class ExecutionBottomStage(nn.Module):
 
 
 class OutletAdapter(nn.Module):
-    """Selected outlet's physical field codec (Pen/RDT/CALVIN ABI)."""
+    """Selected outlet's physical field codec (Pen/RDT/CALVIN/LIBERO ABI)."""
 
     def __init__(self, codec: PhysicalActionFieldCodec, *, selection: str) -> None:
         super().__init__()

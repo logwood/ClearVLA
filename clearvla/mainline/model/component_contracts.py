@@ -20,6 +20,7 @@ from ..v120_core.bspine import (
     BSPINE_DISABLED_IMPLEMENTATION,
 )
 from .action_contract import V120SeedContext
+from .calvin_object_binding import CALVIN_OBJECT_BINDING_INTENTS, binding_intent
 from .compiler import ObjectPolicyPlanDeltaBank
 from .observation_contract import ObservationEvidence
 from .types import (
@@ -78,6 +79,9 @@ class ComponentSelection:
         if profile == "calvin_relative_7d_v1":
             terminal = "calvin_binary_command_v1"
             outlet = "calvin_7d_binary_v1"
+        elif profile == "libero_relative_7d_v1":
+            terminal = "continuous_physical_v1"
+            outlet = "libero_7d_continuous_v1"
         elif profile == "rdt_right_arm_action_chart_v1":
             terminal = "continuous_physical_v1"
             outlet = "rdt_right_arm_7d_v1"
@@ -85,6 +89,7 @@ class ComponentSelection:
             terminal = "continuous_physical_v1"
             outlet = "pen_7d_continuous_v1"
         selection = cls(
+            intent=binding_intent(str(config.top.calvin_object_binding)),
             execution_bottom=_execution_bottom_selection(config),
             terminal_controller=terminal,
             outlet_adapter=outlet,
@@ -124,6 +129,13 @@ class ComponentSelection:
             raise ValueError("selected component ABI requires the complete Schema30 axes")
         if int(dims.action_basis_tokens) <= 0:
             raise ValueError("selected component ABI requires a positive basis count")
+        if self.intent in CALVIN_OBJECT_BINDING_INTENTS.values():
+            if config.data.data_profile != "calvin_relative_7d_v1":
+                raise ValueError("CALVIN object binding is valid only for the CALVIN outlet")
+            if self.intent != binding_intent(str(config.top.calvin_object_binding)):
+                raise ValueError("CALVIN binding component differs from its configured mode")
+        elif str(config.top.calvin_object_binding) != "disabled":
+            raise ValueError("an object-binding top selection requires the CALVIN intent component")
 
     @classmethod
     def from_config_without_validation(
@@ -132,9 +144,15 @@ class ComponentSelection:
         profile = str(config.data.data_profile)
         if profile == "calvin_relative_7d_v1":
             return cls(
+                intent=binding_intent(str(config.top.calvin_object_binding)),
                 execution_bottom=_execution_bottom_selection(config),
                 terminal_controller="calvin_binary_command_v1",
                 outlet_adapter="calvin_7d_binary_v1",
+            )
+        if profile == "libero_relative_7d_v1":
+            return cls(
+                execution_bottom=_execution_bottom_selection(config),
+                outlet_adapter="libero_7d_continuous_v1",
             )
         if profile == "rdt_right_arm_action_chart_v1":
             return cls(
@@ -292,6 +310,7 @@ MODULAR_TO_LEGACY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("grounding.grounder.", "top.grounder."),
     ("intent.organizer.", "top.intent."),
     ("intent.coarse_action.", "top.coarse_action."),
+    ("intent.calvin_object_binding.", "calvin_object_binding."),
     ("world.dynamics.", "top.dynamics."),
     ("training_targets.teacher.", "top.teacher."),
     ("training_targets.recognizer.", "top.recognizer."),

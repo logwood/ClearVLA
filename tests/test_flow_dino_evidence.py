@@ -8299,6 +8299,66 @@ def test_v114_tiled_microgrid_matches_ancestry_contraction_and_gradients() -> No
         torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
 
 
+def test_v114_normalized_rgb_detail_contraction_split_is_bit_exact() -> None:
+    torch.manual_seed(406)
+    shape = (1, 2, 2, 1, 2, 2, 1)
+    candidates = 4
+    micro = 9
+    route_logits = torch.randn(*shape, requires_grad=True)
+    fine_logits = torch.randn(*shape, candidates, requires_grad=True)
+    route = torch.softmax(route_logits.flatten(3), dim=-1).reshape(shape)
+    fine = torch.softmax(fine_logits, dim=-1)
+    basis = torch.rand(candidates, micro)
+    value_shape = (1, 1, 2, 2, 1, candidates)
+    rgb = torch.randn(*value_shape, 3, requires_grad=True)
+    detail = torch.randn(*value_shape, 7, requires_grad=True)
+    coordinates = torch.randn(*value_shape, 2, requires_grad=True)
+    common = (
+        route,
+        fine,
+        basis,
+        rgb,
+        detail,
+        coordinates,
+    )
+
+    inline = LateRawDetailPolicyReader._typed_microgrid_expectation(
+        *common,
+        micro_tile=3,
+        mixed_precision_values=True,
+    )
+    split = LateRawDetailPolicyReader._typed_microgrid_expectation(
+        *common,
+        micro_tile=3,
+        mixed_precision_values=True,
+        rgb_detail_contraction=(
+            LateRawDetailPolicyReader
+            ._configured_typed_microgrid_rgb_detail_contraction
+        ),
+    )
+    for expected, actual in zip(inline, split, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+    probes = tuple(torch.randn_like(value) for value in inline)
+    parameters = (route_logits, fine_logits, rgb, detail, coordinates)
+    inline_loss = sum(
+        (value * probe).sum()
+        for value, probe in zip(inline, probes, strict=True)
+    )
+    inline_gradients = torch.autograd.grad(
+        inline_loss,
+        parameters,
+        retain_graph=True,
+    )
+    split_loss = sum(
+        (value * probe).sum()
+        for value, probe in zip(split, probes, strict=True)
+    )
+    split_gradients = torch.autograd.grad(split_loss, parameters)
+    for expected, actual in zip(inline_gradients, split_gradients, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
 def test_v114_full_action_path_uses_24_factual_and_96_basis_queries() -> None:
     torch.manual_seed(403)
     config = _complete_v114_config(

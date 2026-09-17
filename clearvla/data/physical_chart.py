@@ -267,6 +267,60 @@ _CALVIN_STATE_CHANNELS = (
         source="CALVIN robot_obs[6] summed finger opening width",
     ),
 )
+_LIBERO_ACTION_CHANNELS = (
+    *tuple(
+        PhysicalChannelSpec(
+            name=name,
+            unit="normalized_relative_command",
+            nominal_lower=-1.0,
+            nominal_upper=1.0,
+            nominal_abs_limit=1.0,
+            source=(
+                "LIBERO official OSC_POSE controller: normalized xyz/axis-angle "
+                "relative action command"
+            ),
+        )
+        for name in (
+            "delta_x",
+            "delta_y",
+            "delta_z",
+            "delta_roll",
+            "delta_pitch",
+            "delta_yaw",
+        )
+    ),
+    PhysicalChannelSpec(
+        name="gripper_command",
+        unit="normalized_continuous_command",
+        nominal_lower=-1.0,
+        nominal_upper=1.0,
+        nominal_abs_limit=1.0,
+        source="LIBERO official continuous gripper command in the normalized action chart",
+    ),
+)
+_LIBERO_STATE_CHANNELS = (
+    *tuple(
+        PhysicalChannelSpec(
+            name=name,
+            unit="m",
+            source="LIBERO ee_states end-effector Cartesian position",
+        )
+        for name in ("eef_x", "eef_y", "eef_z")
+    ),
+    *tuple(
+        PhysicalChannelSpec(
+            name=name,
+            unit="rad",
+            source="LIBERO ee_states end-effector axis-angle orientation",
+        )
+        for name in ("eef_roll", "eef_pitch", "eef_yaw")
+    ),
+    PhysicalChannelSpec(
+        name="gripper_opening_width",
+        unit="m",
+        source="LIBERO sum(abs(robot0_gripper_qpos)) opening width",
+    ),
+)
 _RDT_LEFT_CHANNEL_NAMES = tuple(f"left_joint_{index + 1}" for index in range(6)) + (
     "left_gripper",
 )
@@ -296,6 +350,20 @@ def _chart(
 
 
 PHYSICAL_CHART_SPECS: dict[str, PhysicalChartSpec] = {
+    "maniskill_pd_ee_delta_pose_7d_v1": _chart(
+        "maniskill_pd_ee_delta_pose_7d_v1",
+        tuple(PhysicalChannelSpec(
+            name=name, unit="normalized_relative_command" if i < 6 else "normalized_continuous_command",
+            nominal_lower=-1.0, nominal_upper=1.0, nominal_abs_limit=1.0,
+            source="ManiSkill panda_wristcam pd_ee_delta_pose native controller",
+        ) for i, name in enumerate(("dx", "dy", "dz", "rx", "ry", "rz", "gripper"))),
+        chart_kind="maniskill_normalized_pd_ee_delta_pose_command",
+        source="ManiSkill StackCube-v1; not interchangeable with LIBERO OSC_POSE",
+        state_channels=tuple(PhysicalChannelSpec(
+            name=name, unit="rad" if 3 <= i < 6 else "m",
+            source="ManiSkill TCP xyz/wxyz-to-rotvec plus sum of finger qpos",
+        ) for i, name in enumerate(("tcp_x", "tcp_y", "tcp_z", "rotvec_x", "rotvec_y", "rotvec_z", "opening"))),
+    ),
     "identity_7d_pen": _chart(
         "identity_7d_pen",
         _PEN_CHANNELS,
@@ -311,6 +379,16 @@ PHYSICAL_CHART_SPECS: dict[str, PhysicalChartSpec] = {
             "max_rel_orn=0.05, binary gripper"
         ),
         state_channels=_CALVIN_STATE_CHANNELS,
+    ),
+    "libero_relative_7d_v1": _chart(
+        "libero_relative_7d_v1",
+        _LIBERO_ACTION_CHANNELS,
+        chart_kind="libero_normalized_relative_osc_pose_command",
+        source=(
+            "Official LIBERO normalized OSC_POSE xyz/axis-angle relative command "
+            "and continuous gripper chart"
+        ),
+        state_channels=_LIBERO_STATE_CHANNELS,
     ),
     "rdt_right_arm_action_chart_v1": _chart(
         "rdt_right_arm_action_chart_v1",
@@ -354,6 +432,18 @@ PHYSICAL_CHART_SPECS: dict[str, PhysicalChartSpec] = {
 }
 
 
+PHYSICAL_CHART_SPECS["maniskill_pd_ee_delta_pose_7d_v2"] = _chart(
+    "maniskill_pd_ee_delta_pose_7d_v2",
+    PHYSICAL_CHART_SPECS["maniskill_pd_ee_delta_pose_7d_v1"].action_channels,
+    chart_kind="maniskill_normalized_pd_ee_delta_pose_command",
+    source="ManiSkill commands unchanged; fixed-down-reference causal state chart v2",
+    state_channels=tuple(PhysicalChannelSpec(
+        name=name, unit="rad" if 3 <= i < 6 else "m",
+        source="TCP xyz; causal log of Rx(pi)^-1 R_tcp; summed finger opening",
+    ) for i, name in enumerate(("tcp_x", "tcp_y", "tcp_z", "local_rotvec_x", "local_rotvec_y", "local_rotvec_z", "opening"))),
+)
+
+
 def resolve_physical_chart_spec(name: str) -> PhysicalChartSpec:
     """Resolve metadata without changing the numeric action profile."""
 
@@ -380,3 +470,5 @@ __all__ = [
     "physical_chart_metadata",
     "resolve_physical_chart_spec",
 ]
+
+
