@@ -1,5 +1,17 @@
 # Current ClearVLA architecture contract
 
+## Local integration candidate (2026-09-17)
+
+The optional `calvin_primary_v2` selection preserves the public K coarse read
+and gates a selected-read residual after LayerNorm/attention/FFN by
+`tanh(context_gate) * real_object_mass`. It has the distinct intent component
+`stateless_object_intent_calvin_binding_v2`; it is not a default promotion or
+an exact-resume alias for V1. Shared G/W/P, outlet charts and the bounded two-pass
+deployment lifecycle remain unchanged. The auxiliary binding supervised-loss
+helper is not added to the formal loss ledger. Scope, selective-port provenance
+and unclosed release gates are in
+[`VERIFIED_INTEGRATION_REVIEW_20260917.md`](auxiliary/VERIFIED_INTEGRATION_REVIEW_20260917.md).
+
 Updated: 2026-09-10
 
 This is the compact source of truth for the active independent mainline. Read

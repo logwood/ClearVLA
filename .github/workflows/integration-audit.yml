@@ -2,9 +2,10 @@ name: Integration audit
 
 on:
   push:
-    branches: [codex/integrated-mainline-20260917]
+    branches: [codex/integrated-mainline-20260917, codex/verified-integration-20260917]
   pull_request:
-    branches: [master]
+    branches: [master, codex/integrated-mainline-20260917]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -101,7 +102,17 @@ jobs:
             tests/test_mainline_action_field.py \
             tests/test_calvin_object_binding.py \
             tests/test_window_boundaries.py \
-            tests/test_training_batch_prefetch.py
+            tests/test_training_batch_prefetch.py \
+            tests/test_simulation_history_bounded.py \
+            tests/test_deployment_integer_boundaries.py \
+            tests/test_root_launch_guard.py \
+            tests/test_optional_binding_ownership.py \
+            tests/test_calvin_object_binding_v2.py \
+            tests/test_mainline_policy.py \
+            tests/test_root_boundary_regressions.py \
+            tests/test_simulation_policy_runtime.py \
+            clearvla/action_solvers/flow_solver/tests \
+            clearvla/action_representations/composite/tests
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@v4
