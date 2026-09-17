@@ -392,6 +392,7 @@ class IntentStage(nn.Module):
             object_binding_pointer=result.pointer,
             object_binding_selected_context=result.selected_context,
             object_binding_selected_geometry=result.selected_geometry,
+            object_binding_readout_strength=result.readout_strength,
         )
         bound.validate(
             horizon=int(intent.temporal_queries.shape[1]),

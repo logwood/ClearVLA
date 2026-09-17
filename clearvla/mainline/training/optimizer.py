@@ -24,8 +24,6 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("grounder", ("top.grounder.",)),
     ("intent", ("top.intent.",)),
     ("coarse_action", ("top.coarse_action.",)),
-    # CALVIN-only language/object pointer; absent from Pen/RDT/LIBERO.
-    ("calvin_object_binding", ("calvin_object_binding.",)),
     ("plan_recognizer", ("top.recognizer.",)),
     ("history_proposal", ("history_proposal.",)),
     ("dynamics", ("top.dynamics.",)),
@@ -96,6 +94,8 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 OPTIONAL_ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Report this owner only when the selected outlet actually constructs it.
+    ("calvin_object_binding", ("calvin_object_binding.",)),
     ("bottom_spine", ("bottom.decoder.spine.",)),
 )
 ALL_ROLE_PREFIXES = (*OPTIONAL_ROLE_PREFIXES, *ROLE_PREFIXES)

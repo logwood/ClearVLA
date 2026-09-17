@@ -20,7 +20,10 @@ from ..v120_core.bspine import (
     BSPINE_DISABLED_IMPLEMENTATION,
 )
 from .action_contract import V120SeedContext
-from .calvin_object_binding import CALVIN_OBJECT_BINDING_INTENT
+from .calvin_object_binding import (
+    CALVIN_OBJECT_BINDING_INTENT,
+    CALVIN_OBJECT_BINDING_INTENT_V2,
+)
 from .compiler import ObjectPolicyPlanDeltaBank
 from .observation_contract import ObservationEvidence
 from .types import (
@@ -90,7 +93,9 @@ class ComponentSelection:
             outlet = "pen_7d_continuous_v1"
         selection = cls(
             intent=(
-                CALVIN_OBJECT_BINDING_INTENT
+                CALVIN_OBJECT_BINDING_INTENT_V2
+                if str(config.top.calvin_object_binding) == "calvin_primary_v2"
+                else CALVIN_OBJECT_BINDING_INTENT
                 if str(config.top.calvin_object_binding) == "calvin_primary_v1"
                 else "stateless_object_intent_v1"
             ),
@@ -133,11 +138,16 @@ class ComponentSelection:
             raise ValueError("selected component ABI requires the complete Schema30 axes")
         if int(dims.action_basis_tokens) <= 0:
             raise ValueError("selected component ABI requires a positive basis count")
-        if self.intent == CALVIN_OBJECT_BINDING_INTENT:
+        if self.intent in {CALVIN_OBJECT_BINDING_INTENT, CALVIN_OBJECT_BINDING_INTENT_V2}:
             if config.data.data_profile != "calvin_relative_7d_v1":
                 raise ValueError("CALVIN object binding is valid only for the CALVIN outlet")
-            if str(config.top.calvin_object_binding) != "calvin_primary_v1":
-                raise ValueError("CALVIN binding component requires top.calvin_object_binding=calvin_primary_v1")
+            expected_binding = (
+                "calvin_primary_v2"
+                if self.intent == CALVIN_OBJECT_BINDING_INTENT_V2
+                else "calvin_primary_v1"
+            )
+            if str(config.top.calvin_object_binding) != expected_binding:
+                raise ValueError("CALVIN binding selection differs from the top config")
         elif str(config.top.calvin_object_binding) != "disabled":
             raise ValueError("an object-binding top selection requires the CALVIN intent component")
 
@@ -149,7 +159,9 @@ class ComponentSelection:
         if profile == "calvin_relative_7d_v1":
             return cls(
                 intent=(
-                    CALVIN_OBJECT_BINDING_INTENT
+                    CALVIN_OBJECT_BINDING_INTENT_V2
+                    if str(config.top.calvin_object_binding) == "calvin_primary_v2"
+                    else CALVIN_OBJECT_BINDING_INTENT
                     if str(config.top.calvin_object_binding) == "calvin_primary_v1"
                     else "stateless_object_intent_v1"
                 ),

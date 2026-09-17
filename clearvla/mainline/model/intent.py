@@ -609,12 +609,24 @@ class CoarseActionIntent(nn.Module):
         # CALVIN may provide a language-selected, validity-aware K memory at
         # the outlet seam.  All other outlets leave this optional field empty
         # and retain the exact historical public object memory.
-        object_memory = (
-            intent.public_object_memory
-            if intent.selected_object_context is None
-            else intent.selected_object_context
-        )
-        _, object_delta, _ = self.object_read(query, object_memory)
+        if intent.object_binding_readout_strength is None:
+            # Preserve V1 and every non-binding outlet byte-for-byte.
+            object_memory = (
+                intent.public_object_memory
+                if intent.selected_object_context is None
+                else intent.selected_object_context
+            )
+            _, object_delta, _ = self.object_read(query, object_memory)
+        else:
+            # V2 gates the innovation after LayerNorm/attention/FFN. Retain
+            # the protected public K read, including exact zero-gate/null
+            # fallback. Scaling the selected memory before its LayerNorm
+            # would erase the real-mass and gate magnitude again.
+            assert intent.selected_object_context is not None
+            _, base_delta, _ = self.object_read(query, intent.public_object_memory)
+            _, selected_delta, _ = self.object_read(query, intent.selected_object_context)
+            strength = intent.object_binding_readout_strength.to(dtype=base_delta.dtype)
+            object_delta = base_delta + strength[..., None] * (selected_delta - base_delta)
         _, history_delta, _ = self.history_read(query, intent.history_memory)
         token = self.block(
             query

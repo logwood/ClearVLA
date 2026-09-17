@@ -586,13 +586,14 @@ class ActionIntentDock:
     public_interval_carrier: Tensor  # [B,I,H]
     history_memory: Tensor  # [B,L,H]
     public_object_memory: Tensor  # [B,K,H]
-    # Optional outlet-scoped replacement for the K object memory.  The shared
-    # Pen/RDT/LIBERO paths leave this ``None`` and therefore retain the exact
-    # historical coarse read.  CALVIN's object-binding bridge fills it with a
-    # validity-aware, language-selected K memory without entering W directly.
+    # Optional outlet-scoped selected context. V1 replaces the K read; V2
+    # combines its completed read with the original K read using the separate
+    # post-read strength below. Pen/RDT/LIBERO leave both fields None. Neither
+    # variant introduces a direct language/context ingress into W.
     selected_object_context: Tensor | None = None  # [B,1,H]
     object_binding_pointer: Tensor | None = None  # [B,K+1], final column null
     object_binding_selected_geometry: Tensor | None = None  # [B,2]
+    object_binding_readout_strength: Tensor | None = None  # V2 only: [B,1]
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -615,6 +616,14 @@ class ActionIntentDock:
                 self.selected_object_context,
                 (batch, 1, hidden),
                 "action-intent selected object context",
+            )
+        if self.object_binding_readout_strength is not None:
+            if self.selected_object_context is None:
+                raise ValueError("binding readout strength requires selected context")
+            _shape(
+                self.object_binding_readout_strength,
+                (batch, 1),
+                "action-intent binding readout strength",
             )
         if self.object_binding_pointer is not None:
             _shape(
@@ -726,6 +735,7 @@ class ObjectIntentState:
     object_binding_pointer: Tensor | None = None  # [B,K+1], final column null
     object_binding_selected_context: Tensor | None = None  # [B,1,H]
     object_binding_selected_geometry: Tensor | None = None  # [B,2]
+    object_binding_readout_strength: Tensor | None = None  # V2 only: [B,1]
 
     @property
     def interval_queries(self) -> Tensor:
@@ -765,6 +775,7 @@ class ObjectIntentState:
             selected_object_context=self.object_binding_selected_context,
             object_binding_pointer=self.object_binding_pointer,
             object_binding_selected_geometry=self.object_binding_selected_geometry,
+            object_binding_readout_strength=self.object_binding_readout_strength,
         )
 
     def factual_dock(self) -> FactualIntentDock:
@@ -901,6 +912,7 @@ class ObjectIntentState:
             ),
             object_binding_selected_context=self.object_binding_selected_context,
             object_binding_selected_geometry=self.object_binding_selected_geometry,
+            object_binding_readout_strength=self.object_binding_readout_strength,
         )
 
 

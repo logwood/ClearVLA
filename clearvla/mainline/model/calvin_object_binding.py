@@ -6,11 +6,11 @@ blue block rather than the red block).  This module provides that pointer as
 an outlet-scoped adapter.  It never reads privileged ``scene_obs`` and it is
 not constructed for Pen/RDT/LIBERO.
 
-The adapter is intentionally conservative at initialization: its context
-blend is zero, so a component-initialized checkpoint starts with the old
-coarse proposal.  The pointer is still available for its own supervision and
-diagnostics; training can open the bounded blend after the pointer becomes
-useful.
+The adapter exposes a selected object at the online coarse-action seam. V1 retains its historical
+pre-normalization replacement read. Opt-in V2 preserves the public K read and
+gates a selected-read residual after normalization, including real-object mass.
+The auxiliary supervised-loss helper is not wired into the formal loss ledger;
+task/action gradients remain the training signal for this bridge.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from .types import ObjectFactSet
 
 CALVIN_OBJECT_BINDING_COMPONENT = "calvin_primary_object_binding_v1"
 CALVIN_OBJECT_BINDING_INTENT = "stateless_object_intent_calvin_binding_v1"
+CALVIN_OBJECT_BINDING_INTENT_V2 = "stateless_object_intent_calvin_binding_v2"
 
 
 def _normalized_entropy(probability: Tensor) -> Tensor:
@@ -50,6 +51,7 @@ class CalvinObjectBindingResult:
     confidence: Tensor  # [B,1]
     entropy: Tensor  # [B,1]
     valid_mass: Tensor  # [B,1]
+    readout_strength: Tensor | None = None  # V2 only: [B,1], applied after the read
 
     def validate(self, *, batch: int, objects: int, hidden: int) -> None:
         if tuple(self.pointer.shape) != (batch, objects + 1):
@@ -65,6 +67,13 @@ class CalvinObjectBindingResult:
             raise ValueError("CALVIN binding pointer is non-finite")
         if not bool(torch.isfinite(self.selected_context).all()):
             raise ValueError("CALVIN selected object context is non-finite")
+        if self.readout_strength is not None:
+            if tuple(self.readout_strength.shape) != (batch, 1):
+                raise ValueError("CALVIN binding readout strength must be [B,1]")
+            if not bool(torch.isfinite(self.readout_strength).all()):
+                raise ValueError("CALVIN binding readout strength is non-finite")
+            if bool((self.readout_strength.abs() > 1.02).any()):
+                raise ValueError("CALVIN binding readout strength exceeds its bounded gate")
         sums = self.pointer.float().sum(dim=-1)
         # The pointer is consumed in BF16 on the active path; softmax roundoff
         # can exceed the FP32 contract tolerance while remaining numerically
@@ -84,8 +93,13 @@ class CalvinObjectBindingBridge(nn.Module):
     is present, so permuting K rows permutes the pointer and nothing else.
     """
 
-    def __init__(self, *, hidden: int, route_dim: int, objects: int = 4) -> None:
+    def __init__(
+        self, *, hidden: int, route_dim: int, objects: int = 4, readout_mode: str = "legacy_v1"
+    ) -> None:
         super().__init__()
+        if readout_mode not in {"legacy_v1", "mass_gated_residual_v2"}:
+            raise ValueError("unknown CALVIN binding readout mode")
+        self.readout_mode = readout_mode
         if int(objects) != 4:
             raise ValueError("CALVIN object binding currently requires K=4")
         if int(hidden) <= 0 or int(route_dim) <= 0:
@@ -177,7 +191,11 @@ class CalvinObjectBindingBridge(nn.Module):
             torch.zeros_like(selected),
         )
         gate = torch.tanh(self.context_gate).to(device=object_tokens.device, dtype=object_tokens.dtype)
-        selected_context = gate * selected
+        # V2 carries confidence separately. A pre-LayerNorm scale would be
+        # cancelled by the downstream reader and is not an effective gate.
+        residual_readout = self.readout_mode == "mass_gated_residual_v2"
+        selected_context = selected if residual_readout else gate * selected
+        readout_strength = gate * valid_mass if residual_readout else None
 
         geometry = facts.coordinates.float()
         selected_geometry = (
@@ -195,6 +213,7 @@ class CalvinObjectBindingBridge(nn.Module):
             confidence=pointer.max(dim=-1, keepdim=True).values,
             entropy=_normalized_entropy(pointer).unsqueeze(-1),
             valid_mass=valid_mass,
+            readout_strength=readout_strength,
         )
         result.validate(batch=batch, objects=objects, hidden=hidden)
         metrics = {
@@ -209,6 +228,10 @@ class CalvinObjectBindingBridge(nn.Module):
             .mean()
             .sqrt(),
         }
+        if readout_strength is not None:
+            metrics["calvin_binding_postread_strength_abs_mean"] = (
+                readout_strength.detach().float().abs().mean()
+            )
         return result, metrics
 
     @staticmethod
@@ -241,6 +264,7 @@ class CalvinObjectBindingBridge(nn.Module):
 __all__ = [
     "CALVIN_OBJECT_BINDING_COMPONENT",
     "CALVIN_OBJECT_BINDING_INTENT",
+    "CALVIN_OBJECT_BINDING_INTENT_V2",
     "CalvinObjectBindingBridge",
     "CalvinObjectBindingResult",
 ]
