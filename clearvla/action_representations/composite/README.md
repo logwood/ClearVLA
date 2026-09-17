@@ -38,6 +38,37 @@ They are never concatenated into the continuous state. Decode groups name
 exactly one final owner for every `D_action` slice; the package itself
 does not own codec math, normalizers, robot limits or safety control.
 
+## `hybrid-v1` registration boundary
+
+`hybrid_v1.build_hybrid_v1_contract` provides the smallest fixed contract for
+an opt-in integration owner. It materializes the current `T=24`,
+`D_state=18`, `D_action=7` shape, an arm role with hierarchical-exact cubic
+`K=12` B-spline coordinates plus retained raw rows, and a six-channel
+identity/raw gripper role. Endpoint specs and the gripper's final owner are
+explicit arguments, so the same boundary can describe a codec-owned
+continuous gripper or an endpoint-owned binary command without changing the
+continuous state.
+
+```python
+from clearvla.action_representations.composite import build_hybrid_v1_contract
+
+contract = build_hybrid_v1_contract(
+    codec_id="caller_physical_codec",
+    normalizer_id="caller_normalizer",
+    causal_boundary_id="caller_gripper_boundary",
+    endpoint_specs=(),  # typed sidecars, when present, stay outside the ODE
+)
+representation = contract.representation
+identity = contract.identity  # serialize with the caller's run context
+```
+
+The factory is an identity/assembly helper, not a mainline selection. It does
+not alter Schema30 defaults, choose loss weights or a solver, and its payload
+validation/encoding remains an outer-boundary operation. `identity` records
+`solver_role_awareness="none"`, `ode_loop_safe=False`, endpoint refresh
+fail-closed semantics and `default_mainline_enabled=False` for downstream
+registration checks.
+
 ## Mainline relationship
 
 The opt-in B-spine component uses this package only as an outer representation

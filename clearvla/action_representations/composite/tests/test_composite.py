@@ -19,6 +19,17 @@ from clearvla.action_representations.composite import (
     EndpointSpec,
     IdentityRoleChart,
     OwnerRef,
+    build_hybrid_v1_contract,
+)
+from clearvla.action_representations.composite.hybrid_v1 import (
+    HYBRID_V1_ACTION_DIM,
+    HYBRID_V1_ARM_FIELD_DIM,
+    HYBRID_V1_BSPLINE_CONTROL_POINTS,
+    HYBRID_V1_BSPLINE_DEGREE,
+    HYBRID_V1_GRIPPER_FIELD_DIM,
+    HYBRID_V1_HORIZON,
+    HYBRID_V1_IDENTITY,
+    HYBRID_V1_STATE_DIM,
 )
 
 
@@ -770,3 +781,89 @@ def test_integration_metadata_keeps_solver_role_agnostic() -> None:
     assert metadata["ode_loop_safe"] is False
 
 
+def test_hybrid_v1_factory_freezes_complete_state_and_role_identity() -> None:
+    contract = build_hybrid_v1_contract(
+        codec_id="hybrid_v1_codec",
+        normalizer_id="hybrid_v1_normalizer",
+        causal_boundary_id="hybrid_v1_boundary",
+    )
+    spec = contract.spec
+    assert spec.horizon == HYBRID_V1_HORIZON
+    assert spec.state_dim == HYBRID_V1_STATE_DIM
+    assert spec.action_dim == HYBRID_V1_ACTION_DIM
+    assert spec.continuous_roles[0].state_indices == tuple(range(12))
+    assert spec.continuous_roles[0].temporal_view_kind == "bspline"
+    assert spec.continuous_roles[0].retain_raw is True
+    assert spec.continuous_roles[1].state_indices == tuple(range(12, 18))
+    assert spec.continuous_roles[1].width == HYBRID_V1_GRIPPER_FIELD_DIM
+    assert spec.continuous_roles[1].temporal_view_kind == "identity"
+    assert spec.continuous_roles[1].retain_raw is True
+    assert spec.decode_groups[0].final_owner == OwnerRef(
+        "codec", "hybrid_v1_codec"
+    )
+    assert spec.decode_groups[1].final_owner == OwnerRef(
+        "codec", "hybrid_v1_codec"
+    )
+
+    identity = contract.identity
+    assert identity["identity"] == HYBRID_V1_IDENTITY
+    assert identity["state_shape"] == [HYBRID_V1_HORIZON, HYBRID_V1_STATE_DIM]
+    assert identity["action_shape"] == [HYBRID_V1_HORIZON, HYBRID_V1_ACTION_DIM]
+    assert identity["typed_endpoint_sidecars_outside_ode"] is True
+    assert identity["single_final_owner_per_decode_group"] is True
+    assert identity["solver_role_awareness"] == "none"
+    assert identity["ode_loop_safe"] is False
+    assert identity["default_mainline_enabled"] is False
+    arm_chart = identity["charts"]["arm_field"]
+    assert arm_chart["spec"]["degree"] == HYBRID_V1_BSPLINE_DEGREE
+    assert arm_chart["spec"]["num_control_points"] == (
+        HYBRID_V1_BSPLINE_CONTROL_POINTS
+    )
+    assert arm_chart["is_lossless"] is True
+    assert identity["roles"]["continuous_gripper_field"]["state_indices"] == list(
+        range(HYBRID_V1_ARM_FIELD_DIM, HYBRID_V1_STATE_DIM)
+    )
+
+    state = torch.randn(2, HYBRID_V1_HORIZON, HYBRID_V1_STATE_DIM)
+    decoded = contract.representation.decode(contract.representation.encode(state))
+    torch.testing.assert_close(decoded.continuous_state, state, atol=0.0, rtol=0.0)
+
+
+def test_hybrid_v1_factory_keeps_typed_endpoint_outside_state() -> None:
+    endpoint = EndpointSpec(
+        role_id="binary_gripper_command",
+        decode_group_id="gripper",
+        semantic_kind="binary_gripper_command",
+        payload_kind="logits",
+        payload_shape=(HYBRID_V1_HORIZON, 2),
+        axis_names=("action_time", "class"),
+        temporal_alignment="action_horizon",
+        distribution_kind="categorical",
+        vocabulary_id="hybrid_v1_binary_gripper_v1",
+        usage="action_owner",
+        producer_id="hybrid_v1_endpoint_head",
+        action_mapping="argmax_to_minus_plus_one",
+        boundary_policy="caller_outlet_owned",
+    )
+    contract = build_hybrid_v1_contract(
+        codec_id="hybrid_v1_codec",
+        normalizer_id="hybrid_v1_normalizer",
+        causal_boundary_id="hybrid_v1_boundary",
+        endpoint_specs=(endpoint,),
+        gripper_final_owner=OwnerRef("role", "binary_gripper_command"),
+    )
+    state = torch.randn(1, HYBRID_V1_HORIZON, HYBRID_V1_STATE_DIM)
+    logits = torch.randn(1, HYBRID_V1_HORIZON, 2)
+    payload = contract.representation.encode(
+        state,
+        endpoints={"binary_gripper_command": logits},
+    )
+    decoded = contract.representation.decode(payload)
+    torch.testing.assert_close(decoded.continuous_state, state, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        decoded.endpoints["binary_gripper_command"], logits, atol=0.0, rtol=0.0
+    )
+    assert decoded.requires_endpoint_refresh is False
+    assert contract.spec.decode_groups[1].final_owner == OwnerRef(
+        "role", "binary_gripper_command"
+    )
