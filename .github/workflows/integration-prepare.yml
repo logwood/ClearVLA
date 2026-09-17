@@ -1,0 +1,154 @@
+name: Prepare reviewed integration
+
+on:
+  push:
+    branches: [codex/integrated-mainline-20260917]
+    paths: [integration-review.patch.json]
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.repository == 'logwood/ClearVLA' && github.ref == 'refs/heads/codex/integrated-mainline-20260917'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    env:
+      OMP_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply only the SHA-verified reviewed patch
+        env:
+          GH_OBJECT_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, re, subprocess, urllib.request
+          root = pathlib.Path.cwd()
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'integration-reviewed-tree'
+          evidence.mkdir()
+          manifest = json.loads((root / 'integration-review.patch.json').read_text())
+          for field, size in [('base_commit', 40), ('expected_tree_sha', 40), ('patch_sha256', 64)]:
+              if not re.fullmatch('[0-9a-f]{' + str(size) + '}', manifest[field]):
+                  raise ValueError('invalid review identity: ' + field)
+          subprocess.run(['git', 'merge-base', '--is-ancestor', manifest['base_commit'], 'HEAD'], check=True)
+          compressed = bytearray()
+          shas = manifest['patch_blob_shas']
+          if not 1 <= len(shas) <= 8:
+              raise ValueError('invalid patch blob count')
+          for sha in shas:
+              if not re.fullmatch('[0-9a-f]{40}', sha):
+                  raise ValueError('invalid blob identity')
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/logwood/ClearVLA/git/blobs/' + sha,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_OBJECT_TOKEN'], 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  value = json.load(response)
+              data = base64.b64decode(value['content'])
+              digest = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              if digest != sha or len(data) > 1000000:
+                  raise ValueError('patch blob content differs')
+              compressed.extend(data)
+          decoder = lzma.LZMADecompressor()
+          patch = decoder.decompress(bytes(compressed), max_length=1000000)
+          if not decoder.eof or hashlib.sha256(patch).hexdigest() != manifest['patch_sha256']:
+              raise ValueError('reviewed patch digest differs')
+          patch_path = evidence / 'requested.patch'
+          patch_path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', '--unidiff-zero', str(patch_path)], check=True)
+          subprocess.run(['git', 'apply', '--unidiff-zero', str(patch_path)], check=True)
+          # Neither bootstrap file is part of the candidate source tree.
+          (root / 'integration-review.patch.json').unlink()
+          (root / '.github/workflows/integration-prepare.yml').unlink()
+          subprocess.run(['git', 'add', '--all'], check=True)
+          actual = subprocess.check_output(['git', 'write-tree'], text=True).strip()
+          if actual != manifest['expected_tree_sha']:
+              raise ValueError('candidate tree differs from the reviewed local tree')
+          (evidence / 'request.json').write_text(json.dumps(manifest, indent=2))
+          print('Verified requested tree:', actual)
+          PY
+      - name: Install CPU-only review environment
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu 'torch>=2.11,<2.12'
+          python -m pip install 'numpy>=1.26,<3' 'h5py>=3.10,<4' 'pillow>=10,<13' 'pytest>=8,<10' 'rich>=13,<15' 'ruff>=0.8,<1'
+          python -m pip freeze > "$RUNNER_TEMP/integration-reviewed-tree/test-environment.txt"
+      - name: Check changed Python source and retain any safe lint edits for review
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess
+          names = subprocess.check_output(['git', 'diff', '--cached', '--name-only', '--diff-filter=AM', '-z']).decode().split('\0')
+          names = [name for name in names if name.endswith('.py')]
+          subprocess.run(['ruff', 'check', '--fix', *names], check=True)
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'integration-reviewed-tree'
+          (evidence / 'format.patch').write_bytes(subprocess.check_output(['git', 'diff', '--binary']))
+          subprocess.run(['git', 'add', '--', *names], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          PY
+      - name: Compile and run current mainline contracts
+        run: |
+          python -m compileall -q clearvla scripts tests
+          python scripts/check_integration.py --suite mainline --junitxml "$RUNNER_TEMP/integration-reviewed-tree/mainline.xml"
+      - name: Run independent numerical contracts
+        run: |
+          python scripts/check_integration.py --suite numerics --junitxml "$RUNNER_TEMP/integration-reviewed-tree/numerics.xml"
+      - name: Create reviewed Git objects only; do not update any ref
+        env:
+          GH_OBJECT_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, json, os, pathlib, subprocess, urllib.request
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          def post(path, body):
+              request = urllib.request.Request('https://api.github.com/repos/logwood/ClearVLA/' + path,
+                  data=json.dumps(body).encode(), method='POST',
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_OBJECT_TOKEN'],
+                           'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'integration-reviewed-tree'
+          request = json.loads((evidence / 'request.json').read_text())
+          records = subprocess.check_output(['git', 'diff', '--cached', '--name-status', '--no-renames', '-z']).decode().split('\0')
+          entries = []
+          for index in range(0, len(records)-1, 2):
+              status, path = records[index:index+2]
+              if status == 'D':
+                  entries.append({'path':path, 'mode':'100644', 'type':'blob', 'sha':None})
+                  continue
+              if status not in {'A', 'M'}:
+                  raise ValueError('unexpected tree operation: ' + status)
+              metadata = git('ls-files', '--stage', '--', path).split()
+              mode, expected_sha = metadata[:2]
+              data = subprocess.check_output(['git', 'cat-file', 'blob', expected_sha])
+              result = post('git/blobs', {'content':base64.b64encode(data).decode(), 'encoding':'base64'})
+              if result['sha'] != expected_sha:
+                  raise ValueError('uploaded source differs: ' + path)
+              entries.append({'path':path, 'mode':mode, 'type':'blob', 'sha':expected_sha})
+          local_tree = git('write-tree')
+          result = post('git/trees', {'base_tree':git('rev-parse', 'HEAD^{tree}'), 'tree':entries})
+          if result['sha'] != local_tree:
+              raise ValueError('uploaded tree differs from tested source')
+          report = {'tree_sha':local_tree, 'requested_tree_sha':request['expected_tree_sha'],
+                    'prepared_from_commit':git('rev-parse', 'HEAD'), 'base_commit':request['base_commit'],
+                    'patch_sha256':request['patch_sha256'], 'suites':['mainline','numerics'],
+                    'branch_refs_updated':False, 'paths':[item['path'] for item in entries]}
+          (evidence / 'ready.json').write_text(json.dumps(report, indent=2) + '\n')
+          (evidence / 'ready.patch').write_bytes(subprocess.check_output(['git', 'diff', '--cached', '--binary', '--full-index', request['base_commit']]))
+          print(json.dumps(report, indent=2))
+          PY
+      - name: Upload review evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-integration-${{ github.sha }}
+          path: ${{ runner.temp }}/integration-reviewed-tree/
+          retention-days: 7
+          if-no-files-found: warn
