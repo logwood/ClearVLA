@@ -1,11 +1,13 @@
 {
   "base_commit": "95851520cc49817c4dc401d48386303eefdec5c6",
-  "expected_tree_sha": "311d70d11d6e5344a074d705a792b0069a4dbdf0",
+  "initial_tree_sha": "311d70d11d6e5344a074d705a792b0069a4dbdf0",
+  "expected_tree_sha": "9f793f638de6e64442d924df400a5e61c465a11e",
   "patch_sha256": "1a0289ec3303cc9343514d4ae1860c18287a1184d0e1da47e851216b6539e09b",
   "patch_blob_shas": [
     "ac134986d75b22de2dd17f5862405c7211a96bed",
     "89c9946bbbeb2f2ef31fdd29c20f6045168489b9",
     "653a65d98c1a9c3497d9cb6ba5c117ef1f3040ad",
     "98e0bfe38f56c18798631f42ef608a1f936ade20"
-  ]
+  ],
+  "supplemental_blob_sha": "641b4fde58b60d2bda4ec61ab07901e46565afff"
 }
