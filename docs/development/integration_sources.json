@@ -1,0 +1,137 @@
+{
+  "schema": 1,
+  "inventory_date": "2026-09-17",
+  "comparison_head": "95851520cc49817c4dc401d48386303eefdec5c6",
+  "base_source": "d7ebf00ed4b0041294c5ca44350c6ce79f8e782b",
+  "note": "Immutable review inventory, not a declaration that deferred source is merged or behavior-validated.",
+  "branches": [
+    {
+      "branch": "codex/calvin-object-binding-20260911",
+      "sha": "d7ebf00ed4b0041294c5ca44350c6ce79f8e782b",
+      "tip": "2026-09-12T18:07:38+08:00 fix: tolerate bf16 binding pointer normalization",
+      "unique_to_head_commits": 0,
+      "merge_base": "d7ebf00ed4b0041294c5ca44350c6ce79f8e782b",
+      "disposition": "integration_base"
+    },
+    {
+      "branch": "codex/hybrid-v1",
+      "sha": "cd9489afbf080f592c6badfc23a06d9b8b8d64d8",
+      "tip": "2026-09-05T17:11:59+08:00 Fail closed on hybrid deployment manifest identity",
+      "unique_to_head_commits": 3,
+      "merge_base": "cf98238ba774880f6cd15a7a21cd3464a9ab9cfc",
+      "disposition": "deferred_experimental_graph; shared deployment gate already repaired"
+    },
+    {
+      "branch": "codex/pen-bspline-routing-20260906",
+      "sha": "a4a170e6c81eed05705e1dc30279c8f5a3e17ab7",
+      "tip": "2026-09-06T01:39:57+08:00 Normalize routing regression test formatting",
+      "unique_to_head_commits": 2,
+      "merge_base": "d585417a7ad8d120e2c040af71ce62da3582f8fd",
+      "disposition": "solver already extracted; routing/Q5 candidates deferred"
+    },
+    {
+      "branch": "codex/pen-geometry-gripper-repair-20260907",
+      "sha": "7a5c20d60b18093096f42cbe6376bd3c218c4643",
+      "tip": "2026-09-07T22:38:04+08:00 Wire mainline bottom FFN expansion into active decoder",
+      "unique_to_head_commits": 6,
+      "merge_base": "d585417a7ad8d120e2c040af71ce62da3582f8fd",
+      "disposition": "FFN repair already inherited via ed90020; coupled graph/codec experiment deferred"
+    },
+    {
+      "branch": "codex/pen-gripper-anchored-ablation-20260909",
+      "sha": "52e2df4550ab03d3613d2eb0e13240d92fb11840",
+      "tip": "2026-09-09T21:14:32+08:00 Keep persistence ablation test imports ordered",
+      "unique_to_head_commits": 4,
+      "merge_base": "f60bd808becabd882b10ad7b07e74242fe49a881",
+      "disposition": "deferred shared-core persistence ablation; not a default replacement"
+    },
+    {
+      "branch": "codex/pen-gripper-frame-scope-20260911",
+      "sha": "8536f7d93c96dc5d83bd36fce4ab167f7cf95fd1",
+      "tip": "2026-09-11T13:55:18+08:00 Scope frame weighting for Pen gripper trajectory loss",
+      "unique_to_head_commits": 3,
+      "merge_base": "f60bd808becabd882b10ad7b07e74242fe49a881",
+      "disposition": "deferred event/motion loss scope experiment; prerequisite objective absent in base"
+    },
+    {
+      "branch": "codex/pen-rdt-shared-core-schema28-20260908",
+      "sha": "cd43eee988caa39a18bdab19c6e5a48b937dfc42",
+      "tip": "2026-09-08T17:38:51+08:00 Build shared Pen RDT core from Schema28 recovery",
+      "unique_to_head_commits": 2,
+      "merge_base": "f60bd808becabd882b10ad7b07e74242fe49a881",
+      "disposition": "deferred coupled core/objective/outlet experiment"
+    },
+    {
+      "branch": "codex/rdt-data-adaptation",
+      "sha": "8672c5f0c3ee78bbbb5fdfef37801aa7c6a4a139",
+      "tip": "2026-08-31T12:18:29+08:00 rdt: bind smoke reports to checkout commit",
+      "unique_to_head_commits": 0,
+      "merge_base": "8672c5f0c3ee78bbbb5fdfef37801aa7c6a4a139",
+      "disposition": "ancestor inherited"
+    },
+    {
+      "branch": "codex/rdt-multitask-prep",
+      "sha": "f8d0c2f0a988b180b6539edb0062690824dab829",
+      "tip": "2026-09-02T01:42:39+08:00 rdt: tighten launch gate source checks",
+      "unique_to_head_commits": 4,
+      "merge_base": "4125a3ded5b47b0cc73a5d128a1bbcfeb5477436",
+      "disposition": "historical machine-specific launch gate; not promoted"
+    },
+    {
+      "branch": "codex/remove-bspine-keep-solver-20260906",
+      "sha": "c7eccded96a4e784a083f5820b49e5782076d22b",
+      "tip": "2026-09-07T13:13:07+08:00 Restore independent local P2 reads for the fixed W S Q5 Pen trial",
+      "unique_to_head_commits": 4,
+      "merge_base": "d585417a7ad8d120e2c040af71ce62da3582f8fd",
+      "disposition": "solver already extracted; raw-only/Q5 experiment deferred"
+    },
+    {
+      "branch": "codex/schema25-r1-replay",
+      "sha": "90557b6cbfe4647a22e88219b4374918d09fbecb",
+      "tip": "2026-08-31T19:29:21+08:00 schema28: add matched core attribution",
+      "unique_to_head_commits": 1,
+      "merge_base": "76caa4846bee6bf36f96e32af4ad1aa5f561cccd",
+      "disposition": "historical patch-equivalent evidence"
+    },
+    {
+      "branch": "codex/schema28-core-recovery-pen-20260903",
+      "sha": "0973f1920cb8467e3b5f048aaaa180e34e27c83f",
+      "tip": "2026-09-03T10:36:54+08:00 mainline: restore schema28 core for Pen recovery",
+      "unique_to_head_commits": 1,
+      "merge_base": "f60bd808becabd882b10ad7b07e74242fe49a881",
+      "disposition": "superseded recovery evidence"
+    },
+    {
+      "branch": "codex/schema28-estimator-gate",
+      "sha": "6a43e8ed36912411b14dcb92a48f4d23a3de7951",
+      "tip": "2026-09-01T01:49:09+08:00 schema28: add action estimator replay gate",
+      "unique_to_head_commits": 2,
+      "merge_base": "76caa4846bee6bf36f96e32af4ad1aa5f561cccd",
+      "disposition": "superseded estimator/replay evidence"
+    },
+    {
+      "branch": "codex/schema29-mainline",
+      "sha": "e62b1b79f1a14ee9f50bdf4b073abfb67956ad90",
+      "tip": "2026-09-06T23:11:03+08:00 Remove competing run examples and preserve interpreter identity",
+      "unique_to_head_commits": 0,
+      "merge_base": "e62b1b79f1a14ee9f50bdf4b073abfb67956ad90",
+      "disposition": "ancestor inherited"
+    },
+    {
+      "branch": "codex/v94-latent-ownership-execution",
+      "sha": "09347da1a90399d5cad78c3c9630c54ed0acb878",
+      "tip": "2026-08-27T16:56:41+08:00 docs: add conversation insight ledger",
+      "unique_to_head_commits": 17,
+      "merge_base": "6a6c1bfb164e0013a4f5e6b4303d296f4de5b2d6",
+      "disposition": "historical incompatible architecture experiments"
+    },
+    {
+      "branch": "master",
+      "sha": "d585417a7ad8d120e2c040af71ce62da3582f8fd",
+      "tip": "2026-09-05T13:31:11+08:00 docs: fix runbook markdown escapes",
+      "unique_to_head_commits": 0,
+      "merge_base": "d585417a7ad8d120e2c040af71ce62da3582f8fd",
+      "disposition": "ancestor inherited"
+    }
+  ]
+}

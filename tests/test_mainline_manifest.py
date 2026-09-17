@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import torch
 
+from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.manifest import (
     ARCHITECTURE_MANIFEST,
@@ -16,8 +17,8 @@ from clearvla.mainline.manifest import (
     manifest_from_mapping,
 )
 from clearvla.mainline.model.component_contracts import (
-    BSPINE_ARM_ONLY_EXECUTION_BOTTOM,
     BSPINE0_EXECUTION_BOTTOM,
+    BSPINE_ARM_ONLY_EXECUTION_BOTTOM,
     ComponentSelection,
 )
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
@@ -30,14 +31,14 @@ from clearvla.mainline.runtime.deployment import (
 )
 from clearvla.mainline.training.optimizer import build_optimizer
 from clearvla.mainline.v120_core.bspine import (
-    BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
-    BSPINE_ARM_ONLY_IMPLEMENTATION,
-    BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
     BSPINE0_BASIS_DIGEST,
     BSPINE0_CONTROL_POINTS,
     BSPINE0_DEGREE,
     BSPINE0_IMPLEMENTATION,
     BSPINE0_SPEC_FINGERPRINT,
+    BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
+    BSPINE_ARM_ONLY_IMPLEMENTATION,
+    BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
 )
 
 
@@ -159,9 +160,13 @@ def test_mainline_manifest_names_the_current_component_semantics() -> None:
 def test_deployment_abi_rejects_pre_boundary_scope_checkpoints() -> None:
     config = ExperimentConfig()
     graph = deployment_graph_config(config)
+    registered = resolve_action_state_profile("identity_7d_pen")
+    # A positive fixture must describe a complete registered chart; only the
+    # boundary scope is removed in the negative case below.
     profile = {
-        "name": "identity_7d_pen",
-        "gripper_transition_boundary": "current_action_state",
+        **registered.as_dict(),
+        "sha256": registered.digest(),
+        "gripper_transition_boundary": registered.gripper_transition_boundary,
     }
     action = {
         "data_profile": profile,
@@ -186,9 +191,13 @@ def test_deployment_abi_rejects_pre_boundary_scope_checkpoints() -> None:
             "executed_action_offsets": [-24, -16, -12, -8, -6, -4, -2, -1],
             "dinov2": {
                 "model": "test",
-                "compute_dtype": "fp32",
+                "compute_dtype": config.runtime.compute_dtype,
                 "reference_batch_size": 1,
+                "patches_per_camera": config.dimensions.patches_per_camera,
+                "token_width": config.dimensions.visual_token_dim,
             },
+            "state_dim": config.dimensions.state_dim,
+            "action_dim": config.dimensions.action_dim,
         },
         "action": action,
         "normalizers": {

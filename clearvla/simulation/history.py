@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -58,7 +59,7 @@ class HistorySnapshot:
 
 
 class CausalHistory:
-    """Append-only observation/action timeline with explicit reset padding.
+    """Bounded causal observation/action windows with explicit reset padding.
 
     At time zero the model has no pre-episode actions.  Those unavailable rows
     are padded with the environment's safe reset action-state, while visual and
@@ -67,15 +68,21 @@ class CausalHistory:
     """
 
     def __init__(self) -> None:
-        self._observations: list[PolicyObservation] = []
-        self._actions: list[np.ndarray] = []
+        # Keep only rows addressable by the model; RGB must not accumulate
+        # for an entire long-horizon rollout. Absolute time is independent of
+        # deque length so reset padding and sparse offsets remain unchanged.
+        self._observations: deque[PolicyObservation] = deque(
+            maxlen=1 - min(*VISUAL_OFFSETS, *STATE_OFFSETS)
+        )
+        self._actions: deque[np.ndarray] = deque(maxlen=-min(EXECUTED_ACTION_OFFSETS))
         self._reset_action: np.ndarray | None = None
+        self._time_index = 0
 
     @property
     def time_index(self) -> int:
         if not self._observations:
             raise RuntimeError("causal history has not been reset")
-        return len(self._observations) - 1
+        return self._time_index
 
     def reset(
         self,
@@ -88,9 +95,11 @@ class CausalHistory:
         boundary = np.asarray(boundary, dtype=np.float32)
         if boundary.shape != (ACTION_DIM,) or not np.isfinite(boundary).all():
             raise ValueError("reset action must be one finite [7] vector")
-        self._observations = [copied]
-        self._actions = []
+        self._observations.clear()
+        self._observations.append(copied)
+        self._actions.clear()
         self._reset_action = boundary.copy()
+        self._time_index = 0
 
     def append(self, executed_action: np.ndarray, observation: PolicyObservation) -> None:
         if not self._observations or self._reset_action is None:
@@ -101,19 +110,25 @@ class CausalHistory:
         copied = observation.copied()
         self._actions.append(action.copy())
         self._observations.append(copied)
-        if len(self._observations) != len(self._actions) + 1:
-            raise RuntimeError("causal observation/action timeline lost alignment")
+        self._time_index += 1
 
     def _observation_at(self, index: int) -> PolicyObservation:
-        return self._observations[max(int(index), 0)]
+        index = max(int(index), 0)
+        oldest = self.time_index - len(self._observations) + 1
+        if index < oldest or index > self.time_index:
+            raise IndexError("requested an observation outside the retained causal window")
+        return self._observations[index - oldest]
 
     def _action_at(self, index: int) -> np.ndarray:
         assert self._reset_action is not None
         if index < 0:
             return self._reset_action
-        if index >= len(self._actions):
+        if index >= self.time_index:
             raise IndexError("requested an action that has not executed")
-        return self._actions[index]
+        oldest = self.time_index - len(self._actions)
+        if index < oldest:
+            raise IndexError("requested an action outside the retained causal window")
+        return self._actions[index - oldest]
 
     def snapshot(self) -> HistorySnapshot:
         if not self._observations or self._reset_action is None:

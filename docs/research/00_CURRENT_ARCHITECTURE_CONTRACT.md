@@ -1,6 +1,6 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-10
+Updated: 2026-09-17
 
 This is the compact source of truth for the active independent mainline. Read
 it before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
@@ -55,6 +55,30 @@ fresh CALVIN run from commit `f9cee96a` is active; no historical checkpoint was
 resumed or migrated. These are interface observations, not an accepted
 behavior release; live Pen, RDT and CALVIN process state remains in the rolling
 handoff.
+
+## Integration candidate boundary (2026-09-17)
+
+`codex/integrated-mainline-20260917` starts from `d7ebf00` and is a reviewed
+integration candidate, not a promoted behavior release. The shared G/S/W/P,
+single-pass training, detached Teacher and bounded two-pass deployment remain
+unchanged. The optional CALVIN mode `calvin_primary_v2` uses intent component
+`stateless_object_intent_calvin_binding_v2`: S carries conditional object
+context and a separate `tanh(context_gate) * P(real)` scalar, consumed after the
+complete coarse object read. This preserves null ownership through LayerNorm;
+no new parameter or objective is introduced. V1 remains explicitly selected
+by its existing config and identity; neither mode is an implicit migration.
+
+Deployment history retains only its addressable 9 observation / 24 action
+rows. All outlet deployment profiles and redundant dimensions are checked
+against their registry/graph, including RDT's ordered high/right-wrist aliases.
+The source snapshot includes the checkpoint-backed online policy closure;
+older sources must not be relabelled as exact-resume compatible. Ingress
+preflight also checks both normalized online action/codec anchors. Candidate
+provenance, exclusions and reproducible CPU gates are documented in
+[`../development/INTEGRATION_REVIEW.md`](../development/INTEGRATION_REVIEW.md).
+Real CUDA/BF16, production-checkpoint and closed-loop behavior gates remain
+required before promotion. Rolling run-state statements above remain historical
+observations; this review did not inspect or change live training processes.
 
 ## Authority order
 

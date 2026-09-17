@@ -97,6 +97,8 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
         "online.dino_history": batch.online.observation.dino_history,
         "online.raw": batch.online.observation.raw_rgb,
         "online.state": batch.online.history.state,
+        "online.action_state": batch.online.history.action_state,
+        "online.codec_gripper_boundary": batch.online.history.codec_gripper_boundary,
         "online.state_history": batch.online.history.state_history,
         "online.executed_history": batch.online.history.executed_action_history,
         "online.goal": batch.online.goal.tokens,

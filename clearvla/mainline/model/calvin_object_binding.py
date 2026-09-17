@@ -6,26 +6,40 @@ blue block rather than the red block).  This module provides that pointer as
 an outlet-scoped adapter.  It never reads privileged ``scene_obs`` and it is
 not constructed for Pen/RDT/LIBERO.
 
-The adapter is intentionally conservative at initialization: its context
-blend is zero, so a component-initialized checkpoint starts with the old
-coarse proposal.  The pointer is still available for its own supervision and
-diagnostics; training can open the bounded blend after the pointer becomes
-useful.
+The adapter starts with the existing small tanh(0.25) context blend.
+The historical v1 path conditions on selecting a real object. The explicit
+v2 path preserves the real probability mass so a soft null decision reduces
+the coarse context and receives action-level gradients. No extra loss or
+parameter is introduced; component identity separates the two semantics.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
 
 from .types import ObjectFactSet
 
-
 CALVIN_OBJECT_BINDING_COMPONENT = "calvin_primary_object_binding_v1"
 CALVIN_OBJECT_BINDING_INTENT = "stateless_object_intent_calvin_binding_v1"
+CALVIN_OBJECT_BINDING_V2_INTENT = "stateless_object_intent_calvin_binding_v2"
+CALVIN_OBJECT_BINDING_INTENTS = {
+    "calvin_primary_v1": CALVIN_OBJECT_BINDING_INTENT,
+    "calvin_primary_v2": CALVIN_OBJECT_BINDING_V2_INTENT,
+}
+
+
+def binding_intent(mode: str) -> str:
+    """Resolve checkpoint-visible intent identity without building a module."""
+    if mode == "disabled":
+        return "stateless_object_intent_v1"
+    try:
+        return CALVIN_OBJECT_BINDING_INTENTS[mode]
+    except KeyError as error:
+        raise ValueError(f"unknown CALVIN object-binding mode: {mode!r}") from error
 
 
 def _normalized_entropy(probability: Tensor) -> Tensor:
@@ -50,6 +64,7 @@ class CalvinObjectBindingResult:
     confidence: Tensor  # [B,1]
     entropy: Tensor  # [B,1]
     valid_mass: Tensor  # [B,1]
+    context_scale: Tensor | None = None  # v2: [B,1], applied after coarse read
 
     def validate(self, *, batch: int, objects: int, hidden: int) -> None:
         if tuple(self.pointer.shape) != (batch, objects + 1):
@@ -65,6 +80,11 @@ class CalvinObjectBindingResult:
             raise ValueError("CALVIN binding pointer is non-finite")
         if not bool(torch.isfinite(self.selected_context).all()):
             raise ValueError("CALVIN selected object context is non-finite")
+        if self.context_scale is not None:
+            if tuple(self.context_scale.shape) != (batch, 1):
+                raise ValueError("CALVIN binding context scale must be [B,1]")
+            if not bool(torch.isfinite(self.context_scale).all()):
+                raise ValueError("CALVIN binding context scale is non-finite")
         sums = self.pointer.float().sum(dim=-1)
         # The pointer is consumed in BF16 on the active path; softmax roundoff
         # can exceed the FP32 contract tolerance while remaining numerically
@@ -84,7 +104,10 @@ class CalvinObjectBindingBridge(nn.Module):
     is present, so permuting K rows permutes the pointer and nothing else.
     """
 
-    def __init__(self, *, hidden: int, route_dim: int, objects: int = 4) -> None:
+    def __init__(
+        self, *, hidden: int, route_dim: int, objects: int = 4,
+        preserve_null_mass: bool = False,
+    ) -> None:
         super().__init__()
         if int(objects) != 4:
             raise ValueError("CALVIN object binding currently requires K=4")
@@ -93,6 +116,7 @@ class CalvinObjectBindingBridge(nn.Module):
         self.hidden = int(hidden)
         self.route_dim = int(route_dim)
         self.objects = int(objects)
+        self.preserve_null_mass = bool(preserve_null_mass)
         self.goal_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.object_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.route_projection = nn.Linear(3 * route_dim, hidden, bias=False)
@@ -177,7 +201,11 @@ class CalvinObjectBindingBridge(nn.Module):
             torch.zeros_like(selected),
         )
         gate = torch.tanh(self.context_gate).to(device=object_tokens.device, dtype=object_tokens.dtype)
-        selected_context = gate * selected
+        # A pre-LayerNorm scalar is not an execution weight: the coarse
+        # reader would normalize it away. V2 carries the existing gate and
+        # P(real) separately and applies them after the entire object read.
+        selected_context = selected if self.preserve_null_mass else gate * selected
+        context_scale = gate * valid_mass if self.preserve_null_mass else None
 
         geometry = facts.coordinates.float()
         selected_geometry = (
@@ -195,6 +223,7 @@ class CalvinObjectBindingBridge(nn.Module):
             confidence=pointer.max(dim=-1, keepdim=True).values,
             entropy=_normalized_entropy(pointer).unsqueeze(-1),
             valid_mass=valid_mass,
+            context_scale=context_scale,
         )
         result.validate(batch=batch, objects=objects, hidden=hidden)
         metrics = {
@@ -241,6 +270,9 @@ class CalvinObjectBindingBridge(nn.Module):
 __all__ = [
     "CALVIN_OBJECT_BINDING_COMPONENT",
     "CALVIN_OBJECT_BINDING_INTENT",
+    "CALVIN_OBJECT_BINDING_V2_INTENT",
+    "CALVIN_OBJECT_BINDING_INTENTS",
+    "binding_intent",
     "CalvinObjectBindingBridge",
     "CalvinObjectBindingResult",
 ]

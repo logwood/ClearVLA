@@ -593,6 +593,7 @@ class ActionIntentDock:
     selected_object_context: Tensor | None = None  # [B,1,H]
     object_binding_pointer: Tensor | None = None  # [B,K+1], final column null
     object_binding_selected_geometry: Tensor | None = None  # [B,2]
+    object_binding_context_scale: Tensor | None = None  # v2 post-read [B,1]
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -610,6 +611,12 @@ class ActionIntentDock:
         objects = int(self.public_object_memory.shape[1])
         if int(self.public_object_memory.shape[2]) != hidden:
             raise ValueError("action-intent object memory has the wrong hidden width")
+        if self.object_binding_context_scale is not None:
+            _shape(self.object_binding_context_scale, (batch, 1), "object-binding context scale")
+            if self.selected_object_context is None or self.object_binding_pointer is None:
+                raise ValueError("object-binding context scale requires context and pointer")
+            if not bool(torch.isfinite(self.object_binding_context_scale).all()):
+                raise ValueError("object-binding context scale is non-finite")
         if self.selected_object_context is not None:
             _shape(
                 self.selected_object_context,
@@ -726,6 +733,7 @@ class ObjectIntentState:
     object_binding_pointer: Tensor | None = None  # [B,K+1], final column null
     object_binding_selected_context: Tensor | None = None  # [B,1,H]
     object_binding_selected_geometry: Tensor | None = None  # [B,2]
+    object_binding_context_scale: Tensor | None = None  # v2 post-read [B,1]
 
     @property
     def interval_queries(self) -> Tensor:
@@ -765,6 +773,7 @@ class ObjectIntentState:
             selected_object_context=self.object_binding_selected_context,
             object_binding_pointer=self.object_binding_pointer,
             object_binding_selected_geometry=self.object_binding_selected_geometry,
+            object_binding_context_scale=self.object_binding_context_scale,
         )
 
     def factual_dock(self) -> FactualIntentDock:
@@ -901,6 +910,7 @@ class ObjectIntentState:
             ),
             object_binding_selected_context=self.object_binding_selected_context,
             object_binding_selected_geometry=self.object_binding_selected_geometry,
+            object_binding_context_scale=self.object_binding_context_scale,
         )
 
 

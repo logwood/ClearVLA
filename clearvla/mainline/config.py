@@ -325,9 +325,9 @@ class TopConfig:
     calvin_object_binding: str = "disabled"
 
     def validate(self) -> None:
-        if self.calvin_object_binding not in {"disabled", "calvin_primary_v1"}:
+        if self.calvin_object_binding not in {"disabled", "calvin_primary_v1", "calvin_primary_v2"}:
             raise ValueError(
-                "top.calvin_object_binding must be disabled or calvin_primary_v1"
+                "top.calvin_object_binding must be disabled, calvin_primary_v1 or calvin_primary_v2"
             )
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")

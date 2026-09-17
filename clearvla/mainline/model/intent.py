@@ -615,6 +615,12 @@ class CoarseActionIntent(nn.Module):
             else intent.selected_object_context
         )
         _, object_delta, _ = self.object_read(query, object_memory)
+        if intent.object_binding_context_scale is not None:
+            # CALVIN v2: apply confidence and the existing learned blend only
+            # AFTER LayerNorm, RMS contraction and the read FFN. Otherwise a
+            # soft null (or a zero memory with a nonzero query FFN) can still
+            # contribute a full object update. V1 and other outlets skip this.
+            object_delta = object_delta * intent.object_binding_context_scale[:, :, None]
         _, history_delta, _ = self.history_read(query, intent.history_memory)
         token = self.block(
             query

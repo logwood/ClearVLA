@@ -140,8 +140,10 @@ def _formal_libero_abi() -> dict[str, object]:
             "action_dim": 7,
             "dinov2": {
                 "model": "test",
-                "compute_dtype": "fp32",
+                "compute_dtype": config.runtime.compute_dtype,
                 "reference_batch_size": 1,
+                "patches_per_camera": config.dimensions.patches_per_camera,
+                "token_width": config.dimensions.visual_token_dim,
             },
         },
         "action": action,

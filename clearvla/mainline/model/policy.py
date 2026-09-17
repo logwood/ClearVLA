@@ -15,7 +15,8 @@ from ..training.acceleration_contract import TrainingAccelerationAdapter
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from .action_contract import BottomOutput
 from .calvin_object_binding import (
-    CALVIN_OBJECT_BINDING_INTENT,
+    CALVIN_OBJECT_BINDING_INTENTS,
+    CALVIN_OBJECT_BINDING_V2_INTENT,
     CalvinObjectBindingBridge,
 )
 from .component_contracts import ComponentSelection, modular_to_legacy_name
@@ -229,11 +230,12 @@ class ClearVLAMainlinePolicy(nn.Module):
         # component-initialized checkpoint preserves the shared RNG/parameter
         # initialization exactly.  Pen/RDT/LIBERO do not construct this child.
         calvin_object_binding = None
-        if selection.intent == CALVIN_OBJECT_BINDING_INTENT:
+        if selection.intent in CALVIN_OBJECT_BINDING_INTENTS.values():
             calvin_object_binding = CalvinObjectBindingBridge(
                 hidden=dims.hidden_size,
                 route_dim=obs.address_route_dim,
                 objects=top.object_slots,
+                preserve_null_mass=selection.intent == CALVIN_OBJECT_BINDING_V2_INTENT,
             )
 
         # Capture the exact old traversal before changing registrations.  This

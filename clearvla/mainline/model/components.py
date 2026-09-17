@@ -26,6 +26,7 @@ from .action_codec import (
     binary_gripper_command_from_logits,
 )
 from .action_contract import ActionQueryEncoder, BottomDecoderOutput, V120SeedContext
+from .calvin_object_binding import CalvinObjectBindingBridge
 from .compiler import (
     ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
@@ -33,7 +34,6 @@ from .compiler import (
     ZeroPreservingObjectConsequence,
 )
 from .component_contracts import OutletActionOutput
-from .calvin_object_binding import CalvinObjectBindingBridge
 from .grounding import DenseObjectGrounder
 from .intent import CoarseActionIntent, StatelessObjectIntentOrganizer
 from .observation_contract import GroundingObservationBank, ObservationEvidence
@@ -392,6 +392,7 @@ class IntentStage(nn.Module):
             object_binding_pointer=result.pointer,
             object_binding_selected_context=result.selected_context,
             object_binding_selected_geometry=result.selected_geometry,
+            object_binding_context_scale=result.context_scale,
         )
         bound.validate(
             horizon=int(intent.temporal_queries.shape[1]),

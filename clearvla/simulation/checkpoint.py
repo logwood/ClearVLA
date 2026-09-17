@@ -55,6 +55,7 @@ _DEPLOYMENT_SOURCE_PREFIXES = (
     "clearvla/action_representations/",
     "clearvla/mainline/model/",
     "clearvla/mainline/v120_core/",
+    "clearvla/simulation/",
 )
 _DEPLOYMENT_SOURCE_FILES = frozenset(
     {

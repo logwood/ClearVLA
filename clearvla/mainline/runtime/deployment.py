@@ -83,6 +83,37 @@ def _indices(value: object, *, name: str) -> tuple[int, ...]:
     )
 
 
+def _validate_registered_profile(
+    profile: Mapping[str, object], *, gripper_indices: object,
+) -> None:
+    """Bind every outlet to its registered chart, not just a self-consistent label.
+
+    A digest copied from a valid profile does not authenticate modified fields.
+    The gripper boundary is deliberately outside the numeric projection digest,
+    so it must also be compared with the registry's independent boundary owner.
+    """
+    registered = resolve_action_state_profile(str(profile.get("name", "")))
+    if profile.get("sha256") != registered.digest():
+        raise ValueError("deployment profile digest differs from the registered chart")
+    for field, expected in registered.as_dict().items():
+        actual = profile.get(field)
+        if field in {"source_action_dim", "source_state_dim"}:
+            actual = _strict_int(actual, name=f"action.data_profile.{field}")
+        elif field in {"action_indices", "state_indices", "gripper_indices"}:
+            actual = _indices(actual, name=f"action.data_profile.{field}")
+        elif field == "state_to_action_scale":
+            rows = _sequence(actual, name=f"action.data_profile.{field}")
+            if any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in rows):
+                raise ValueError("deployment profile state-to-action scale must be numeric")
+            actual = tuple(float(x) for x in rows)
+        if actual != expected:
+            raise ValueError(f"deployment profile {field} differs from the registered chart")
+    if profile.get("gripper_transition_boundary") != registered.gripper_transition_boundary:
+        raise ValueError("deployment profile gripper boundary differs from its registered owner")
+    if _indices(gripper_indices, name="action.gripper_indices") != registered.gripper_indices:
+        raise ValueError("deployment profile gripper indices differ from the registered chart")
+
+
 def _validate_libero_profile(
     profile: Mapping[str, object],
     *,
@@ -156,6 +187,7 @@ def build_deployment_abi(
             "deployment data profile differs from config: "
             f"{profile_name!r} != {config.data.data_profile!r}"
         )
+    _validate_registered_profile(profile, gripper_indices=gripper_indices)
     if profile_name == _LIBERO_PROFILE_NAME:
         _validate_libero_profile(profile, gripper_indices=gripper_indices)
     gripper_codec_boundary = str(profile.get("gripper_transition_boundary", ""))
@@ -189,7 +221,7 @@ def build_deployment_abi(
                 "normalized_high": [1.0] * 7,
             }
         )
-    return {
+    abi = {
         "schema": DEPLOYMENT_ABI_SCHEMA,
         "source_config_digest": identity.config_digest,
         "architecture_manifest": dict(identity.manifest),
@@ -224,6 +256,10 @@ def build_deployment_abi(
             "metadata": dict(goal_metadata),
         },
     }
+    # Export and import share the same boundary: never serialize an ABI that
+    # this source cannot read back (notably the native RDT camera aliases).
+    validate_deployment_abi(abi)
+    return abi
 
 
 def _mapping(value: object, *, name: str) -> dict[str, object]:
@@ -253,20 +289,26 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         raise ValueError("deployment DINO model identity is empty")
     if str(dino.get("compute_dtype", "")) not in {"bf16", "fp32"}:
         raise ValueError("deployment DINO compute_dtype must be bf16 or fp32")
-    try:
-        reference_batch_size = int(dino.get("reference_batch_size", 0))
-    except (TypeError, ValueError) as error:
-        raise ValueError("deployment DINO reference_batch_size must be an integer") from error
+    reference_batch_size = _strict_int(
+        dino.get("reference_batch_size"), name="observation.dinov2.reference_batch_size"
+    )
     if reference_batch_size <= 0:
         raise ValueError("deployment DINO reference_batch_size must be positive")
     cameras = tuple(str(name) for name in observation.get("camera_names", ()))
-    if cameras != ("top", "wrist"):
-        raise ValueError("deployment ABI camera order must be top,wrist")
-    if tuple(observation.get("visual_offsets", ())) != (-8, -4, 0):
+    profile = _mapping(action.get("data_profile"), name="action.data_profile")
+    _validate_registered_profile(profile, gripper_indices=action.get("gripper_indices"))
+    allowed_cameras = {("top", "wrist")}
+    if profile.get("name") == "rdt_right_arm_action_chart_v1":
+        # Explicit positional alias: RDT high/right_wrist occupies the same
+        # ordered global/right-wrist axes as the simulator's top/wrist input.
+        allowed_cameras.add(("high", "right_wrist"))
+    if cameras not in allowed_cameras:
+        raise ValueError("deployment ABI camera order differs from the profile-owned top,wrist axes")
+    if _indices(observation.get("visual_offsets"), name="observation.visual_offsets") != (-8, -4, 0):
         raise ValueError("deployment ABI visual history differs from the formal policy")
-    if tuple(observation.get("state_offsets", ())) != (-8, -4, 0):
+    if _indices(observation.get("state_offsets"), name="observation.state_offsets") != (-8, -4, 0):
         raise ValueError("deployment ABI state history differs from the formal policy")
-    if tuple(observation.get("executed_action_offsets", ())) != (
+    if _indices(observation.get("executed_action_offsets"), name="observation.executed_action_offsets") != (
         -24,
         -16,
         -12,
@@ -277,8 +319,24 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         -1,
     ):
         raise ValueError("deployment ABI executed-action history differs")
-    if int(action.get("receding_horizon_execute_rows", 0)) != 1:
+    if _strict_int(action.get("receding_horizon_execute_rows"), name="action.receding_horizon_execute_rows") != 1:
         raise ValueError("deployment must execute exactly one predicted action row")
+    dimensions = _mapping(graph.get("dimensions"), name="graph_config.dimensions")
+    for field, expected in (("action_dim", 7), ("state_dim", 7), ("action_horizon", 24)):
+        if _strict_int(dimensions.get(field), name=f"graph_config.dimensions.{field}") != expected:
+            raise ValueError(f"deployment graph {field} must be {expected}")
+    for field in ("action_dim", "state_dim"):
+        if _strict_int(observation.get(field), name=f"observation.{field}") != dimensions[field]:
+            raise ValueError(f"deployment observation {field} differs from the graph")
+    if _strict_int(action.get("prediction_horizon"), name="action.prediction_horizon") != dimensions["action_horizon"]:
+        raise ValueError("deployment prediction horizon differs from the graph")
+    for field, graph_field in (("patches_per_camera", "patches_per_camera"), ("token_width", "visual_token_dim")):
+        expected = _strict_int(dimensions.get(graph_field), name=f"graph_config.dimensions.{graph_field}")
+        if expected <= 0 or _strict_int(dino.get(field), name=f"observation.dinov2.{field}") != expected:
+            raise ValueError(f"deployment DINO {field} differs from the graph")
+    runtime = _mapping(graph.get("runtime"), name="graph_config.runtime")
+    if dino.get("compute_dtype") != runtime.get("compute_dtype"):
+        raise ValueError("deployment DINO compute dtype differs from the graph runtime")
     output_mode = str(action.get("gripper_output_mode", "continuous"))
     if output_mode not in {"continuous", "calvin_binary_command"}:
         raise ValueError("deployment gripper_output_mode is invalid")

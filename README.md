@@ -1,5 +1,14 @@
 # ClearVLA
 
+> **整合候选仍有阻塞项：** Torch 2.11 CPU 复验中，两项可选加速路径的严格等价检查失败；断言未放宽，默认模型未启用这些实验。本分支不是全绿发布版，详见整合审查记录。
+
+> **2026-09-17 整合候选：** 本分支汇总当前活动主线并修复对象绑定、部署契约、
+> 在线历史和启动流水线边界；尚未宣称通过真实 CUDA 或机器人闭环验收。
+> 分支取舍、兼容性与运行入口见
+> [整合审查记录](docs/development/INTEGRATION_REVIEW.md)。
+> CALVIN null 修复通过 `configs/mainline/calvin_object_binding_v2.json` 显式启用，
+> 不会悄悄替换 v1 配置，也不允许改写旧 checkpoint 的身份。
+
 面向长时域机器人操作的对象中心 Vision-Language-Action 研究系统。
 
 ClearVLA 将近期多视角视觉、语言目标、机器人状态与已执行动作历史组织成

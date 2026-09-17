@@ -1,0 +1,43 @@
+{
+  "data": {
+    "raw_hdf5_root": "/data/senwang/data/calvin/converted/abc_d_full",
+    "hdf5_glob": "*.hdf5",
+    "decoded_cache": "/data/senwang/data/calvin/caches/abc_d_full/decoded_336",
+    "dino_cache": "/data/senwang/data/calvin/caches/abc_d_full/dinov2_base_336",
+    "t5_condition": "/data/senwang/data/calvin/language/abc_d_full_t5_xxl_bank.pt",
+    "output_dir": "runs/clearvla_calvin_object_binding_v2",
+    "data_profile": "calvin_relative_7d_v1",
+    "action_key": "action",
+    "action_state_key": "action_state",
+    "state_key": "state",
+    "top_camera_key": "observations/images/cam_high",
+    "wrist_camera_key": "observations/images/cam_right_wrist",
+    "split_mode": "episode-manifest",
+    "split_manifest": "/data/senwang/data/calvin/converted/abc_d_full_raw_overlay_v2_splits.json",
+    "train_episodes": 0,
+    "val_episodes": 0,
+    "test_episodes": 0,
+    "num_workers": 4,
+    "sampling_gripper_event_threshold": 0.1
+  },
+  "top": {
+    "calvin_object_binding": "calvin_primary_v2"
+  },
+  "bottom": {
+    "arm_flow_mode": "relative_command_direct",
+    "gripper_output_mode": "calvin_binary_command"
+  },
+  "objectives": {
+    "gripper_command": 0.1,
+    "gripper_event_threshold": 0.1
+  },
+  "optimizer": {
+    "epochs": 20,
+    "batch_size": 8
+  },
+  "runtime": {
+    "max_train_batches": 64106,
+    "max_val_batches": 256,
+    "log_every": 50
+  }
+}

@@ -25,4 +25,5 @@ exec "${PYTHON_BIN}" -B -u -m clearvla.mainline.train \
   --dtype bf16 \
   --batch-size 8 \
   --num-workers 4 \
-  --output-dir "${OUTPUT_PATH}"
+  --output-dir "${OUTPUT_PATH}" \
+  "$@"
