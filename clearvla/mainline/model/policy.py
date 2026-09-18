@@ -186,6 +186,8 @@ class ClearVLAMainlinePolicy(nn.Module):
             role_host_depth=top.role_host_depth,
             role_host_expansion=top.role_host_ffn_expansion,
             role_host_dropout=top.role_host_dropout,
+            camera_names=config.data.camera_names,
+            world_camera_condition_mode=top.world_camera_condition_mode,
             core_config=raw_observation.v120_config,
         )
         raw_history_proposal = HistoryActionProposal(

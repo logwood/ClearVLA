@@ -14,8 +14,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from clearvla.data.window_boundaries import PREFIX_REGION, TAIL_REGION
 from clearvla.data.action_chart import resolve_action_state_profile
+from clearvla.data.window_boundaries import PREFIX_REGION, TAIL_REGION
 
 from .checkpoint import (
     CheckpointIdentity,
@@ -32,6 +32,7 @@ from .runtime.checkpoints import (
     LIBERO_RELEASE_FIRST_REPAIR_MIGRATION,
     LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION,
     LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION,
+    WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
     InitializationState,
     load_checkpoint_exact,
     load_checkpoint_for_initialization,
@@ -117,6 +118,14 @@ def _parser() -> argparse.ArgumentParser:
             "Explicitly admit one narrow LIBERO data-contract migration for "
             "model-only initialization. Normalizers, model, objectives, outlet, "
             "language and runtime semantics must still match."
+        ),
+    )
+    parser.add_argument(
+        "--init-model-contract-migration",
+        choices=(WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,),
+        help=(
+            "Explicitly initialize the opt-in W camera coordinate/role "
+            "condition from an otherwise identical legacy checkpoint."
         ),
     )
     parser.add_argument("--validate-checkpoint", type=Path)
@@ -339,6 +348,21 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
     ):
         raise ValueError(
             "--init-data-contract-migration requires --init-checkpoint"
+        )
+    if (
+        args.init_model_contract_migration is not None
+        and args.init_checkpoint is None
+    ):
+        raise ValueError(
+            "--init-model-contract-migration requires --init-checkpoint"
+        )
+    if (
+        args.init_data_contract_migration is not None
+        and args.init_model_contract_migration is not None
+    ):
+        raise ValueError(
+            "data-contract and model-contract initialization migrations "
+            "cannot be combined"
         )
     return result
 
@@ -2244,6 +2268,7 @@ def main() -> None:
             config=config,
             identity=identity,
             data_contract_migration=args.init_data_contract_migration,
+            model_contract_migration=args.init_model_contract_migration,
         )
         initialization_checkpoint_resolved = str(Path(args.init_checkpoint).resolve())
         # A model-only initialization intentionally starts all continuation
@@ -2256,6 +2281,7 @@ def main() -> None:
             f"checkpoint={initialization_checkpoint_resolved} "
             f"checkpoint_epoch={initialization_state.epoch:03d} "
             f"checkpoint_step={initialization_state.global_step} "
+            f"model_migration={initialization_state.model_contract_migration} "
             "optimizer_load=disabled schedule_load=disabled rng_load=disabled",
             flush=True,
         )
@@ -2360,6 +2386,7 @@ def main() -> None:
             "current_source_digest": initialization_state.current_source_digest,
             "changed_source_files": list(initialization_state.changed_source_files),
             "data_contract_migration": initialization_state.data_contract_migration,
+            "model_contract_migration": initialization_state.model_contract_migration,
             "saved_window_boundary_contract": (
                 initialization_state.saved_window_boundary_contract
             ),

@@ -342,6 +342,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     """W1 owns common/near; W2 reads W1 and writes far only."""
 
     TYPE_NAMES = ("semantic", "appearance", "geometry")
+    CAMERA_CONDITION_MODES = ("motion_prior_only", "coordinate_role_v1")
 
     @staticmethod
     def _safe_object_validity(
@@ -408,6 +409,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         action_dim: int = 7,
         heads: int,
         normalization_floor: float = 0.25,
+        camera_names: tuple[str, ...] | None = None,
+        camera_condition_mode: str = "motion_prior_only",
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -415,6 +418,22 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.normalization_floor = float(normalization_floor)
         if self.normalization_floor <= 0.0:
             raise ValueError("W typed normalization floor must be positive")
+        self.camera_condition_mode = str(camera_condition_mode)
+        if self.camera_condition_mode not in self.CAMERA_CONDITION_MODES:
+            raise ValueError(
+                "W camera condition mode must be motion_prior_only or "
+                "coordinate_role_v1"
+            )
+        self.camera_names = tuple(str(name) for name in (camera_names or ()))
+        if self.camera_condition_mode == "coordinate_role_v1":
+            if not self.camera_names or len(set(self.camera_names)) != len(
+                self.camera_names
+            ):
+                raise ValueError(
+                    "coordinate_role_v1 requires non-empty unique camera names"
+                )
+            if any(not name for name in self.camera_names):
+                raise ValueError("W camera role names must be non-empty")
         self.object_content = nn.Linear(content_dim, hidden, bias=False)
         self.object_semantic = nn.Linear(route_dim, hidden, bias=False)
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
@@ -491,6 +510,33 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     dtype=self.covariance_head.bias.dtype,
                 )
             )
+        # This branch is an explicit component initialization.  Preserve the
+        # historical construction RNG and start from exact legacy behavior.
+        self.camera_coordinate_role_condition: nn.Linear | None = None
+        if self.camera_condition_mode == "coordinate_role_v1":
+            retained_rng_state = torch.get_rng_state()
+            try:
+                self.camera_coordinate_role_condition = nn.Linear(
+                    2 + len(self.camera_names),
+                    hidden,
+                    bias=False,
+                )
+            finally:
+                torch.set_rng_state(retained_rng_state)
+            nn.init.zeros_(self.camera_coordinate_role_condition.weight)
+            stable_roles = {
+                name: index for index, name in enumerate(sorted(self.camera_names))
+            }
+            role_basis = torch.zeros(
+                len(self.camera_names),
+                len(self.camera_names),
+                dtype=torch.float32,
+            )
+            for camera_index, name in enumerate(self.camera_names):
+                role_basis[camera_index, stable_roles[name]] = 1.0
+        else:
+            role_basis = torch.empty(0, 0, dtype=torch.float32)
+        self.register_buffer("_camera_role_basis", role_basis, persistent=False)
 
     @staticmethod
     def _zero_preserving_condition(
@@ -773,6 +819,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         camera_context = self.object_transport_prior(
             safe_camera_transport.to(dtype=typed_geometry.dtype)
         )
+        camera_context = camera_context + self._camera_coordinate_role_context(
+            facts,
+            object_camera_support=object_camera_support,
+            dtype=typed_geometry.dtype,
+            device=typed_geometry.device,
+        )
         cameras = int(camera_context.shape[2])
         if typed_geometry.ndim == 3:
             if tuple(typed_geometry.shape[:2]) != tuple(camera_context.shape[:2]):
@@ -790,6 +842,52 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             availability = camera_validity[:, None]
         conditioned, _ = self._zero_preserving_condition(carrier, condition)
         return conditioned * availability.to(dtype=conditioned.dtype)
+
+    def _camera_coordinate_role_context(
+        self,
+        facts: ObjectFactSet | ObjectWorldBelief,
+        *,
+        object_camera_support: Tensor,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor:
+        """Return a declared-role, current-coordinate W condition."""
+
+        batch, objects, cameras = object_camera_support.shape[:3]
+        if self.camera_condition_mode == "motion_prior_only":
+            return torch.zeros(
+                batch,
+                objects,
+                cameras,
+                self.hidden,
+                device=device,
+                dtype=dtype,
+            )
+        if cameras != len(self.camera_names):
+            raise ValueError(
+                "W camera axis does not match the declared camera role order"
+            )
+        projection = self.camera_coordinate_role_condition
+        if projection is None:
+            raise RuntimeError("coordinate_role_v1 lost its condition projection")
+        coordinates = facts.camera_coordinates.to(device=device)
+        safe_coordinates = torch.where(
+            object_camera_support,
+            coordinates,
+            torch.zeros_like(coordinates),
+        )
+        role = self._camera_role_basis.to(device=device, dtype=dtype)
+        role = role[None, None].expand(batch, objects, -1, -1)
+        condition_input = torch.cat(
+            (safe_coordinates.to(dtype=dtype), role),
+            dim=-1,
+        )
+        context = projection(condition_input)
+        return torch.where(
+            object_camera_support,
+            context,
+            torch.zeros_like(context),
+        )
 
     def _field_with_diagnostics(
         self,
@@ -915,6 +1013,23 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         )
         if diagnostic_prefix is None:
             return field, {}
+        coordinate_role_context = self._camera_coordinate_role_context(
+            facts,
+            object_camera_support=(object_camera_availability > 0.0),
+            dtype=semantic_delta.dtype,
+            device=semantic_delta.device,
+        )
+        camera_condition_weight_rms = semantic_delta.new_zeros(
+            (), dtype=torch.float32
+        )
+        if self.camera_coordinate_role_condition is not None:
+            camera_condition_weight_rms = (
+                self.camera_coordinate_role_condition.weight.detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt()
+            )
         saturation = torch.cat(
             (
                 transport_common_pre_tanh.detach().reshape(-1),
@@ -927,6 +1042,16 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .square()
             .mean()
             .sqrt(),
+            "object_w_camera_coordinate_role_mode_active": semantic_delta.new_tensor(
+                float(self.camera_condition_mode == "coordinate_role_v1"),
+                dtype=torch.float32,
+            ),
+            "object_w_camera_coordinate_role_weight_rms": (
+                camera_condition_weight_rms
+            ),
+            f"{diagnostic_prefix}_camera_coordinate_role_condition_rms": (
+                coordinate_role_context.detach().float().square().mean().sqrt()
+            ),
             f"{diagnostic_prefix}_transport_common_pre_tanh_rms": (
                 transport_common_pre_tanh.detach().square().mean().sqrt()
             ),

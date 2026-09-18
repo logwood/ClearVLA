@@ -38,6 +38,10 @@ ENVIRONMENT = {
     "MKL_NUM_THREADS",
     "PYTORCH_CUDA_ALLOC_CONF",
 }
+MODEL_CONTRACT_MIGRATIONS = (
+    "world_camera_coordinate_role_v1",
+    "world_action_sequence_prefix_v1",
+)
 
 
 def segment(value: str) -> str:
@@ -276,6 +280,28 @@ def run_logged(command: list[str], code: Path, output: Path, env: dict, metadata
         raise
 
 
+def initialization_arguments(args: argparse.Namespace) -> list[str]:
+    """Build an unambiguous, read-only model-initialization request."""
+    checkpoint = getattr(args, "init_checkpoint", None)
+    migration = getattr(args, "init_model_contract_migration", None)
+    if migration is not None and migration not in MODEL_CONTRACT_MIGRATIONS:
+        raise ValueError("unsupported model-contract migration")
+    if migration is not None and checkpoint is None:
+        raise ValueError("--init-model-contract-migration requires --init-checkpoint")
+    if checkpoint is None:
+        return []
+    requested = Path(checkpoint).expanduser()
+    if not requested.is_absolute():
+        raise ValueError("--init-checkpoint must be an absolute checkpoint path")
+    resolved = requested.resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError("--init-checkpoint must identify a checkpoint file")
+    result = ["--init-checkpoint", str(resolved)]
+    if migration is not None:
+        result += ["--init-model-contract-migration", migration]
+    return result
+
+
 def launch(root: Path, args: argparse.Namespace) -> int:
     if os.name != "posix":
         raise ValueError("remote launches require a POSIX host")
@@ -309,8 +335,11 @@ def launch(root: Path, args: argparse.Namespace) -> int:
         "--num-workers",
         str(args.workers),
     ]
+    command += initialization_arguments(args)
     if args.epochs is not None:
         command += ["--epochs", str(args.epochs)]
+    if getattr(args, "retain_checkpoint_epochs", None):
+        command += ["--retain-checkpoint-epochs", *map(str, args.retain_checkpoint_epochs)]
     if args.smoke:
         command += ["--smoke", "--max-train-batches", "2", "--max-val-batches", "1"]
     environment = {k: v for k, v in os.environ.items() if k in ENVIRONMENT}
@@ -356,6 +385,12 @@ def main() -> int:
             cmd.add_argument("--batch-size", type=int, default=8)
             cmd.add_argument("--workers", type=int, default=4)
             cmd.add_argument("--epochs", type=int)
+            cmd.add_argument("--retain-checkpoint-epochs", type=int, nargs="+")
+            cmd.add_argument("--init-checkpoint", type=Path)
+            cmd.add_argument(
+                "--init-model-contract-migration",
+                choices=MODEL_CONTRACT_MIGRATIONS,
+            )
             cmd.add_argument("--dtype", choices=("fp32", "bf16"), default="bf16")
             cmd.add_argument("--smoke", action="store_true")
     args = parser.parse_args()

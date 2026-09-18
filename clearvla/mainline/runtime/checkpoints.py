@@ -36,6 +36,9 @@ LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION = (
     "libero_retarget_training_overlay_v1"
 )
 LIBERO_RELEASE_FIRST_REPAIR_MIGRATION = "libero_release_first_repair_v1"
+WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION = (
+    "world_camera_coordinate_role_v1"
+)
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/model/compiler.py",
@@ -58,6 +61,16 @@ DATA_CONTRACT_MIGRATION_SOURCE_PATHS = INITIALIZATION_SOURCE_PATHS | frozenset(
         "clearvla/mainline/data/dataset.py",
         "clearvla/mainline/data/loading.py",
         "clearvla/mainline/training/losses.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/train.py",
+    }
+)
+WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/model/dynamics.py",
+        "clearvla/mainline/model/policy.py",
+        "clearvla/mainline/model/top.py",
         "clearvla/mainline/runtime/checkpoints.py",
         "clearvla/mainline/train.py",
     }
@@ -114,6 +127,7 @@ class InitializationState:
     current_source_digest: str
     changed_source_files: tuple[str, ...]
     data_contract_migration: str | None
+    model_contract_migration: str | None
     saved_window_boundary_contract: str
     current_window_boundary_contract: str
     saved_dataset_identity: dict[str, str]
@@ -790,6 +804,18 @@ def _libero_release_repair_config_view(
     return payload
 
 
+def _world_camera_condition_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the admitted opt-in W camera-condition selector."""
+
+    payload = _initialization_config_view(config)
+    top = dict(cast(Mapping[str, object], payload["top"]))
+    top.pop("world_camera_condition_mode", None)
+    payload["top"] = top
+    return payload
+
+
 def load_checkpoint_for_initialization(
     path: str | Path,
     *,
@@ -797,6 +823,7 @@ def load_checkpoint_for_initialization(
     config: ExperimentConfig,
     identity: CheckpointIdentity,
     data_contract_migration: str | None = None,
+    model_contract_migration: str | None = None,
 ) -> InitializationState:
     """Load only model parameters as the start of a fresh training run.
 
@@ -841,6 +868,16 @@ def load_checkpoint_for_initialization(
         if data_contract_migration is None
         else str(data_contract_migration).strip()
     )
+    selected_model_migration = (
+        None
+        if model_contract_migration is None
+        else str(model_contract_migration).strip()
+    )
+    if selected_migration is not None and selected_model_migration is not None:
+        raise ValueError(
+            "data-contract and model-contract initialization migrations "
+            "cannot be combined"
+        )
     if selected_migration not in {
         None,
         LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION,
@@ -849,6 +886,14 @@ def load_checkpoint_for_initialization(
     }:
         raise ValueError(
             f"unknown model-initialization data migration {selected_migration!r}"
+        )
+    if selected_model_migration not in {
+        None,
+        WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
+    }:
+        raise ValueError(
+            "unknown model-initialization model migration "
+            f"{selected_model_migration!r}"
         )
 
     report = compare_checkpoint_identity(saved_identity, identity)
@@ -865,7 +910,31 @@ def load_checkpoint_for_initialization(
     )
     if rejected_reasons:
         raise ValueError("model initialization rejected: " + "; ".join(rejected_reasons))
-    if selected_migration is None:
+    if selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
+        if (
+            saved_config.top.world_camera_condition_mode != "motion_prior_only"
+            or config.top.world_camera_condition_mode != "coordinate_role_v1"
+        ):
+            raise ValueError(
+                "W camera-condition migration requires motion_prior_only source "
+                "and coordinate_role_v1 target"
+            )
+        if tuple(saved_config.data.camera_names) != tuple(config.data.camera_names):
+            raise ValueError(
+                "W camera-condition migration requires the identical declared "
+                "camera role order"
+            )
+        if _world_camera_condition_migration_config_view(
+            saved_config
+        ) != _world_camera_condition_migration_config_view(config):
+            raise ValueError(
+                "W camera-condition migration differs outside its one model selector"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "W camera-condition migration requires identical dataset identity"
+            )
+    elif selected_migration is None:
         if _initialization_config_view(saved_config) != _initialization_config_view(config):
             raise ValueError(
                 "model initialization config differs in model/data/objective/runtime semantics"
@@ -1004,11 +1073,14 @@ def load_checkpoint_for_initialization(
             if saved_sources.get(source_path) != current_sources.get(source_path)
         )
     )
-    allowed_source_paths = (
-        INITIALIZATION_SOURCE_PATHS
-        if selected_migration is None
-        else DATA_CONTRACT_MIGRATION_SOURCE_PATHS
-    )
+    if selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
+        allowed_source_paths = WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS
+    else:
+        allowed_source_paths = (
+            INITIALIZATION_SOURCE_PATHS
+            if selected_migration is None
+            else DATA_CONTRACT_MIGRATION_SOURCE_PATHS
+        )
     unexpected_source_files = tuple(
         source_path
         for source_path in changed_source_files
@@ -1029,7 +1101,26 @@ def load_checkpoint_for_initialization(
         saved_layout_schema=int(saved_manifest.layout_schema),
     )
     current_model = model.state_dict()
-    if set(mapped_model) != set(current_model):
+    if selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
+        new_condition_key = (
+            "world.dynamics.camera_coordinate_role_condition.weight"
+        )
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        if missing != {new_condition_key} or unexpected:
+            raise ValueError(
+                "W camera-condition migration must add exactly its one condition weight"
+            )
+        new_condition = current_model[new_condition_key]
+        if not isinstance(new_condition, torch.Tensor) or int(
+            torch.count_nonzero(new_condition).item()
+        ) != 0:
+            raise ValueError(
+                "W camera-condition migration requires an exact-zero new condition weight"
+            )
+        mapped_model = dict(mapped_model)
+        mapped_model[new_condition_key] = new_condition.detach().clone()
+    elif set(mapped_model) != set(current_model):
         raise ValueError("model initialization parameter ownership differs")
     for name, current_value in current_model.items():
         saved_value = mapped_model[name]
@@ -1065,6 +1156,7 @@ def load_checkpoint_for_initialization(
         current_source_digest=identity.source.digest,
         changed_source_files=changed_source_files,
         data_contract_migration=selected_migration,
+        model_contract_migration=selected_model_migration,
         saved_window_boundary_contract=saved_config.data.window_boundary_contract,
         current_window_boundary_contract=config.data.window_boundary_contract,
         saved_dataset_identity=dict(asdict(saved_identity.dataset)),
@@ -1211,6 +1303,8 @@ __all__ = [
     "RestoredTrainingState",
     "VALIDATION_REPLAY_SOURCE_PATHS",
     "ValidationReplayState",
+    "WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION",
+    "WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS",
     "load_checkpoint_exact",
     "load_checkpoint_for_initialization",
     "load_checkpoint_for_validation",

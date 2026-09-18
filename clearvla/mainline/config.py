@@ -410,8 +410,19 @@ class TopConfig:
     proposal_summary_tokens: int = 3
     goal_condition_dropout: float = 0.05
     action_history_condition_dropout: float = 0.10
+    # Opt-in W camera conditioning from current image-plane coordinates and
+    # declared camera roles.  The historical motion-prior path stays default.
+    world_camera_condition_mode: str = "motion_prior_only"
 
     def validate(self) -> None:
+        if self.world_camera_condition_mode not in {
+            "motion_prior_only",
+            "coordinate_role_v1",
+        }:
+            raise ValueError(
+                "top world_camera_condition_mode must be motion_prior_only "
+                "or coordinate_role_v1"
+            )
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")
         if (
@@ -1026,6 +1037,10 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.world_camera_condition_mode == "motion_prior_only":
+            cast(dict[str, object], payload["top"]).pop(
+                "world_camera_condition_mode"
+            )
         data = cast(dict[str, object], payload["data"])
         if self.data.window_boundary_contract == STRICT_COMPLETE_V1:
             # Preserve historical E8 config identity exactly.  Parsing an old

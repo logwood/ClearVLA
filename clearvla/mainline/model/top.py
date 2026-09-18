@@ -185,6 +185,8 @@ class ObjectIntentDynamicsTop(nn.Module):
         role_host_depth: int = 3,
         role_host_expansion: float = 4.0,
         role_host_dropout: float = 0.05,
+        camera_names: tuple[str, ...] = ("top", "wrist"),
+        world_camera_condition_mode: str = "motion_prior_only",
         core_config=None,
     ) -> None:
         super().__init__()
@@ -251,6 +253,8 @@ class ObjectIntentDynamicsTop(nn.Module):
             normalization_floor=float(
                 core_config.flow_jepa_routing_norm_floor
             ),
+            camera_names=camera_names,
+            camera_condition_mode=world_camera_condition_mode,
         )
         self.teacher = ObjectFutureTeacher(
             content_dim=content_dim,
