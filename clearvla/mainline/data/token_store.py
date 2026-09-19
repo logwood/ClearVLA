@@ -17,6 +17,7 @@ import torch
 from torch import Tensor
 
 from clearvla.data.hdf5_episode import LoadedEpisode
+from clearvla.vision.npy_rows import NpyRowReader
 from clearvla.vision.preprocessing import PreprocessConfig
 
 DINO_TOKEN_CACHE_VERSION = "rdt2-dinov2-dense-token-v1"
@@ -92,7 +93,7 @@ class DinoTokenEpisodeMeta:
 
 
 class DinoV2TokenStore:
-    """Lazy, episode-grouped mmap reader for ``[T,C,P,D]`` token arrays."""
+    """Lazy, episode-grouped mmap/pread reader for ``[T,C,P,D]`` arrays."""
 
     def __init__(
         self,
@@ -103,6 +104,7 @@ class DinoV2TokenStore:
         preprocessing: PreprocessConfig,
         dinov2_model: str,
         required_episode_indices: Sequence[int] | None = None,
+        read_backend: str = "mmap",
         max_open_arrays: int = DEFAULT_MMAP_ARRAY_CACHE_CAPACITY,
     ) -> None:
         if not episodes:
@@ -114,6 +116,9 @@ class DinoV2TokenStore:
             raise ValueError("requested DINO cameras must be non-empty and unique")
         self.preprocessing = preprocessing
         self.dinov2_model = str(dinov2_model)
+        if read_backend not in {"mmap", "pread"}:
+            raise ValueError("read_backend must be mmap or pread")
+        self.read_backend = read_backend
         if int(max_open_arrays) <= 0:
             raise ValueError("max_open_arrays must be positive")
         self.max_open_arrays = int(max_open_arrays)
@@ -122,6 +127,7 @@ class DinoV2TokenStore:
         # RLIMIT_NOFILE even though returned batches are released.  Advanced
         # indexing in ``load_batch`` copies rows, making LRU eviction safe.
         self._arrays: OrderedDict[int, np.ndarray] = OrderedDict()
+        self._rows = NpyRowReader(max_open_files=max_open_arrays) if read_backend == "pread" else None
         required = (
             tuple(range(len(self.episodes)))
             if required_episode_indices is None
@@ -155,7 +161,14 @@ class DinoV2TokenStore:
     def __getstate__(self) -> dict[str, object]:
         state = dict(self.__dict__)
         state["_arrays"] = OrderedDict()
+        if self.read_backend == "pread":
+            state["_rows"] = NpyRowReader(max_open_files=self.max_open_arrays)
         return state
+
+    def close(self) -> None:
+        if self._rows is not None:
+            self._rows.close()
+        self._arrays.clear()
 
     def _validate_episode(self, episode_idx: int, episode: LoadedEpisode) -> DinoTokenEpisodeMeta:
         del episode_idx
@@ -237,14 +250,35 @@ class DinoV2TokenStore:
         episode_ids = keys[:, 0].astype(np.int64, copy=False)
         frame_ids = keys[:, 1].astype(np.int64, copy=False)
         for episode_idx in np.unique(episode_ids):
+            index = int(episode_idx)
+            if not 0 <= index < len(self.episodes):
+                raise IndexError(f"episode index {index} is outside the token store")
+            if index not in self._meta:
+                raise KeyError(
+                    f"episode index {index} was not admitted by this loader-only cache scope"
+                )
             positions = np.flatnonzero(episode_ids == episode_idx)
-            array = self._array(int(episode_idx))
             frames = frame_ids[positions]
-            episode = self.episodes[int(episode_idx)]
+            episode = self.episodes[index]
             cache_frames = episode.resolve_cached_frame_indices(frames)
-            if cache_frames.size and int(cache_frames.max()) >= len(array):
-                raise IndexError(f"DINO cache frame index outside episode {episode_idx}")
-            cached = np.asarray(array[cache_frames], dtype=np.float16)
+            if self.read_backend == "pread":
+                assert self._rows is not None
+                cached = self._rows.read(
+                    _tokens_path(self.cache_dir, episode.cache_key),
+                    cache_frames,
+                    expected_shape=(
+                        episode.cached_frame_count,
+                        len(self.storage_camera_names),
+                        self.tokens_per_camera,
+                        self.token_dim,
+                    ),
+                    expected_dtype=np.float16,
+                )
+            else:
+                array = self._array(index)
+                if cache_frames.size and int(cache_frames.max()) >= len(array):
+                    raise IndexError(f"DINO cache frame index outside episode {index}")
+                cached = np.asarray(array[cache_frames], dtype=np.float16)
             result[positions] = cached[:, self._camera_indices]
         return torch.from_numpy(np.ascontiguousarray(result))
 

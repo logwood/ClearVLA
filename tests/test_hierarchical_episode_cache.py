@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -327,3 +328,94 @@ def test_three_camera_cache_can_serve_an_ordered_two_camera_view(tmp_path: Path)
     assert tuple(rows.shape) == (1, 2, 2, 4)
     assert np.all(rows[:, 0] == 3.0)
     assert np.all(rows[:, 1] == 1.0)
+
+
+def test_pread_cache_backend_matches_mmap_for_ordered_repeated_rows(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "pread-data"
+    _write_episode(
+        root / "task" / "episode_0.hdf5",
+        value=11,
+        instruction="move object",
+    )
+    _write_episode(
+        root / "task" / "episode_1.hdf5",
+        value=21,
+        instruction="move another object",
+    )
+    episodes = _load(root)
+    preprocessing = PreprocessConfig()
+    decoded_cache = tmp_path / "decoded"
+    dino_cache = tmp_path / "dino"
+    build_all_decoded_caches(
+        episodes,
+        cache_dir=decoded_cache,
+        camera_names=CAMERAS,
+        preprocessing=preprocessing,
+    )
+    _write_token_caches(episodes, dino_cache, preprocessing)
+
+    selected = ("wrist", "top")
+    mmap_images = DecodedImageStore(
+        decoded_cache,
+        camera_names=selected,
+        preprocessing=preprocessing,
+        max_open_arrays=1,
+    )
+    pread_images = DecodedImageStore(
+        decoded_cache,
+        camera_names=selected,
+        preprocessing=preprocessing,
+        read_backend="pread",
+        max_open_arrays=1,
+    )
+    indices = np.asarray([3, 0, 3, 1], dtype=np.int64)
+    mmap_frames = mmap_images.load_window(episodes[0], indices)
+    pread_frames = pread_images.load_window(episodes[0], indices)
+    assert tuple(mmap_frames) == selected
+    for camera in selected:
+        assert np.array_equal(mmap_frames[camera].numpy(), pread_frames[camera].numpy())
+    assert pread_images._rows is not None
+    assert pread_images._rows.open_file_count <= 1
+
+    mmap_tokens = DinoV2TokenStore(
+        dino_cache,
+        episodes=episodes,
+        camera_names=selected,
+        preprocessing=preprocessing,
+        dinov2_model="unit-test-dino",
+        max_open_arrays=1,
+    )
+    pread_tokens = DinoV2TokenStore(
+        dino_cache,
+        episodes=episodes,
+        camera_names=selected,
+        preprocessing=preprocessing,
+        dinov2_model="unit-test-dino",
+        read_backend="pread",
+        max_open_arrays=1,
+    )
+    keys = [[0, 3], [0, 0], [0, 3], [1, 1]]
+    assert np.array_equal(
+        mmap_tokens.load_batch(keys).numpy(), pread_tokens.load_batch(keys).numpy()
+    )
+    assert pread_tokens._rows is not None
+    assert pread_tokens._rows.open_file_count <= 1
+
+    # A worker copy must reopen physical handles in its own process/state.
+    restored_images = pickle.loads(pickle.dumps(pread_images))
+    restored_tokens = pickle.loads(pickle.dumps(pread_tokens))
+    assert np.array_equal(
+        restored_images.load_window(episodes[0], indices)["top"].numpy(),
+        pread_frames["top"].numpy(),
+    )
+    assert np.array_equal(
+        restored_tokens.load_batch(keys).numpy(), pread_tokens.load_batch(keys).numpy()
+    )
+    mmap_images.close()
+    pread_images.close()
+    mmap_tokens.close()
+    pread_tokens.close()
+    restored_images.close()
+    restored_tokens.close()

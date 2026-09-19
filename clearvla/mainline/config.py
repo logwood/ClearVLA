@@ -61,6 +61,10 @@ class DataConfig:
     wrist_camera_key: str = "observations/images/cam_right_wrist"
     camera_key_overrides: tuple[tuple[str, str], ...] = ()
     image_store_mode: str = "decoded-cache"
+    # Opt-in physical NPY reads only; sampling and cache/data identity stay
+    # owned by their existing contracts. Legacy payloads omit these defaults.
+    visual_cache_read_backend: str = "mmap"
+    visual_pread_max_open_files: int = 16
     image_frame_lru_capacity: int = 512
     image_open_file_capacity: int = 8
     cache_side: int = 336
@@ -178,6 +182,12 @@ class DataConfig:
             raise ValueError("data.dinov2_reference_batch_size must be positive")
         if self.image_store_mode not in {"decoded-cache", "hdf5-direct"}:
             raise ValueError("data.image_store_mode must be decoded-cache or hdf5-direct")
+        if self.visual_cache_read_backend not in {"mmap", "pread"}:
+            raise ValueError("data.visual_cache_read_backend must be mmap or pread")
+        if type(self.visual_pread_max_open_files) is not int or self.visual_pread_max_open_files <= 0:
+            raise ValueError("data.visual_pread_max_open_files must be a positive integer")
+        if self.visual_cache_read_backend == "mmap" and self.visual_pread_max_open_files != 16:
+            raise ValueError("a custom visual_pread_max_open_files requires the pread backend")
         if self.image_frame_lru_capacity < 0 or self.image_open_file_capacity <= 0:
             raise ValueError("image-store LRU capacity must be non-negative and files positive")
         if not isinstance(self.task_filter, str):
@@ -1042,6 +1052,9 @@ class ExperimentConfig:
                 "world_camera_condition_mode"
             )
         data = cast(dict[str, object], payload["data"])
+        if self.data.visual_cache_read_backend == "mmap":
+            data.pop("visual_cache_read_backend")
+            data.pop("visual_pread_max_open_files")
         if self.data.window_boundary_contract == STRICT_COMPLETE_V1:
             # Preserve historical E8 config identity exactly.  Parsing an old
             # checkpoint supplies the dataclass default above.

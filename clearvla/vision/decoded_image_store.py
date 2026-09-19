@@ -12,6 +12,7 @@ import torch
 
 from clearvla.data.hdf5_episode import LoadedEpisode
 from clearvla.vision.image_io import decode_image_value
+from clearvla.vision.npy_rows import NpyRowReader
 from clearvla.vision.preprocessing import PreprocessConfig, apply_preprocess
 
 DECODED_IMAGE_CACHE_VERSION = "decoded-image-v1"
@@ -206,7 +207,7 @@ def build_all_decoded_caches(
 
 
 class DecodedImageStore:
-    """Strict mmap-backed decoded-image store.
+    """Strict mmap/pread decoded-image store.
 
     Each camera is stored separately, so native camera resolutions may differ.
     The store validates source HDF5 fingerprint, camera keys, frame count and
@@ -219,6 +220,7 @@ class DecodedImageStore:
         *,
         camera_names: tuple[str, ...],
         preprocessing: PreprocessConfig,
+        read_backend: str = "mmap",
         max_open_arrays: int = DEFAULT_MMAP_ARRAY_CACHE_CAPACITY,
     ) -> None:
         if not camera_names:
@@ -226,6 +228,9 @@ class DecodedImageStore:
         self.cache_dir = Path(cache_dir)
         self.camera_names = tuple(camera_names)
         self.preprocessing = preprocessing
+        if read_backend not in {"mmap", "pread"}:
+            raise ValueError("read_backend must be mmap or pread")
+        self.read_backend = read_backend
         if int(max_open_arrays) <= 0:
             raise ValueError("max_open_arrays must be positive")
         self.max_open_arrays = int(max_open_arrays)
@@ -233,6 +238,7 @@ class DecodedImageStore:
         # Keep the process-local mmap descriptor count bounded when workers
         # traverse a large multi-episode benchmark.
         self._arrays: OrderedDict[tuple[str, str], np.ndarray] = OrderedDict()
+        self._rows = NpyRowReader(max_open_files=max_open_arrays) if read_backend == "pread" else None
 
     def validate_episode(self, episode: LoadedEpisode) -> DecodedImageEpisodeMeta:
         meta_path = _meta_path(self.cache_dir, episode.cache_key)
@@ -299,7 +305,14 @@ class DecodedImageStore:
         state = dict(self.__dict__)
         state["_arrays"] = OrderedDict()
         state["_meta"] = {}
+        if self.read_backend == "pread":
+            state["_rows"] = NpyRowReader(max_open_files=self.max_open_arrays)
         return state
+
+    def close(self) -> None:
+        if self._rows is not None:
+            self._rows.close()
+        self._arrays.clear()
 
     def _array(self, episode: LoadedEpisode, camera: str) -> np.ndarray:
         key = (episode.cache_key, camera)
@@ -322,10 +335,24 @@ class DecodedImageStore:
         cache_indices = episode.resolve_cached_frame_indices(indices)
         output: dict[str, torch.Tensor] = {}
         for camera in self.camera_names:
-            # mmap slice -> private contiguous buffer [H,Hc,Wc,3]
-            frames = np.asarray(
-                self._array(episode, camera)[cache_indices], dtype=np.uint8
-            )
+            if self.read_backend == "pread":
+                assert self._rows is not None
+                if episode.cache_key not in self._meta:
+                    self.validate_episode(episode)
+                frames = self._rows.read(
+                    _episode_dir(self.cache_dir, episode.cache_key) / _camera_filename(camera),
+                    cache_indices,
+                    expected_shape=(
+                        episode.cached_frame_count,
+                        *self._meta[episode.cache_key].camera_shapes_hwc[camera],
+                    ),
+                    expected_dtype=np.uint8,
+                )
+            else:
+                # mmap slice -> private contiguous buffer [H,Hc,Wc,3]
+                frames = np.asarray(
+                    self._array(episode, camera)[cache_indices], dtype=np.uint8
+                )
             chw = np.ascontiguousarray(frames.transpose(0, 3, 1, 2))
             output[camera] = torch.from_numpy(chw)
         return output

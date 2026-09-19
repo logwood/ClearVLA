@@ -222,6 +222,33 @@ def test_config_identity_ignores_relocation_but_not_data_semantics() -> None:
     assert config.digest() != changed_dtype.digest()
 
 
+def test_pread_cache_backend_is_opt_in_and_serialized_explicitly() -> None:
+    baseline = ExperimentConfig()
+    baseline_data = baseline.as_dict()["data"]
+    assert "visual_cache_read_backend" not in baseline_data
+    assert "visual_pread_max_open_files" not in baseline_data
+
+    pread = replace(
+        baseline,
+        data=replace(
+            baseline.data,
+            visual_cache_read_backend="pread",
+            visual_pread_max_open_files=3,
+        ),
+    )
+    pread.validate()
+    pread_data = pread.as_dict()["data"]
+    assert pread_data["visual_cache_read_backend"] == "pread"
+    assert pread_data["visual_pread_max_open_files"] == 3
+    assert pread.digest() != baseline.digest()
+
+    with pytest.raises(ValueError, match="custom visual_pread_max_open_files"):
+        replace(
+            baseline,
+            data=replace(baseline.data, visual_pread_max_open_files=3),
+        ).validate()
+
+
 def test_gripper_compatibility_weight_is_explicit_only_when_nondefault() -> None:
     baseline = ExperimentConfig()
     legacy = replace(

@@ -41,7 +41,6 @@ from clearvla.data.samplers import (
     TaskBalancedInformationBatchSampler,
     TaskStratifiedBatchSampler,
 )
-from ..gripper_contract import is_binary_gripper_mode
 from clearvla.data.split import (
     RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
     load_episode_split_manifest,
@@ -61,6 +60,7 @@ from clearvla.vision.online_store import OnlineVisualStore
 from clearvla.vision.preprocessing import PreprocessConfig
 
 from ..config import ExperimentConfig
+from ..gripper_contract import is_binary_gripper_mode
 from ..interfaces import (
     ActionSupervision,
     AuditMetadata,
@@ -815,6 +815,8 @@ def _load_mainline_data(
             Path(data.decoded_cache),
             camera_names=cameras,
             preprocessing=preprocessing,
+            read_backend=data.visual_cache_read_backend,
+            max_open_arrays=data.visual_pread_max_open_files,
         )
     else:
         image_store = OnlineVisualStore(
@@ -830,6 +832,8 @@ def _load_mainline_data(
         preprocessing=preprocessing,
         dinov2_model=data.dinov2_model,
         required_episode_indices=required_token_episode_ids,
+        read_backend=data.visual_cache_read_backend,
+        max_open_arrays=data.visual_pread_max_open_files,
     )
     if token_store.token_dim != dims.visual_token_dim:
         raise ValueError(
