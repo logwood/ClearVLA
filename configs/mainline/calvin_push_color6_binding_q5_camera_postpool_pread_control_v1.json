@@ -1,0 +1,96 @@
+{
+  "data": {
+    "raw_hdf5_root": "/data/senwang/data/calvin/converted/abc_d_full",
+    "hdf5_glob": "*.hdf5",
+    "decoded_cache": "/data/senwang/data/calvin/caches/abc_d_full/decoded_336",
+    "dino_cache": "/data/senwang/data/calvin/caches/abc_d_full/dinov2_base_336",
+    "t5_condition": "/data/senwang/data/calvin/language/abc_d_full_t5_xxl_bank.pt",
+    "calvin_raw_source": "/data/senwang/data/calvin/raw/task_ABC_D",
+    "output_dir": "/data/senwang/clearvla/experiments/calvin/20260920-push-color6-binding-q5-camera-postpool-pread-control-v1",
+    "data_profile": "calvin_relative_7d_v1",
+    "action_key": "action",
+    "action_state_key": "action_state",
+    "state_key": "state",
+    "top_camera_key": "observations/images/cam_high",
+    "wrist_camera_key": "observations/images/cam_right_wrist",
+    "split_mode": "episode-manifest",
+    "split_manifest": "/data/senwang/data/calvin/converted/abc_d_push_color6_raw_overlay_v2_splits_20260915.json",
+    "train_episodes": 0,
+    "val_episodes": 0,
+    "test_episodes": 0,
+    "num_workers": 4,
+    "sampling_gripper_event_threshold": 0.1,
+    "visual_cache_read_backend": "pread",
+    "visual_pread_max_open_files": 16
+  },
+  "top": {
+    "world_camera_condition_mode": "coordinate_role_v1",
+    "p2_spatial_intent_mode": "post_pool_only"
+  },
+  "bottom": {
+    "arm_flow_mode": "relative_command_adapter",
+    "gripper_output_mode": "calvin_binary_command"
+  },
+  "objectives": {
+    "gripper_command": 0.1,
+    "gripper_event_threshold": 0.1
+  },
+  "optimizer": {
+    "epochs": 1,
+    "batch_size": 8
+  },
+  "runtime": {
+    "max_train_batches": 11012,
+    "max_val_batches": 256,
+    "log_every": 50,
+    "deployment_flow_schedule": {
+      "deployment_flow_schedule": "clearvla.mainline.deployment_flow_schedule",
+      "schema_version": 2,
+      "method": "euler",
+      "bottom_context_contract": "flow_step_context_t_dt_kn_endpoint_fourier_v1",
+      "endpoint_policy": "external_t1_head",
+      "initial_state_policy": "reuse_exact_initial",
+      "cache_boundary_policy": "one_w_rebuild_no_history",
+      "proposal": {
+        "schedule": "clearvla.flow_schedule",
+        "schema_version": 1,
+        "kind": "custom",
+        "boundaries": [
+          0.0,
+          0.1337480609952844,
+          0.3181082915068203,
+          0.528067042076036,
+          0.7565932872025407,
+          1.0
+        ],
+        "parameters": {
+          "candidate_id": "Q5",
+          "exponent": 1.25,
+          "formula": "t_i=(i/5)^exponent",
+          "label": "same-nfe-power-five",
+          "steps": 5
+        }
+      },
+      "refined": {
+        "schedule": "clearvla.flow_schedule",
+        "schema_version": 1,
+        "kind": "custom",
+        "boundaries": [
+          0.0,
+          0.1337480609952844,
+          0.3181082915068203,
+          0.528067042076036,
+          0.7565932872025407,
+          1.0
+        ],
+        "parameters": {
+          "candidate_id": "Q5",
+          "exponent": 1.25,
+          "formula": "t_i=(i/5)^exponent",
+          "label": "same-nfe-power-five",
+          "steps": 5
+        }
+      }
+    }
+  }
+}

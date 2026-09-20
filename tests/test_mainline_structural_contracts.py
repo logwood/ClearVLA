@@ -175,7 +175,10 @@ def _local_facts(
     )
 
 
-def _object_top() -> ObjectIntentDynamicsTop:
+def _object_top(
+    *,
+    p2_spatial_intent_mode: str = "post_pool_only",
+) -> ObjectIntentDynamicsTop:
     base = ExperimentConfig()
     config = replace(
         base,
@@ -201,6 +204,7 @@ def _object_top() -> ObjectIntentDynamicsTop:
         basis=2,
         heads=4,
         teacher_key_dim=8,
+        p2_spatial_intent_mode=p2_spatial_intent_mode,
         core_config=build_v120_visual_config(config),
     )
 
@@ -2662,6 +2666,10 @@ def test_p2_policy_dock_exposes_existing_typed_metadata_by_identity() -> None:
         executed_history=torch.randn(1, 3, 7),
     )
     dock = context.intent.policy_dock()
+    assert (
+        dock.target_object_address_logit
+        is context.intent.target_object_address_logit
+    )
     assert dock.typed_common_value is context.intent.typed_common_value
     assert (
         dock.typed_interval_residual_value
@@ -3022,7 +3030,7 @@ def test_p2_eval_intervention_preserves_posterior_and_localizes_values() -> None
         )
         torch.testing.assert_close(counterfactual.semantic, expected_semantic)
         torch.testing.assert_close(counterfactual.geometry, expected_geometry)
-        if mode == "geometry_address_neutral":
+        if mode in {"geometry_address_neutral", "target_address_neutral"}:
             # The address intervention lives in spatial selection, so a
             # terminal-only replay is deliberately an identity.
             assert torch.equal(counterfactual.combined(), primary.combined())
@@ -4173,7 +4181,7 @@ def test_s_lone_object_and_type_keep_fixed_owner_means_and_rms_contract() -> Non
         for query in top.intent.typed_relevance_queries:
             query.weight.zero_()
     public = torch.randn(1, 4, top.intent.hidden)
-    _, relevance_value, components, _, _ = top.intent._typed_relevance(
+    _, relevance_value, components, _, _, _ = top.intent._typed_relevance(
         public_interval_carrier=public,
         facts=facts,
     )
@@ -4252,7 +4260,7 @@ def test_s_integrated_common_residual_reconstructs_unchanged_schema25_scoring() 
         facts=facts,
         collect_diagnostics=False,
     )
-    raw_mass, raw_value, raw_components, _, _ = top.intent._typed_relevance(
+    raw_mass, raw_value, raw_components, _, _, _ = top.intent._typed_relevance(
         public_interval_carrier=intent.public_interval_carrier,
         facts=facts,
     )
@@ -4952,3 +4960,541 @@ def test_deployment_cache_has_no_source_or_training_charts() -> None:
         "intent",
         "candidate_world",
     }
+
+def test_s_shared_target_address_is_zero_start_k_centered_and_appearance_reachable() -> None:
+    torch.manual_seed(3151)
+    top = _object_top(p2_spatial_intent_mode="shared_target_prior_v1").eval()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    zeros = torch.zeros_like(facts.semantic)
+    appearance = torch.zeros_like(facts.appearance)
+    appearance[:, 0] = 1.0
+    appearance[:, 1] = -1.0
+    appearance[:, 2, ::2] = 0.5
+    appearance[:, 3, 1::2] = -0.5
+    facts = replace(
+        facts,
+        semantic=zeros,
+        appearance=appearance,
+        geometry=zeros,
+    )
+    facts.validate()
+    public_interval = torch.zeros(1, 4, 32)
+    public_interval[..., :8] = 1.0
+    with torch.no_grad():
+        for projection in top.intent.typed_relevance_queries:
+            projection.weight.zero_()
+        top.intent.typed_relevance_queries[1].weight[:, :8].copy_(torch.eye(8))
+        top.intent.target_object_address.weight.zero_()
+
+    zero_start = top.intent._typed_relevance(
+        public_interval_carrier=public_interval,
+        facts=facts,
+    )[3]
+    assert zero_start.dtype == torch.float32
+    assert torch.equal(zero_start, torch.zeros_like(zero_start))
+
+    with torch.no_grad():
+        top.intent.target_object_address.weight[0, 1] = 1.0
+    appearance_target = top.intent._typed_relevance(
+        public_interval_carrier=public_interval,
+        facts=facts,
+    )[3]
+    assert torch.all(appearance_target[..., 0] > appearance_target[..., 1])
+    torch.testing.assert_close(
+        appearance_target.sum(dim=-1),
+        torch.zeros_like(appearance_target.sum(dim=-1)),
+        atol=2.0e-7,
+        rtol=0.0,
+    )
+
+    # At exact legacy initialization the new head itself receives an ordinary
+    # gradient, while upstream typed queries correctly open only after that
+    # zero-start owner has moved away from zero.
+    with torch.no_grad():
+        top.intent.target_object_address.weight.zero_()
+    zero_for_grad = top.intent._typed_relevance(
+        public_interval_carrier=public_interval,
+        facts=facts,
+    )[3]
+    probe = zero_for_grad.new_tensor([1.0, -1.0, 0.5, -0.5])
+    head_gradient = torch.autograd.grad(
+        (zero_for_grad * probe[None, None]).sum(),
+        top.intent.target_object_address.weight,
+    )[0]
+    assert torch.isfinite(head_gradient).all()
+    assert torch.count_nonzero(head_gradient) > 0
+
+    with torch.no_grad():
+        top.intent.target_object_address.weight[0, 1] = 1.0
+    differentiable_public = public_interval.clone().requires_grad_(True)
+    opened = top.intent._typed_relevance(
+        public_interval_carrier=differentiable_public,
+        facts=facts,
+    )[3]
+    upstream_gradient = torch.autograd.grad(
+        (opened * probe[None, None]).sum(),
+        differentiable_public,
+    )[0]
+    assert torch.isfinite(upstream_gradient).all()
+    assert torch.count_nonzero(upstream_gradient) > 0
+
+
+def test_s_shared_target_address_preserves_rng_and_uniform_rows_are_exact_zero() -> None:
+    torch.manual_seed(31511)
+    baseline = _object_top()
+    baseline_state = baseline.state_dict()
+    torch.manual_seed(31511)
+    target = _object_top(p2_spatial_intent_mode="shared_target_prior_v1")
+    target_state = target.state_dict()
+    extra = set(target_state) - set(baseline_state)
+    assert len(extra) == 1
+    assert next(iter(extra)).endswith("target_object_address.weight")
+    for name, value in baseline_state.items():
+        torch.testing.assert_close(target_state[name], value, atol=0.0, rtol=0.0)
+
+    facts, _ = target.grounder(_local_facts(cameras=2))
+    semantic = torch.randn_like(facts.semantic[:, :1]).expand_as(facts.semantic).clone()
+    appearance = torch.randn_like(facts.appearance[:, :1]).expand_as(facts.appearance).clone()
+    geometry = torch.randn_like(facts.geometry[:, :1]).expand_as(facts.geometry).clone()
+    public_interval = torch.randn(1, 4, 32)
+    with torch.no_grad():
+        assert target.intent.target_object_address is not None
+        target.intent.target_object_address.weight.copy_(
+            torch.tensor([[0.1, -0.2, 0.3]])
+        )
+    for valid_objects in range(1, 5):
+        validity = torch.zeros_like(facts.validity)
+        validity[:, :valid_objects] = 1.0
+        equal_facts = replace(
+            facts,
+            semantic=semantic,
+            appearance=appearance,
+            geometry=geometry,
+            validity=validity,
+        )
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            address = target.intent._typed_relevance(
+                public_interval_carrier=public_interval,
+                facts=equal_facts,
+            )[3]
+        assert address.dtype == torch.float32
+        assert torch.equal(address, torch.zeros_like(address))
+
+
+def test_p2_shared_target_prior_binds_semantic_and_geometry_k_before_pooling() -> None:
+    torch.manual_seed(3152)
+    top = _object_top(p2_spatial_intent_mode="shared_target_prior_v1").eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    semantic = torch.zeros(1, 4, 4, 16)
+    transport = torch.zeros(1, 4, 4, 2, 2)
+    object_value = torch.tensor([-3.0, -1.0, 1.0, 3.0])
+    for object_index, value in enumerate(object_value):
+        semantic[:, :, object_index, 0] = value
+        transport[:, :, object_index, :, 0] = 0.01 * value
+    dynamics = _future_dynamics(
+        content=16,
+        objects=4,
+        semantic_delta=semantic,
+        transport_mean=transport,
+    )
+    reader = top.effect_reader
+    with torch.no_grad():
+        for projection in reader.source_query:
+            projection.weight.zero_()
+        for projection in reader.source_key:
+            projection.weight.zero_()
+        reader.coordinate_query.weight.zero_()
+    action_query = torch.zeros(1, 24, 2, 32)
+    dock = context.intent.policy_dock()
+    neutral_dock = replace(
+        dock,
+        target_object_address_logit=torch.zeros_like(
+            dock.target_object_address_logit
+        ),
+    )
+    target_logit = torch.tensor([-6.0, -2.0, 2.0, 6.0]).reshape(1, 1, 4)
+    target_dock = replace(
+        dock,
+        target_object_address_logit=target_logit.expand(1, 4, 4).clone(),
+    )
+    neutral, _ = reader.spatial_select(
+        action_query,
+        dynamics,
+        neutral_dock,
+        collect_diagnostics=False,
+    )
+    selected, metrics = reader.spatial_select(
+        action_query,
+        dynamics,
+        target_dock,
+        collect_diagnostics=True,
+    )
+    assert selected.semantic_value[..., 0].mean() > neutral.semantic_value[..., 0].mean()
+    assert selected.geometry_value[..., 0].mean() > neutral.geometry_value[..., 0].mean()
+    assert metrics["object_p2_target_address_mode_enabled"] == 1.0
+    assert metrics["object_p2_target_address_active_rms"] > 0.0
+
+    # The retained post-pooling typed context still owns interval conditioning;
+    # it cannot rewrite the already-selected physical W values.
+    changed_typed = replace(
+        target_dock,
+        typed_common_value=torch.randn_like(target_dock.typed_common_value),
+        typed_interval_residual_value=torch.randn_like(
+            target_dock.typed_interval_residual_value
+        ),
+    )
+    typed_selected, _ = reader.spatial_select(
+        action_query,
+        dynamics,
+        changed_typed,
+        collect_diagnostics=False,
+    )
+    torch.testing.assert_close(typed_selected.semantic_value, selected.semantic_value)
+    torch.testing.assert_close(typed_selected.geometry_value, selected.geometry_value)
+    assert not torch.equal(typed_selected.selected_s_context, selected.selected_s_context)
+
+    reader.set_eval_intervention("target_address_neutral")
+    intervened, _ = reader.spatial_select(
+        action_query,
+        dynamics,
+        target_dock,
+        collect_diagnostics=False,
+    )
+    reader.clear_eval_intervention()
+    torch.testing.assert_close(intervened.semantic_value, neutral.semantic_value)
+    torch.testing.assert_close(intervened.geometry_value, neutral.geometry_value)
+
+    # The default reader ignores the new field exactly, preserving the accepted
+    # post-pooling ABI until the opt-in model contract is selected.
+    legacy = ObjectFutureEffectReader(hidden=32, content_dim=16, route_dim=8).eval()
+    legacy.load_state_dict(reader.state_dict())
+    legacy_neutral, _ = legacy.spatial_select(
+        action_query,
+        dynamics,
+        neutral_dock,
+        collect_diagnostics=False,
+    )
+    legacy_target, _ = legacy.spatial_select(
+        action_query,
+        dynamics,
+        target_dock,
+        collect_diagnostics=False,
+    )
+    torch.testing.assert_close(legacy_target.semantic_value, legacy_neutral.semantic_value)
+    torch.testing.assert_close(legacy_target.geometry_value, legacy_neutral.geometry_value)
+
+
+def test_p2_shared_target_prior_is_k_equivariant_masks_all_invalid_and_has_vjp() -> None:
+    torch.manual_seed(3153)
+    top = _object_top(p2_spatial_intent_mode="shared_target_prior_v1").train()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    semantic = torch.randn(1, 4, 4, 16, requires_grad=True)
+    transport = (0.03 * torch.randn(1, 4, 4, 2, 2)).requires_grad_(True)
+    dynamics = _future_dynamics(
+        content=16,
+        objects=4,
+        semantic_delta=semantic,
+        transport_mean=transport,
+    )
+    dock = context.intent.policy_dock()
+    target_logit = torch.randn_like(
+        dock.target_object_address_logit,
+        requires_grad=True,
+    )
+    target_logit = target_logit - target_logit.mean(dim=-1, keepdim=True)
+    target_dock = replace(dock, target_object_address_logit=target_logit)
+    action_query = torch.randn(1, 24, 2, 32, requires_grad=True)
+    effect, _ = top.effect_reader(
+        action_query,
+        dynamics,
+        target_dock,
+        collect_diagnostics=False,
+    )
+    gradients = torch.autograd.grad(
+        effect.combined().square().mean(),
+        (target_logit, semantic, transport, action_query),
+        retain_graph=True,
+    )
+    for gradient in gradients:
+        assert torch.isfinite(gradient).all()
+        assert torch.count_nonzero(gradient) > 0
+
+    permutation = torch.tensor([3, 1, 0, 2])
+    permuted_dock = replace(
+        target_dock,
+        target_object_address_logit=target_dock.target_object_address_logit[
+            :, :, permutation
+        ],
+        typed_common_value=target_dock.typed_common_value[:, permutation],
+        typed_interval_residual_value=(
+            target_dock.typed_interval_residual_value[:, :, permutation]
+        ),
+    )
+    selected, _ = top.effect_reader.spatial_select(
+        action_query.detach(),
+        dynamics,
+        target_dock,
+        collect_diagnostics=False,
+    )
+    permuted, _ = top.effect_reader.spatial_select(
+        action_query.detach(),
+        dynamics.permute(permutation),
+        permuted_dock,
+        collect_diagnostics=False,
+    )
+    for name in (
+        "key",
+        "semantic_value",
+        "semantic_common_value",
+        "semantic_residual_value",
+        "geometry_value",
+        "geometry_common_value",
+        "geometry_residual_value",
+        "selected_s_context",
+        "support",
+    ):
+        torch.testing.assert_close(getattr(permuted, name), getattr(selected, name))
+
+    camera_permutation = torch.tensor([1, 0])
+    camera_permuted_dynamics = replace(
+        dynamics,
+        transport_mean=dynamics.transport_mean[:, :, :, camera_permutation],
+        transport_covariance=(
+            dynamics.transport_covariance[:, :, :, camera_permutation]
+        ),
+        camera_coordinates=dynamics.camera_coordinates[:, :, camera_permutation],
+        camera_chart_availability=(
+            dynamics.camera_chart_availability[:, :, camera_permutation]
+        ),
+        log_camera_chart_availability=(
+            dynamics.log_camera_chart_availability[:, :, camera_permutation]
+        ),
+    )
+    camera_permuted, _ = top.effect_reader.spatial_select(
+        action_query.detach(),
+        camera_permuted_dynamics,
+        target_dock,
+        collect_diagnostics=False,
+    )
+    for name in (
+        "key",
+        "semantic_value",
+        "semantic_common_value",
+        "semantic_residual_value",
+        "geometry_value",
+        "geometry_common_value",
+        "geometry_residual_value",
+        "selected_s_context",
+        "support",
+    ):
+        torch.testing.assert_close(
+            getattr(camera_permuted, name),
+            getattr(selected, name),
+        )
+
+    invalid = _future_dynamics(
+        content=16,
+        objects=4,
+        chart_availability=torch.zeros(1, 4, 1),
+        camera_chart_availability=torch.zeros(1, 4, 2, 1),
+    )
+    invalid_selected, _ = top.effect_reader.spatial_select(
+        action_query.detach(),
+        invalid,
+        target_dock,
+        collect_diagnostics=False,
+    )
+    assert not invalid_selected.support.any()
+    for value in (
+        invalid_selected.semantic_value,
+        invalid_selected.geometry_value,
+        invalid_selected.key,
+        invalid_selected.selected_s_context,
+    ):
+        assert torch.isfinite(value).all()
+    assert torch.equal(
+        invalid_selected.semantic_value,
+        torch.zeros_like(invalid_selected.semantic_value),
+    )
+    assert torch.equal(
+        invalid_selected.geometry_value,
+        torch.zeros_like(invalid_selected.geometry_value),
+    )
+
+
+def test_p2_shared_target_prior_quarantines_invalid_nonfinite_and_rejects_supported_nonfinite() -> None:
+    torch.manual_seed(31531)
+    top = _object_top(p2_spatial_intent_mode="shared_target_prior_v1").eval()
+    context, _ = top.build_online_context(
+        local_facts=_local_facts(cameras=2),
+        goal_tokens=torch.randn(1, 6, 12),
+        goal_mask=torch.ones(1, 6, dtype=torch.bool),
+        state_history=torch.randn(1, 3, 7),
+        state=torch.randn(1, 7),
+        action_state=torch.randn(1, 7),
+        executed_history=torch.randn(1, 3, 7),
+    )
+    partial_object_support = torch.ones(1, 4, 1)
+    partial_object_support[:, 1] = 0.0
+    partial_camera_support = torch.ones(1, 4, 2, 1)
+    partial_camera_support[:, 1] = 0.0
+    partial = _future_dynamics(
+        content=16,
+        objects=4,
+        chart_availability=partial_object_support,
+        camera_chart_availability=partial_camera_support,
+    )
+    action_query = torch.randn(1, 24, 2, 32)
+    dock = context.intent.policy_dock()
+    invalid_nan = torch.zeros_like(dock.target_object_address_logit)
+    invalid_nan[:, :, 1] = torch.nan
+    quarantined, quarantined_metrics = top.effect_reader.spatial_select(
+        action_query,
+        partial,
+        replace(dock, target_object_address_logit=invalid_nan),
+        collect_diagnostics=True,
+    )
+    for value in (
+        quarantined.semantic_value,
+        quarantined.geometry_value,
+        quarantined.key,
+        quarantined.selected_s_context,
+    ):
+        assert torch.isfinite(value).all()
+    for name, value in quarantined_metrics.items():
+        if name.startswith("object_p2_target_address_"):
+            assert torch.isfinite(torch.as_tensor(value)).all(), name
+
+    supported_nan = invalid_nan.clone()
+    supported_nan[:, :, 0] = torch.nan
+    with pytest.raises(ValueError, match="non-finite values on supported K"):
+        top.effect_reader.spatial_select(
+            action_query,
+            partial,
+            replace(dock, target_object_address_logit=supported_nan),
+            collect_diagnostics=False,
+        )
+
+    empty = _future_dynamics(
+        content=16,
+        objects=4,
+        chart_availability=torch.zeros(1, 4, 1),
+        camera_chart_availability=torch.zeros(1, 4, 2, 1),
+    )
+    all_nan = torch.full_like(dock.target_object_address_logit, torch.nan)
+    empty_selected, empty_metrics = top.effect_reader.spatial_select(
+        action_query,
+        empty,
+        replace(dock, target_object_address_logit=all_nan),
+        collect_diagnostics=True,
+    )
+    assert not empty_selected.support.any()
+    assert torch.equal(
+        empty_selected.semantic_value,
+        torch.zeros_like(empty_selected.semantic_value),
+    )
+    assert torch.equal(
+        empty_selected.geometry_value,
+        torch.zeros_like(empty_selected.geometry_value),
+    )
+    for name, value in empty_metrics.items():
+        if name.startswith("object_p2_target_address_"):
+            assert torch.isfinite(torch.as_tensor(value)).all(), name
+
+
+def test_p2_shared_target_prior_opens_s_and_w_owners_from_the_existing_effect_loss() -> None:
+    torch.manual_seed(3154)
+    top = _object_top(p2_spatial_intent_mode="shared_target_prior_v1").train()
+    facts, _ = top.grounder(_local_facts(cameras=2))
+    inputs = {
+        "goal_tokens": torch.randn(1, 6, 12),
+        "goal_mask": torch.ones(1, 6, dtype=torch.bool),
+        "state_history": torch.randn(1, 3, 7),
+        "state": torch.randn(1, 7),
+        "executed_history": torch.randn(1, 3, 7),
+        "facts": facts,
+        "collect_diagnostics": False,
+    }
+    semantic = torch.randn(1, 4, 4, 16)
+    transport = (0.03 * torch.randn(1, 4, 4, 2, 2)).requires_grad_(True)
+    dynamics = _future_dynamics(
+        content=16,
+        objects=4,
+        semantic_delta=semantic,
+        transport_mean=transport,
+    )
+    action_query = torch.randn(1, 24, 2, 32)
+    target_head = top.intent.target_object_address
+    assert target_head is not None
+
+    intent_zero, _ = top.intent(**inputs)
+    dock_zero = intent_zero.policy_dock()
+    isolated_zero = replace(
+        dock_zero,
+        interval_key=dock_zero.interval_key.detach(),
+        typed_common_value=dock_zero.typed_common_value.detach(),
+        typed_interval_residual_value=(
+            dock_zero.typed_interval_residual_value.detach()
+        ),
+    )
+    effect_zero, _ = top.effect_reader(
+        action_query,
+        dynamics,
+        isolated_zero,
+        collect_diagnostics=False,
+    )
+    zero_head_gradient, zero_query_gradient, transport_gradient = torch.autograd.grad(
+        effect_zero.combined().square().mean(),
+        (
+            target_head.weight,
+            top.intent.typed_relevance_queries[1].weight,
+            transport,
+        ),
+        allow_unused=True,
+    )
+    assert torch.isfinite(zero_head_gradient).all()
+    assert torch.count_nonzero(zero_head_gradient) > 0
+    assert zero_query_gradient is None or torch.count_nonzero(zero_query_gradient) == 0
+    assert torch.isfinite(transport_gradient).all()
+    assert torch.count_nonzero(transport_gradient) > 0
+
+    with torch.no_grad():
+        target_head.weight[0, 1] = 1.0
+    intent_open, _ = top.intent(**inputs)
+    dock_open = intent_open.policy_dock()
+    isolated_open = replace(
+        dock_open,
+        interval_key=dock_open.interval_key.detach(),
+        typed_common_value=dock_open.typed_common_value.detach(),
+        typed_interval_residual_value=(
+            dock_open.typed_interval_residual_value.detach()
+        ),
+    )
+    effect_open, _ = top.effect_reader(
+        action_query,
+        dynamics,
+        isolated_open,
+        collect_diagnostics=False,
+    )
+    opened_query_gradient = torch.autograd.grad(
+        effect_open.combined().square().mean(),
+        top.intent.typed_relevance_queries[1].weight,
+    )[0]
+    assert torch.isfinite(opened_query_gradient).all()
+    assert torch.count_nonzero(opened_query_gradient) > 0

@@ -249,6 +249,83 @@ def test_pread_cache_backend_is_opt_in_and_serialized_explicitly() -> None:
         ).validate()
 
 
+def test_p2_spatial_intent_mode_is_explicit_and_round_trips() -> None:
+    baseline = ExperimentConfig()
+    assert baseline.top.p2_spatial_intent_mode == "post_pool_only"
+    assert "p2_spatial_intent_mode" not in baseline.as_dict()["top"]
+
+    target_prior = replace(
+        baseline,
+        top=replace(
+            baseline.top,
+            p2_spatial_intent_mode="shared_target_prior_v1",
+        ),
+    )
+    target_prior.validate()
+    payload = target_prior.as_dict()
+    assert payload["top"]["p2_spatial_intent_mode"] == "shared_target_prior_v1"
+    restored = config_from_mapping(json.loads(json.dumps(payload)))
+    assert restored.top.p2_spatial_intent_mode == "shared_target_prior_v1"
+    assert restored.digest() == target_prior.digest()
+    assert restored.digest() != baseline.digest()
+
+    with pytest.raises(ValueError, match="p2_spatial_intent_mode"):
+        replace(
+            baseline,
+            top=replace(
+                baseline.top,
+                p2_spatial_intent_mode="language_bypass",
+            ),
+        ).validate()
+
+
+def test_calvin_pread_control_and_target_prior_configs_are_matched() -> None:
+    control = load_config(
+        ROOT
+        / "configs"
+        / "mainline"
+        / "calvin_push_color6_binding_q5_camera_postpool_pread_control_v1.json"
+    )
+    treatment = load_config(
+        ROOT
+        / "configs"
+        / "mainline"
+        / "calvin_push_color6_binding_q5_camera_target_prior_pread_v1.json"
+    )
+    control.validate()
+    treatment.validate()
+    assert control.data.visual_cache_read_backend == "pread"
+    assert treatment.data.visual_cache_read_backend == "pread"
+    assert control.data.visual_pread_max_open_files == 16
+    assert treatment.data.visual_pread_max_open_files == 16
+    assert control.top.p2_spatial_intent_mode == "post_pool_only"
+    assert treatment.top.p2_spatial_intent_mode == "shared_target_prior_v1"
+
+    def differing_leaf_paths(
+        left: object,
+        right: object,
+        *,
+        prefix: str = "",
+    ) -> set[str]:
+        if isinstance(left, dict) and isinstance(right, dict):
+            paths: set[str] = set()
+            for key in set(left) | set(right):
+                child = f"{prefix}.{key}" if prefix else str(key)
+                if key not in left or key not in right:
+                    paths.add(child)
+                else:
+                    paths.update(
+                        differing_leaf_paths(left[key], right[key], prefix=child)
+                    )
+            return paths
+        return set() if left == right else {prefix}
+
+    assert differing_leaf_paths(control.as_dict(), treatment.as_dict()) == {
+        "data.output_dir",
+        "top.p2_spatial_intent_mode",
+    }
+
+
 def test_gripper_compatibility_weight_is_explicit_only_when_nondefault() -> None:
     baseline = ExperimentConfig()
     legacy = replace(

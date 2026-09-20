@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import torch
 
 from clearvla.mainline.checkpoint import (
@@ -24,8 +25,15 @@ from clearvla.mainline.model.component_contracts import (
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.runtime.checkpoints import (
     CHECKPOINT_SCHEMA,
+    P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
+    P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS,
+    P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+    P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS,
+    P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+    P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY,
     VALIDATION_REPLAY_SOURCE_PATHS,
     load_checkpoint_exact,
+    load_checkpoint_for_initialization,
     load_checkpoint_for_validation,
     migrate_bottom_only,
     save_checkpoint,
@@ -1130,3 +1138,372 @@ def test_schema31_bspine_round_trip_and_schema30_exact_resume_rejection(
         raise AssertionError("Schema30 must not exact-resume into Schema31")
     for name, value in restored_model.state_dict().items():
         assert torch.equal(value, before[name]), name
+
+def test_p2_shared_target_prior_pread_has_one_explicit_combined_initialization(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    condition = tmp_path / "goal-target-prior-pread.pt"
+    condition.write_bytes(b"t5-condition")
+    language = ArtifactIdentity.from_file("t5_goal", condition)
+    baseline_config = _reduced_modular_config()
+    target_config = replace(
+        baseline_config,
+        data=replace(
+            baseline_config.data,
+            visual_cache_read_backend="pread",
+            visual_pread_max_open_files=3,
+        ),
+        top=replace(
+            baseline_config.top,
+            p2_spatial_intent_mode="shared_target_prior_v1",
+        ),
+    )
+    target_config.validate()
+    baseline_identity = build_checkpoint_identity(
+        baseline_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="8" * 40,
+    )
+    target_identity = build_checkpoint_identity(
+        target_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="8" * 40,
+    )
+    changed_paths = set(P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS)
+    saved_rows = list(baseline_identity.source.files)
+    available_paths = {name for name, _digest in saved_rows}
+    assert changed_paths <= available_paths
+    for index, (name, _digest) in enumerate(saved_rows):
+        if name in changed_paths:
+            saved_rows[index] = (
+                name,
+                hashlib.sha256(f"pre-target-prior-pread:{name}".encode()).hexdigest(),
+            )
+    saved_source_rows = tuple(saved_rows)
+    saved_identity = replace(
+        baseline_identity,
+        source=replace(
+            baseline_identity.source,
+            files=saved_source_rows,
+            digest=hashlib.sha256(
+                json.dumps(
+                    saved_source_rows,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        ),
+    )
+    source_model = ClearVLAMainlinePolicy(baseline_config)
+    source_optimizer, _ = build_optimizer(source_model, baseline_config)
+    source_schedule = WarmupCosineSchedule(
+        source_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    checkpoint = tmp_path / "pre-target-prior-pread.pt"
+    save_checkpoint(
+        checkpoint,
+        model=source_model,
+        optimizer=source_optimizer,
+        schedule=source_schedule,
+        config=baseline_config,
+        identity=saved_identity,
+        epoch=1,
+        global_step=0,
+        best_metric=0.25,
+    )
+    target_model = ClearVLAMainlinePolicy(target_config)
+    with pytest.raises(ValueError, match="differs outside its one model selector"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=target_model,
+            config=target_config,
+            identity=target_identity,
+            model_contract_migration=P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+        )
+    state = load_checkpoint_for_initialization(
+        checkpoint,
+        model=target_model,
+        config=target_config,
+        identity=target_identity,
+        model_contract_migration=P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+    )
+    assert state.model_contract_migration == P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION
+    assert set(state.changed_source_files) == changed_paths
+    source_state = source_model.state_dict()
+    target_state = target_model.state_dict()
+    assert set(target_state) - set(source_state) == {
+        P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY
+    }
+    for name, value in source_state.items():
+        torch.testing.assert_close(target_state[name], value, atol=0.0, rtol=0.0)
+    assert torch.count_nonzero(
+        target_state[P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY]
+    ) == 0
+
+    wrong_target_config = replace(
+        target_config,
+        data=replace(
+            target_config.data,
+            visual_cache_read_backend="mmap",
+            visual_pread_max_open_files=16,
+        ),
+    )
+    wrong_target_config.validate()
+    wrong_target_identity = build_checkpoint_identity(
+        wrong_target_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="8" * 40,
+    )
+    with pytest.raises(ValueError, match="mmap source and pread target"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=ClearVLAMainlinePolicy(wrong_target_config),
+            config=wrong_target_config,
+            identity=wrong_target_identity,
+            model_contract_migration=P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+        )
+
+    exact_optimizer, _ = build_optimizer(target_model, target_config)
+    exact_schedule = WarmupCosineSchedule(
+        exact_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    exact_path = tmp_path / "target-prior-pread-exact.pt"
+    save_checkpoint(
+        exact_path,
+        model=target_model,
+        optimizer=exact_optimizer,
+        schedule=exact_schedule,
+        config=target_config,
+        identity=target_identity,
+        epoch=0,
+        global_step=0,
+        best_metric=None,
+    )
+    exact_model = ClearVLAMainlinePolicy(target_config)
+    restored_optimizer, _ = build_optimizer(exact_model, target_config)
+    restored_schedule = WarmupCosineSchedule(
+        restored_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    restored = load_checkpoint_exact(
+        exact_path,
+        model=exact_model,
+        optimizer=restored_optimizer,
+        schedule=restored_schedule,
+        config=target_config,
+        identity=target_identity,
+    )
+    assert restored.epoch == 0 and restored.global_step == 0
+    for name, value in target_model.state_dict().items():
+        torch.testing.assert_close(exact_model.state_dict()[name], value, atol=0.0, rtol=0.0)
+
+    drifted_rows = list(target_identity.source.files)
+    forbidden_path = "clearvla/mainline/model/dynamics.py"
+    for index, (name, _digest) in enumerate(drifted_rows):
+        if name == forbidden_path:
+            drifted_rows[index] = (
+                name,
+                hashlib.sha256(b"unreviewed-combined-migration-drift").hexdigest(),
+            )
+            break
+    else:
+        raise AssertionError(f"source snapshot omitted {forbidden_path}")
+    drifted_source_rows = tuple(drifted_rows)
+    drifted_identity = replace(
+        target_identity,
+        source=replace(
+            target_identity.source,
+            files=drifted_source_rows,
+            digest=hashlib.sha256(
+                json.dumps(
+                    drifted_source_rows,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        ),
+    )
+    with pytest.raises(ValueError, match="source drift escapes the allow-list"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=ClearVLAMainlinePolicy(target_config),
+            config=target_config,
+            identity=drifted_identity,
+            model_contract_migration=P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+        )
+
+
+def test_p2_post_pool_pread_control_preserves_exact_model_state(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    condition = tmp_path / "goal-post-pool-pread.pt"
+    condition.write_bytes(b"t5-condition")
+    language = ArtifactIdentity.from_file("t5_goal", condition)
+    baseline_config = _reduced_modular_config()
+    control_config = replace(
+        baseline_config,
+        data=replace(
+            baseline_config.data,
+            visual_cache_read_backend="pread",
+            visual_pread_max_open_files=3,
+        ),
+    )
+    control_config.validate()
+    baseline_identity = build_checkpoint_identity(
+        baseline_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="9" * 40,
+    )
+    control_identity = build_checkpoint_identity(
+        control_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="9" * 40,
+    )
+    changed_paths = set(P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS)
+    saved_rows = list(baseline_identity.source.files)
+    assert changed_paths <= {name for name, _digest in saved_rows}
+    for index, (name, _digest) in enumerate(saved_rows):
+        if name in changed_paths:
+            saved_rows[index] = (
+                name,
+                hashlib.sha256(f"pre-post-pool-pread:{name}".encode()).hexdigest(),
+            )
+    saved_source_rows = tuple(saved_rows)
+    saved_identity = replace(
+        baseline_identity,
+        source=replace(
+            baseline_identity.source,
+            files=saved_source_rows,
+            digest=hashlib.sha256(
+                json.dumps(
+                    saved_source_rows,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        ),
+    )
+    source_model = ClearVLAMainlinePolicy(baseline_config)
+    source_optimizer, _ = build_optimizer(source_model, baseline_config)
+    source_schedule = WarmupCosineSchedule(
+        source_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    checkpoint = tmp_path / "pre-post-pool-pread.pt"
+    save_checkpoint(
+        checkpoint,
+        model=source_model,
+        optimizer=source_optimizer,
+        schedule=source_schedule,
+        config=baseline_config,
+        identity=saved_identity,
+        epoch=1,
+        global_step=0,
+        best_metric=0.25,
+    )
+
+    control_model = ClearVLAMainlinePolicy(control_config)
+    state = load_checkpoint_for_initialization(
+        checkpoint,
+        model=control_model,
+        config=control_config,
+        identity=control_identity,
+        model_contract_migration=P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
+    )
+    assert state.model_contract_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION
+    assert set(state.changed_source_files) == changed_paths
+    source_state = source_model.state_dict()
+    control_state = control_model.state_dict()
+    assert set(control_state) == set(source_state)
+    for name, value in source_state.items():
+        torch.testing.assert_close(control_state[name], value, atol=0.0, rtol=0.0)
+
+    wrong_mode_config = replace(
+        control_config,
+        top=replace(
+            control_config.top,
+            p2_spatial_intent_mode="shared_target_prior_v1",
+        ),
+    )
+    wrong_mode_config.validate()
+    wrong_mode_identity = build_checkpoint_identity(
+        wrong_mode_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="9" * 40,
+    )
+    with pytest.raises(ValueError, match="post_pool_only on both sides"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=ClearVLAMainlinePolicy(wrong_mode_config),
+            config=wrong_mode_config,
+            identity=wrong_mode_identity,
+            model_contract_migration=P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
+        )
+
+    wrong_backend_config = baseline_config
+    wrong_backend_identity = build_checkpoint_identity(
+        wrong_backend_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="9" * 40,
+    )
+    with pytest.raises(ValueError, match="mmap source and pread target"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=ClearVLAMainlinePolicy(wrong_backend_config),
+            config=wrong_backend_config,
+            identity=wrong_backend_identity,
+            model_contract_migration=P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
+        )
+
+    drifted_config = replace(
+        control_config,
+        data=replace(
+            control_config.data,
+            seed=control_config.data.seed + 1,
+        ),
+    )
+    drifted_config.validate()
+    drifted_identity = build_checkpoint_identity(
+        drifted_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="9" * 40,
+    )
+    with pytest.raises(ValueError, match="outside its physical-read selector"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=ClearVLAMainlinePolicy(drifted_config),
+            config=drifted_config,
+            identity=drifted_identity,
+            model_contract_migration=P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
+        )

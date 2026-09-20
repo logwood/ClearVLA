@@ -423,6 +423,11 @@ class TopConfig:
     # Opt-in W camera conditioning from current image-plane coordinates and
     # declared camera roles.  The historical motion-prior path stays default.
     world_camera_condition_mode: str = "motion_prior_only"
+    # The accepted reader applies typed S only after K/K*C pooling.  The
+    # opt-in target-prior mode moves direct target identity to the spatial
+    # address, shared over semantic and geometry readers, while W retains
+    # value/support authority and the geometry reader retains its camera axis.
+    p2_spatial_intent_mode: str = "post_pool_only"
 
     def validate(self) -> None:
         if self.world_camera_condition_mode not in {
@@ -432,6 +437,14 @@ class TopConfig:
             raise ValueError(
                 "top world_camera_condition_mode must be motion_prior_only "
                 "or coordinate_role_v1"
+            )
+        if self.p2_spatial_intent_mode not in {
+            "post_pool_only",
+            "shared_target_prior_v1",
+        }:
+            raise ValueError(
+                "top p2_spatial_intent_mode must be post_pool_only "
+                "or shared_target_prior_v1"
             )
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")
@@ -1047,6 +1060,9 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.p2_spatial_intent_mode == "post_pool_only":
+            # Keep legacy checkpoint identities exact unless opted in.
+            cast(dict[str, object], payload["top"]).pop("p2_spatial_intent_mode")
         if self.top.world_camera_condition_mode == "motion_prior_only":
             cast(dict[str, object], payload["top"]).pop(
                 "world_camera_condition_mode"

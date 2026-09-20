@@ -163,6 +163,24 @@ class _SelfBlock(nn.Module):
         return value + ffn
 
 
+class _ZeroStartTargetAddress(nn.Module):
+    """Bias-free shared type-to-K address head without constructor RNG use."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        if int(width) <= 0:
+            raise ValueError("target-address width must be positive")
+        self.weight = nn.Parameter(torch.zeros(1, int(width), dtype=torch.float32))
+
+    def forward(self, value: Tensor) -> Tensor:
+        if int(value.shape[-1]) != int(self.weight.shape[-1]):
+            raise ValueError("target-address input lost typed evidence width")
+        # Elementwise FP32 arithmetic is deliberately used instead of an
+        # autocast-eligible GEMM.  Equal typed evidence must remain an exact
+        # K-common value before the centering contract below.
+        return (value.float() * self.weight.float()).sum(dim=-1, keepdim=True)
+
+
 class StatelessObjectIntentOrganizer(nn.Module):
     """V120 observable intent without scalar progress or synthetic phases."""
 
@@ -177,8 +195,15 @@ class StatelessObjectIntentOrganizer(nn.Module):
         route_dim: int,
         horizon: int,
         heads: int,
+        target_object_address_mode: str = "post_pool_only",
     ) -> None:
         super().__init__()
+        if target_object_address_mode not in {
+            "post_pool_only",
+            "shared_target_prior_v1",
+        }:
+            raise ValueError("unknown target object address mode")
+        self.target_object_address_mode = target_object_address_mode
         self.hidden = int(hidden)
         self.horizon = int(horizon)
         self.goal_input = nn.Linear(goal_dim, hidden, bias=False)
@@ -203,6 +228,22 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.typed_relevance_queries = nn.ModuleList(
             nn.Linear(hidden, route_dim, bias=False) for _ in TYPED_INTENT_NAMES
         )
+        # One shared object identity must bind semantic and geometry reads.
+        # The head learns which typed evidence identifies the operated object
+        # (including appearance for color instructions) without creating one
+        # target per downstream reader.  Exact zero initialization preserves
+        # the legacy spatial reader at initialization and lets ordinary action
+        # loss open the route without a hand-set gain.
+        self.target_object_address: _ZeroStartTargetAddress | None
+        if target_object_address_mode == "shared_target_prior_v1":
+            self.target_object_address = _ZeroStartTargetAddress(
+                len(TYPED_INTENT_NAMES)
+            )
+        else:
+            # The accepted reader must retain the exact old parameter set and
+            # constructor RNG stream.  Runtime still exposes a typed zero field
+            # so the downstream dock has one stable schema.
+            self.target_object_address = None
         # Initial temperature is exactly one.  It remains bounded in [0.25, 4]
         # and therefore cannot turn the fixed-zero null comparison into an
         # unbounded selector gain.
@@ -276,7 +317,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         *,
         public_interval_carrier: Tensor,
         facts: ObjectFactSet,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Build fixed-zero, per-type relevance without collapsing K."""
 
         query_source = self.typed_query_norm(public_interval_carrier)
@@ -313,6 +354,40 @@ class StatelessObjectIntentOrganizer(nn.Module):
         signal_probability = torch.sigmoid(
             score * temperature.to(device=score.device)[None, None, None]
         )
+        # Target identity is one shared K-indexed fact, not one independently
+        # chosen object per downstream P2 type.  The shared zero-start head can
+        # learn whether semantic, appearance or geometry identifies the target.
+        # Removing the supported K-common component makes uniform evidence an
+        # exact neutral prior and leaves producer support authority unchanged.
+        typed_address_score = score * temperature.to(device=score.device)[
+            None, None, None
+        ]
+        if self.target_object_address is None:
+            target_address_raw = torch.zeros_like(typed_address_score[..., 0])
+        else:
+            target_address_raw = self.target_object_address(typed_address_score)[..., 0]
+        target_support = object_support[:, None].expand_as(target_address_raw)
+        safe_target_address = torch.where(
+            target_support,
+            target_address_raw.float(),
+            torch.zeros_like(target_address_raw, dtype=torch.float32),
+        )
+        first_legal_k = target_support.to(dtype=torch.int64).argmax(
+            dim=-1, keepdim=True
+        )
+        target_address_reference = safe_target_address.gather(-1, first_legal_k)
+        target_address_relative = safe_target_address - target_address_reference
+        target_count = target_support.float().sum(dim=-1, keepdim=True)
+        target_address_mean = torch.where(
+            target_support,
+            target_address_relative,
+            torch.zeros_like(target_address_relative),
+        ).sum(dim=-1, keepdim=True) / target_count.clamp_min(1.0)
+        target_object_address_logit = torch.where(
+            target_support,
+            target_address_relative - target_address_mean,
+            torch.zeros_like(target_address_relative),
+        )
         validity = validity_values[:, None, :, None, :]
         relevance_mass = signal_probability[..., None] * validity
         relevance_mass = relevance_mass.to(dtype=typed_route.dtype)
@@ -339,6 +414,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             relevance_mass,
             relevance_value,
             typed_components,
+            target_object_address_logit,
             score,
             temperature,
         )
@@ -472,6 +548,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             typed_relevance_mass,
             typed_relevance_value,
             typed_policy_components,
+            target_object_address_logit,
             typed_relevance_score,
             typed_temperature,
         ) = self._typed_relevance(
@@ -537,6 +614,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             policy_interval_context=policy_intervals,
             temporal_queries=temporal,
             state_change_evidence=state_change_evidence,
+            target_object_address_logit=target_object_address_logit,
             typed_common_mass=typed_common_mass,
             typed_common_value=typed_common_value,
             typed_interval_residual_mass=typed_interval_residual_mass,
@@ -586,6 +664,17 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
             "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
             "object_intent_typed_action_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
+            "object_intent_target_address_logit_rms": target_object_address_logit.detach().square().mean().sqrt(),
+            "object_intent_target_address_logit_k_variation": target_object_address_logit.detach().std(
+                dim=2, unbiased=False
+            ).mean(),
+            "object_intent_target_address_logit_k_center_error": (
+                (
+                    target_object_address_logit.detach()
+                    * object_validity[:, None].detach().float()
+                ).sum(dim=2)
+                / object_validity.detach().float().sum(dim=1)[:, None].clamp_min(1.0)
+            ).abs().amax(),
             "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
             "object_intent_observed_transport_rms": transport_prior.detach().float().square().mean().sqrt(),
             "object_intent_state_change_history_rms": state_change_history.detach().float().square().mean().sqrt(),
@@ -617,6 +706,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
             metrics,
             "gradient_tensor_s_language_object_attention_rms",
         )
+        if self.target_object_address is not None:
+            register_gradient_rms_metric(
+                target_object_address_logit,
+                metrics,
+                "gradient_tensor_s_target_object_address_logit_rms",
+            )
         raw_routes = (semantic_input, appearance_input, geometry_input)
         for type_index, name in enumerate(TYPED_INTENT_NAMES):
             mass = typed_relevance_mass[..., type_index, 0].detach().float()

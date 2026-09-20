@@ -47,6 +47,20 @@ binary-command behavior; the ManiSkill choice is explicit and does not change
 Pen/RDT/LIBERO defaults. The opt-in B-spine is an experiment selection, not a
 new default.
 
+## Default and opt-in selections
+
+These are source/config selections, not claims about trained-model success.
+
+| Boundary | Default | Explicit alternative |
+|---|---|---|
+| P2 spatial intent | `post_pool_only`; typed S selects interval after spatial pooling | `shared_target_prior_v1`; one shared S-owned target-K prior conditions semantic K and geometry K*C before pooling |
+| Visual NPY read transport | `mmap` | `pread`; cache layout, logical indices and dataset identity are unchanged |
+| W camera condition | `motion_prior_only` | `coordinate_role_v1`; separate initialization migration |
+| ODE schedule | Uniform E5 proposal/refined | Registered Q5 plus its versioned flow-step context |
+
+An opt-in's source tests do not promote it to the default. The checkpoint's
+serialized selection remains authoritative for evaluation and resume.
+
 ## Authority and document ownership
 
 When records disagree, use:
@@ -114,11 +128,22 @@ relevance decomposition, while a bounded symmetric
 semantic/appearance/geometry-enriched public K memory supplies the coarse
 object read. Both views are masked by producer-owned validity. Goal/history
 innovations condition the interval object query, and that same conditioned
-query is carried into the coarse object's K read and history read. Thus an
-instruction can change the K-preserving object attention and typed S context,
-while the only value that reaches W/P2 is still the ordinary physical
-action/consequence carrier. No raw language, color label or rank-1
-selected-object tensor is introduced.
+query is carried into the coarse object's K read and history read. W still
+receives intent only through the outlet-owned physical action condition. The
+default P2 path reads typed S only after spatial pooling and uses it for
+interval selection.
+
+The opt-in `shared_target_prior_v1` additionally exports one S-owned FP32
+`[B,I,K]` address before P2 spatial pooling. A bias-free exact-zero `[1,3]`
+owner combines the typed semantic, appearance and geometry evidence without
+consuming constructor RNG. Supported K are reference- and mean-centered in
+FP32, so uniform evidence is exactly neutral under autocast. The same K prior
+is added to semantic K and geometry K*C logits, broadcasting only over C; it
+cannot create support, rewrite W values, flatten camera identity or introduce
+independent target priors for the two readers. Their final K posteriors may
+still differ because their W source and coordinate likelihoods remain
+independent. Supported NaN/Inf is rejected and unsupported K is quarantined.
+No raw language, color label or rank-1 object pointer enters W or the bottom.
 
 ### Precision, policy, transition and execution
 
@@ -170,6 +195,11 @@ encode online observation once
 ~~~
 
 There is no train-time endpoint estimate or train-time W rebuild.
+
+Visual cache transport is independent of model semantics. The default remains
+`mmap`; opt-in `pread` reads exact ordered NPY rows with bounded process-local
+handles while preserving cache admission, row repetition/order, camera order,
+normalizers, sampling and dataset identity.
 
 Deployment and validation perform exactly two complete five-update ODE passes
 from identical initial physical noise:
@@ -517,6 +547,7 @@ Current checkpoint observations, when needed, live in the temporary
 | FutureSupervision | Disjoint training-only future action/state/DINO evidence |
 | ObjectFactSet | K=4 physical objects plus explicit null and observable object/camera mass |
 | ActionIntentDock | Public S interval/history/K memory plus producer-owned K validity mask; no typed fact re-entry |
+| PolicyIntentDock | Reduced typed S context for P2/P3; opt-in shared FP32 target-K address |
 | PhysicalActionCondition | Four physical interval means plus current-anchored deltas |
 | ObjectWorldBelief | Compact current G belief; no S/Teacher/noisy action |
 | CandidateWorld | One exact action condition atomically paired with FutureObjectDynamics |
@@ -599,6 +630,15 @@ architectural semantic.
 - Exact resume fails closed on incompatible architecture, component, data,
   optimizer or continuation state. A migration requires an explicit tested
   contract.
+- `p2_shared_target_prior_v1` adds exactly the zero `[1,3]` address owner.
+  `p2_shared_target_prior_pread_v1` additionally admits only the four reviewed
+  physical-reader paths. Both are fresh optimizer/schedule/RNG initialization,
+  require identical dataset/language/normalizer identity and are not exact
+  resume across modes.
+- `p2_post_pool_pread_control_v1` is the matched physical-reader control. It
+  keeps `post_pool_only`, changes only `mmap` to `pread`, preserves the exact
+  model state-key set and uses the same fresh initialization boundary as the
+  shared-target treatment.
 - Validation replay is read-only: it does not load optimizer/scheduler/random
   continuation state and writes no checkpoint.
 - Formal output directories are new and empty, and checkpoint writes are

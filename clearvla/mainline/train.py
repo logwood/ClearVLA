@@ -32,6 +32,9 @@ from .runtime.checkpoints import (
     LIBERO_RELEASE_FIRST_REPAIR_MIGRATION,
     LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION,
     LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION,
+    P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
+    P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+    P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
     WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
     InitializationState,
     load_checkpoint_exact,
@@ -122,10 +125,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--init-model-contract-migration",
-        choices=(WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,),
+        choices=(
+            P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
+            P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+            P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+            WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
+        ),
         help=(
-            "Explicitly initialize the opt-in W camera coordinate/role "
-            "condition from an otherwise identical legacy checkpoint."
+            "Explicitly initialize one narrow opt-in model contract from an "
+            "otherwise identical checkpoint."
         ),
     )
     parser.add_argument("--validate-checkpoint", type=Path)

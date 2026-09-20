@@ -187,6 +187,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         role_host_dropout: float = 0.05,
         camera_names: tuple[str, ...] = ("top", "wrist"),
         world_camera_condition_mode: str = "motion_prior_only",
+        p2_spatial_intent_mode: str = "post_pool_only",
         core_config=None,
     ) -> None:
         super().__init__()
@@ -238,6 +239,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             route_dim=route_dim,
             horizon=horizon,
             heads=heads,
+            target_object_address_mode=p2_spatial_intent_mode,
         )
         self.coarse_action = CoarseActionIntent(
             hidden=hidden,
@@ -272,6 +274,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             hidden=hidden,
             content_dim=content_dim,
             route_dim=route_dim,
+            spatial_intent_mode=p2_spatial_intent_mode,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)
         self.plan_compiler = ObjectPolicyPlanCompiler(

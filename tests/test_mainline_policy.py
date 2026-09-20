@@ -29,6 +29,7 @@ from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.model.restored_observation import (
     _v120_flow_field,
 )
+from clearvla.mainline.runtime.flow_schedule import DeploymentFlowSchedule
 from clearvla.mainline.runtime.logging import archival_metrics
 from clearvla.mainline.runtime.sampling import (
     sample_action,
@@ -3504,3 +3505,142 @@ def test_preflight_rejects_a_same_shape_but_wrong_future_offset_schedule() -> No
         assert "exactly 4,8,...,48" in str(error)
     else:
         raise AssertionError("future teacher offsets are part of the semantic ABI")
+
+
+def test_shared_target_prior_q5_keeps_two_passes_and_one_world_rebuild() -> None:
+    torch.manual_seed(2911)
+    base = _config()
+    q5 = DeploymentFlowSchedule.same_nfe_power_five()
+    config = replace(
+        base,
+        top=replace(
+            base.top,
+            p2_spatial_intent_mode="shared_target_prior_v1",
+        ),
+        runtime=replace(
+            base.runtime,
+            deployment_flow_schedule=q5.to_dict(),
+        ),
+    )
+    config.validate()
+    model = ClearVLAMainlinePolicy(config).eval()
+    model.configure_action_normalizer(
+        ArrayNormalizer.fit_identity(
+            [
+                np.zeros((2, config.dimensions.action_dim), dtype=np.float32),
+                np.ones((2, config.dimensions.action_dim), dtype=np.float32),
+            ]
+        )
+    )
+    cache, _, _ = model.encode_online(
+        _batch(config).online,
+        collect_diagnostics=False,
+    )
+
+    with (
+        mock.patch.object(model, "velocity", wraps=model.velocity) as velocity,
+        mock.patch.object(
+            model.world,
+            "refine_deployment_world",
+            wraps=model.world.refine_deployment_world,
+        ) as refine_world,
+        mock.patch.object(
+            model.world.dynamics,
+            "forward_w1",
+            wraps=model.world.dynamics.forward_w1,
+        ) as forward_w1,
+    ):
+        result, _ = sample_refined_cached_action_with_cache(
+            model,
+            cache,
+            config,
+            generator=torch.Generator().manual_seed(2912),
+            collect_diagnostics=True,
+            dtype=torch.float32,
+        )
+
+    assert velocity.call_count == 2 * (config.runtime.inference_steps + 1)
+    assert refine_world.call_count == 1
+    assert forward_w1.call_count == 1
+    assert torch.equal(
+        velocity.call_args_list[0].kwargs["noisy_action_field"],
+        velocity.call_args_list[config.runtime.inference_steps + 1].kwargs[
+            "noisy_action_field"
+        ],
+    )
+    torch.testing.assert_close(
+        result.step_times,
+        torch.tensor(q5.refined.query_times, dtype=torch.float32),
+    )
+    assert np.allclose(result.step_sizes, q5.refined.step_sizes)
+    assert result.flow_schedule_identity == q5.identity
+    assert result.flow_schedule_pass_role == "refined"
+
+
+def test_shared_target_prior_full_training_graph_has_one_owner_and_gradient() -> None:
+    torch.manual_seed(2913)
+    base = _config()
+    q5 = DeploymentFlowSchedule.same_nfe_power_five()
+    config = replace(
+        base,
+        top=replace(
+            base.top,
+            p2_spatial_intent_mode="shared_target_prior_v1",
+        ),
+        runtime=replace(
+            base.runtime,
+            deployment_flow_schedule=q5.to_dict(),
+        ),
+    )
+    config.validate()
+    model = ClearVLAMainlinePolicy(config).train()
+    model.configure_action_normalizer(
+        ArrayNormalizer.fit_identity(
+            [
+                np.zeros((2, config.dimensions.action_dim), dtype=np.float32),
+                np.ones((2, config.dimensions.action_dim), dtype=np.float32),
+            ]
+        )
+    )
+    # Production initialization inherits trained W heads.  Make the synthetic
+    # fresh graph non-degenerate without changing the new address owner.
+    with torch.no_grad():
+        torch.nn.init.normal_(model.world.dynamics.delta_head.weight, std=0.05)
+        torch.nn.init.normal_(model.world.dynamics.transport_head.weight, std=0.05)
+        torch.nn.init.normal_(model.world.dynamics.covariance_head.weight, std=0.05)
+    optimizer, ownership = build_optimizer(model, config)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    engine = MainlineTrainingEngine(
+        model=model,
+        config=config,
+        optimizer=optimizer,
+        schedule=schedule,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        train_flow_generator=torch.Generator().manual_seed(2914),
+        train_condition_generator=torch.Generator().manual_seed(2915),
+    )
+    optimizer.zero_grad(set_to_none=True)
+    ledger, _ = engine._forward(
+        _batch(config),
+        training=True,
+        collect_diagnostics=False,
+        generator=engine.train_flow_generator,
+        condition_generator=engine.train_condition_generator,
+    )
+    ledger.total.backward()
+
+    assert ownership.trainable_names.count(
+        "top.intent.target_object_address.weight"
+    ) == 1
+    gradient = dict(model.named_parameters())[
+        "intent.organizer.target_object_address.weight"
+    ].grad
+    assert gradient is not None
+    assert torch.isfinite(gradient).all()
+    assert torch.count_nonzero(gradient) > 0

@@ -887,6 +887,7 @@ class PolicyIntentDock:
     interval_key: Tensor  # [B,I,H]
     temporal_control: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
+    target_object_address_logit: Tensor  # FP32 [B,I,K]
     typed_common_value: Tensor  # [B,K,3,R]
     typed_interval_residual_value: Tensor  # [B,I,K,3,R]
 
@@ -910,6 +911,17 @@ class PolicyIntentDock:
         objects = int(self.typed_common_value.shape[1])
         if int(self.typed_common_value.shape[2]) != 3:
             raise ValueError("policy-intent typed common value lost type identity")
+        _shape(
+            self.target_object_address_logit,
+            (batch, 4, objects),
+            "policy-intent target object address logit",
+        )
+        if self.target_object_address_logit.dtype != torch.float32:
+            raise TypeError("policy-intent target object address logit must remain FP32")
+        if self.target_object_address_logit.device != self.interval_key.device:
+            raise ValueError(
+                "policy-intent target object address logit must share intent device"
+            )
         route = int(self.typed_common_value.shape[3])
         _shape(
             self.typed_interval_residual_value,
@@ -929,6 +941,7 @@ class ObjectIntentState:
     policy_interval_context: Tensor  # [B,4,H]
     temporal_queries: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
+    target_object_address_logit: Tensor  # FP32 [B,4,K]
     typed_common_mass: Tensor  # [B,K,3,1]
     typed_common_value: Tensor  # [B,K,3,R]
     typed_interval_residual_mass: Tensor  # [B,4,K,3,1]
@@ -998,6 +1011,7 @@ class ObjectIntentState:
             interval_key=self.policy_interval_context,
             temporal_control=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
+            target_object_address_logit=self.target_object_address_logit,
             typed_common_value=self.typed_common_value,
             typed_interval_residual_value=self.typed_interval_residual_value,
         )
@@ -1034,6 +1048,15 @@ class ObjectIntentState:
                 raise ValueError(
                     "intent object validity must share object-token device"
                 )
+        _shape(
+            self.target_object_address_logit,
+            (batch, 4, objects),
+            "target object address logit",
+        )
+        if self.target_object_address_logit.dtype != torch.float32:
+            raise TypeError("target object address logit must remain FP32")
+        if self.target_object_address_logit.device != self.object_tokens.device:
+            raise ValueError("target object address logit must share object-token device")
         _shape(
             self.typed_common_mass,
             (batch, objects, 3, 1),
@@ -1081,6 +1104,7 @@ class ObjectIntentState:
             policy_interval_context=self.policy_interval_context,
             temporal_queries=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
+            target_object_address_logit=self.target_object_address_logit[:, :, index],
             typed_common_mass=self.typed_common_mass[:, index],
             typed_common_value=self.typed_common_value[:, index],
             typed_interval_residual_mass=self.typed_interval_residual_mass[

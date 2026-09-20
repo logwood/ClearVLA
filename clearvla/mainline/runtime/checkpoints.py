@@ -39,6 +39,9 @@ LIBERO_RELEASE_FIRST_REPAIR_MIGRATION = "libero_release_first_repair_v1"
 WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION = (
     "world_camera_coordinate_role_v1"
 )
+P2_SHARED_TARGET_PRIOR_V1_MIGRATION = "p2_shared_target_prior_v1"
+P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION = "p2_shared_target_prior_pread_v1"
+P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION = "p2_post_pool_pread_control_v1"
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/model/compiler.py",
@@ -74,6 +77,35 @@ WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS = frozenset(
         "clearvla/mainline/runtime/checkpoints.py",
         "clearvla/mainline/train.py",
     }
+)
+P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/model/compiler.py",
+        "clearvla/mainline/model/intent.py",
+        "clearvla/mainline/model/policy.py",
+        "clearvla/mainline/model/top.py",
+        "clearvla/mainline/model/types.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/train.py",
+    }
+)
+P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS = (
+    P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS
+    | frozenset(
+        {
+            "clearvla/mainline/data/loading.py",
+            "clearvla/mainline/data/token_store.py",
+            "clearvla/vision/decoded_image_store.py",
+            "clearvla/vision/npy_rows.py",
+        }
+    )
+)
+P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS = (
+    P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
+)
+P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
+    "intent.organizer.target_object_address.weight"
 )
 LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS = frozenset(
     {
@@ -816,6 +848,44 @@ def _world_camera_condition_migration_config_view(
     return payload
 
 
+def _p2_shared_target_prior_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the admitted opt-in P2 target-address selector."""
+
+    payload = _initialization_config_view(config)
+    top = dict(cast(Mapping[str, object], payload["top"]))
+    top.pop("p2_spatial_intent_mode", None)
+    payload["top"] = top
+    return payload
+
+
+def _p2_shared_target_prior_pread_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the admitted target-address and physical-read selectors."""
+
+    payload = _p2_shared_target_prior_migration_config_view(config)
+    data = dict(cast(Mapping[str, object], payload["data"]))
+    data.pop("visual_cache_read_backend", None)
+    data.pop("visual_pread_max_open_files", None)
+    payload["data"] = data
+    return payload
+
+
+def _p2_post_pool_pread_control_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the admitted physical-read selector for the matched control."""
+
+    payload = _initialization_config_view(config)
+    data = dict(cast(Mapping[str, object], payload["data"]))
+    data.pop("visual_cache_read_backend", None)
+    data.pop("visual_pread_max_open_files", None)
+    payload["data"] = data
+    return payload
+
+
 def load_checkpoint_for_initialization(
     path: str | Path,
     *,
@@ -889,6 +959,9 @@ def load_checkpoint_for_initialization(
         )
     if selected_model_migration not in {
         None,
+        P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
+        P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+        P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
         WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
     }:
         raise ValueError(
@@ -910,7 +983,86 @@ def load_checkpoint_for_initialization(
     )
     if rejected_reasons:
         raise ValueError("model initialization rejected: " + "; ".join(rejected_reasons))
-    if selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
+    if selected_model_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION:
+        if (
+            saved_config.top.p2_spatial_intent_mode != "post_pool_only"
+            or config.top.p2_spatial_intent_mode != "post_pool_only"
+        ):
+            raise ValueError(
+                "P2 post-pool pread control requires post_pool_only on both sides"
+            )
+        if (
+            saved_config.data.visual_cache_read_backend != "mmap"
+            or config.data.visual_cache_read_backend != "pread"
+        ):
+            raise ValueError(
+                "P2 post-pool pread control requires mmap source and pread target"
+            )
+        if (
+            saved_config.data.visual_pread_max_open_files != 16
+            or type(config.data.visual_pread_max_open_files) is not int
+            or config.data.visual_pread_max_open_files <= 0
+        ):
+            raise ValueError(
+                "P2 post-pool pread control requires the legacy mmap cap "
+                "and a positive target pread cap"
+            )
+        if _p2_post_pool_pread_control_migration_config_view(
+            saved_config
+        ) != _p2_post_pool_pread_control_migration_config_view(config):
+            raise ValueError(
+                "P2 post-pool pread control differs outside its physical-read selector"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "P2 post-pool pread control requires identical dataset identity"
+            )
+    elif selected_model_migration in {
+        P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+        P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+    }:
+        if (
+            saved_config.top.p2_spatial_intent_mode != "post_pool_only"
+            or config.top.p2_spatial_intent_mode != "shared_target_prior_v1"
+        ):
+            raise ValueError(
+                "P2 shared-target migration requires post_pool_only source "
+                "and shared_target_prior_v1 target"
+            )
+        if selected_model_migration == P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION:
+            if (
+                saved_config.data.visual_cache_read_backend != "mmap"
+                or config.data.visual_cache_read_backend != "pread"
+            ):
+                raise ValueError(
+                    "P2 shared-target pread migration requires mmap source and pread target"
+                )
+            if (
+                saved_config.data.visual_pread_max_open_files != 16
+                or type(config.data.visual_pread_max_open_files) is not int
+                or config.data.visual_pread_max_open_files <= 0
+            ):
+                raise ValueError(
+                    "P2 shared-target pread migration requires the legacy mmap cap "
+                    "and a positive target pread cap"
+                )
+            if _p2_shared_target_prior_pread_migration_config_view(
+                saved_config
+            ) != _p2_shared_target_prior_pread_migration_config_view(config):
+                raise ValueError(
+                    "P2 shared-target pread migration differs outside its model/read selectors"
+                )
+        elif _p2_shared_target_prior_migration_config_view(
+            saved_config
+        ) != _p2_shared_target_prior_migration_config_view(config):
+            raise ValueError(
+                "P2 shared-target migration differs outside its one model selector"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "P2 shared-target migration requires identical dataset identity"
+            )
+    elif selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
         if (
             saved_config.top.world_camera_condition_mode != "motion_prior_only"
             or config.top.world_camera_condition_mode != "coordinate_role_v1"
@@ -1073,7 +1225,13 @@ def load_checkpoint_for_initialization(
             if saved_sources.get(source_path) != current_sources.get(source_path)
         )
     )
-    if selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
+    if selected_model_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION:
+        allowed_source_paths = P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS
+    elif selected_model_migration == P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION:
+        allowed_source_paths = P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
+    elif selected_model_migration == P2_SHARED_TARGET_PRIOR_V1_MIGRATION:
+        allowed_source_paths = P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS
+    elif selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
         allowed_source_paths = WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS
     else:
         allowed_source_paths = (
@@ -1101,7 +1259,36 @@ def load_checkpoint_for_initialization(
         saved_layout_schema=int(saved_manifest.layout_schema),
     )
     current_model = model.state_dict()
-    if selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
+    if selected_model_migration in {
+        P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+        P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+    }:
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        if missing != {P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY} or unexpected:
+            raise ValueError(
+                "P2 shared-target migration must add exactly its one address weight"
+            )
+        new_address = current_model[P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY]
+        if (
+            not isinstance(new_address, torch.Tensor)
+            or tuple(new_address.shape) != (1, 3)
+            or new_address.dtype != torch.float32
+        ):
+            raise ValueError(
+                "P2 shared-target migration requires one FP32 [1,3] address weight"
+            )
+        if not bool(torch.isfinite(new_address).all()) or int(
+            torch.count_nonzero(new_address).item()
+        ) != 0:
+            raise ValueError(
+                "P2 shared-target migration requires a finite exact-zero new address weight"
+            )
+        mapped_model = dict(mapped_model)
+        mapped_model[P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY] = (
+            new_address.detach().clone()
+        )
+    elif selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
         new_condition_key = (
             "world.dynamics.camera_coordinate_role_condition.weight"
         )
@@ -1299,6 +1486,13 @@ __all__ = [
     "LIBERO_RELEASE_FIRST_REPAIR_MIGRATION",
     "LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION",
     "LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS",
+    "P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION",
+    "P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS",
+    "P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION",
+    "P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS",
+    "P2_SHARED_TARGET_PRIOR_V1_MIGRATION",
+    "P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY",
+    "P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS",
     "MigrationReport",
     "RestoredTrainingState",
     "VALIDATION_REPLAY_SOURCE_PATHS",
