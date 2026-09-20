@@ -22,6 +22,7 @@ import pickle
 import re
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, replace
+from os import scandir
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -106,31 +107,32 @@ def _frame_pattern(
     if not endpoints:
         raise ValueError("CALVIN frame pattern requires trajectory endpoints")
     rejected_charts: set[tuple[str, int, str]] = set()
-    for path in root.iterdir():
-        if path.suffix not in {".npz", ".pkl"}:
-            continue
-        match = re.match(r"^(.*?)(\d+)(\.(?:npz|pkl))$", path.name)
-        if match is None:
-            continue
-        prefix, digits, suffix = match.group(1), len(match.group(2)), match.group(3)
-        chart = (prefix, digits, suffix)
-        if chart in rejected_charts:
-            continue
-        present = tuple(
-            (root / f"{prefix}{index:0{digits}d}{suffix}").is_file()
-            for index in endpoints
-        )
-        if all(present):
-            return chart
-        if any(present):
-            missing = endpoints[present.index(False)]
-            raise FileNotFoundError(
-                "CALVIN indexed frame pattern misses trajectory endpoint "
-                f"{missing} under {root}"
-            )
-        # An indexed side artifact (for example a dated metadata dump) is not
-        # a frame chart when it names none of the source trajectory endpoints.
-        rejected_charts.add(chart)
+    with scandir(root) as entries:
+        for entry in entries:
+            match = re.match(r"^(.*?)(\d+)(\.(?:npz|pkl))$", entry.name)
+            if match is None:
+                continue
+            prefix, digits, suffix = match.group(1), len(match.group(2)), match.group(3)
+            chart = (prefix, digits, suffix)
+            if chart in rejected_charts:
+                continue
+            first_missing: int | None = None
+            has_present_endpoint = False
+            for index in endpoints:
+                present = (root / f"{prefix}{index:0{digits}d}{suffix}").is_file()
+                has_present_endpoint = has_present_endpoint or present
+                if not present and first_missing is None:
+                    first_missing = index
+            if first_missing is None:
+                return chart
+            if has_present_endpoint:
+                raise FileNotFoundError(
+                    "CALVIN indexed frame pattern misses trajectory endpoint "
+                    f"{first_missing} under {root}"
+                )
+            # An indexed side artifact (for example a dated metadata dump) is
+            # not a frame chart when it names none of the trajectory endpoints.
+            rejected_charts.add(chart)
     raise FileNotFoundError(f"no indexed CALVIN frame files found under {root}")
 
 

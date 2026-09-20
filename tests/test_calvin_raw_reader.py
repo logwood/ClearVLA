@@ -8,6 +8,7 @@ import h5py
 import numpy as np
 import pytest
 
+import clearvla.benchmarks.calvin_raw as calvin_raw
 from clearvla.benchmarks.calvin import convert_calvin
 from clearvla.benchmarks.calvin_raw import (
     CalvinRawReader,
@@ -70,31 +71,49 @@ def _converted_episode(root: Path, name: str):
     )
 
 
-def test_raw_reader_streams_frame_pattern_without_globbing_inventory(
+def test_frame_pattern_uses_lazy_scandir_and_closes_after_match(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = tmp_path / "task_ABC_D"
-    _raw_source_split(source / "training", trajectories=3)
-    _raw_source_split(source / "validation", trajectories=2)
+    root = tmp_path / "training"
+    _raw_source_split(root, trajectories=3)
     original_glob = Path.glob
-    original_iterdir = Path.iterdir
-    split_roots = {source / "training", source / "validation"}
 
     def reject_frame_glob(path: Path, pattern: str):
         if pattern in {"*.npz", "*.pkl"}:
             raise AssertionError("raw frame discovery must not glob the full inventory")
         return original_glob(path, pattern)
 
-    def expose_one_frame(path: Path):
-        if path in split_roots:
-            return iter((path / "episode_0000000.npz",))
-        return original_iterdir(path)
+    class GuardedScandir:
+        def __init__(self) -> None:
+            self.closed = False
+            self.next_calls = 0
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            self.closed = True
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.next_calls += 1
+            if self.next_calls == 1:
+                return root / "episode_0000000.npz"
+            raise AssertionError("frame discovery consumed entries after a valid chart")
+
+    probe = GuardedScandir()
     monkeypatch.setattr(Path, "glob", reject_frame_glob)
-    monkeypatch.setattr(Path, "iterdir", expose_one_frame)
-    reader = CalvinRawReader(source, task_filter="open_drawer", split_seed=7)
-    assert sum(len(reader.episodes(split)) for split in ("train", "val", "test")) == 5
+    monkeypatch.setattr(calvin_raw, "scandir", lambda path: probe)
+    assert calvin_raw._frame_pattern(root, required_indices=(0, 69, 70, 139)) == (
+        "episode_",
+        7,
+        ".npz",
+    )
+    assert probe.next_calls == 1
+    assert probe.closed
 
 
 def test_raw_reader_ignores_unrelated_indexed_archive_before_frame_chart(
@@ -110,13 +129,19 @@ def test_raw_reader_ignores_unrelated_indexed_archive_before_frame_chart(
     }
     for decoy in decoys:
         np.savez(decoy, marker=np.asarray([1], dtype=np.int64))
-    original_iterdir = Path.iterdir
+    class DecoyFirstScandir:
+        def __init__(self, root: Path) -> None:
+            self.entries = iter(
+                (root / "metadata_2026.npz", root / "episode_0000000.npz")
+            )
 
-    def decoy_first(path: Path):
-        entries = tuple(original_iterdir(path))
-        return iter(sorted(entries, key=lambda entry: (entry not in decoys, entry.name)))
+        def __enter__(self):
+            return self.entries
 
-    monkeypatch.setattr(Path, "iterdir", decoy_first)
+        def __exit__(self, *_args) -> None:
+            return None
+
+    monkeypatch.setattr(calvin_raw, "scandir", DecoyFirstScandir)
     reader = CalvinRawReader(source, task_filter="open_drawer", split_seed=7)
     assert sum(len(reader.episodes(split)) for split in ("train", "val", "test")) == 5
 
