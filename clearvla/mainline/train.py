@@ -27,13 +27,14 @@ from .config import ExperimentConfig, load_config
 from .data.loading import MainlineDataBundle, load_mainline_data, to_training_batch
 from .interfaces import TrainingBatch
 from .model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
-from .model.types import PhysicalActionCondition
+from .model.types import PhysicalActionCondition, PhysicalActionSequenceCondition
 from .runtime.checkpoints import (
     LIBERO_RELEASE_FIRST_REPAIR_MIGRATION,
     LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION,
     LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION,
     P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
     P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+    P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION,
     P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
     WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
     InitializationState,
@@ -128,6 +129,7 @@ def _parser() -> argparse.ArgumentParser:
         choices=(
             P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
             P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+            P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION,
             P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
             WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
         ),
@@ -1015,22 +1017,32 @@ def _wrong_action_world_cache(
     primary_condition = primary_world.action_condition
     batch = primary_condition.batch
     shift = batch // 2 if batch >= 2 else 0
-    donor_interval_action = primary_condition.interval_action.roll(
-        shifts=shift,
-        dims=0,
-    )
-    donor_delta = (
-        donor_interval_action.detach().float()
-        - primary_condition.interval_action.detach().float()
-    )
+    if isinstance(primary_condition, PhysicalActionSequenceCondition):
+        donor_action = primary_condition.source_action.roll(shifts=shift, dims=0)
+        donor_delta = (
+            donor_action.detach().float()
+            - primary_condition.source_action.detach().float()
+        )
+        wrong_condition = model.outlet_adapter.world_condition_from_horizon_action(
+            donor_action,
+            cache.history.action_state,
+        )
+    else:
+        donor_action = primary_condition.interval_action.roll(
+            shifts=shift,
+            dims=0,
+        )
+        donor_delta = (
+            donor_action.detach().float()
+            - primary_condition.interval_action.detach().float()
+        )
+        # The current action anchor belongs to the receiving sample.  Only the
+        # four proposed interval actions are donated in the legacy ABI.
+        wrong_condition = PhysicalActionCondition.from_interval_action(
+            donor_action,
+            primary_condition.current_action,
+        )
     donor_valid = donor_delta.abs().amax(dim=(1, 2)) > 0.0
-    # The current action anchor belongs to the receiving sample.  Only the four
-    # proposed interval actions are donated; delta is reconstructed from that
-    # retained anchor by the canonical physical-action ABI.
-    wrong_condition = PhysicalActionCondition.from_interval_action(
-        donor_interval_action,
-        primary_condition.current_action,
-    )
     device = cache.history.state.device
     autocast_enabled = device.type in {"cuda", "cpu"} and dtype in {
         torch.bfloat16,
@@ -1246,31 +1258,72 @@ def _validation_action_estimator_match(
     estimator_dynamics = estimator_top.predicted_dynamics
     full_dynamics = refined_cache.top.predicted_dynamics
     scalar = full_fingerprint.new_tensor
+    if isinstance(full_condition, PhysicalActionSequenceCondition):
+        if not (
+            isinstance(coarse_condition, PhysicalActionSequenceCondition)
+            and isinstance(estimator_condition, PhysicalActionSequenceCondition)
+        ):
+            raise TypeError("validation estimator changed W action condition schema")
+        condition_metrics = {
+            "estimator_to_full_action_sequence_mse": (
+                estimator_condition.canonical_value.detach().float()
+                - full_condition.canonical_value.detach().float()
+            )
+            .square()
+            .mean(),
+            "estimator_to_full_action_sequence_delta_mse": (
+                estimator_condition.canonical_delta.detach().float()
+                - full_condition.canonical_delta.detach().float()
+            )
+            .square()
+            .mean(),
+            "coarse_to_full_action_sequence_mse": (
+                coarse_condition.canonical_value.detach().float()
+                - full_condition.canonical_value.detach().float()
+            )
+            .square()
+            .mean(),
+            "coarse_to_full_action_sequence_delta_mse": (
+                coarse_condition.canonical_delta.detach().float()
+                - full_condition.canonical_delta.detach().float()
+            )
+            .square()
+            .mean(),
+        }
+    else:
+        if not (
+            isinstance(coarse_condition, PhysicalActionCondition)
+            and isinstance(estimator_condition, PhysicalActionCondition)
+        ):
+            raise TypeError("validation estimator changed W action condition schema")
+        condition_metrics = {
+            "estimator_to_full_interval_action_mse": (
+                estimator_condition.interval_action.detach().float()
+                - full_condition.interval_action.detach().float()
+            )
+            .square()
+            .mean(),
+            "estimator_to_full_interval_delta_mse": (
+                estimator_condition.interval_delta.detach().float()
+                - full_condition.interval_delta.detach().float()
+            )
+            .square()
+            .mean(),
+            "coarse_to_full_interval_action_mse": (
+                coarse_condition.interval_action.detach().float()
+                - full_condition.interval_action.detach().float()
+            )
+            .square()
+            .mean(),
+            "coarse_to_full_interval_delta_mse": (
+                coarse_condition.interval_delta.detach().float()
+                - full_condition.interval_delta.detach().float()
+            )
+            .square()
+            .mean(),
+        }
     return {
-        "estimator_to_full_interval_action_mse": (
-            estimator_condition.interval_action.detach().float()
-            - full_condition.interval_action.detach().float()
-        )
-        .square()
-        .mean(),
-        "estimator_to_full_interval_delta_mse": (
-            estimator_condition.interval_delta.detach().float()
-            - full_condition.interval_delta.detach().float()
-        )
-        .square()
-        .mean(),
-        "coarse_to_full_interval_action_mse": (
-            coarse_condition.interval_action.detach().float()
-            - full_condition.interval_action.detach().float()
-        )
-        .square()
-        .mean(),
-        "coarse_to_full_interval_delta_mse": (
-            coarse_condition.interval_delta.detach().float()
-            - full_condition.interval_delta.detach().float()
-        )
-        .square()
-        .mean(),
+        **condition_metrics,
         "estimator_full_update_direction_cosine": direction_cosine,
         "estimator_full_update_direction_valid_fraction": direction_valid,
         "estimator_to_full_semantic_mse": (
@@ -1964,11 +2017,13 @@ def _validate(
     )
     if estimator_match_batches:
         rows = estimator_matches.materialize()
+        if config.top.world_action_condition_mode == "sequence_prefix_v1":
+            action_semantics = ("action_sequence", "action_sequence_delta")
+        else:
+            action_semantics = ("interval_action", "interval_delta")
         rms_rows = (
-            "estimator_to_full_interval_action",
-            "estimator_to_full_interval_delta",
-            "coarse_to_full_interval_action",
-            "coarse_to_full_interval_delta",
+            *(f"estimator_to_full_{name}" for name in action_semantics),
+            *(f"coarse_to_full_{name}" for name in action_semantics),
             "estimator_to_full_semantic",
             "coarse_to_full_semantic",
             "estimator_to_full_transport",
@@ -1978,7 +2033,7 @@ def _validate(
             result[f"validation_action_{stem}_rms"] = math.sqrt(
                 max(rows[f"{stem}_mse"], 0.0)
             )
-        for semantic in ("interval_action", "interval_delta", "semantic", "transport"):
+        for semantic in (*action_semantics, "semantic", "transport"):
             estimator_rms = result[
                 f"validation_action_estimator_to_full_{semantic}_rms"
             ]

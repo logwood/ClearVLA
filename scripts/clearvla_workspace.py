@@ -39,8 +39,11 @@ ENVIRONMENT = {
     "PYTORCH_CUDA_ALLOC_CONF",
 }
 MODEL_CONTRACT_MIGRATIONS = (
+    "p2_post_pool_pread_control_v1",
+    "p2_shared_target_prior_pread_v1",
+    "p2_shared_target_prior_sequence_prefix_pread_v1",
+    "p2_shared_target_prior_v1",
     "world_camera_coordinate_role_v1",
-    "world_action_sequence_prefix_v1",
 )
 
 

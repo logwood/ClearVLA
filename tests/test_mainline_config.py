@@ -279,6 +279,36 @@ def test_p2_spatial_intent_mode_is_explicit_and_round_trips() -> None:
         ).validate()
 
 
+def test_w_action_condition_mode_is_explicit_and_round_trips() -> None:
+    baseline = ExperimentConfig()
+    assert baseline.top.world_action_condition_mode == "interval_mean_v1"
+    assert "world_action_condition_mode" not in baseline.as_dict()["top"]
+
+    sequence = replace(
+        baseline,
+        top=replace(
+            baseline.top,
+            world_action_condition_mode="sequence_prefix_v1",
+        ),
+    )
+    sequence.validate()
+    payload = sequence.as_dict()
+    assert payload["top"]["world_action_condition_mode"] == "sequence_prefix_v1"
+    restored = config_from_mapping(json.loads(json.dumps(payload)))
+    assert restored.top.world_action_condition_mode == "sequence_prefix_v1"
+    assert restored.digest() == sequence.digest()
+    assert restored.digest() != baseline.digest()
+
+    with pytest.raises(ValueError, match="world_action_condition_mode"):
+        replace(
+            baseline,
+            top=replace(
+                baseline.top,
+                world_action_condition_mode="sequence_shape_guess",
+            ),
+        ).validate()
+
+
 def test_calvin_pread_control_and_target_prior_configs_are_matched() -> None:
     control = load_config(
         ROOT
@@ -323,6 +353,50 @@ def test_calvin_pread_control_and_target_prior_configs_are_matched() -> None:
     assert differing_leaf_paths(control.as_dict(), treatment.as_dict()) == {
         "data.output_dir",
         "top.p2_spatial_intent_mode",
+    }
+
+
+def test_calvin_target_prior_sequence_config_changes_only_the_w_action_abi() -> None:
+    target_prior = load_config(
+        ROOT
+        / "configs"
+        / "mainline"
+        / "calvin_push_color6_binding_q5_camera_target_prior_pread_v1.json"
+    )
+    sequence = load_config(
+        ROOT
+        / "configs"
+        / "mainline"
+        / "calvin_push_color6_binding_q5_camera_target_prior_sequence_pread_v1.json"
+    )
+    target_prior.validate()
+    sequence.validate()
+
+    def differing_leaf_paths(
+        left: object,
+        right: object,
+        *,
+        prefix: str = "",
+    ) -> set[str]:
+        if isinstance(left, dict) and isinstance(right, dict):
+            paths: set[str] = set()
+            for key in set(left) | set(right):
+                child = f"{prefix}.{key}" if prefix else str(key)
+                if key not in left or key not in right:
+                    paths.add(child)
+                else:
+                    paths.update(
+                        differing_leaf_paths(left[key], right[key], prefix=child)
+                    )
+            return paths
+        return set() if left == right else {prefix}
+
+    assert sequence.top.p2_spatial_intent_mode == "shared_target_prior_v1"
+    assert target_prior.top.world_action_condition_mode == "interval_mean_v1"
+    assert sequence.top.world_action_condition_mode == "sequence_prefix_v1"
+    assert differing_leaf_paths(target_prior.as_dict(), sequence.as_dict()) == {
+        "data.output_dir",
+        "top.world_action_condition_mode",
     }
 
 

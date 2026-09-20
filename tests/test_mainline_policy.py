@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -28,6 +29,10 @@ from clearvla.mainline.model.component_contracts import BSPINE0_EXECUTION_BOTTOM
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.model.restored_observation import (
     _v120_flow_field,
+)
+from clearvla.mainline.model.types import (
+    PhysicalActionCondition,
+    PhysicalActionSequenceCondition,
 )
 from clearvla.mainline.runtime.flow_schedule import DeploymentFlowSchedule
 from clearvla.mainline.runtime.logging import archival_metrics
@@ -3644,3 +3649,621 @@ def test_shared_target_prior_full_training_graph_has_one_owner_and_gradient() ->
     assert gradient is not None
     assert torch.isfinite(gradient).all()
     assert torch.count_nonzero(gradient) > 0
+def test_sequence_condition_uses_24_row_online_and_training_abi() -> None:
+    torch.manual_seed(2899)
+    base = _config()
+    config = replace(
+        base,
+        top=replace(
+            base.top,
+            world_action_condition_mode="sequence_prefix_v1",
+        ),
+    )
+    config.validate()
+    model = ClearVLAMainlinePolicy(config).train()
+    model.configure_action_normalizer(
+        ArrayNormalizer.fit_identity(
+            [
+                np.zeros((2, config.dimensions.action_dim), dtype=np.float32),
+                np.ones((2, config.dimensions.action_dim), dtype=np.float32),
+            ]
+        )
+    )
+    batch = _batch(config)
+    cache, training_state, _ = model.encode_online(batch.online)
+    condition = cache.top.action_condition
+    assert isinstance(condition, PhysicalActionSequenceCondition)
+    assert condition.source_action is training_state.top.coarse_action.action_prediction
+    assert training_state.top.coarse_action.tokens.shape == (1, 24, 32)
+    assert condition.fingerprint.shape == (1, 24, 45)
+
+    supervised = model.intent.coarse_action(
+        training_state.top.intent.action_dock(),
+        future_action=batch.future.action_sequence,
+    )
+    assert supervised.target is not None
+    torch.testing.assert_close(
+        supervised.target,
+        batch.future.action_sequence[:, :24],
+        atol=0.0,
+        rtol=0.0,
+    )
+    supervised.loss.backward()
+    row_offset = model.intent.coarse_action.sequence_row_offset
+    assert row_offset is not None and row_offset.grad is not None
+    assert torch.count_nonzero(row_offset.grad) > 0
+    assert model.intent.coarse_action.action_head.weight.grad is not None
+
+
+def test_sequence_constructor_preserves_target_prior_camera_baseline_state_and_rng() -> None:
+    base = _calvin_binary_config()
+    target_prior_config = replace(
+        base,
+        top=replace(
+            base.top,
+            world_camera_condition_mode="coordinate_role_v1",
+            p2_spatial_intent_mode="shared_target_prior_v1",
+        ),
+    )
+    sequence_config = replace(
+        target_prior_config,
+        top=replace(
+            target_prior_config.top,
+            world_action_condition_mode="sequence_prefix_v1",
+        ),
+    )
+    target_prior_config.validate()
+    sequence_config.validate()
+
+    torch.manual_seed(2910)
+    target_prior = ClearVLAMainlinePolicy(target_prior_config)
+    target_prior_rng = torch.get_rng_state().clone()
+    torch.manual_seed(2910)
+    sequence = ClearVLAMainlinePolicy(sequence_config)
+    sequence_rng = torch.get_rng_state().clone()
+    assert torch.equal(sequence_rng, target_prior_rng)
+
+    target_prior_state = target_prior.state_dict()
+    sequence_state = sequence.state_dict()
+    expected_new = {
+        "intent.coarse_action.sequence_row_offset",
+        "world.dynamics.sequence_time_condition.weight",
+        "world.dynamics.sequence_action_recurrence.weight_ih",
+        "world.dynamics.sequence_action_recurrence.weight_hh",
+        "world.dynamics.sequence_action_recurrence.bias_ih",
+        "world.dynamics.sequence_action_recurrence.bias_hh",
+    }
+    assert set(sequence_state) - set(target_prior_state) == expected_new
+    assert not set(target_prior_state) - set(sequence_state)
+    for name, value in target_prior_state.items():
+        torch.testing.assert_close(sequence_state[name], value, atol=0.0, rtol=0.0)
+    assert torch.count_nonzero(
+        sequence_state["intent.coarse_action.sequence_row_offset"]
+    ) == 0
+    for name in expected_new:
+        assert torch.isfinite(sequence_state[name]).all(), name
+
+
+def test_action_condition_schema_and_metadata_fail_closed_without_diagnostics() -> None:
+    torch.manual_seed(2900)
+    base = _config()
+    sequence_config = replace(
+        base,
+        top=replace(base.top, world_action_condition_mode="sequence_prefix_v1"),
+    )
+    sequence_model = ClearVLAMainlinePolicy(sequence_config).eval()
+    sequence_model.configure_action_normalizer(
+        ArrayNormalizer.fit_identity(
+            [
+                np.zeros((2, sequence_config.dimensions.action_dim), dtype=np.float32),
+                np.ones((2, sequence_config.dimensions.action_dim), dtype=np.float32),
+            ]
+        )
+    )
+    sequence_cache, _, _ = sequence_model.encode_online(_batch(sequence_config).online)
+    sequence_condition = sequence_cache.top.action_condition
+    assert isinstance(sequence_condition, PhysicalActionSequenceCondition)
+
+    legacy_condition = PhysicalActionCondition.from_horizon_action(
+        sequence_condition.source_action,
+        sequence_cache.history.action_state,
+    )
+    forged_legacy_cache = replace(
+        sequence_cache,
+        top=replace(
+            sequence_cache.top,
+            candidate_world=replace(
+                sequence_cache.top.candidate_world,
+                action_condition=legacy_condition,
+            ),
+        ),
+    )
+    with pytest.raises(TypeError, match="policy cache rejected"):
+        forged_legacy_cache.validate(sequence_config)
+    with pytest.raises(TypeError, match="cannot change action condition schema"):
+        sequence_model.world.refine_deployment_world(
+            sequence_cache.top,
+            action_condition=legacy_condition,
+            collect_diagnostics=False,
+        )
+
+    drifted_profile = replace(
+        sequence_condition,
+        outlet_profile="rdt_right_arm_7d_v1",
+    )
+    forged_profile_cache = replace(
+        sequence_cache,
+        top=replace(
+            sequence_cache.top,
+            candidate_world=replace(
+                sequence_cache.top.candidate_world,
+                action_condition=drifted_profile,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="outlet profile changed"):
+        forged_profile_cache.validate(sequence_config)
+    with pytest.raises(ValueError, match="metadata changed"):
+        sequence_model.world.refine_deployment_world(
+            sequence_cache.top,
+            action_condition=drifted_profile,
+            collect_diagnostics=False,
+        )
+    with pytest.raises(ValueError, match="outlet profile changed"):
+        sequence_model.outlet_adapter.validate_world_condition(drifted_profile)
+    with pytest.raises(ValueError, match="normalizer identity changed"):
+        sequence_model.outlet_adapter.validate_world_condition(
+            replace(sequence_condition, normalizer_fingerprint="tampered")
+        )
+
+    legacy_model = ClearVLAMainlinePolicy(base).eval()
+    legacy_cache, _, _ = legacy_model.encode_online(_batch(base).online)
+    forged_sequence_cache = replace(
+        legacy_cache,
+        top=replace(
+            legacy_cache.top,
+            candidate_world=replace(
+                legacy_cache.top.candidate_world,
+                action_condition=sequence_condition,
+            ),
+        ),
+    )
+    with pytest.raises(TypeError, match="policy cache rejected"):
+        forged_sequence_cache.validate(base)
+    with pytest.raises(TypeError, match="cannot change action condition schema"):
+        legacy_model.world.refine_deployment_world(
+            legacy_cache.top,
+            action_condition=sequence_condition,
+            collect_diagnostics=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "p2_spatial_intent_mode",
+    ("post_pool_only", "shared_target_prior_v1"),
+)
+def test_sequence_q5_runs_exactly_two_passes_and_one_world_rebuild(
+    p2_spatial_intent_mode: str,
+) -> None:
+    torch.manual_seed(2901)
+    base = _calvin_binary_config()
+    q5 = DeploymentFlowSchedule.same_nfe_power_five()
+    config = replace(
+        base,
+        data=replace(
+            base.data,
+            visual_cache_read_backend="pread",
+            visual_pread_max_open_files=3,
+        ),
+        top=replace(
+            base.top,
+            world_action_condition_mode="sequence_prefix_v1",
+            world_camera_condition_mode="coordinate_role_v1",
+            p2_spatial_intent_mode=p2_spatial_intent_mode,
+        ),
+        runtime=replace(
+            base.runtime,
+            deployment_flow_schedule=q5.to_dict(),
+        ),
+    )
+    model = ClearVLAMainlinePolicy(config).eval()
+    model.configure_action_normalizer(
+        ArrayNormalizer.fit_identity(
+            [
+                np.zeros((2, config.dimensions.action_dim), dtype=np.float32),
+                np.ones((2, config.dimensions.action_dim), dtype=np.float32),
+            ]
+        )
+    )
+    with torch.no_grad():
+        camera_condition = model.world.dynamics.camera_coordinate_role_condition
+        assert camera_condition is not None
+        camera_condition.weight.normal_(std=0.05)
+        model.world.dynamics.delta_head.weight.normal_(std=0.05)
+        model.world.dynamics.transport_head.weight.normal_(std=0.05)
+        model.world.dynamics.covariance_head.weight.normal_(std=0.05)
+        if p2_spatial_intent_mode == "shared_target_prior_v1":
+            target_address = model.intent.organizer.target_object_address
+            assert target_address is not None
+            target_address.weight.copy_(
+                torch.tensor([[0.20, -0.10, 0.15]], dtype=torch.float32)
+            )
+    cache, _, _ = model.encode_online(
+        _batch(config).online,
+        collect_diagnostics=False,
+    )
+
+    with (
+        mock.patch.object(model, "velocity", wraps=model.velocity) as velocity,
+        mock.patch.object(
+            model.world,
+            "refine_deployment_world",
+            wraps=model.world.refine_deployment_world,
+        ) as refine_world,
+        mock.patch.object(
+            model.world.dynamics,
+            "forward_w1",
+            wraps=model.world.dynamics.forward_w1,
+        ) as forward_w1,
+    ):
+        result, refined_cache = sample_refined_cached_action_with_cache(
+            model,
+            cache,
+            config,
+            generator=torch.Generator().manual_seed(2902),
+            collect_diagnostics=True,
+            dtype=torch.float32,
+        )
+
+    assert velocity.call_count == 2 * (config.runtime.inference_steps + 1)
+    assert refine_world.call_count == 1
+    assert forward_w1.call_count == 1
+    assert torch.equal(
+        velocity.call_args_list[0].kwargs["noisy_action_field"],
+        velocity.call_args_list[config.runtime.inference_steps + 1].kwargs[
+            "noisy_action_field"
+        ],
+    )
+    torch.testing.assert_close(
+        result.step_times,
+        torch.tensor(q5.refined.query_times, dtype=torch.float32),
+    )
+    assert result.step_sizes == pytest.approx(q5.refined.step_sizes)
+    assert result.flow_schedule_identity == q5.identity
+    assert result.flow_schedule_pass_role == "refined"
+    assert isinstance(
+        refined_cache.top.action_condition,
+        PhysicalActionSequenceCondition,
+    )
+    for name in (
+        "object_action_world_refinement_action_sequence_change_rms",
+        "sampling_outer_final_world_action_sequence_mismatch_rms",
+        "sampling_outer_final_world_action_sequence_delta_mismatch_rms",
+        "sampling_outer_refined_action_delta_first_row_rms",
+        "sampling_outer_refined_action_delta_first_four_rms",
+    ):
+        assert name in result.metrics
+        assert torch.isfinite(result.metrics[name])
+    assert not any("action_interval" in name for name in result.metrics)
+@pytest.mark.parametrize(
+    "p2_spatial_intent_mode",
+    ("post_pool_only", "shared_target_prior_v1"),
+)
+def test_sequence_full_training_graph_backpropagates_and_is_uniquely_owned(
+    p2_spatial_intent_mode: str,
+) -> None:
+    torch.manual_seed(2903)
+    base = _calvin_binary_config()
+    q5 = DeploymentFlowSchedule.same_nfe_power_five()
+    config = replace(
+        base,
+        data=replace(
+            base.data,
+            visual_cache_read_backend="pread",
+            visual_pread_max_open_files=3,
+        ),
+        top=replace(
+            base.top,
+            world_action_condition_mode="sequence_prefix_v1",
+            world_camera_condition_mode="coordinate_role_v1",
+            p2_spatial_intent_mode=p2_spatial_intent_mode,
+        ),
+        runtime=replace(
+            base.runtime,
+            deployment_flow_schedule=q5.to_dict(),
+        ),
+    )
+    model = ClearVLAMainlinePolicy(config).train()
+    model.configure_action_normalizer(
+        ArrayNormalizer.fit_identity(
+            [
+                np.zeros((2, config.dimensions.action_dim), dtype=np.float32),
+                np.ones((2, config.dimensions.action_dim), dtype=np.float32),
+            ]
+        )
+    )
+    # The production migration inherits already-trained W output heads.  Fresh
+    # construction keeps them at zero, so make this graph test non-degenerate
+    # without changing the sequence encoder itself.
+    with torch.no_grad():
+        camera_condition = model.world.dynamics.camera_coordinate_role_condition
+        assert camera_condition is not None
+        camera_condition.weight.normal_(std=0.05)
+        torch.nn.init.normal_(model.world.dynamics.delta_head.weight, std=0.05)
+        torch.nn.init.normal_(model.world.dynamics.transport_head.weight, std=0.05)
+        torch.nn.init.normal_(model.world.dynamics.covariance_head.weight, std=0.05)
+        if p2_spatial_intent_mode == "shared_target_prior_v1":
+            target_address = model.intent.organizer.target_object_address
+            assert target_address is not None
+            target_address.weight.copy_(
+                torch.tensor([[0.20, -0.10, 0.15]], dtype=torch.float32)
+            )
+    optimizer, ownership = build_optimizer(model, config)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    engine = MainlineTrainingEngine(
+        model=model,
+        config=config,
+        optimizer=optimizer,
+        schedule=schedule,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        train_flow_generator=torch.Generator().manual_seed(2904),
+        train_condition_generator=torch.Generator().manual_seed(2905),
+    )
+    optimizer.zero_grad(set_to_none=True)
+    ledger, _ = engine._forward(
+        _batch(config),
+        training=True,
+        collect_diagnostics=False,
+        generator=engine.train_flow_generator,
+        condition_generator=engine.train_condition_generator,
+    )
+    ledger.total.backward()
+
+    parameter_names = tuple(ownership.trainable_names)
+    expected_owned = (
+        "top.coarse_action.sequence_row_offset",
+        "top.dynamics.sequence_time_condition.weight",
+        "top.dynamics.sequence_action_recurrence.weight_ih",
+        "top.dynamics.sequence_action_recurrence.weight_hh",
+        "top.dynamics.sequence_action_recurrence.bias_ih",
+        "top.dynamics.sequence_action_recurrence.bias_hh",
+        "top.dynamics.physical_action_condition.weight",
+    )
+    for name in expected_owned:
+        assert parameter_names.count(name) == 1
+    if p2_spatial_intent_mode == "shared_target_prior_v1":
+        assert parameter_names.count("top.intent.target_object_address.weight") == 1
+
+    live_parameters = dict(model.named_parameters())
+    expected_live = (
+        "intent.coarse_action.sequence_row_offset",
+        "world.dynamics.sequence_time_condition.weight",
+        "world.dynamics.sequence_action_recurrence.weight_ih",
+        "world.dynamics.sequence_action_recurrence.weight_hh",
+        "world.dynamics.sequence_action_recurrence.bias_ih",
+        "world.dynamics.sequence_action_recurrence.bias_hh",
+        "world.dynamics.physical_action_condition.weight",
+    )
+    for name in expected_live:
+        gradient = live_parameters[name].grad
+        assert gradient is not None, name
+        assert torch.isfinite(gradient).all(), name
+        assert torch.count_nonzero(gradient) > 0, name
+    if p2_spatial_intent_mode == "shared_target_prior_v1":
+        target_gradient = live_parameters[
+            "intent.organizer.target_object_address.weight"
+        ].grad
+        assert target_gradient is not None
+        assert torch.isfinite(target_gradient).all()
+        assert torch.count_nonzero(target_gradient) > 0
+
+
+def test_calvin_sequence_coarse_and_binary_rebuild_share_one_normalized_chart() -> None:
+    torch.manual_seed(2906)
+    base = _calvin_binary_config()
+    config = replace(
+        base,
+        top=replace(base.top, world_action_condition_mode="sequence_prefix_v1"),
+    )
+    model = ClearVLAMainlinePolicy(config).eval()
+    offset = np.asarray(
+        [[0.40, -0.20, 0.10, 0.30, -0.50, 0.25, 0.60]],
+        dtype=np.float32,
+    )
+    scale = np.asarray(
+        [[1.70, 0.80, 2.10, 1.30, 0.90, 1.40, 0.75]],
+        dtype=np.float32,
+    )
+    normalizer = ArrayNormalizer(
+        offset=offset,
+        scale=scale,
+        mean=-offset / scale,
+        std=1.0 / scale,
+        minimum=-np.ones_like(scale),
+        maximum=np.ones_like(scale),
+        mode="zscore",
+    )
+    model.configure_action_normalizer(normalizer)
+
+    commands = torch.where(
+        torch.arange(config.dimensions.action_horizon) % 3 == 0,
+        torch.tensor(1.0),
+        torch.tensor(-1.0),
+    )[None]
+    source = torch.as_tensor(offset)[:, None].expand(-1, 24, -1).clone()
+    source[..., :6] += 0.05 * torch.randn_like(source[..., :6])
+    source[..., -1] = commands * float(scale[0, -1]) + float(offset[0, -1])
+    current = torch.as_tensor(offset).clone()
+    current[..., -1] = -float(scale[0, -1]) + float(offset[0, -1])
+
+    coarse = model.outlet_adapter.world_condition_from_action_prediction(
+        source,
+        current,
+    )
+    deployed = source.clone()
+    deployed[..., -1] = commands
+    rebuild_source = model.outlet_adapter.world_condition_action_from_deployed(
+        deployed,
+        command=commands,
+    )
+    torch.testing.assert_close(rebuild_source, source, atol=0.0, rtol=0.0)
+    rebuilt = model.outlet_adapter.world_condition_from_horizon_action(
+        rebuild_source,
+        current,
+    )
+    assert isinstance(coarse, PhysicalActionSequenceCondition)
+    assert isinstance(rebuilt, PhysicalActionSequenceCondition)
+    assert coarse.metadata_identity == rebuilt.metadata_identity
+    torch.testing.assert_close(coarse.fingerprint, rebuilt.fingerprint, atol=0.0, rtol=0.0)
+    coarse.assert_exact_contract()
+    rebuilt.assert_exact_contract()
+
+
+def test_calvin_sequence_real_cpu_bf16_encode_keeps_fp32_normalizer_identity() -> None:
+    torch.manual_seed(2907)
+    base = _calvin_binary_config()
+    config = replace(
+        base,
+        data=replace(
+            base.data,
+            visual_cache_read_backend="pread",
+            visual_pread_max_open_files=3,
+        ),
+        top=replace(
+            base.top,
+            world_action_condition_mode="sequence_prefix_v1",
+            world_camera_condition_mode="coordinate_role_v1",
+            p2_spatial_intent_mode="shared_target_prior_v1",
+        ),
+        runtime=replace(
+            base.runtime,
+            compute_dtype="bf16",
+            deployment_flow_schedule=(
+                DeploymentFlowSchedule.same_nfe_power_five().to_dict()
+            ),
+        ),
+    )
+    model = ClearVLAMainlinePolicy(config).eval()
+    with torch.no_grad():
+        camera_condition = model.world.dynamics.camera_coordinate_role_condition
+        target_address = model.intent.organizer.target_object_address
+        assert camera_condition is not None
+        assert target_address is not None
+        camera_condition.weight.normal_(std=0.05)
+        target_address.weight.copy_(
+            torch.tensor([[0.20, -0.10, 0.15]], dtype=torch.float32)
+        )
+    offset = np.asarray(
+        [[0.40, -0.20, 0.10, 0.30, -0.50, 0.25, 0.60]],
+        dtype=np.float32,
+    )
+    scale = np.asarray(
+        [[1.70, 0.80, 2.10, 1.30, 0.90, 1.40, 0.75]],
+        dtype=np.float32,
+    )
+    model.configure_action_normalizer(
+        ArrayNormalizer(
+            offset=offset,
+            scale=scale,
+            mean=-offset / scale,
+            std=1.0 / scale,
+            minimum=-np.ones_like(scale),
+            maximum=np.ones_like(scale),
+            mode="zscore",
+        )
+    )
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        cache, training_state, _ = model.encode_online(
+            _batch(config).online,
+            collect_diagnostics=False,
+        )
+    condition = cache.top.action_condition
+    assert isinstance(condition, PhysicalActionSequenceCondition)
+    assert condition.source_action.dtype == torch.bfloat16
+    assert condition.normalizer_offset.dtype == torch.float32
+    assert condition.normalizer_scale.dtype == torch.float32
+    assert condition is training_state.top.action_condition
+    model.outlet_adapter.validate_world_condition(condition)
+    condition.assert_exact_contract()
+def test_sequence_validation_aggregates_estimator_and_closure_metrics() -> None:
+    torch.manual_seed(2301)
+    base = _config()
+    q5 = DeploymentFlowSchedule.same_nfe_power_five()
+    config = replace(
+        base,
+        top=replace(base.top, world_action_condition_mode="sequence_prefix_v1"),
+        runtime=replace(
+            base.runtime,
+            max_val_batches=1,
+            eval_sampling_diagnostic_batches=1,
+            eval_proposal_ablation_batches=0,
+            eval_execution_ablation_batches=0,
+            deployment_flow_schedule=q5.to_dict(),
+        ),
+    )
+    model = ClearVLAMainlinePolicy(config)
+    optimizer, _ = build_optimizer(model, config)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    engine = MainlineTrainingEngine(
+        model=model,
+        config=config,
+        optimizer=optimizer,
+        schedule=schedule,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    batch = _batch(config)
+    action_dim = config.dimensions.action_dim
+    unit = np.ones((1, action_dim), dtype=np.float32)
+    normalizer = ArrayNormalizer(
+        offset=np.zeros_like(unit),
+        scale=unit,
+        mean=np.zeros_like(unit),
+        std=unit,
+        minimum=-unit,
+        maximum=unit,
+        mode="identity",
+    )
+    bundle = SimpleNamespace(action_normalizer=normalizer, goal=None)
+    with mock.patch(
+        "clearvla.mainline.train.to_training_batch",
+        return_value=batch,
+    ):
+        metrics = _validate(
+            engine=engine,
+            loader=[object()],
+            bundle=bundle,
+            config=config,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+
+    assert metrics["validation_action_estimator_match_batches"] == 1.0
+    assert metrics["validation_action_estimator_match_coverage"] == 1.0
+    sequence_metrics = (
+        "validation_action_estimator_to_full_action_sequence_rms",
+        "validation_action_estimator_to_full_action_sequence_delta_rms",
+        "validation_action_estimator_to_full_action_sequence_ratio_vs_coarse",
+        "validation_action_estimator_to_full_action_sequence_delta_ratio_vs_coarse",
+        "validation_deploy_object_action_world_refinement_action_sequence_change_rms",
+        "validation_deploy_sampling_outer_final_world_action_sequence_mismatch_rms",
+        "validation_deploy_sampling_outer_final_world_action_sequence_delta_mismatch_rms",
+    )
+    for name in sequence_metrics:
+        assert name in metrics
+        assert math.isfinite(metrics[name])
+    assert "validation_action_estimator_to_full_interval_action_rms" not in metrics
+    assert "validation_action_estimator_to_full_interval_delta_rms" not in metrics
+    archived = archival_metrics(metrics)
+    assert set(sequence_metrics) <= set(archived)

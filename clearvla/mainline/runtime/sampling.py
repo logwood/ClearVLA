@@ -13,7 +13,11 @@ from clearvla.action_solvers.flow_solver.spec import ScheduleSpec
 from ..config import ExperimentConfig
 from ..interfaces import OnlinePolicyInput
 from ..model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
-from ..model.types import FlowStepContext
+from ..model.types import (
+    FlowStepContext,
+    PhysicalActionCondition,
+    PhysicalActionSequenceCondition,
+)
 from .flow_schedule import (
     DeploymentFlowSchedule,
     legacy_uniform_runtime,
@@ -40,6 +44,27 @@ class SamplingResult:
     step_sizes: tuple[float, ...] = ()
     flow_schedule_identity: dict[str, Any] | None = None
     flow_schedule_pass_role: str = "legacy_unspecified"
+
+
+def _validate_outlet_world_condition(
+    model: object,
+    condition: object,
+) -> None:
+    """Use the concrete outlet contract without narrowing numerical test doubles.
+
+    Production policies always expose the fail-closed adapter validator.  The
+    standalone integrator intentionally also accepts minimal deterministic
+    fields used to audit schedule arithmetic; those historical dummies do not
+    own an outlet metadata contract and remain outside this check.
+    """
+
+    outlet = getattr(model, "outlet_adapter", None)
+    validator = getattr(outlet, "validate_world_condition", None)
+    if callable(validator):
+        validator(condition)
+        return
+    if isinstance(model, ClearVLAMainlinePolicy):
+        raise RuntimeError("production policy lost outlet world-condition validation")
 
 
 def _accepts_flow_step_context(model: object) -> bool:
@@ -273,7 +298,7 @@ def refine_cached_world(
 
     The first deployment pass produces a concrete 24-row outlet proposal.
     This helper converts its explicitly normalized W view to the canonical
-    four-interval physical ABI and rebuilds only W from the cached compact
+    configured physical-action ABI and rebuilds only W from the cached compact
     belief.  G, S, P1 and all dense source charts remain untouched.  Callers
     can then run a second integration with the same initial noise, making the
     refinement explicit without rerunning W at every ODE node.
@@ -281,6 +306,7 @@ def refine_cached_world(
 
     config.validate()
     cache.validate(config)
+    _validate_outlet_world_condition(model, cache.top.action_condition)
     if world_condition_action.ndim != 3 or tuple(world_condition_action.shape[1:]) != (
         config.dimensions.action_horizon,
         config.dimensions.action_dim,
@@ -293,6 +319,7 @@ def refine_cached_world(
         world_condition_action.to(device=cache.history.action_state.device),
         cache.history.action_state,
     )
+    _validate_outlet_world_condition(model, action_condition)
     device = cache.history.state.device
     autocast_enabled = device.type in {"cuda", "cpu"} and runtime_dtype in {
         torch.bfloat16,
@@ -310,6 +337,7 @@ def refine_cached_world(
         )
     refined_cache = replace(cache, top=refined_top)
     refined_cache.validate(config)
+    _validate_outlet_world_condition(model, refined_cache.top.action_condition)
     return refined_cache, metrics
 
 
@@ -400,32 +428,93 @@ def sample_refined_cached_action_with_cache(
         cache.history.action_state,
     )
     refined_world_condition = refined_cache.top.action_condition
-    final_interval = final_world_condition.interval_action.detach().float()
-    final_delta = final_world_condition.interval_delta.detach().float()
-    refined_interval = refined_world_condition.interval_action.detach().float()
-    refined_delta = refined_world_condition.interval_delta.detach().float()
+    _validate_outlet_world_condition(model, final_world_condition)
+    _validate_outlet_world_condition(model, refined_world_condition)
+    if isinstance(final_world_condition, PhysicalActionSequenceCondition):
+        if not isinstance(refined_world_condition, PhysicalActionSequenceCondition):
+            raise TypeError("outer refinement changed W action condition schema")
+        if (
+            final_world_condition.metadata_identity
+            != refined_world_condition.metadata_identity
+        ):
+            raise ValueError("outer refinement changed W action sequence metadata")
+        final_value = final_world_condition.canonical_value.detach().float()
+        final_delta = final_world_condition.canonical_delta.detach().float()
+        refined_value = refined_world_condition.canonical_value.detach().float()
+        refined_delta = refined_world_condition.canonical_delta.detach().float()
+        condition_metrics = {
+            "sampling_outer_final_world_action_sequence_rms": final_value.square()
+            .mean()
+            .sqrt(),
+            "sampling_outer_final_world_action_sequence_delta_rms": final_delta.square()
+            .mean()
+            .sqrt(),
+            "sampling_outer_final_world_action_sequence_mismatch_rms": (
+                final_value - refined_value
+            )
+            .square()
+            .mean()
+            .sqrt(),
+            "sampling_outer_final_world_action_sequence_delta_mismatch_rms": (
+                final_delta - refined_delta
+            )
+            .square()
+            .mean()
+            .sqrt(),
+        }
+    else:
+        if not isinstance(refined_world_condition, PhysicalActionCondition):
+            compatible_dummy = not isinstance(
+                model, ClearVLAMainlinePolicy
+            ) and all(
+                hasattr(condition, name)
+                for condition in (final_world_condition, refined_world_condition)
+                for name in ("interval_action", "interval_delta")
+            )
+            if not compatible_dummy:
+                raise TypeError("outer refinement changed W action condition schema")
+        final_interval = final_world_condition.interval_action.detach().float()
+        final_delta = final_world_condition.interval_delta.detach().float()
+        refined_interval = refined_world_condition.interval_action.detach().float()
+        refined_delta = refined_world_condition.interval_delta.detach().float()
+        condition_metrics = {
+            "sampling_outer_final_world_action_interval_rms": final_interval.square()
+            .mean()
+            .sqrt(),
+            "sampling_outer_final_world_action_delta_rms": final_delta.square()
+            .mean()
+            .sqrt(),
+            "sampling_outer_final_world_action_interval_mismatch_rms": (
+                final_interval - refined_interval
+            )
+            .square()
+            .mean()
+            .sqrt(),
+            "sampling_outer_final_world_action_delta_mismatch_rms": (
+                final_delta - refined_delta
+            )
+            .square()
+            .mean()
+            .sqrt(),
+        }
+    refined_change = refined_action - proposal_action
     outer_metrics = {
         **refinement_metrics,
+        **condition_metrics,
         "sampling_outer_world_refinement": refined.action.new_ones(
             (), dtype=torch.float32
         ),
         "sampling_outer_proposal_action_rms": proposal_action.square().mean().sqrt(),
         "sampling_outer_refined_action_rms": refined_action.square().mean().sqrt(),
         "sampling_outer_refined_action_delta_rms": (
-            refined_action - proposal_action
+            refined_change
         ).square().mean().sqrt(),
-        "sampling_outer_final_world_action_interval_rms": final_interval.square()
+        "sampling_outer_refined_action_delta_first_row_rms": refined_change[:, :1]
+        .square()
         .mean()
         .sqrt(),
-        "sampling_outer_final_world_action_delta_rms": final_delta.square().mean().sqrt(),
-        "sampling_outer_final_world_action_interval_mismatch_rms": (
-            final_interval - refined_interval
-        ).square()
-        .mean()
-        .sqrt(),
-        "sampling_outer_final_world_action_delta_mismatch_rms": (
-            final_delta - refined_delta
-        ).square()
+        "sampling_outer_refined_action_delta_first_four_rms": refined_change[:, :4]
+        .square()
         .mean()
         .sqrt(),
     }

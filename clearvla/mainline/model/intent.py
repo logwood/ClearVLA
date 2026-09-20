@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .routing import register_gradient_rms_metric, smooth_rms_contract
@@ -865,9 +866,34 @@ class FuturePlanRecognizer(nn.Module):
 class CoarseActionIntent(nn.Module):
     """V120 online clean action intent used exactly once by W."""
 
-    def __init__(self, *, hidden: int, action_dim: int, heads: int) -> None:
+    def __init__(
+        self,
+        *,
+        hidden: int,
+        action_dim: int,
+        heads: int,
+        horizon: int = 24,
+        action_condition_mode: str = "interval_mean_v1",
+    ) -> None:
         super().__init__()
+        self.horizon = int(horizon)
+        if self.horizon != 24:
+            raise ValueError("the active coarse action contract requires 24 rows")
+        self.action_condition_mode = str(action_condition_mode)
+        if self.action_condition_mode not in {
+            "interval_mean_v1",
+            "sequence_prefix_v1",
+        }:
+            raise ValueError("unknown coarse action condition mode")
         self.query = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
+        # Keep the trained four-query basis as the shared temporal scaffold.
+        # The new zero-initialized row offsets add row-specific capacity
+        # without replacing or resetting the existing action head/query.
+        self.sequence_row_offset: nn.Parameter | None = None
+        if self.action_condition_mode == "sequence_prefix_v1":
+            self.sequence_row_offset = nn.Parameter(
+                torch.zeros(1, self.horizon, hidden)
+            )
         self.intent_read = _CrossRead(hidden, heads)
         self.object_read = _CrossRead(hidden, heads)
         self.history_read = _CrossRead(hidden, heads)
@@ -883,7 +909,17 @@ class CoarseActionIntent(nn.Module):
     ) -> CoarseActionIntentState:
         intent.validate(hidden=int(self.query.shape[-1]))
         batch = int(intent.public_interval_carrier.shape[0])
-        query = self.query.to(
+        query_seed = self.query
+        if self.action_condition_mode == "sequence_prefix_v1":
+            if self.sequence_row_offset is None:
+                raise RuntimeError("sequence coarse action has no row offsets")
+            query_seed = F.interpolate(
+                self.query.transpose(1, 2),
+                size=self.horizon,
+                mode="linear",
+                align_corners=True,
+            ).transpose(1, 2) + self.sequence_row_offset
+        query = query_seed.to(
             device=intent.public_interval_carrier.device,
             dtype=intent.public_interval_carrier.dtype,
         ).expand(batch, -1, -1)
@@ -925,10 +961,17 @@ class CoarseActionIntent(nn.Module):
             target = None
             loss = action_prediction.new_zeros(())
         else:
-            slices = _interval_slices(int(future_action.shape[1]))
-            target = torch.stack(
-                [future_action[:, row].mean(dim=1) for row in slices], dim=1
-            ).detach()
+            if self.action_condition_mode == "sequence_prefix_v1":
+                if int(future_action.shape[1]) < self.horizon:
+                    raise ValueError(
+                        "sequence coarse supervision requires 24 future rows"
+                    )
+                target = future_action[:, : self.horizon].detach()
+            else:
+                slices = _interval_slices(int(future_action.shape[1]))
+                target = torch.stack(
+                    [future_action[:, row].mean(dim=1) for row in slices], dim=1
+                ).detach()
             loss = (action_prediction.float() - target.float()).square().mean()
         return CoarseActionIntentState(
             tokens=token,

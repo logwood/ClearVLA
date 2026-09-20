@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 import torch
@@ -1389,6 +1391,448 @@ class OutletPhysicalActionCondition(PhysicalActionCondition):
             raise ValueError("outlet physical action delta reconstruction failed")
 
 
+PHYSICAL_ACTION_SEQUENCE_SCHEMA = "physical_action_sequence_prefix_v1"
+ABSOLUTE_ACTION_SEQUENCE_CHART = "absolute_action_sequence_v1"
+RELATIVE_COMMAND_SEQUENCE_CHART = "relative_command_sequence_v1"
+_ACTION_SEQUENCE_CHART_CODES = {
+    ABSOLUTE_ACTION_SEQUENCE_CHART: 1.0,
+    RELATIVE_COMMAND_SEQUENCE_CHART: 2.0,
+}
+
+
+def physical_action_normalizer_fingerprint(
+    offset: Tensor,
+    scale: Tensor,
+) -> str:
+    """Hash exactly the affine chart values used by the outlet adapter."""
+
+    offset_values = tuple(
+        float(value)
+        for value in offset.detach().float().cpu().reshape(-1).tolist()
+    )
+    scale_values = tuple(
+        float(value)
+        for value in scale.detach().float().cpu().reshape(-1).tolist()
+    )
+    encoded = json.dumps(
+        {"offset": offset_values, "scale": scale_values},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class PhysicalActionSequenceCondition:
+    """Versioned 24-row physical action condition consumed by W.
+
+    ``source_action`` is the normalized outlet-native proposal and remains the
+    sole producer-owned value.  ``canonical_value`` and ``canonical_delta``
+    are deterministic outlet-adapter views.  For an absolute action chart they
+    are the action and its adjacent difference.  For a relative-command chart
+    the arm value is the prefix command sum while the arm delta is the centered
+    command itself; the gripper lane remains an ordinary value/difference.
+
+    Row time is control-step time, not flow-ODE time.  Version one deliberately
+    accepts exactly 24 contiguous known steps and does not imply controls for
+    W's 32--48 future interval.
+    """
+
+    source_action: Tensor  # [B,24,A], normalized outlet-native proposal
+    canonical_value: Tensor  # [B,24,A], adapter-owned physical sequence value
+    canonical_delta: Tensor  # [B,24,A], adapter-owned adjacent/command delta
+    current_action: Tensor  # [B,A], canonical row-zero boundary
+    row_start: Tensor  # [B,24,1], inclusive control-step start
+    row_end: Tensor  # [B,24,1], exclusive control-step end
+    normalizer_offset: Tensor  # FP32 [B,1,A], normalized value of native zero
+    normalizer_scale: Tensor  # FP32 [B,1,A], native-to-normalized affine scale
+    outlet_profile: str
+    chart_version: str
+    normalizer_fingerprint: str
+    arm_dim: int
+    schema: str = PHYSICAL_ACTION_SEQUENCE_SCHEMA
+    known_prefix_end: int = 24
+
+    @classmethod
+    def from_absolute_action(
+        cls,
+        action: Tensor,
+        current_action: Tensor,
+        *,
+        outlet_profile: str,
+        normalizer_offset: Tensor,
+        normalizer_scale: Tensor,
+        normalizer_fingerprint: str | None = None,
+    ) -> "PhysicalActionSequenceCondition":
+        """Build the exact absolute-chart sequence without interval pooling."""
+
+        if action.ndim != 3 or int(action.shape[1]) != 24:
+            raise ValueError("physical action sequence must be [B,24,A]")
+        batch, horizon, action_dim = action.shape
+        _shape(
+            current_action,
+            (batch, action_dim),
+            "physical action sequence current action",
+        )
+        boundary = torch.cat(
+            (
+                current_action[:, None].to(
+                    device=action.device,
+                    dtype=action.dtype,
+                ),
+                action[:, :-1],
+            ),
+            dim=1,
+        )
+        row_start = torch.arange(
+            horizon,
+            device=action.device,
+            dtype=action.dtype,
+        ).reshape(1, horizon, 1).expand(batch, -1, -1)
+        offset, scale = cls._expanded_normalizer_chart(
+            action,
+            normalizer_offset,
+            normalizer_scale,
+        )
+        condition = cls(
+            source_action=action,
+            canonical_value=action,
+            canonical_delta=action - boundary,
+            current_action=current_action,
+            row_start=row_start,
+            row_end=row_start + 1,
+            normalizer_offset=offset,
+            normalizer_scale=scale,
+            outlet_profile=str(outlet_profile),
+            chart_version=ABSOLUTE_ACTION_SEQUENCE_CHART,
+            normalizer_fingerprint=(
+                physical_action_normalizer_fingerprint(offset[0], scale[0])
+                if normalizer_fingerprint is None
+                else str(normalizer_fingerprint)
+            ),
+            arm_dim=action_dim - 1,
+        )
+        condition.validate(action_dim=action_dim)
+        return condition
+
+    @classmethod
+    def from_relative_command(
+        cls,
+        action: Tensor,
+        current_action: Tensor,
+        *,
+        outlet_profile: str,
+        arm_dim: int,
+        normalizer_offset: Tensor,
+        normalizer_scale: Tensor,
+        normalizer_fingerprint: str | None = None,
+    ) -> "PhysicalActionSequenceCondition":
+        """Build the deterministic centered-command/cumulative sequence."""
+
+        if action.ndim != 3 or int(action.shape[1]) != 24:
+            raise ValueError("physical action sequence must be [B,24,A]")
+        batch, horizon, action_dim = action.shape
+        if not 0 < int(arm_dim) < action_dim:
+            raise ValueError("relative action sequence arm width is invalid")
+        _shape(
+            current_action,
+            (batch, action_dim),
+            "physical action sequence current action",
+        )
+        offset, scale = cls._expanded_normalizer_chart(
+            action,
+            normalizer_offset,
+            normalizer_scale,
+        )
+        source_current = current_action.to(device=action.device, dtype=action.dtype)
+        # Metadata retains the exact FP32 chart; the numerical action view
+        # keeps the established arithmetic in the producer's dtype.
+        arm_command = action[..., :arm_dim] - offset[..., :arm_dim].to(
+            dtype=action.dtype
+        )
+        canonical_arm = torch.cumsum(arm_command, dim=1)
+        gripper = action[..., arm_dim:]
+        gripper_boundary = torch.cat(
+            (source_current[:, None, arm_dim:], gripper[:, :-1]),
+            dim=1,
+        )
+        canonical_value = torch.cat((canonical_arm, gripper), dim=-1)
+        canonical_delta = torch.cat(
+            (arm_command, gripper - gripper_boundary),
+            dim=-1,
+        )
+        canonical_current = torch.cat(
+            (
+                torch.zeros_like(source_current[..., :arm_dim]),
+                source_current[..., arm_dim:],
+            ),
+            dim=-1,
+        )
+        row_start = torch.arange(
+            horizon,
+            device=action.device,
+            dtype=action.dtype,
+        ).reshape(1, horizon, 1).expand(batch, -1, -1)
+        condition = cls(
+            source_action=action,
+            canonical_value=canonical_value,
+            canonical_delta=canonical_delta,
+            current_action=canonical_current,
+            row_start=row_start,
+            row_end=row_start + 1,
+            normalizer_offset=offset,
+            normalizer_scale=scale,
+            outlet_profile=str(outlet_profile),
+            chart_version=RELATIVE_COMMAND_SEQUENCE_CHART,
+            normalizer_fingerprint=(
+                physical_action_normalizer_fingerprint(offset[0], scale[0])
+                if normalizer_fingerprint is None
+                else str(normalizer_fingerprint)
+            ),
+            arm_dim=int(arm_dim),
+        )
+        condition.validate(action_dim=action_dim)
+        return condition
+
+    @staticmethod
+    def _expanded_normalizer_chart(
+        action: Tensor,
+        offset: Tensor,
+        scale: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        batch, _, action_dim = action.shape
+
+        def expand(value: Tensor, name: str) -> Tensor:
+            flattened = value.to(device=action.device, dtype=torch.float32).reshape(
+                -1,
+                action_dim,
+            )
+            if int(flattened.shape[0]) not in {1, batch}:
+                raise ValueError(f"physical action sequence {name} batch is invalid")
+            if int(flattened.shape[0]) == 1:
+                flattened = flattened.expand(batch, -1)
+            return flattened[:, None]
+
+        return expand(offset, "normalizer offset"), expand(
+            scale,
+            "normalizer scale",
+        )
+
+    @property
+    def batch(self) -> int:
+        return int(self.source_action.shape[0])
+
+    @property
+    def horizon(self) -> int:
+        return int(self.source_action.shape[1])
+
+    @property
+    def action_dim(self) -> int:
+        return int(self.source_action.shape[-1])
+
+    @property
+    def device(self) -> torch.device:
+        return self.source_action.device
+
+    @property
+    def physical_fingerprint(self) -> Tensor:
+        """The two physical row streams read by W's sequence encoder."""
+
+        return torch.cat((self.canonical_value, self.canonical_delta), dim=-1)
+
+    @property
+    def fingerprint(self) -> Tensor:
+        """Lossless numeric audit view; metadata stays explicit beside it."""
+
+        chart_code = self.source_action.new_full(
+            (self.batch, self.horizon, 1),
+            _ACTION_SEQUENCE_CHART_CODES[self.chart_version],
+        )
+        current_boundary = self.current_action[:, None].to(
+            device=self.device,
+            dtype=self.source_action.dtype,
+        ).expand(-1, self.horizon, -1)
+        return torch.cat(
+            (
+                self.source_action,
+                self.canonical_value,
+                self.canonical_delta,
+                current_boundary,
+                self.normalizer_offset.expand(-1, self.horizon, -1),
+                self.normalizer_scale.expand(-1, self.horizon, -1),
+                self.row_start,
+                self.row_end,
+                chart_code,
+            ),
+            dim=-1,
+        )
+
+    @property
+    def action_fingerprint(self) -> Tensor:
+        return self.fingerprint
+
+    @property
+    def metadata_identity(self) -> tuple[str, str, str, str, int, int]:
+        return (
+            self.schema,
+            self.outlet_profile,
+            self.chart_version,
+            self.normalizer_fingerprint,
+            int(self.arm_dim),
+            int(self.known_prefix_end),
+        )
+
+    def validate(self, *, action_dim: int, horizon: int = 24) -> None:
+        if self.schema != PHYSICAL_ACTION_SEQUENCE_SCHEMA:
+            raise ValueError("unknown physical action sequence schema")
+        if self.chart_version not in _ACTION_SEQUENCE_CHART_CODES:
+            raise ValueError("unknown physical action sequence chart version")
+        if not self.outlet_profile:
+            raise ValueError("physical action sequence outlet profile is empty")
+        if not self.normalizer_fingerprint:
+            raise ValueError("physical action sequence normalizer identity is empty")
+        if (
+            type(self.known_prefix_end) is not int
+            or self.known_prefix_end != 24
+            or int(horizon) != 24
+        ):
+            raise ValueError("sequence-prefix-v1 requires one complete 24-row prefix")
+        if type(self.arm_dim) is not int or not 0 < self.arm_dim < int(action_dim):
+            raise ValueError("physical action sequence arm width is invalid")
+        expected = (self.batch, 24, int(action_dim))
+        _shape(self.source_action, expected, "physical action sequence source")
+        _shape(self.canonical_value, expected, "physical action sequence value")
+        _shape(self.canonical_delta, expected, "physical action sequence delta")
+        _shape(
+            self.current_action,
+            (self.batch, int(action_dim)),
+            "physical action sequence current action",
+        )
+        time_shape = (self.batch, 24, 1)
+        _shape(self.row_start, time_shape, "physical action sequence row start")
+        _shape(self.row_end, time_shape, "physical action sequence row end")
+        normalizer_shape = (self.batch, 1, int(action_dim))
+        _shape(
+            self.normalizer_offset,
+            normalizer_shape,
+            "physical action sequence normalizer offset",
+        )
+        _shape(
+            self.normalizer_scale,
+            normalizer_shape,
+            "physical action sequence normalizer scale",
+        )
+        tensors = (
+            self.source_action,
+            self.canonical_value,
+            self.canonical_delta,
+            self.current_action,
+            self.row_start,
+            self.row_end,
+            self.normalizer_offset,
+            self.normalizer_scale,
+        )
+        if any(value.device != self.source_action.device for value in tensors):
+            raise ValueError("physical action sequence tensors must share a device")
+        if any(not value.is_floating_point() for value in tensors):
+            raise TypeError("physical action sequence tensors must be floating point")
+        if (
+            self.normalizer_offset.dtype != torch.float32
+            or self.normalizer_scale.dtype != torch.float32
+        ):
+            raise TypeError(
+                "physical action sequence normalizer metadata must remain FP32"
+            )
+
+    def assert_exact_contract(self) -> None:
+        """Run synchronization-requiring value checks only in explicit audits."""
+
+        expected_start = torch.arange(
+            24,
+            device=self.device,
+            dtype=self.row_start.dtype,
+        ).reshape(1, 24, 1).expand(self.batch, -1, -1)
+        if not torch.equal(self.row_start, expected_start):
+            raise ValueError("physical action sequence row starts are not contiguous")
+        if not torch.equal(self.row_end, expected_start + 1):
+            raise ValueError("physical action sequence row ends are not contiguous")
+        if not bool(torch.isfinite(self.normalizer_offset).all()) or not bool(
+            torch.isfinite(self.normalizer_scale).all()
+        ):
+            raise ValueError("physical action sequence normalizer is non-finite")
+        if bool((self.normalizer_scale <= 0.0).any()):
+            raise ValueError("physical action sequence normalizer scale is not positive")
+        if not torch.equal(
+            self.normalizer_offset,
+            self.normalizer_offset[:1].expand_as(self.normalizer_offset),
+        ) or not torch.equal(
+            self.normalizer_scale,
+            self.normalizer_scale[:1].expand_as(self.normalizer_scale),
+        ):
+            raise ValueError("physical action sequence normalizer differs across batch")
+        expected_fingerprint = physical_action_normalizer_fingerprint(
+            self.normalizer_offset[0],
+            self.normalizer_scale[0],
+        )
+        if self.normalizer_fingerprint != expected_fingerprint:
+            raise ValueError("physical action sequence normalizer identity is inconsistent")
+        if self.chart_version == ABSOLUTE_ACTION_SEQUENCE_CHART:
+            if not torch.equal(self.source_action, self.canonical_value):
+                raise ValueError("absolute action sequence source/value diverged")
+            delta_source = self.source_action
+            delta = self.canonical_delta
+            current = self.current_action
+        else:
+            arm = self.arm_dim
+            expected_arm_delta = (
+                self.source_action[..., :arm]
+                - self.normalizer_offset[..., :arm].to(dtype=self.source_action.dtype)
+            )
+            if not torch.equal(
+                self.canonical_delta[..., :arm],
+                expected_arm_delta,
+            ):
+                raise ValueError("relative action sequence source/delta diverged")
+            if not torch.allclose(
+                self.canonical_value[..., :arm],
+                torch.cumsum(expected_arm_delta, dim=1),
+                rtol=1e-5,
+                atol=1e-6,
+            ):
+                raise ValueError("relative action sequence cumulative value diverged")
+            if not torch.equal(
+                self.canonical_value[..., arm:],
+                self.source_action[..., arm:],
+            ):
+                raise ValueError("relative action sequence gripper value diverged")
+            if not torch.equal(
+                self.current_action[..., :arm],
+                torch.zeros_like(self.current_action[..., :arm]),
+            ):
+                raise ValueError("relative action sequence arm boundary is not zero")
+            delta_source = self.source_action[..., arm:]
+            delta = self.canonical_delta[..., arm:]
+            current = self.current_action[..., arm:]
+        boundary = torch.cat(
+            (
+                current[:, None].to(
+                    device=self.device,
+                    dtype=delta_source.dtype,
+                ),
+                delta_source[:, :-1],
+            ),
+            dim=1,
+        )
+        # Recompute the producer's subtraction rather than trying to invert a
+        # rounded low-precision delta with addition. Both charts retain the
+        # same numerical factory operations under FP32, BF16 and FP16.
+        if not torch.equal(delta, delta_source - boundary):
+            raise ValueError("physical action sequence delta reconstruction failed")
+
+
+WorldActionCondition = PhysicalActionCondition | PhysicalActionSequenceCondition
+
+
 @dataclass(frozen=True)
 class HistoryActionProposalState:
     """Auxiliary causal prediction reconstructed from executed-action history.
@@ -1649,7 +2093,7 @@ class CandidateWorld:
     action-condition audit method when a probe needs it.
     """
 
-    action_condition: PhysicalActionCondition
+    action_condition: WorldActionCondition
     dynamics: FutureObjectDynamics
 
     @property
@@ -1661,12 +2105,17 @@ class CandidateWorld:
         self.dynamics.validate()
         if self.action_condition.batch != int(self.dynamics.current_reference.shape[0]):
             raise ValueError("candidate world action and dynamics batches do not align")
-        if self.action_condition.interval_action.device != self.dynamics.semantic_delta.device:
+        condition_device = (
+            self.action_condition.interval_action.device
+            if isinstance(self.action_condition, PhysicalActionCondition)
+            else self.action_condition.device
+        )
+        if condition_device != self.dynamics.semantic_delta.device:
             raise ValueError("candidate world action and dynamics must share a device")
 
     def assert_action_identity(
         self,
-        action_condition: PhysicalActionCondition,
+        action_condition: WorldActionCondition,
     ) -> None:
         """Reject a world paired with another candidate action object."""
 

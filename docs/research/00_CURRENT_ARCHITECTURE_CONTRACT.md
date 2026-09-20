@@ -1,6 +1,6 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-14
+Updated: 2026-09-20
 
 This is the compact source of truth for the active mainline graph. Read it
 before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
@@ -31,6 +31,7 @@ visual history:         DINO/raw at -8 / -4 / 0; two learned adjacent flows
 training:               one online encode, one formal velocity pass, one loss composition
 deployment:             proposal ODE, one W rebuild, refined ODE
 shared action core:     24 x 18 value/adjacent-difference/gripper field
+W action condition:     four interval means by default; opt-in causal 24-row prefix
 default config:         configs/mainline/object_intent_dynamics_323.json
 Pen launcher:           scripts/train_mainline.sh
 RDT-8 launcher:         scripts/train_rdt_multitask.sh
@@ -56,6 +57,7 @@ These are source/config selections, not claims about trained-model success.
 | P2 spatial intent | `post_pool_only`; typed S selects interval after spatial pooling | `shared_target_prior_v1`; one shared S-owned target-K prior conditions semantic K and geometry K*C before pooling |
 | Visual NPY read transport | `mmap` | `pread`; cache layout, logical indices and dataset identity are unchanged |
 | W camera condition | `motion_prior_only` | `coordinate_role_v1`; separate initialization migration |
+| W action condition | `interval_mean_v1`; four physical interval means and current-anchored deltas | `sequence_prefix_v1`; exact known 24-row action sequence with causal prefix reads |
 | ODE schedule | Uniform E5 proposal/refined | Registered Q5 plus its versioned flow-step context |
 
 An opt-in's source tests do not promote it to the default. The checkpoint's
@@ -109,9 +111,12 @@ the detached Teacher.
 T5 + observed state/history + ObjectFactSet
   -> S public interval carrier + typed [interval,K,type] relevance
   -> typed-free CoarseAction proposal [B,4,7]
-  -> PhysicalActionCondition [B,4,14]
-     absolute interval means + current-anchored adjacent deltas
-  -> W(ObjectWorldBelief, PhysicalActionCondition)
+  -> outlet-owned physical action condition
+     default: PhysicalActionCondition [B,4,14]
+              absolute interval means + current-anchored adjacent deltas
+     opt-in:  PhysicalActionSequenceCondition [B,24,7]
+              source rows + canonical value/delta + row-time/chart identity
+  -> W(ObjectWorldBelief, selected physical action condition)
      W1 owns intervals 0/1; W2 reads W1 and owns intervals 2/3
   -> action-tagged CandidateWorld / FutureObjectDynamics
 ~~~
@@ -144,6 +149,19 @@ independent target priors for the two readers. Their final K posteriors may
 still differ because their W source and coordinate likelihoods remain
 independent. Supported NaN/Inf is rejected and unsupported K is quarantined.
 No raw language, color label or rank-1 object pointer enters W or the bottom.
+
+The opt-in `sequence_prefix_v1` preserves the known 24-step action proposal
+instead of pooling it into four means. Coarse action keeps its established four
+queries, interpolates them to 24 rows and adds one exact-zero row-offset owner.
+The outlet adapter is the sole factory for both online/coarse and deployment
+rebuild conditions. It records normalized source action, canonical value and
+delta, current boundary, control-row times, FP32 normalizer metadata/fingerprint
+and outlet/chart identity. W reuses its physical row projection, adds a learned
+row-time projection and one recurrent action encoder, then reads causal prefix
+endpoints 8, 16, 24 and 24. The fourth world interval is therefore conditioned
+on the same known 24-step prefix; rows 25--48 are not fabricated. This mode
+does not introduce language, S hidden state, Teacher evidence or noisy ODE
+action into W.
 
 ### Precision, policy, transition and execution
 
@@ -208,15 +226,18 @@ from identical initial physical noise:
 W(coarse)
   -> proposal ODE at t = 0,.2,.4,.6,.8
   -> decode 24-row proposal
-  -> rebuild W once from its four-interval condition
+  -> rebuild W once from the selected physical action condition
   -> refined ODE at t = 0,.2,.4,.6,.8
   -> final action
 ~~~
 
 This is one bounded correction, not a fixed point. The final action may differ
 from the action that conditioned the rebuilt W, so final interval/delta
-mismatch remains a residual metric. Recomputing W after the final action
-without another policy consumer would not close anything.
+mismatch in the default mode, or sequence/delta mismatch in the sequence mode,
+remains a residual metric. Recomputing W after the final action without another
+policy consumer would not close anything. Training still performs one online
+encode and one formal velocity/loss path; future action supervises coarse action
+only and never causes a train-time endpoint estimate or W rebuild.
 
 The default remains the exact uniform E5 grid above. The registered Q5
 schedule (`t_i=(i/5)^1.25`) is opt-in. A non-uniform schedule now carries the
@@ -271,8 +292,10 @@ select rows only; decoded events are evaluation metrics, never runtime gates.
 CALVIN applies exactly three outlet rules:
 
 1. motion sampling scores normalized command minus normalized raw zero;
-2. before W, four centered relative commands become cumulative canonical
-   displacement plus per-interval command delta;
+2. before W, the default mode converts four centered relative-command means to
+   cumulative canonical displacement plus per-interval command delta; the
+   opt-in sequence mode instead preserves all 24 centered commands, their
+   cumulative canonical values and rowwise deltas;
 3. the binary command head maps argmax to {-1,+1}, while the six
    compatibility-only future-gripper coordinates are zero before every dynamic
    ODE consumer.
@@ -538,6 +561,9 @@ Current checkpoint observations, when needed, live in the temporary
     contracts. `FlowStepContext` may enter the bottom flow, while raw language,
     color/object pointers and role logits may not; object binding must be
     resolved upstream and cross the seam only as a compiled physical condition.
+17. A sequence-conditioned W may read only the known 24-row physical prefix.
+    Its four interval reads end at 8, 16, 24 and 24; it cannot synthesize rows
+    25--48, consume future supervision or replace the one-rebuild Q5 lifecycle.
 
 ## Typed boundary summary
 
@@ -549,6 +575,7 @@ Current checkpoint observations, when needed, live in the temporary
 | ActionIntentDock | Public S interval/history/K memory plus producer-owned K validity mask; no typed fact re-entry |
 | PolicyIntentDock | Reduced typed S context for P2/P3; opt-in shared FP32 target-K address |
 | PhysicalActionCondition | Four physical interval means plus current-anchored deltas |
+| PhysicalActionSequenceCondition | Exact known 24-row source action, canonical value/delta, current boundary, row times and FP32 outlet/chart/normalizer identity |
 | ObjectWorldBelief | Compact current G belief; no S/Teacher/noisy action |
 | CandidateWorld | One exact action condition atomically paired with FutureObjectDynamics |
 | FutureObjectDynamics | Semantic successor/delta and camera-resolved transport/covariance |
@@ -577,10 +604,11 @@ ConditioningStage
 
 Static observation work and per-ODE dynamic work are separate. Boundary
 containers pass existing references without detach, clone, hidden projection
-or reconstructed axes. WorldStage accepts only ObjectWorldBelief and
-PhysicalActionCondition. Language-to-object binding is owned above this seam:
-S/P2 may use language with the language-free ObjectFactSet and must compile the
-result into the existing physical action/consequence carriers. The dynamic
+or reconstructed axes. WorldStage accepts only ObjectWorldBelief plus the
+selected PhysicalActionCondition or PhysicalActionSequenceCondition.
+Language-to-object binding is owned above this seam: S/P2 may use language with
+the language-free ObjectFactSet and must compile the result into the existing
+physical action/consequence carriers. The dynamic
 bottom accepts only the prepared physical field, flow time, bottom-local
 FlowStepContext, shared action query, compiled physical plan, V120 seed and
 transition state; goal, RGB/DINO, ObjectFactSet, raw object pointers, color
@@ -635,6 +663,13 @@ architectural semantic.
   physical-reader paths. Both are fresh optimizer/schedule/RNG initialization,
   require identical dataset/language/normalizer identity and are not exact
   resume across modes.
+- `p2_shared_target_prior_sequence_prefix_pread_v1` is the combined opt-in
+  migration. It preserves every old model tensor exactly and adds exactly seven
+  tensors: the FP32 exact-zero `[1,3]` target address, one exact-zero
+  `[1,24,H]` coarse row offset, one sequence-time projection and one GRU's
+  input/hidden weights and biases. Only the reviewed 17-path source allow-list
+  is admitted. It is a fresh optimizer/schedule/RNG initialization, requires
+  identical dataset/language/normalizer identity and is not exact resume.
 - `p2_post_pool_pread_control_v1` is the matched physical-reader control. It
   keeps `post_pool_only`, changes only `mmap` to `pread`, preserves the exact
   model state-key set and uses the same fresh initialization boundary as the

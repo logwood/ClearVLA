@@ -20,6 +20,8 @@ from .types import (
     ObjectFactSet,
     ObjectWorldBelief,
     PhysicalActionCondition,
+    PhysicalActionSequenceCondition,
+    WorldActionCondition,
 )
 
 
@@ -343,6 +345,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
 
     TYPE_NAMES = ("semantic", "appearance", "geometry")
     CAMERA_CONDITION_MODES = ("motion_prior_only", "coordinate_role_v1")
+    ACTION_CONDITION_MODES = ("interval_mean_v1", "sequence_prefix_v1")
+    SEQUENCE_PREFIX_ENDPOINTS = (8, 16, 24, 24)
 
     @staticmethod
     def _safe_object_validity(
@@ -411,6 +415,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         normalization_floor: float = 0.25,
         camera_names: tuple[str, ...] | None = None,
         camera_condition_mode: str = "motion_prior_only",
+        action_condition_mode: str = "interval_mean_v1",
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -434,6 +439,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 )
             if any(not name for name in self.camera_names):
                 raise ValueError("W camera role names must be non-empty")
+        self.action_condition_mode = str(action_condition_mode)
+        if self.action_condition_mode not in self.ACTION_CONDITION_MODES:
+            raise ValueError(
+                "W action condition mode must be interval_mean_v1 or "
+                "sequence_prefix_v1"
+            )
         self.object_content = nn.Linear(content_dim, hidden, bias=False)
         self.object_semantic = nn.Linear(route_dim, hidden, bias=False)
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
@@ -467,6 +478,23 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             )
         finally:
             torch.set_rng_state(retained_rng_state)
+        # The sequence mode reuses the trained physical row projection above.
+        # Only temporal order/time encoding is new.  A private generator keeps
+        # these opt-in draws from shifting any retained parameter initialization.
+        self.sequence_time_condition: nn.Linear | None = None
+        self.sequence_action_recurrence: nn.GRUCell | None = None
+        if self.action_condition_mode == "sequence_prefix_v1":
+            retained_rng_state = torch.get_rng_state()
+            sequence_generator = torch.Generator(device="cpu")
+            sequence_generator.manual_seed(
+                (int(torch.initial_seed()) ^ 0x535145513234) % (2**63 - 1)
+            )
+            try:
+                torch.set_rng_state(sequence_generator.get_state())
+                self.sequence_time_condition = nn.Linear(1, hidden, bias=False)
+                self.sequence_action_recurrence = nn.GRUCell(hidden, hidden)
+            finally:
+                torch.set_rng_state(retained_rng_state)
         self.interval_identity = nn.Parameter(torch.randn(1, 4, 1, hidden) * 0.02)
         self.w1 = _ObjectIntervalBlock(
             hidden,
@@ -510,8 +538,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     dtype=self.covariance_head.bias.dtype,
                 )
             )
-        # This branch is an explicit component initialization.  Preserve the
-        # historical construction RNG and start from exact legacy behavior.
+        # This opt-in branch is a component initialization, not an exact
+        # resume from a motion-prior-only checkpoint.  Preserve the inherited
+        # construction RNG and initialize the new condition to an exact
+        # identity so the first forward matches the accepted W graph.
         self.camera_coordinate_role_condition: nn.Linear | None = None
         if self.camera_condition_mode == "coordinate_role_v1":
             retained_rng_state = torch.get_rng_state()
@@ -536,7 +566,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 role_basis[camera_index, stable_roles[name]] = 1.0
         else:
             role_basis = torch.empty(0, 0, dtype=torch.float32)
-        self.register_buffer("_camera_role_basis", role_basis, persistent=False)
+        self.register_buffer(
+            "_camera_role_basis",
+            role_basis,
+            persistent=False,
+        )
 
     @staticmethod
     def _zero_preserving_condition(
@@ -646,14 +680,24 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     def _base(
         self,
         facts: ObjectFactSet | ObjectWorldBelief,
-        action: PhysicalActionCondition,
+        action: WorldActionCondition,
         *,
         collect_diagnostics: bool,
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         """Build a goal-invariant object transition from one physical action."""
 
         facts.validate()
-        action.validate(action_dim=int(self.physical_action_condition.in_features // 2))
+        action_dim = int(self.physical_action_condition.in_features // 2)
+        if self.action_condition_mode == "interval_mean_v1":
+            if not isinstance(action, PhysicalActionCondition):
+                raise TypeError("interval-mean W requires PhysicalActionCondition")
+            action.validate(action_dim=action_dim)
+        else:
+            if not isinstance(action, PhysicalActionSequenceCondition):
+                raise TypeError(
+                    "sequence-prefix W requires PhysicalActionSequenceCondition"
+                )
+            action.validate(action_dim=action_dim)
         validity = self._safe_object_validity(facts).to(device=facts.content.device)
         safe_content = self._supported_object_values(facts.content, validity)
         safe_transport_prior = self._supported_object_values(
@@ -664,19 +708,63 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         transport_prior = self.object_transport_prior(
             safe_transport_prior.to(dtype=facts.content.dtype)
         )
-        action_source = action.fingerprint.to(dtype=objects.dtype)
         gradient_metrics: dict[str, Tensor] = {}
-        if collect_diagnostics:
-            action_source = action_source.reshape_as(action_source)
-            register_gradient_rms_metric(
-                action_source,
-                gradient_metrics,
-                "gradient_tensor_w_physical_action_condition_rms",
+        if isinstance(action, PhysicalActionSequenceCondition):
+            if (
+                self.sequence_time_condition is None
+                or self.sequence_action_recurrence is None
+            ):
+                raise RuntimeError("sequence-prefix W encoder is not constructed")
+            action_source = action.physical_fingerprint.to(dtype=objects.dtype)
+            if collect_diagnostics:
+                action_source = action_source.reshape_as(action_source)
+                register_gradient_rms_metric(
+                    action_source,
+                    gradient_metrics,
+                    "gradient_tensor_w_physical_action_sequence_rms",
+                )
+            row_carrier, _ = smooth_rms_contract(
+                self.physical_action_condition(action_source),
+                0.35,
             )
-        action_carrier, _ = smooth_rms_contract(
-            self.physical_action_condition(action_source),
-            0.35,
-        )
+            row_time = (
+                action.row_end.to(device=objects.device, dtype=objects.dtype)
+                / float(action.horizon)
+            )
+            time_carrier = self.sequence_time_condition(row_time)
+            recurrent_input, _ = smooth_rms_contract(
+                row_carrier + time_carrier,
+                0.35,
+            )
+            recurrent_state = torch.zeros_like(recurrent_input[:, 0])
+            prefix_states: list[Tensor] = []
+            for row_index in range(action.horizon):
+                recurrent_state = self.sequence_action_recurrence(
+                    recurrent_input[:, row_index],
+                    recurrent_state,
+                )
+                prefix_states.append(recurrent_state)
+            action_carrier = torch.stack(
+                [
+                    prefix_states[prefix_end - 1]
+                    for prefix_end in self.SEQUENCE_PREFIX_ENDPOINTS
+                ],
+                dim=1,
+            )
+            action_carrier, _ = smooth_rms_contract(action_carrier, 0.35)
+        else:
+            action_source = action.fingerprint.to(dtype=objects.dtype)
+            if collect_diagnostics:
+                action_source = action_source.reshape_as(action_source)
+                register_gradient_rms_metric(
+                    action_source,
+                    gradient_metrics,
+                    "gradient_tensor_w_physical_action_condition_rms",
+                )
+            action_carrier, _ = smooth_rms_contract(
+                self.physical_action_condition(action_source),
+                0.35,
+            )
         if collect_diagnostics:
             # Keep the first trainable W carrier visible in the recovery
             # diagnostics.  In the single-pass training path this tensor is
@@ -744,20 +832,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             "object_w_coarse_hidden_direct_ingress": interval.new_zeros(
                 (), dtype=torch.float32
             ),
-            "object_w_physical_action_condition_rms": action.interval_action.detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_w_physical_action_delta_rms": action.interval_delta.detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_w_physical_action_interval_variation": action.interval_action.detach()
-            .float()
-            .std(dim=1, unbiased=False)
-            .mean(),
             "object_w_physical_action_carrier_rms": action_carrier.detach()
             .float()
             .square()
@@ -770,6 +844,49 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .mean()
             .sqrt(),
         }
+        if isinstance(action, PhysicalActionSequenceCondition):
+            metrics.update(
+                {
+                    "object_w_physical_action_sequence_source_rms": action.source_action.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_physical_action_sequence_value_rms": action.canonical_value.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_physical_action_sequence_delta_rms": action.canonical_delta.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_physical_action_sequence_variation": action.canonical_value.detach()
+                    .float()
+                    .std(dim=1, unbiased=False)
+                    .mean(),
+                }
+            )
+        else:
+            metrics.update(
+                {
+                    "object_w_physical_action_condition_rms": action.interval_action.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_physical_action_delta_rms": action.interval_delta.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_physical_action_interval_variation": action.interval_action.detach()
+                    .float()
+                    .std(dim=1, unbiased=False)
+                    .mean(),
+                }
+            )
         for type_index, name in enumerate(self.TYPE_NAMES):
             common = typed_common[..., type_index, :].detach().float()
             innovation = typed_interval[..., type_index, :].detach().float()
@@ -851,7 +968,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
     ) -> Tensor:
-        """Return a declared-role, current-coordinate W condition."""
+        """Return a declared-role, current-coordinate W condition.
+
+        Coordinates remain image-plane facts; the stable role basis only
+        distinguishes their declared camera charts.  The shared projection
+        creates no transport value by itself because its output can only
+        modulate an existing producer-owned geometry carrier.
+        """
 
         batch, objects, cameras = object_camera_support.shape[:3]
         if self.camera_condition_mode == "motion_prior_only":
@@ -1102,7 +1225,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self,
         *,
         facts: ObjectFactSet | ObjectWorldBelief,
-        action: PhysicalActionCondition,
+        action: WorldActionCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics | None, ObjectW1WorkingState, dict[str, Tensor]]:
         base, raw_common, raw_interval, base_metrics = self._base(
@@ -1122,10 +1245,18 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             object_support=object_support,
         )
         common_before = common_batch[:, 0]
-        common, common_modulation = self._zero_preserving_condition(
-            common_before,
-            near.mean(dim=1)[:, :, None, :].expand_as(common_before),
-        )
+        if isinstance(action, PhysicalActionSequenceCondition):
+            # A shared action-dependent common would let W1 interval 1's
+            # <=16-row prefix leak back into interval 0.  Keep common factual
+            # in sequence mode; the per-interval typed path remains action
+            # conditioned and causal below.
+            common = common_before
+            common_modulation = torch.zeros_like(common_before)
+        else:
+            common, common_modulation = self._zero_preserving_condition(
+                common_before,
+                near.mean(dim=1)[:, :, None, :].expand_as(common_before),
+            )
         near_context = (common[:, None] + near[:, :, :, None, :]).expand_as(raw_interval[:, :2])
         near_input, near_condition_modulation = self._zero_preserving_condition(
             raw_interval[:, :2],

@@ -49,6 +49,8 @@ from .top import (
     OnlineTopContext,
 )
 from .types import (
+    ABSOLUTE_ACTION_SEQUENCE_CHART,
+    RELATIVE_COMMAND_SEQUENCE_CHART,
     CandidateWorld,
     CompletedP1PolicyState,
     ControlledTransitionState,
@@ -61,7 +63,10 @@ from .types import (
     ObjectWorldBelief,
     OutletPhysicalActionCondition,
     PhysicalActionCondition,
+    PhysicalActionSequenceCondition,
+    WorldActionCondition,
     intersect_object_camera_validity,
+    physical_action_normalizer_fingerprint,
 )
 
 
@@ -424,7 +429,7 @@ class WorldStage(nn.Module):
         self,
         *,
         belief: ObjectFactSet | ObjectWorldBelief,
-        action_condition: PhysicalActionCondition,
+        action_condition: WorldActionCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[CandidateWorld, dict[str, Tensor]]:
         belief.validate()
@@ -452,11 +457,22 @@ class WorldStage(nn.Module):
         self,
         context: DeploymentTopCache,
         *,
-        action_condition: PhysicalActionCondition,
+        action_condition: WorldActionCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[DeploymentTopCache, dict[str, Tensor]]:
         context.validate(hidden=self.hidden, horizon=self.horizon)
         action_condition.validate(action_dim=self.action_dim)
+        old_condition = context.action_condition
+        if isinstance(action_condition, PhysicalActionSequenceCondition):
+            if not isinstance(old_condition, PhysicalActionSequenceCondition):
+                raise TypeError("world refinement cannot change action condition schema")
+            if old_condition.metadata_identity != action_condition.metadata_identity:
+                raise ValueError("world refinement action sequence metadata changed")
+        elif isinstance(action_condition, PhysicalActionCondition):
+            if not isinstance(old_condition, PhysicalActionCondition):
+                raise TypeError("world refinement cannot change action condition schema")
+        else:
+            raise TypeError("world refinement received an unknown action condition schema")
         world, metrics = self.materialize(
             belief=context.belief,
             action_condition=action_condition,
@@ -469,10 +485,58 @@ class WorldStage(nn.Module):
         refined.validate(hidden=self.hidden, horizon=self.horizon)
         if not collect_diagnostics:
             return refined, {}
-        old_action = context.action_condition.interval_action.detach().float()
-        new_action = action_condition.interval_action.detach().float()
-        old_delta = context.action_condition.interval_delta.detach().float()
-        new_delta = action_condition.interval_delta.detach().float()
+        if isinstance(action_condition, PhysicalActionSequenceCondition):
+            old_action = old_condition.canonical_value.detach().float()
+            new_action = action_condition.canonical_value.detach().float()
+            old_delta = old_condition.canonical_delta.detach().float()
+            new_delta = action_condition.canonical_delta.detach().float()
+            reference = action_condition.source_action
+            action_metrics = {
+                "object_action_world_refinement_pre_action_sequence_rms": old_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_sequence_rms": new_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_action_sequence_change_rms": (
+                    new_action - old_action
+                )
+                .square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_pre_action_sequence_delta_rms": old_delta.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_sequence_delta_rms": new_delta.square()
+                .mean()
+                .sqrt(),
+            }
+        else:
+            old_action = old_condition.interval_action.detach().float()
+            new_action = action_condition.interval_action.detach().float()
+            old_delta = old_condition.interval_delta.detach().float()
+            new_delta = action_condition.interval_delta.detach().float()
+            reference = action_condition.interval_action
+            action_metrics = {
+                "object_action_world_refinement_pre_action_interval_rms": old_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_interval_rms": new_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_action_interval_delta_rms": (
+                    new_action - old_action
+                )
+                .square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_pre_action_delta_rms": old_delta.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_delta_rms": new_delta.square()
+                .mean()
+                .sqrt(),
+            }
         old_dynamics = context.predicted_dynamics
         new_dynamics = refined.predicted_dynamics
         old_semantic = old_dynamics.semantic_delta.detach().float()
@@ -481,28 +545,10 @@ class WorldStage(nn.Module):
         new_transport = new_dynamics.transport_mean.detach().float()
         metrics = {
             **metrics,
-            "object_action_world_refinement_count": action_condition.interval_action.new_ones(
+            **action_metrics,
+            "object_action_world_refinement_count": reference.new_ones(
                 (), dtype=torch.float32
             ),
-            # Keep the proposal and the re-materialized condition visible as
-            # separate quantities, without duplicate compatibility aliases.
-            "object_action_world_refinement_pre_action_interval_rms": old_action.square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_post_action_interval_rms": new_action.square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_action_interval_delta_rms": (
-                new_action - old_action
-            ).square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_pre_action_delta_rms": old_delta.square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_post_action_delta_rms": new_delta.square()
-            .mean()
-            .sqrt(),
             "object_action_world_refinement_pre_semantic_delta_rms": old_semantic.square()
             .mean()
             .sqrt(),
@@ -525,7 +571,7 @@ class WorldStage(nn.Module):
             ).square()
             .mean()
             .sqrt(),
-            "object_action_world_refinement_tag_identity_error": action_condition.interval_action.new_zeros(
+            "object_action_world_refinement_tag_identity_error": reference.new_zeros(
                 (), dtype=torch.float32
             ),
         }
@@ -1310,16 +1356,29 @@ class ExecutionBottomStage(nn.Module):
 class OutletAdapter(nn.Module):
     """Selected outlet's physical field codec and native action boundary."""
 
-    def __init__(self, codec: PhysicalActionFieldCodec, *, selection: str) -> None:
+    def __init__(
+        self,
+        codec: PhysicalActionFieldCodec,
+        *,
+        selection: str,
+        world_action_condition_mode: str = "interval_mean_v1",
+    ) -> None:
         super().__init__()
         self.codec = codec
         self.selection = str(selection)
+        self.world_action_condition_mode = str(world_action_condition_mode)
+        if self.world_action_condition_mode not in {
+            "interval_mean_v1",
+            "sequence_prefix_v1",
+        }:
+            raise ValueError("unknown outlet W action condition mode")
         # Dataset normalization is an ordinary Python sidecar.  Keeping these
         # values out of parameters and buffers preserves model/state/RNG
         # identity for Pen and RDT while allowing relative/binary outlet
         # semantics to be converted at the native action boundary.
         self._action_normalizer_offset: tuple[float, ...] | None = None
         self._action_normalizer_scale: tuple[float, ...] | None = None
+        self._action_normalizer_fingerprint: str | None = None
 
     @property
     def action_dim(self) -> int:
@@ -1383,7 +1442,10 @@ class OutletAdapter(nn.Module):
         Absolute Pen/RDT outlets never read this sidecar.
         """
 
-        if not self.is_relative_command:
+        if (
+            not self.is_relative_command
+            and self.world_action_condition_mode == "interval_mean_v1"
+        ):
             # Pen/RDT never read or retain a relative-command sidecar.
             return
         try:
@@ -1399,15 +1461,67 @@ class OutletAdapter(nn.Module):
             raise ValueError("action normalizer scale must be strictly positive")
         self._action_normalizer_offset = tuple(float(value) for value in offset.tolist())
         self._action_normalizer_scale = tuple(float(value) for value in scale.tolist())
+        self._action_normalizer_fingerprint = (
+            physical_action_normalizer_fingerprint(offset, scale)
+        )
 
-    def _normalizer_chart(self, reference: Tensor) -> tuple[Tensor, Tensor]:
+    def _normalizer_chart(
+        self,
+        reference: Tensor,
+        *,
+        dtype: torch.dtype | None = None,
+    ) -> tuple[Tensor, Tensor]:
         if self._action_normalizer_offset is None or self._action_normalizer_scale is None:
             raise RuntimeError(
                 "relative-command outlet adapter requires the checkpoint/data action normalizer"
             )
-        offset = reference.new_tensor(self._action_normalizer_offset).reshape(1, 1, -1)
-        scale = reference.new_tensor(self._action_normalizer_scale).reshape(1, 1, -1)
+        chart_dtype = reference.dtype if dtype is None else dtype
+        offset = reference.new_tensor(
+            self._action_normalizer_offset, dtype=chart_dtype
+        ).reshape(1, 1, -1)
+        scale = reference.new_tensor(
+            self._action_normalizer_scale, dtype=chart_dtype
+        ).reshape(1, 1, -1)
         return offset, scale
+
+    def _normalizer_identity(self) -> str:
+        if self._action_normalizer_fingerprint is None:
+            raise RuntimeError(
+                "sequence action condition requires the checkpoint/data action normalizer"
+            )
+        return self._action_normalizer_fingerprint
+
+    def validate_world_condition(
+        self,
+        condition: WorldActionCondition,
+    ) -> None:
+        """Bind a cached W condition to this configured outlet unconditionally."""
+
+        if self.world_action_condition_mode == "interval_mean_v1":
+            if not isinstance(condition, PhysicalActionCondition):
+                raise TypeError(
+                    "interval-mean outlet rejected a sequence action condition"
+                )
+            condition.validate(action_dim=self.action_dim)
+            return
+        if not isinstance(condition, PhysicalActionSequenceCondition):
+            raise TypeError(
+                "sequence-prefix outlet rejected an interval action condition"
+            )
+        condition.validate(action_dim=self.action_dim)
+        expected_chart = (
+            RELATIVE_COMMAND_SEQUENCE_CHART
+            if self.is_relative_command
+            else ABSOLUTE_ACTION_SEQUENCE_CHART
+        )
+        if condition.outlet_profile != self.selection:
+            raise ValueError("sequence action condition outlet profile changed")
+        if condition.chart_version != expected_chart:
+            raise ValueError("sequence action condition chart version changed")
+        if condition.arm_dim != self.arm_dim:
+            raise ValueError("sequence action condition arm width changed")
+        if condition.normalizer_fingerprint != self._normalizer_identity():
+            raise ValueError("sequence action condition normalizer identity changed")
 
     def world_condition_from_interval_action(
         self,
@@ -1415,6 +1529,11 @@ class OutletAdapter(nn.Module):
         current_action: Tensor,
     ) -> PhysicalActionCondition:
         """Convert an outlet-native four-row proposal to W's physical chart."""
+
+        if self.world_action_condition_mode != "interval_mean_v1":
+            raise RuntimeError(
+                "four-row world condition is unavailable in sequence-prefix mode"
+            )
 
         if not self.is_relative_command:
             # This exact factory is the established Pen/RDT path.
@@ -1466,6 +1585,75 @@ class OutletAdapter(nn.Module):
         condition.validate(action_dim=self.action_dim)
         return condition
 
+    def world_condition_from_action_prediction(
+        self,
+        action_prediction: Tensor,
+        current_action: Tensor,
+    ) -> WorldActionCondition:
+        """Route the online coarse proposal through the configured W ABI."""
+
+        if self.world_action_condition_mode == "interval_mean_v1":
+            return self.world_condition_from_interval_action(
+                action_prediction,
+                current_action,
+            )
+        return self._sequence_condition_from_horizon_action(
+            action_prediction,
+            current_action,
+        )
+
+    def _sequence_condition_from_horizon_action(
+        self,
+        action: Tensor,
+        current_action: Tensor,
+    ) -> PhysicalActionSequenceCondition:
+        """Build one complete 24-row condition with outlet-owned semantics."""
+
+        if self.world_action_condition_mode != "sequence_prefix_v1":
+            raise RuntimeError("sequence condition requested from interval-mean outlet")
+        if action.ndim != 3 or tuple(action.shape[1:]) != (
+            self.horizon,
+            self.action_dim,
+        ):
+            raise ValueError("sequence-prefix W proposal must be [B,24,A]")
+        batch = int(action.shape[0])
+        if tuple(current_action.shape) != (batch, self.action_dim):
+            raise ValueError("sequence-prefix W current action does not align")
+        normalizer_identity = self._normalizer_identity()
+        # Identity describes the checkpoint chart, independently of AMP's
+        # action dtype. The condition factory casts only the arithmetic view.
+        offset, scale = self._normalizer_chart(action, dtype=torch.float32)
+        if not self.is_relative_command:
+            if self.selection not in {
+                "pen_7d_continuous_v1",
+                "rdt_right_arm_7d_v1",
+            }:
+                raise ValueError(
+                    "sequence-prefix W has no absolute chart for this outlet"
+                )
+            condition = PhysicalActionSequenceCondition.from_absolute_action(
+                action,
+                current_action,
+                outlet_profile=self.selection,
+                normalizer_offset=offset,
+                normalizer_scale=scale,
+                normalizer_fingerprint=normalizer_identity,
+            )
+        else:
+            condition = PhysicalActionSequenceCondition.from_relative_command(
+                action,
+                current_action,
+                outlet_profile=self.selection,
+                arm_dim=self.arm_dim,
+                normalizer_offset=offset,
+                normalizer_scale=scale,
+                normalizer_fingerprint=normalizer_identity,
+            )
+        if condition.normalizer_fingerprint != normalizer_identity:
+            raise RuntimeError("sequence action normalizer identity changed in factory")
+        self.validate_world_condition(condition)
+        return condition
+
     def world_condition_action_from_deployed(
         self,
         deployed_action: Tensor,
@@ -1496,8 +1684,14 @@ class OutletAdapter(nn.Module):
         self,
         action: Tensor,
         current_action: Tensor,
-    ) -> PhysicalActionCondition:
-        """Project a deployed 24-row outlet action into the four-row W ABI."""
+    ) -> WorldActionCondition:
+        """Build the configured W condition from one deployed 24-row action."""
+
+        if self.world_action_condition_mode == "sequence_prefix_v1":
+            return self._sequence_condition_from_horizon_action(
+                action,
+                current_action,
+            )
 
         source = PhysicalActionCondition.from_horizon_action(
             action,

@@ -170,6 +170,30 @@ def test_launch_environment_does_not_allow_auth_tokens():
     assert "HF_TOKEN" not in workspace.ENVIRONMENT
 
 
+def test_combined_target_sequence_migration_is_launchable_and_stale_alias_is_rejected(
+    tmp_path,
+):
+    checkpoint = tmp_path / "source.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    migration = "p2_shared_target_prior_sequence_prefix_pread_v1"
+    assert migration in workspace.MODEL_CONTRACT_MIGRATIONS
+    assert "world_action_sequence_prefix_v1" not in workspace.MODEL_CONTRACT_MIGRATIONS
+    args = argparse.Namespace(
+        init_checkpoint=checkpoint,
+        init_model_contract_migration=migration,
+    )
+    assert workspace.initialization_arguments(args) == [
+        "--init-checkpoint",
+        str(checkpoint.resolve()),
+        "--init-model-contract-migration",
+        migration,
+    ]
+
+    args.init_model_contract_migration = "world_action_sequence_prefix_v1"
+    with pytest.raises(ValueError, match="unsupported model-contract migration"):
+        workspace.initialization_arguments(args)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="Linux process identity boundary")
 def test_unreadable_live_process_is_not_treated_as_stopped(monkeypatch):
     entry = {"process": {"pid": os.getpid(), "start_ticks": "known", "cwd": "/known"}}

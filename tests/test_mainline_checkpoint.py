@@ -29,6 +29,9 @@ from clearvla.mainline.runtime.checkpoints import (
     P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS,
     P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
     P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS,
+    P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION,
+    P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_NEW_STATE_KEYS,
+    P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_SOURCE_PATHS,
     P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
     P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY,
     VALIDATION_REPLAY_SOURCE_PATHS,
@@ -1506,4 +1509,277 @@ def test_p2_post_pool_pread_control_preserves_exact_model_state(
             config=drifted_config,
             identity=drifted_identity,
             model_contract_migration=P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
+        )
+
+
+def test_target_prior_sequence_pread_has_one_fail_closed_combined_initialization(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    condition = tmp_path / "goal-target-prior-sequence-pread.pt"
+    condition.write_bytes(b"t5-condition")
+    language = ArtifactIdentity.from_file("t5_goal", condition)
+    reduced = _reduced_modular_config()
+    baseline_config = replace(
+        reduced,
+        top=replace(
+            reduced.top,
+            world_camera_condition_mode="coordinate_role_v1",
+        ),
+    )
+    baseline_config.validate()
+    target_config = replace(
+        baseline_config,
+        data=replace(
+            baseline_config.data,
+            visual_cache_read_backend="pread",
+            visual_pread_max_open_files=3,
+        ),
+        top=replace(
+            baseline_config.top,
+            p2_spatial_intent_mode="shared_target_prior_v1",
+            world_action_condition_mode="sequence_prefix_v1",
+        ),
+    )
+    target_config.validate()
+    baseline_identity = build_checkpoint_identity(
+        baseline_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="7" * 40,
+    )
+    target_identity = build_checkpoint_identity(
+        target_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="7" * 40,
+    )
+    changed_paths = set(
+        P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_SOURCE_PATHS
+    )
+    saved_rows = list(baseline_identity.source.files)
+    assert changed_paths <= {name for name, _digest in saved_rows}
+    for index, (name, _digest) in enumerate(saved_rows):
+        if name in changed_paths:
+            saved_rows[index] = (
+                name,
+                hashlib.sha256(
+                    f"pre-target-prior-sequence-pread:{name}".encode()
+                ).hexdigest(),
+            )
+    saved_source_rows = tuple(saved_rows)
+    saved_identity = replace(
+        baseline_identity,
+        source=replace(
+            baseline_identity.source,
+            files=saved_source_rows,
+            digest=hashlib.sha256(
+                json.dumps(
+                    saved_source_rows,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        ),
+    )
+
+    source_model = ClearVLAMainlinePolicy(baseline_config)
+    with torch.no_grad():
+        camera_condition = source_model.world.dynamics.camera_coordinate_role_condition
+        assert camera_condition is not None
+        camera_condition.weight.copy_(
+            torch.linspace(
+                -0.25,
+                0.25,
+                camera_condition.weight.numel(),
+                dtype=camera_condition.weight.dtype,
+            ).reshape_as(camera_condition.weight)
+        )
+    source_optimizer, _ = build_optimizer(source_model, baseline_config)
+    source_schedule = WarmupCosineSchedule(
+        source_optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    checkpoint = tmp_path / "pre-target-prior-sequence-pread.pt"
+    save_checkpoint(
+        checkpoint,
+        model=source_model,
+        optimizer=source_optimizer,
+        schedule=source_schedule,
+        config=baseline_config,
+        identity=saved_identity,
+        epoch=1,
+        global_step=0,
+        best_metric=0.25,
+    )
+
+    target_model = ClearVLAMainlinePolicy(target_config)
+    target_initial = {
+        name: value.detach().clone()
+        for name, value in target_model.state_dict().items()
+    }
+    assert set(target_initial) - set(source_model.state_dict()) == set(
+        P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_NEW_STATE_KEYS
+    )
+    with pytest.raises(ValueError, match="model initialization config differs"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=target_model,
+            config=target_config,
+            identity=target_identity,
+        )
+    state = load_checkpoint_for_initialization(
+        checkpoint,
+        model=target_model,
+        config=target_config,
+        identity=target_identity,
+        model_contract_migration=(
+            P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
+        ),
+    )
+    assert state.model_contract_migration == (
+        P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
+    )
+    assert set(state.changed_source_files) == changed_paths
+    source_state = source_model.state_dict()
+    target_state = target_model.state_dict()
+    for name, value in source_state.items():
+        torch.testing.assert_close(target_state[name], value, atol=0.0, rtol=0.0)
+    for name in P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_NEW_STATE_KEYS:
+        torch.testing.assert_close(
+            target_state[name],
+            target_initial[name],
+            atol=0.0,
+            rtol=0.0,
+        )
+        assert torch.isfinite(target_state[name]).all()
+    assert torch.count_nonzero(
+        target_state["intent.organizer.target_object_address.weight"]
+    ) == 0
+    assert (
+        target_state["intent.organizer.target_object_address.weight"].dtype
+        == torch.float32
+    )
+    assert torch.count_nonzero(
+        target_state["intent.coarse_action.sequence_row_offset"]
+    ) == 0
+
+    for reduced_dtype in (torch.float16, torch.bfloat16):
+        reduced_precision_target = ClearVLAMainlinePolicy(target_config)
+        address_owner = reduced_precision_target.intent.organizer.target_object_address
+        address_owner.weight = torch.nn.Parameter(
+            torch.zeros((1, 3), dtype=reduced_dtype)
+        )
+        before = {
+            name: value.detach().clone()
+            for name, value in reduced_precision_target.state_dict().items()
+        }
+        with pytest.raises(ValueError, match=r"requires one FP32 \[1,3\]"):
+            load_checkpoint_for_initialization(
+                checkpoint,
+                model=reduced_precision_target,
+                config=target_config,
+                identity=target_identity,
+                model_contract_migration=(
+                    P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
+                ),
+            )
+        for name, value in reduced_precision_target.state_dict().items():
+            torch.testing.assert_close(value, before[name], atol=0.0, rtol=0.0)
+
+    nonzero_target = ClearVLAMainlinePolicy(target_config)
+    with torch.no_grad():
+        assert nonzero_target.intent.coarse_action.sequence_row_offset is not None
+        nonzero_target.intent.coarse_action.sequence_row_offset.fill_(1.0)
+    before = {
+        name: value.detach().clone()
+        for name, value in nonzero_target.state_dict().items()
+    }
+    with pytest.raises(ValueError, match="must be exact zero"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=nonzero_target,
+            config=target_config,
+            identity=target_identity,
+            model_contract_migration=(
+                P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
+            ),
+        )
+    for name, value in nonzero_target.state_dict().items():
+        torch.testing.assert_close(value, before[name], atol=0.0, rtol=0.0)
+
+    nan_target = ClearVLAMainlinePolicy(target_config)
+    with torch.no_grad():
+        assert nan_target.world.dynamics.sequence_time_condition is not None
+        nan_target.world.dynamics.sequence_time_condition.weight.fill_(torch.nan)
+    with pytest.raises(ValueError, match="must be finite floating point"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=nan_target,
+            config=target_config,
+            identity=target_identity,
+            model_contract_migration=(
+                P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
+            ),
+        )
+
+    wrong_target_config = replace(
+        target_config,
+        top=replace(
+            target_config.top,
+            world_action_condition_mode="interval_mean_v1",
+        ),
+    )
+    wrong_target_config.validate()
+    wrong_target_identity = build_checkpoint_identity(
+        wrong_target_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="7" * 40,
+    )
+    with pytest.raises(ValueError, match="sequence_prefix_v1 target"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=ClearVLAMainlinePolicy(wrong_target_config),
+            config=wrong_target_config,
+            identity=wrong_target_identity,
+            model_contract_migration=(
+                P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
+            ),
+        )
+
+    drifted_rows = list(target_identity.source.files)
+    forbidden_path = "clearvla/mainline/model/compiler.py.not-reviewed"
+    drifted_rows.append((forbidden_path, hashlib.sha256(b"drift").hexdigest()))
+    drifted_source_rows = tuple(sorted(drifted_rows))
+    drifted_identity = replace(
+        target_identity,
+        source=replace(
+            target_identity.source,
+            files=drifted_source_rows,
+            digest=hashlib.sha256(
+                json.dumps(
+                    drifted_source_rows,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        ),
+    )
+    with pytest.raises(ValueError, match="source drift escapes the allow-list"):
+        load_checkpoint_for_initialization(
+            checkpoint,
+            model=ClearVLAMainlinePolicy(target_config),
+            config=target_config,
+            identity=drifted_identity,
+            model_contract_migration=(
+                P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
+            ),
         )

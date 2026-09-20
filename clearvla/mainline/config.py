@@ -423,6 +423,10 @@ class TopConfig:
     # Opt-in W camera conditioning from current image-plane coordinates and
     # declared camera roles.  The historical motion-prior path stays default.
     world_camera_condition_mode: str = "motion_prior_only"
+    # The accepted graph keeps the historical four interval means.  The
+    # opt-in sequence mode predicts and conditions W on the complete 24-row
+    # normalized physical proposal through a causal prefix encoder.
+    world_action_condition_mode: str = "interval_mean_v1"
     # The accepted reader applies typed S only after K/K*C pooling.  The
     # opt-in target-prior mode moves direct target identity to the spatial
     # address, shared over semantic and geometry readers, while W retains
@@ -437,6 +441,14 @@ class TopConfig:
             raise ValueError(
                 "top world_camera_condition_mode must be motion_prior_only "
                 "or coordinate_role_v1"
+            )
+        if self.world_action_condition_mode not in {
+            "interval_mean_v1",
+            "sequence_prefix_v1",
+        }:
+            raise ValueError(
+                "top world_action_condition_mode must be interval_mean_v1 "
+                "or sequence_prefix_v1"
             )
         if self.p2_spatial_intent_mode not in {
             "post_pool_only",
@@ -1066,6 +1078,13 @@ class ExperimentConfig:
         if self.top.world_camera_condition_mode == "motion_prior_only":
             cast(dict[str, object], payload["top"]).pop(
                 "world_camera_condition_mode"
+            )
+        if self.top.world_action_condition_mode == "interval_mean_v1":
+            # The sequence condition is an explicit model-contract change;
+            # keep old config/checkpoint identities byte-compatible by
+            # omitting the accepted legacy selector.
+            cast(dict[str, object], payload["top"]).pop(
+                "world_action_condition_mode"
             )
         data = cast(dict[str, object], payload["data"])
         if self.data.visual_cache_read_backend == "mmap":

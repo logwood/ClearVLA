@@ -41,6 +41,9 @@ WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION = (
 )
 P2_SHARED_TARGET_PRIOR_V1_MIGRATION = "p2_shared_target_prior_v1"
 P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION = "p2_shared_target_prior_pread_v1"
+P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION = (
+    "p2_shared_target_prior_sequence_prefix_pread_v1"
+)
 P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION = "p2_post_pool_pread_control_v1"
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
@@ -101,12 +104,45 @@ P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS = (
         }
     )
 )
+WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/model/__init__.py",
+        "clearvla/mainline/model/components.py",
+        "clearvla/mainline/model/dynamics.py",
+        "clearvla/mainline/model/intent.py",
+        "clearvla/mainline/model/policy.py",
+        "clearvla/mainline/model/top.py",
+        "clearvla/mainline/model/types.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/runtime/logging.py",
+        "clearvla/mainline/runtime/sampling.py",
+        "clearvla/mainline/train.py",
+    }
+)
+P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_SOURCE_PATHS = (
+    P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
+    | WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS
+)
 P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS = (
     P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
 )
 P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
     "intent.organizer.target_object_address.weight"
 )
+WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS = frozenset(
+    {
+        "intent.coarse_action.sequence_row_offset",
+        "world.dynamics.sequence_time_condition.weight",
+        "world.dynamics.sequence_action_recurrence.weight_ih",
+        "world.dynamics.sequence_action_recurrence.weight_hh",
+        "world.dynamics.sequence_action_recurrence.bias_ih",
+        "world.dynamics.sequence_action_recurrence.bias_hh",
+    }
+)
+P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_NEW_STATE_KEYS = frozenset(
+    {P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY}
+) | WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS
 LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/checkpoint.py",
@@ -873,6 +909,18 @@ def _p2_shared_target_prior_pread_migration_config_view(
     return payload
 
 
+def _p2_shared_target_prior_sequence_prefix_pread_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove exactly the target-prior, sequence-prefix and pread selectors."""
+
+    payload = _p2_shared_target_prior_pread_migration_config_view(config)
+    top = dict(cast(Mapping[str, object], payload["top"]))
+    top.pop("world_action_condition_mode", None)
+    payload["top"] = top
+    return payload
+
+
 def _p2_post_pool_pread_control_migration_config_view(
     config: ExperimentConfig,
 ) -> dict[str, object]:
@@ -961,6 +1009,7 @@ def load_checkpoint_for_initialization(
         None,
         P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
         P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+        P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION,
         P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
         WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
     }:
@@ -983,7 +1032,55 @@ def load_checkpoint_for_initialization(
     )
     if rejected_reasons:
         raise ValueError("model initialization rejected: " + "; ".join(rejected_reasons))
-    if selected_model_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION:
+    if (
+        selected_model_migration
+        == P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
+    ):
+        if (
+            saved_config.top.p2_spatial_intent_mode != "post_pool_only"
+            or config.top.p2_spatial_intent_mode != "shared_target_prior_v1"
+        ):
+            raise ValueError(
+                "combined target/sequence migration requires post_pool_only "
+                "source and shared_target_prior_v1 target"
+            )
+        if (
+            saved_config.top.world_action_condition_mode != "interval_mean_v1"
+            or config.top.world_action_condition_mode != "sequence_prefix_v1"
+        ):
+            raise ValueError(
+                "combined target/sequence migration requires interval_mean_v1 "
+                "source and sequence_prefix_v1 target"
+            )
+        if (
+            saved_config.data.visual_cache_read_backend != "mmap"
+            or config.data.visual_cache_read_backend != "pread"
+        ):
+            raise ValueError(
+                "combined target/sequence migration requires mmap source and pread target"
+            )
+        if (
+            saved_config.data.visual_pread_max_open_files != 16
+            or type(config.data.visual_pread_max_open_files) is not int
+            or config.data.visual_pread_max_open_files <= 0
+        ):
+            raise ValueError(
+                "combined target/sequence migration requires the legacy mmap cap "
+                "and a positive target pread cap"
+            )
+        if _p2_shared_target_prior_sequence_prefix_pread_migration_config_view(
+            saved_config
+        ) != _p2_shared_target_prior_sequence_prefix_pread_migration_config_view(
+            config
+        ):
+            raise ValueError(
+                "combined target/sequence migration differs outside its three selectors"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "combined target/sequence migration requires identical dataset identity"
+            )
+    elif selected_model_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION:
         if (
             saved_config.top.p2_spatial_intent_mode != "post_pool_only"
             or config.top.p2_spatial_intent_mode != "post_pool_only"
@@ -1227,6 +1324,13 @@ def load_checkpoint_for_initialization(
     )
     if selected_model_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION:
         allowed_source_paths = P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS
+    elif (
+        selected_model_migration
+        == P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
+    ):
+        allowed_source_paths = (
+            P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_SOURCE_PATHS
+        )
     elif selected_model_migration == P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION:
         allowed_source_paths = P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
     elif selected_model_migration == P2_SHARED_TARGET_PRIOR_V1_MIGRATION:
@@ -1259,7 +1363,66 @@ def load_checkpoint_for_initialization(
         saved_layout_schema=int(saved_manifest.layout_schema),
     )
     current_model = model.state_dict()
-    if selected_model_migration in {
+    if (
+        selected_model_migration
+        == P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
+    ):
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        expected_missing = set(
+            P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_NEW_STATE_KEYS
+        )
+        if missing != expected_missing or unexpected:
+            raise ValueError(
+                "combined target/sequence migration must add exactly its seven "
+                "declared model tensors"
+            )
+        hidden = int(config.dimensions.hidden_size)
+        expected_shapes = {
+            P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY: (1, 3),
+            "intent.coarse_action.sequence_row_offset": (1, 24, hidden),
+            "world.dynamics.sequence_time_condition.weight": (hidden, 1),
+            "world.dynamics.sequence_action_recurrence.weight_ih": (
+                3 * hidden,
+                hidden,
+            ),
+            "world.dynamics.sequence_action_recurrence.weight_hh": (
+                3 * hidden,
+                hidden,
+            ),
+            "world.dynamics.sequence_action_recurrence.bias_ih": (3 * hidden,),
+            "world.dynamics.sequence_action_recurrence.bias_hh": (3 * hidden,),
+        }
+        mapped_model = dict(mapped_model)
+        for name in sorted(expected_missing):
+            value = current_model[name]
+            if not isinstance(value, torch.Tensor):
+                raise ValueError(f"combined migration state {name!r} is not a tensor")
+            if tuple(value.shape) != expected_shapes[name]:
+                raise ValueError(
+                    f"combined migration state {name!r} has an incompatible shape"
+                )
+            if not value.is_floating_point() or not bool(torch.isfinite(value).all()):
+                raise ValueError(
+                    f"combined migration state {name!r} must be finite floating point"
+                )
+            if (
+                name == P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY
+                and value.dtype != torch.float32
+            ):
+                raise ValueError(
+                    "combined target/sequence migration requires one FP32 [1,3] "
+                    "address weight"
+                )
+            if name in {
+                P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY,
+                "intent.coarse_action.sequence_row_offset",
+            } and int(torch.count_nonzero(value).item()) != 0:
+                raise ValueError(
+                    f"combined migration state {name!r} must be exact zero"
+                )
+            mapped_model[name] = value.detach().clone()
+    elif selected_model_migration in {
         P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
         P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
     }:
@@ -1490,6 +1653,9 @@ __all__ = [
     "P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS",
+    "P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION",
+    "P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_NEW_STATE_KEYS",
+    "P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_V1_MIGRATION",
     "P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY",
     "P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS",
@@ -1499,6 +1665,8 @@ __all__ = [
     "ValidationReplayState",
     "WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION",
     "WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS",
+    "WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS",
+    "WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS",
     "load_checkpoint_exact",
     "load_checkpoint_for_initialization",
     "load_checkpoint_for_validation",
