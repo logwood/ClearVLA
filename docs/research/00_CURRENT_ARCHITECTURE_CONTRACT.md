@@ -659,7 +659,7 @@ architectural semantic.
   optimizer or continuation state. A migration requires an explicit tested
   contract.
 - `p2_shared_target_prior_v1` adds exactly the zero `[1,3]` address owner.
-  `p2_shared_target_prior_pread_v1` additionally admits only the four reviewed
+  `p2_shared_target_prior_pread_v1` additionally admits only the five reviewed
   physical-reader paths. Both are fresh optimizer/schedule/RNG initialization,
   require identical dataset/language/normalizer identity and are not exact
   resume across modes.
@@ -667,7 +667,7 @@ architectural semantic.
   migration. It preserves every old model tensor exactly and adds exactly seven
   tensors: the FP32 exact-zero `[1,3]` target address, one exact-zero
   `[1,24,H]` coarse row offset, one sequence-time projection and one GRU's
-  input/hidden weights and biases. Only the reviewed 17-path source allow-list
+  input/hidden weights and biases. Only the reviewed 18-path source allow-list
   is admitted. It is a fresh optimizer/schedule/RNG initialization, requires
   identical dataset/language/normalizer identity and is not exact resume.
 - `p2_post_pool_pread_control_v1` is the matched physical-reader control. It
