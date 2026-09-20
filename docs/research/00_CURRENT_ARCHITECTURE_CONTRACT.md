@@ -631,7 +631,7 @@ architectural semantic.
   optimizer or continuation state. A migration requires an explicit tested
   contract.
 - `p2_shared_target_prior_v1` adds exactly the zero `[1,3]` address owner.
-  `p2_shared_target_prior_pread_v1` additionally admits only the four reviewed
+  `p2_shared_target_prior_pread_v1` additionally admits only the five reviewed
   physical-reader paths. Both are fresh optimizer/schedule/RNG initialization,
   require identical dataset/language/normalizer identity and are not exact
   resume across modes.

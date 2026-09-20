@@ -6,6 +6,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pytest
 
 from clearvla.benchmarks.calvin import convert_calvin
 from clearvla.benchmarks.calvin_raw import (
@@ -67,6 +68,69 @@ def _converted_episode(root: Path, name: str):
             "wrist": "observations/images/cam_right_wrist",
         },
     )
+
+
+def test_raw_reader_streams_frame_pattern_without_globbing_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "task_ABC_D"
+    _raw_source_split(source / "training", trajectories=3)
+    _raw_source_split(source / "validation", trajectories=2)
+    original_glob = Path.glob
+    original_iterdir = Path.iterdir
+    split_roots = {source / "training", source / "validation"}
+
+    def reject_frame_glob(path: Path, pattern: str):
+        if pattern in {"*.npz", "*.pkl"}:
+            raise AssertionError("raw frame discovery must not glob the full inventory")
+        return original_glob(path, pattern)
+
+    def expose_one_frame(path: Path):
+        if path in split_roots:
+            return iter((path / "episode_0000000.npz",))
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "glob", reject_frame_glob)
+    monkeypatch.setattr(Path, "iterdir", expose_one_frame)
+    reader = CalvinRawReader(source, task_filter="open_drawer", split_seed=7)
+    assert sum(len(reader.episodes(split)) for split in ("train", "val", "test")) == 5
+
+
+def test_raw_reader_ignores_unrelated_indexed_archive_before_frame_chart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "task_ABC_D"
+    _raw_source_split(source / "training", trajectories=3)
+    _raw_source_split(source / "validation", trajectories=2)
+    decoys = {
+        root / "metadata_2026.npz"
+        for root in (source / "training", source / "validation")
+    }
+    for decoy in decoys:
+        np.savez(decoy, marker=np.asarray([1], dtype=np.int64))
+    original_iterdir = Path.iterdir
+
+    def decoy_first(path: Path):
+        entries = tuple(original_iterdir(path))
+        return iter(sorted(entries, key=lambda entry: (entry not in decoys, entry.name)))
+
+    monkeypatch.setattr(Path, "iterdir", decoy_first)
+    reader = CalvinRawReader(source, task_filter="open_drawer", split_seed=7)
+    assert sum(len(reader.episodes(split)) for split in ("train", "val", "test")) == 5
+
+
+def test_raw_reader_frame_pattern_fails_closed_on_missing_trajectory_endpoint(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "task_ABC_D"
+    _raw_source_split(source / "training", trajectories=3)
+    _raw_source_split(source / "validation", trajectories=2)
+    (source / "training" / "episode_0000069.npz").unlink()
+
+    with pytest.raises(FileNotFoundError, match="trajectory endpoint 69"):
+        CalvinRawReader(source, task_filter="open_drawer", split_seed=7)
 
 
 def test_raw_reader_matches_converted_segment_and_split(tmp_path: Path) -> None:
