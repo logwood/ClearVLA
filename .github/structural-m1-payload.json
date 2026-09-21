@@ -1,0 +1,17 @@
+{
+  "base_commit": "8d3c8feb425e277684d46658fcb9b1cbd896c3ea",
+  "base_tree": "516752562d0fd9f582a5adddc226b812aa18abbf",
+  "result_tree": "a1c100a6e93f82efc505450465dd479eee5b79d1",
+  "edit_sha256": "ea8e40302cee4cce5f47701475f58db79ccabf9e074e266ae0088f650a403ddf",
+  "edit_bytes": 98673,
+  "parts": [
+    ".github/structural-m1-part-0.txt",
+    ".github/structural-m1-part-1.txt",
+    ".github/structural-m1-part-2.txt",
+    ".github/structural-m1-part-3.txt",
+    ".github/structural-m1-part-4.txt",
+    ".github/structural-m1-part-5.txt",
+    ".github/structural-m1-part-6.txt",
+    ".github/structural-m1-part-7.txt"
+  ]
+}

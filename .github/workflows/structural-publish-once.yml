@@ -1,0 +1,110 @@
+name: Publish verified M1a source once
+on:
+  push:
+    branches: [codex/structural-rebuild-20260921]
+    paths: [.github/structural-m1-payload.json]
+permissions:
+  contents: write
+concurrency:
+  group: structural-publish-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'logwood/ClearVLA' && github.ref == 'refs/heads/codex/structural-rebuild-20260921'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Apply the exact source edit set and remove its transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m1a-report"
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, re, subprocess, zlib
+          root = pathlib.Path.cwd()
+          payload_path = '.github/structural-m1-payload.json'
+          manifest = json.loads(pathlib.Path(payload_path).read_text())
+          assert manifest['parts'] == [f'.github/structural-m1-part-{i}.txt' for i in range(8)]
+          transport = [payload_path, '.github/workflows/structural-publish-once.yml', *manifest['parts']]
+          base = '8d3c8feb425e277684d46658fcb9b1cbd896c3ea'
+          assert manifest['base_commit'] == base
+          assert subprocess.check_output(['git','rev-parse',base+'^{tree}'], text=True).strip() == manifest['base_tree']
+          assert set(subprocess.check_output(['git','diff','--name-only',base,'HEAD'],text=True).splitlines()) == set(transport)
+          encoded = base64.b64decode(''.join(pathlib.Path(p).read_text() for p in manifest['parts']), validate=True)
+          raw = zlib.decompress(encoded)
+          assert len(raw) == manifest['edit_bytes'] and len(raw) < 2000000
+          assert hashlib.sha256(raw).hexdigest() == manifest['edit_sha256']
+          edits = json.loads(raw)
+          assert edits['schema'] == 'clearvla-verified-text-edits-v1'
+          paths = []
+          for item in edits['files']:
+              relative = pathlib.PurePosixPath(item['path'])
+              assert not relative.is_absolute() and '..' not in relative.parts
+              assert relative.parts[0] in {'clearvla','tests','scripts','docs','configs'}
+              assert item['path'] not in paths
+              paths.append(item['path'])
+              path = root.joinpath(relative)
+              assert path.resolve().is_relative_to(root)
+              assert not path.is_symlink() and path.exists() == item['exists']
+              content = path.read_bytes() if path.exists() else b''
+              assert hashlib.sha256(content).hexdigest() == item['before']
+              lines = content.decode('utf-8').splitlines(keepends=True)
+              stop = len(lines)
+              for start, end, replacement in reversed(item['edits']):
+                  assert isinstance(start,int) and isinstance(end,int) and 0 <= start <= end <= stop
+                  lines[start:end] = replacement.splitlines(keepends=True)
+                  stop = start
+              updated = ''.join(lines).encode('utf-8')
+              assert hashlib.sha256(updated).hexdigest() == item['after']
+              assert item['mode'] in ('100644','100755')
+              path.parent.mkdir(parents=True,exist_ok=True)
+              path.write_bytes(updated)
+              path.chmod(0o755 if item['mode']=='100755' else 0o644)
+          subprocess.run(['git','add','--',*paths],check=True)
+          subprocess.run(['git','rm','--',*transport],check=True)
+          tree = subprocess.check_output(['git','write-tree'],text=True).strip()
+          assert re.fullmatch('[0-9a-f]{40}',manifest['result_tree']) and tree == manifest['result_tree']
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'m1a-report'
+          (out/'expected-tree.txt').write_text(tree+'\n')
+          (out/'transport-head.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'],text=True))
+          (out/'edited-paths.json').write_text(json.dumps(paths,indent=2)+'\n')
+          PY
+      - name: Install repository-compatible CPU verification dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install 'torch==2.11.0' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'pytest==9.1.1' 'ruff==0.16.0' 'pyright==1.1.411' 'numpy>=1.26,<3' 'h5py>=3.10,<4' 'pillow>=10,<13' 'rich>=13,<15'
+      - name: Verify the exact candidate against the immutable baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/check_structural_rebuild.sh "$RUNNER_TEMP/m1a-report"
+          git diff --exit-code
+          test "$(git write-tree)" = "$(cat "$RUNNER_TEMP/m1a-report/expected-tree.txt")"
+      - name: Commit and fast-forward only this isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: implement M1a source-timed causal history across training and deployment' -m 'Explicit component and deployment identity; independent state/control events, real-gap changes, padding masks, bounded history, source-owned tests and scoped static review. M1b and G/S-task/W/P redesign remain open. No old-checkpoint migration or formal training.'
+          test "$(git rev-parse HEAD^{tree})" = "$(cat "$RUNNER_TEMP/m1a-report/expected-tree.txt")"
+          git push origin HEAD:refs/heads/codex/structural-rebuild-20260921
+          git rev-parse HEAD > "$RUNNER_TEMP/m1a-report/published-head.txt"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/m1a-report/published-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: verified-m1a-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/m1a-report/*.json
+            ${{ runner.temp }}/m1a-report/*.txt
+            ${{ runner.temp }}/m1a-report/*.xml
+            ${{ runner.temp }}/m1a-report/*.tar.gz
+          retention-days: 14
+          if-no-files-found: error
