@@ -2,7 +2,7 @@ name: Verify and publish recovered M1b
 on:
   push:
     branches: [codex/structural-rebuild-20260921]
-    paths: [.github/m1b-transport/manifest.json]
+    paths: [.github/m1b-transport/manifest.json, .github/workflows/structural-publish-m1b.yml]
 permissions:
   contents: write
 concurrency:
@@ -61,11 +61,12 @@ jobs:
                   for value in line.split()[2:]:
                       p = pathlib.PurePosixPath(value)
                       assert not p.is_absolute() and '..' not in p.parts
-                      assert p.parts[0] in {'a','b'} and p.parts[1] in {'clearvla','tests','scripts','docs','configs'}
+                      assert p.parts[0] in {'a','b'}
+                      assert p.parts[1] in {'clearvla','tests','scripts','docs','configs'} or p.as_posix()[2:] == '.github/workflows/structural-audit.yml'
           subprocess.run(['git','apply','--check','-'],input=patch,check=True)
           subprocess.run(['git','apply','-'],input=patch,check=True)
           subprocess.run(['git','rm','--',*transport],check=True)
-          subprocess.run(['git','add','--','clearvla','tests','scripts','docs','configs'],check=True)
+          subprocess.run(['git','add','--','clearvla','tests','scripts','docs','configs','.github/workflows/structural-audit.yml'],check=True)
           tree = subprocess.check_output(['git','write-tree'],text=True).strip()
           assert tree == expected_tree
           out = pathlib.Path(os.environ['RUNNER_TEMP'])/'m1b-report'
