@@ -19,7 +19,10 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from clearvla.data.window_boundaries import OBSERVED_TAIL_V1
+
 from .config import ExperimentConfig
+from .supervision import FutureLabelSupport
 from .temporal import TIMED_HISTORY_ENCODING, HistoryTiming
 
 
@@ -229,6 +232,7 @@ class FutureSupervision:
     action_sequence: Tensor  # float32 [B,Tw,A]
     state_sequence: Tensor  # float32 [B,Tw,S]
     offsets: Tensor  # int64 [B,F]
+    support: FutureLabelSupport | None = None
 
     @property
     def batch(self) -> int:
@@ -280,6 +284,17 @@ class FutureSupervision:
         }
         if len(devices) != 1:
             raise ValueError("future supervision tensors must share a device")
+        if config.data.window_boundary_contract == OBSERVED_TAIL_V1 and self.support is None:
+            raise ValueError("observed-tail future labels require explicit source support")
+        if self.support is not None and config.data.window_boundary_contract != OBSERVED_TAIL_V1:
+            raise ValueError("future label support requires the observed-tail contract")
+        if self.support is not None:
+            self.support.validate(
+                batch=batch,
+                horizon=world_horizon,
+                offsets=self.offsets,
+                device=self.dino_supports.device,
+            )
 
 
 @dataclass(frozen=True)
@@ -296,6 +311,11 @@ class ActionSupervision:
     # Pen uses current action-state; RDT uses the previous executed command.
     gripper_transition_boundary: Tensor  # float32 [B,A], normalized action chart
     gripper_transition_boundary_raw_units: Tensor  # float32 [B,A], raw action chart
+    support: FutureLabelSupport | None = None
+
+    @property
+    def row_valid(self) -> Tensor | None:
+        return None if self.support is None else self.support.action[:, : self.normalized.shape[1]]
 
     @property
     def batch(self) -> int:
@@ -310,6 +330,12 @@ class ActionSupervision:
         )
         if self.normalized.dtype != torch.float32:
             raise TypeError("normalized action target must be float32")
+        if self.support is not None:
+            mask = self.row_valid
+            if mask is None or tuple(mask.shape) != tuple(self.normalized.shape[:2]):
+                raise ValueError("policy labels lost their source support rows")
+            if mask.dtype != torch.bool or mask.device != self.normalized.device:
+                raise ValueError("policy label support must be boolean on the label device")
         _shape(self.raw_units, tuple(self.normalized.shape), "raw-unit action target")
         _shape(
             self.current_raw_units,
@@ -388,6 +414,8 @@ class TrainingBatch:
             == self.future.dino_supports.device
         ):
             raise ValueError("training batch partitions must share a device")
+        if self.action_target.support is not self.future.support:
+            raise ValueError("action and future labels must share one source-support record")
         self.audit.validate(self.online.batch)
 
 

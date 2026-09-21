@@ -34,12 +34,11 @@ TESTS=(tests/test_mainline*.py tests/test_structural_static_audit.py tests/test_
        tests/test_calvin_schema30_adapter.py tests/test_calvin_chunked_execution.py
        tests/test_maniskill_binary_gripper.py tests/test_maniskill_rl_admission.py
        tests/test_libero_boundaries.py)
-# The old tree is independently executed. Its new-feature test is absent by definition.
-(
-  cd "$BASELINE"
-  OLD=()
-  for path in "${TESTS[@]}"; do [[ ! -f "$path" ]] || OLD+=("$path"); done
-  python -m pytest -q "${OLD[@]}" --tb=short --junitxml="$OUT/baseline-tests.xml"
-) | tee "$OUT/baseline-tests.txt"
-python -m pytest -q "${TESTS[@]}" --tb=short --junitxml="$OUT/current-tests.xml" \
-  | tee "$OUT/current-tests.txt"
+# Run identical selected inventories in separate processes per file. This
+# bounds allocator lifetime, not test coverage. A failed/killed child is fatal.
+OLD=()
+for path in "${TESTS[@]}"; do [[ ! -f "$BASELINE/$path" ]] || OLD+=("$path"); done
+python scripts/run_structural_tests.py --root "$BASELINE" --output "$OUT" \
+  --label baseline "${OLD[@]}" | tee "$OUT/baseline-tests.txt"
+python scripts/run_structural_tests.py --root "$ROOT" --output "$OUT" \
+  --label current "${TESTS[@]}" | tee "$OUT/current-tests.txt"

@@ -17,6 +17,7 @@ from ..gripper_contract import VALID_GRIPPER_OUTPUT_MODES, is_binary_gripper_mod
 from ..interfaces import TrainingBatch
 from ..model.action_codec import ACTION_BAND_ENDS
 from ..model.policy import ClearVLAMainlinePolicy
+from ..supervision import quarantine
 from .logging import tensor_scalars
 from .sampling import sample_action
 
@@ -334,11 +335,15 @@ class ValidationAccumulator:
         row_indices: Tensor | None = None,
     ) -> None:
         target = batch.action_target.normalized.float()
+        row_valid = batch.action_target.row_valid
         normalized_current = batch.online.history.action_state.float()
         normalized_codec_gripper_boundary = (
             batch.online.history.codec_gripper_boundary.float()
         )
         raw_target = batch.action_target.raw_units.float()
+        if row_valid is not None:
+            target = quarantine(target, row_valid)
+            raw_target = quarantine(raw_target, row_valid)
         raw_current = batch.action_target.current_raw_units.float()
         raw_codec_gripper_boundary = (
             batch.action_target.gripper_transition_boundary_raw_units[..., -1:].float()
@@ -357,6 +362,8 @@ class ValidationAccumulator:
             if int(torch.unique(rows).numel()) != int(rows.numel()):
                 raise ValueError("validation row selection cannot contain duplicates")
             device_rows = rows.to(device=prediction.device)
+            if row_valid is not None:
+                row_valid = row_valid.index_select(0, device_rows)
             prediction = prediction.index_select(0, device_rows)
             target = target.index_select(0, device_rows)
             normalized_current = normalized_current.index_select(0, device_rows)
@@ -380,6 +387,14 @@ class ValidationAccumulator:
                 )
             if gripper_command is not None:
                 gripper_command = gripper_command.index_select(0, device_rows)
+        observed = (
+            torch.ones_like(target[..., 0], dtype=torch.bool) if row_valid is None else row_valid
+        )
+        if row_valid is not None:
+            self._add_scalar("observed_action_rows", observed.float().sum())
+            self._add_scalar(
+                "possible_action_rows", observed.new_tensor(observed.numel(), dtype=torch.float32)
+            )
         output_mode = (
             self.gripper_output_mode
             if gripper_output_mode is None
@@ -425,33 +440,33 @@ class ValidationAccumulator:
             command_raw_error = command_value - raw_target[..., -1]
             command_correct = (command_prediction == command_target).float()
             command_tp = (
-                (command_prediction == 1) & (command_target == 1)
-            ).float().sum()
+                (((command_prediction == 1) & (command_target == 1)) & observed).float().sum()
+            )
             command_fp = (
-                (command_prediction == 1) & (command_target == 0)
-            ).float().sum()
+                (((command_prediction == 1) & (command_target == 0)) & observed).float().sum()
+            )
             command_fn = (
-                (command_prediction == 0) & (command_target == 1)
-            ).float().sum()
-            self._add_scalar("gripper_command_correct", command_correct.sum())
+                (((command_prediction == 0) & (command_target == 1)) & observed).float().sum()
+            )
+            self._add_scalar("gripper_command_correct", (command_correct * observed).sum())
             self._add_scalar(
                 "gripper_command_rows",
-                prediction.new_tensor(float(command_target.numel())),
+                observed.float().sum(),
             )
             self._add_scalar(
                 "gripper_command_predicted_positive",
-                (command_prediction == 1).float().sum(),
+                ((command_prediction == 1) & observed).float().sum(),
             )
             self._add_scalar(
                 "gripper_command_target_positive",
-                (command_target == 1).float().sum(),
+                ((command_target == 1) & observed).float().sum(),
             )
             self._add_scalar("gripper_command_true_positive", command_tp)
             self._add_scalar("gripper_command_false_positive", command_fp)
             self._add_scalar("gripper_command_false_negative", command_fn)
             self._add_scalar(
                 "gripper_command_square_error",
-                command_raw_error.square().sum(),
+                quarantine(command_raw_error, observed).square().sum(),
             )
         elif gripper_command_logits is not None or gripper_command is not None:
             raise ValueError(
@@ -482,7 +497,17 @@ class ValidationAccumulator:
             "normalized_arm": error[..., :-1],
             "normalized_gripper": error[..., -1:],
         }
+        row_masks = {
+            "normalized_action": observed,
+            "normalized_first": observed[:, :1],
+            "normalized_first8": observed[:, :8],
+            "normalized_tail": observed[:, 8:],
+            "normalized_arm": observed,
+            "normalized_gripper": observed,
+        }
         for band_name, band_slice in action_bands:
+            row_masks[f"normalized_band_{band_name}"] = observed[:, band_slice]
+            row_masks[f"normalized_gripper_band_{band_name}"] = observed[:, band_slice]
             rows[f"normalized_band_{band_name}"] = error[:, band_slice]
             rows[f"normalized_gripper_band_{band_name}"] = error[
                 :, band_slice, -1:
@@ -532,6 +557,12 @@ class ValidationAccumulator:
                     "physical_gripper": physical_error[..., -1:],
                 }
             )
+            row_masks.update(
+                {
+                    name.replace("normalized", "physical", 1): mask
+                    for name, mask in tuple(row_masks.items())
+                }
+            )
             for band_name, band_slice in action_bands:
                 rows[f"physical_band_{band_name}"] = physical_error[:, band_slice]
                 rows[f"physical_gripper_band_{band_name}"] = physical_error[
@@ -569,6 +600,13 @@ class ValidationAccumulator:
                 disagreement = absolute_branch[:, band_slice] - cumulative_branch[
                     :, band_slice
                 ]
+                for branch in ("absolute_branch", "delta_branch", "branch_disagreement"):
+                    row_masks[f"normalized_gripper_{branch}_band_{band_name}"] = observed[
+                        :, band_slice
+                    ]
+                    row_masks[f"physical_gripper_{branch}_band_{band_name}"] = observed[
+                        :, band_slice
+                    ]
                 rows[f"normalized_gripper_absolute_branch_band_{band_name}"] = (
                     absolute_error
                 )
@@ -591,9 +629,15 @@ class ValidationAccumulator:
                     ] = disagreement / gripper_scale
         self.samples += int(prediction.shape[0])
         for name, value in rows.items():
-            update = value.detach().float().square().sum()
+            if row_valid is None:
+                update = value.detach().float().square().sum()
+                count = int(value.numel())
+            else:
+                mask = row_masks[name]
+                update = quarantine(value.detach().float(), mask).square().sum()
+                count = int(mask.sum()) * int(value.shape[-1])
             self.square_error[name] = self.square_error.get(name, update.new_zeros(())) + update
-            self.element_count[name] = self.element_count.get(name, 0) + int(value.numel())
+            self.element_count[name] = self.element_count.get(name, 0) + count
         if self.action_scale is not None:
             if self.action_offset is None:
                 raise ValueError("validation action offset is missing")
@@ -621,6 +665,9 @@ class ValidationAccumulator:
         pred_class = _gripper_event_class(
             pred_delta[..., -1], threshold=self.gripper_event_threshold
         )
+        if row_valid is not None:
+            target_class = torch.where(row_valid, target_class, torch.zeros_like(target_class))
+            pred_class = torch.where(row_valid, pred_class, torch.zeros_like(pred_class))
         target_event = target_class != 0
         pred_event = pred_class != 0
         # Row zero is the only action consumed immediately by the
@@ -661,7 +708,7 @@ class ValidationAccumulator:
                 ("3_6", 3, 6),
                 ("7_plus", 7, None),
             ):
-                mask = post_event_distance >= lower
+                mask = (post_event_distance >= lower) & observed
                 if upper is not None:
                     mask = mask & (post_event_distance <= upper)
                 self._add_scalar(
@@ -681,7 +728,7 @@ class ValidationAccumulator:
             }
             for band_name, band_slice in action_bands:
                 for context_name, context_mask in context_masks.items():
-                    mask = context_mask[:, band_slice]
+                    mask = context_mask[:, band_slice] & observed[:, band_slice]
                     stem = f"gripper_band_{band_name}_{context_name}"
                     self._add_scalar(
                         f"{stem}_square_error",
@@ -753,6 +800,8 @@ class ValidationAccumulator:
             decoded_motion = pred_delta[..., :-1].norm(dim=-1) >= float(
                 self.arm_motion_threshold
             )
+        decoded_motion_target = decoded_motion_target & observed
+        decoded_motion = decoded_motion & observed
         self._add_classification(
             "decoded_motion",
             true_positive=(decoded_motion_target & decoded_motion).float().sum(),
@@ -769,6 +818,8 @@ class ValidationAccumulator:
         )
         if tuple(head_prediction.shape) != tuple(head_target.shape):
             raise ValueError("validation motion logits must be [B,T]")
+        head_target = head_target & observed
+        head_prediction = head_prediction & observed
         self._add_classification(
             "motion_head",
             true_positive=(head_target & head_prediction).float().sum(),
@@ -777,14 +828,16 @@ class ValidationAccumulator:
         )
         self._add_scalar(
             "motion_head_correct",
-            (head_target == head_prediction).float().sum(),
+            ((head_target == head_prediction) & observed).float().sum(),
         )
-        self._add_scalar("motion_head_rows", error.new_tensor(float(head_target.numel())))
+        self._add_scalar("motion_head_rows", observed.float().sum())
         if motion_logits is None:
             motion_probability = decoded_motion.float()
         else:
             motion_probability = torch.sigmoid(motion_logits.detach().float())
-        self._add_scalar("motion_head_probability_sum", motion_probability.sum())
+        self._add_scalar(
+            "motion_head_probability_sum", quarantine(motion_probability, observed).sum()
+        )
 
     def means(self) -> dict[str, float]:
         if self.samples <= 0:
@@ -1089,6 +1142,13 @@ class ValidationAccumulator:
                 if name.endswith("_physical")
             }
         )
+        if "observed_action_rows" in self.scalar_totals:
+            tensors["validation_observed_action_rows"] = self.scalar_totals["observed_action_rows"]
+            tensors["validation_possible_action_rows"] = self.scalar_totals["possible_action_rows"]
+            for name, count in self.element_count.items():
+                tensors[f"validation_{name}_observed_elements"] = next(
+                    iter(self.square_error.values())
+                ).new_tensor(float(count))
         return tensor_scalars(tensors)
 
 

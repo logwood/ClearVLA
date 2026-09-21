@@ -19,13 +19,18 @@ evidence as history, not as a prerequisite to indefinitely defer structural
 implementation. The new M1a candidate closes pseudo-synchronous row pairing in
 S/proposal and carries real control-step clocks and padding masks through the
 actual loader and online adapter. Legacy mode deliberately remains unchanged
-as a control. No claim of learned task improvement is attached to this repair.
+as a control. The M1b observed-tail candidate additionally separates real
+current-state coverage from action/state/visual target support through every
+formal loss and validation count. No claim of learned task improvement is
+attached to either repair.
 
 Still open before/through subsequent milestones:
 
-- M1b: final real states as row-zero training centers; independent policy and
-  future-supervision support; reset distribution; physical rotation/unit
-  charts and all compact downstream missing-evidence representations.
+- M1b: reset distribution; physical rotation/coordinate/normalizer units;
+  control-step versus seconds metadata; all compact downstream missing-evidence
+  representations. Existing-inventory real-tail label support is implemented,
+  not a claim that previously converter-excluded annotations are recovered.
+  Observed-tail validation is a new coverage surface, not an old E8 score.
 - G: multi-modal positions versus moment summaries; local attributes sharing
   entity support; completed G3 block versus binder entity identity; causal
   entity association and Teacher's dependence on current G.

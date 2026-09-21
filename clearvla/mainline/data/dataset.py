@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from clearvla.data.future_clock import OBSERVED_FUTURE_CONTRACT, future_source_rows
 from clearvla.data.hdf5_episode import LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING, LoadedEpisode
 from clearvla.data.history_clock import sparse_history_clock
 from clearvla.data.window_boundaries import (
@@ -21,6 +22,7 @@ from clearvla.data.window_boundaries import (
     BOUNDARY_REGIONS,
     CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
     CAUSAL_PREFIX_V1,
+    OBSERVED_TAIL_V1,
     STRICT_COMPLETE_V1,
     WindowBoundaryMetadata,
     WindowBoundaryPlan,
@@ -63,12 +65,15 @@ class ObservedStateDatasetConfig:
             raise ValueError("reset padding requires aligned zero offsets")
         if self.window_boundary_contract not in {
             STRICT_COMPLETE_V1,
+            OBSERVED_TAIL_V1,
             CAUSAL_PREFIX_V1,
             CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
         }:
             raise ValueError(
                 f"unknown window boundary contract {self.window_boundary_contract!r}"
             )
+        if self.window_boundary_contract == OBSERVED_TAIL_V1 and not self.emit_history_timing:
+            raise ValueError("observed-tail windows require explicit history timing")
         if self.window_boundary_contract != STRICT_COMPLETE_V1 and not self.causal_reset_padding:
             raise ValueError("causal boundary contracts require reset-prefix padding")
         if (
@@ -211,11 +216,18 @@ class ObservedStateWindowDataset(Dataset):
                 ),
                 contract=config.window_boundary_contract,
                 strict_computed_start=strict_computed_start,
-                complete_future_end=int(episode.length - 1 - max_rel),
+                complete_future_end=int(
+                    (
+                        episode.terminal_state_index
+                        if config.window_boundary_contract == OBSERVED_TAIL_V1
+                        and episode.terminal_state_index is not None
+                        else episode.length - 1
+                    )
+                    - max_rel
+                ),
                 expected_terminal_padding_mode=(
                     LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING
-                    if config.window_boundary_contract
-                    == CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+                    if config.window_boundary_contract == CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
                     else None
                 ),
             )
@@ -252,7 +264,7 @@ class ObservedStateWindowDataset(Dataset):
             policy_horizon=self.config.policy_horizon,
             action_offset=self.config.action_offset,
         )
-        return {
+        summary: dict[str, object] = {
             "schema": "clearvla-window-boundary-summary-v1",
             "contract": self.config.window_boundary_contract,
             "allowed_regions": (
@@ -264,6 +276,22 @@ class ObservedStateWindowDataset(Dataset):
             "region_window_counts": region_counts,
             **coverage,
         }
+        if self.config.window_boundary_contract == OBSERVED_TAIL_V1:
+            summary.update(
+                {
+                    "source_current_action_rows": sum(
+                        len(set(centers)) for centers in centers_by_episode.values()
+                    ),
+                    "supervision_support": "real_source_only",
+                    "future_label_contract": OBSERVED_FUTURE_CONTRACT,
+                    "eligible_labeled_current_rows": sum(
+                        int(self.episodes[index].terminal_state_index or 0)
+                        - int(self.episodes[index].valid_center_start or 0)
+                        for index in self.episode_ids
+                    ),
+                }
+            )
+        return summary
 
     def _gripper_transition_boundary_raw(
         self,
@@ -366,10 +394,12 @@ class ObservedStateWindowDataset(Dataset):
                 state_index=ref.center + cfg.state_offset,
                 action_start=action_start,
             )
-            action_raw = np.asarray(
-                actions_raw[action_start : action_start + cfg.policy_horizon],
-                dtype=np.float32,
-            )
+            stop = action_start + cfg.policy_horizon
+            if cfg.window_boundary_contract == OBSERVED_TAIL_V1:
+                if episode.terminal_state_index is None:
+                    raise ValueError("observed-tail sampler lost terminal provenance")
+                stop = min(stop, episode.terminal_state_index)
+            action_raw = np.asarray(actions_raw[action_start:stop], dtype=np.float32)
             action = self.action_normalizer.encode(action_raw).astype(np.float32)
             state = self.action_normalizer.encode(action_state_raw).astype(np.float32)
             gripper_boundary = self.action_normalizer.encode(gripper_boundary_raw).astype(
@@ -507,14 +537,37 @@ class ObservedStateWindowDataset(Dataset):
             executed_action_raw[executed_indices < 0] = action_states_raw[0]
         else:
             executed_action_raw = np.asarray(actions_raw[executed_indices], dtype=np.float32)
-        future_action_raw = np.asarray(
-            actions_raw[action_start : action_start + cfg.world_horizon],
-            dtype=np.float32,
-        )
-        future_state_raw = np.asarray(
-            states_raw[state_index + 1 : state_index + cfg.world_horizon + 1],
-            dtype=np.float32,
-        )
+        future_support: dict[str, torch.Tensor] = {}
+        if cfg.window_boundary_contract == OBSERVED_TAIL_V1:
+            if episode.terminal_state_index is None:
+                raise ValueError("observed-tail source lost its real terminal observation")
+            source = future_source_rows(
+                center,
+                episode.terminal_state_index,
+                world_horizon=cfg.world_horizon,
+                future_offsets=cfg.future_offsets,
+            )
+            future_action_raw = np.asarray(
+                actions_raw[source.action_indices], dtype=np.float32
+            ).copy()
+            future_state_raw = np.asarray(states_raw[source.state_indices], dtype=np.float32).copy()
+            # Transport fillers are never targets. Keep neutral finite payloads
+            # and carry real-label support independently all the way to losses.
+            future_action_raw[~source.action_observed] = 0.0
+            future_state_raw[~source.state_observed] = 0.0
+            future_image_indices = source.visual_indices
+            future_support = {
+                name: torch.from_numpy(mask) for name, mask in source.support_mapping().items()
+            }
+        else:
+            future_action_raw = np.asarray(
+                actions_raw[action_start : action_start + cfg.world_horizon],
+                dtype=np.float32,
+            )
+            future_state_raw = np.asarray(
+                states_raw[state_index + 1 : state_index + cfg.world_horizon + 1],
+                dtype=np.float32,
+            )
 
         history_frames = self.image_store.load_window(episode, history_image_indices)
         history_rgb = _camera_stack(history_frames, self.camera_names).float() / 255.0
@@ -532,7 +585,15 @@ class ObservedStateWindowDataset(Dataset):
             ),
             axis=1,
         )
+        frame_progress = float(center + cfg.image_offset) / float(max(int(episode.length) - 1, 1))
+        if cfg.window_boundary_contract == OBSERVED_TAIL_V1:
+            # Audit-only progress uses the real labelled segment, not appended
+            # storage. The terminal observation is progress 1, never a command.
+            label_start = int(episode.valid_center_start or 0)
+            label_end = int(episode.terminal_state_index or 0)
+            frame_progress = float(center - label_start) / max(label_end - label_start, 1)
         return {
+            **future_support,
             **(
                 {
                     name: torch.from_numpy(value)
@@ -552,7 +613,7 @@ class ObservedStateWindowDataset(Dataset):
                 BOUNDARY_REGION_TO_INDEX[ref.boundary_region], dtype=torch.long
             ),
             "frame_progress": torch.tensor(
-                float(center + cfg.image_offset) / float(max(int(episode.length) - 1, 1)),
+                frame_progress,
                 dtype=torch.float32,
             ),
             "state": torch.from_numpy(self.state_normalizer.encode(state_raw)),

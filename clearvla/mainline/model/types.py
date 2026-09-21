@@ -1147,6 +1147,7 @@ class FuturePlanRecognition:
     state_summary: Tensor  # [B,4,S]
     effect_summary: Tensor  # [B,4,D]
     reconstruction_loss: Tensor
+    interval_valid: Tensor | None = None
 
     def validate(self, *, hidden: int) -> None:
         if self.interval_targets.ndim != 3:
@@ -1159,6 +1160,13 @@ class FuturePlanRecognition:
             raise ValueError("recognizer effect summary lost interval axis")
         if self.reconstruction_loss.ndim != 0:
             raise ValueError("recognizer reconstruction loss must be scalar")
+        if self.interval_valid is not None:
+            _shape(self.interval_valid, (batch, 4), "recognizer interval support")
+            if (
+                self.interval_valid.dtype != torch.bool
+                or self.interval_valid.device != self.interval_targets.device
+            ):
+                raise ValueError("recognizer source support must be boolean on the target device")
 
 
 @dataclass(frozen=True)
@@ -2140,6 +2148,7 @@ class ObjectTopTrainingTargets:
     coarse_action_loss: Tensor
     history_proposal_loss: Tensor
     object_reconstruction_loss: Tensor
+    future_interval_valid: Tensor | None = None  # dataset-owned, never a predicted confidence
 
     @property
     def total_unweighted(self) -> Tensor:

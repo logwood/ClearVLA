@@ -17,6 +17,7 @@ from torch import Tensor, nn
 
 from ..gripper_contract import is_binary_gripper_selection
 from ..interfaces import CurrentObservation, ObservableHistory, OnlinePolicyInput
+from ..supervision import FutureLabelSupport, supported_mean
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
 from ..v120_core.primitives import TimeEmbedding
 from ..v120_core.role_delta_attnres import PolicyRoleDeltaBank
@@ -50,6 +51,7 @@ from .top import (
 )
 from .types import (
     ABSOLUTE_ACTION_SEQUENCE_CHART,
+    INTERVAL_BOUNDS,
     RELATIVE_COMMAND_SEQUENCE_CHART,
     CandidateWorld,
     CompletedP1PolicyState,
@@ -917,6 +919,7 @@ class TrainingTargetsStage(nn.Module):
         future_action: Tensor,
         future_state: Tensor,
         coarse_action: CoarseActionIntent,
+        label_support: FutureLabelSupport | None = None,
         collect_diagnostics: bool = False,
     ) -> tuple[ObjectTopTrainingTargets, dict[str, Tensor]]:
         context.validate(hidden=self.hidden, horizon=self.horizon)
@@ -925,7 +928,13 @@ class TrainingTargetsStage(nn.Module):
             facts=context.facts,
             future_supports=future_supports,
             future_offsets=future_offsets,
+            **({"future_observed": label_support.visual} if label_support is not None else {}),
             collect_diagnostics=collect_diagnostics,
+        )
+        interval_valid = (
+            None
+            if label_support is None
+            else label_support.interval_observed(future_offsets, INTERVAL_BOUNDS)
         )
         current_loss_support = intersect_object_camera_validity(
             context.facts.validity,
@@ -936,14 +945,28 @@ class TrainingTargetsStage(nn.Module):
             future_state=future_state,
             teacher=teacher,
             current_loss_support=current_loss_support,
+            **(
+                {"label_support": label_support, "future_interval_valid": interval_valid}
+                if label_support is not None
+                else {}
+            ),
         )
-        online_intent_loss = F.smooth_l1_loss(
-            context.intent.public_interval_carrier.float(),
-            recognition.interval_targets.detach().float(),
+        online_intent_loss = supported_mean(
+            F.smooth_l1_loss(
+                context.intent.public_interval_carrier.float(),
+                recognition.interval_targets.detach().float(),
+                reduction="none",
+            ),
+            recognition.interval_valid,
         )
         supervised_coarse = coarse_action(
             context.intent.action_dock(),
             future_action=future_action[:, : self.horizon],
+            **(
+                {"future_action_valid": label_support.action[:, : self.horizon]}
+                if label_support is not None
+                else {}
+            ),
             collect_diagnostics=collect_diagnostics,
         )
         coarse_loss = supervised_coarse.loss
@@ -956,6 +979,7 @@ class TrainingTargetsStage(nn.Module):
             coarse_action_loss=coarse_loss,
             history_proposal_loss=coarse_loss.new_zeros(()),
             object_reconstruction_loss=context.facts.reconstruction_error,
+            future_interval_valid=interval_valid,
         )
         if not collect_diagnostics:
             return targets, {}

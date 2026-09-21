@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..supervision import FutureLabelSupport, quarantine, supported_mean
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
 from .routing import register_gradient_rms_metric, smooth_rms_contract
 from .timed_history import TimedHistoryEncoder
@@ -151,19 +152,40 @@ class _SelfBlock(nn.Module):
             nn.Linear(2 * hidden, hidden, bias=False),
         )
 
-    def forward(self, value: Tensor, *, causal: bool = False) -> Tensor:
+    def forward(
+        self,
+        value: Tensor,
+        *,
+        causal: bool = False,
+        valid: Tensor | None = None,
+    ) -> Tensor:
+        mask = _causal_mask(int(value.shape[1]), value.device) if causal else None
+        if valid is not None:
+            batch, length = valid.shape
+            if tuple(value.shape[:2]) != (batch, length) or valid.dtype != torch.bool:
+                raise ValueError("self-read support must be bool [B,L]")
+            value = quarantine(value, valid)
+            allowed = valid[:, None, :].expand(-1, length, -1)
+            if mask is not None:
+                allowed = allowed & ~mask[None]
+            own_zero = torch.eye(length, device=value.device, dtype=torch.bool)[None]
+            allowed = torch.where(valid[:, :, None], allowed, own_zero)
+            mask = (~allowed)[:, None].expand(-1, self.attention.num_heads, -1, -1)
+            mask = mask.reshape(batch * self.attention.num_heads, length, length)
         normalized = self.norm(value)
         update, _ = self.attention(
             normalized,
             normalized,
             normalized,
-            attn_mask=_causal_mask(int(value.shape[1]), value.device) if causal else None,
+            attn_mask=mask,
             need_weights=False,
         )
         update, _ = smooth_rms_contract(update, 0.35)
         value = value + update
+        if valid is not None:
+            value = quarantine(value, valid)
         ffn, _ = smooth_rms_contract(self.ffn(value), 0.35)
-        return value + ffn
+        return value + ffn if valid is None else quarantine(value + ffn, valid)
 
 
 class _ZeroStartTargetAddress(nn.Module):
@@ -842,11 +864,26 @@ class FuturePlanRecognizer(nn.Module):
         future_state: Tensor,
         teacher: FutureObjectDynamics | None,
         current_loss_support: Tensor,
+        label_support: FutureLabelSupport | None = None,
+        future_interval_valid: Tensor | None = None,
     ) -> FuturePlanRecognition:
         if future_action.ndim != 3 or future_state.ndim != 3:
             raise ValueError("plan recognizer requires full future action/state sequences")
         length = min(int(future_action.shape[1]), int(future_state.shape[1]))
         slices = _interval_slices(length)
+        interval_valid = None
+        if label_support is not None:
+            future_action = quarantine(future_action, label_support.action)
+            future_state = quarantine(future_state, label_support.state)
+            interval_valid = torch.stack(
+                [
+                    label_support.action[:, row].all(dim=1) & label_support.state[:, row].all(dim=1)
+                    for row in slices
+                ],
+                dim=1,
+            )
+            if future_interval_valid is not None:
+                interval_valid = interval_valid & future_interval_valid
         action_summary = torch.stack(
             [future_action[:, row].mean(dim=1) for row in slices], dim=1
         )
@@ -886,6 +923,11 @@ class FuturePlanRecognizer(nn.Module):
             teacher_valid = (support.sum(dim=2) > 0).to(
                 dtype=teacher.semantic_delta.dtype
             ).expand(-1, teacher.semantic_delta.shape[1], -1)
+        if interval_valid is not None:
+            action_summary = quarantine(action_summary, interval_valid)
+            state_summary = quarantine(state_summary, interval_valid)
+            effect_summary = quarantine(effect_summary, interval_valid)
+            teacher_valid = quarantine(teacher_valid, interval_valid)
         token = (
             self.action_input(action_summary)
             + self.state_input(state_summary)
@@ -894,7 +936,7 @@ class FuturePlanRecognizer(nn.Module):
                 device=future_action.device, dtype=future_action.dtype
             )
         )
-        token = self.block(token)
+        token = self.block(token, valid=interval_valid)
         action_pred = self.action_reconstruction(token)
         state_pred = self.state_reconstruction(token)
         effect_pred = self.effect_reconstruction(token)
@@ -905,8 +947,12 @@ class FuturePlanRecognizer(nn.Module):
             self.content_dim
         )
         reconstruction = (
-            (action_pred.float() - action_summary.detach().float()).square().mean()
-            + (state_pred.float() - state_summary.detach().float()).square().mean()
+            supported_mean(
+                (action_pred.float() - action_summary.detach().float()).square(), interval_valid
+            )
+            + supported_mean(
+                (state_pred.float() - state_summary.detach().float()).square(), interval_valid
+            )
             + 0.25 * effect_error
         )
         result = FuturePlanRecognition(
@@ -915,6 +961,7 @@ class FuturePlanRecognizer(nn.Module):
             state_summary=state_summary.detach(),
             effect_summary=effect_summary.detach(),
             reconstruction_loss=reconstruction,
+            interval_valid=interval_valid,
         )
         result.validate(hidden=self.hidden)
         return result
@@ -962,6 +1009,7 @@ class CoarseActionIntent(nn.Module):
         intent: ActionIntentDock,
         *,
         future_action: Tensor | None = None,
+        future_action_valid: Tensor | None = None,
         collect_diagnostics: bool = False,
     ) -> CoarseActionIntentState:
         intent.validate(hidden=int(self.query.shape[-1]))
@@ -1019,18 +1067,29 @@ class CoarseActionIntent(nn.Module):
             target = None
             loss = action_prediction.new_zeros(())
         else:
+            supervised_rows = future_action_valid
+            if future_action_valid is not None:
+                future_action = quarantine(future_action, future_action_valid)
             if self.action_condition_mode == "sequence_prefix_v1":
                 if int(future_action.shape[1]) < self.horizon:
                     raise ValueError(
                         "sequence coarse supervision requires 24 future rows"
                     )
                 target = future_action[:, : self.horizon].detach()
+                if supervised_rows is not None:
+                    supervised_rows = supervised_rows[:, : self.horizon]
             else:
                 slices = _interval_slices(int(future_action.shape[1]))
                 target = torch.stack(
                     [future_action[:, row].mean(dim=1) for row in slices], dim=1
                 ).detach()
-            loss = (action_prediction.float() - target.float()).square().mean()
+                if future_action_valid is not None:
+                    supervised_rows = torch.stack(
+                        [future_action_valid[:, row].all(dim=1) for row in slices], dim=1
+                    )
+            loss = supported_mean(
+                (action_prediction.float() - target.float()).square(), supervised_rows
+            )
         return CoarseActionIntentState(
             tokens=token,
             action_prediction=action_prediction,

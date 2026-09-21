@@ -16,6 +16,7 @@ from clearvla.benchmarks.calvin_raw import (
     virtualize_calvin_cached_prefix,
 )
 from clearvla.data.action_chart import project_episodes, resolve_action_state_profile
+from clearvla.data.future_clock import FUTURE_SUPPORT_KEYS
 from clearvla.data.hdf5_episode import (
     LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING,
     RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING,
@@ -52,6 +53,7 @@ from clearvla.data.split import (
 from clearvla.data.window_boundaries import (
     CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
     CAUSAL_PREFIX_V1,
+    OBSERVED_TAIL_V1,
     PREFIX_REGION,
     STRICT_COMPLETE_V1,
     TAIL_REGION,
@@ -72,6 +74,7 @@ from ..interfaces import (
     OnlinePolicyInput,
     TrainingBatch,
 )
+from ..supervision import FutureLabelSupport
 from ..temporal import TIMED_HISTORY_ENCODING, HistoryTiming
 from .dataset import (
     CachedTokenPolicyWindowDataset,
@@ -878,10 +881,14 @@ def _load_mainline_data(
             name,
             ids,
             selected_config=(
-                train_dataset_config if name == "train" else strict_dataset_config
+                train_dataset_config
+                if name == "train" or data.window_boundary_contract == OBSERVED_TAIL_V1
+                else strict_dataset_config
             ),
         )
-    # Keep the primary validation/test surfaces strict and therefore directly
+    # Legacy controlled boundary experiments keep validation/test strict. The
+    # observed-tail contract above applies real-label support to every split.
+    # Keep the legacy primary validation/test surfaces strict and directly
     # comparable with E8.  Boundary rows get separate, deployment-only panels;
     # they can never select the best checkpoint or dilute the strict metric.
     if "val" in dataset_episode_ids and data.window_boundary_contract in {
@@ -1135,6 +1142,18 @@ def to_training_batch(
         ),
         goal=GoalCondition(tokens=goal_tokens, mask=goal_mask),
     )
+    support = None
+    if config.data.window_boundary_contract == OBSERVED_TAIL_V1:
+        support = FutureLabelSupport.from_mapping(
+            {name: _device_tensor(batch, name, device=device) for name in FUTURE_SUPPORT_KEYS}
+        )
+        support.validate(
+            batch=batch_size,
+            horizon=int(batch["action"].shape[1]),
+            offsets=_device_tensor(batch, "target_future_offsets", device=device),
+            device=dino_history.device,
+            strict=True,
+        )
     future = FutureSupervision(
         dino_supports=_device_tensor(
             batch,
@@ -1144,8 +1163,10 @@ def to_training_batch(
         action_sequence=_device_tensor(batch, "action", device=device, dtype=torch.float32),
         state_sequence=_device_tensor(batch, "future_state", device=device, dtype=torch.float32),
         offsets=_device_tensor(batch, "target_future_offsets", device=device).long(),
+        support=support,
     )
     action = ActionSupervision(
+        support=support,
         normalized=_device_tensor(batch, "policy_action", device=device, dtype=torch.float32),
         raw_units=_device_tensor(batch, "policy_action_raw", device=device, dtype=torch.float32),
         current_raw_units=_device_tensor(

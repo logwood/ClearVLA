@@ -27,7 +27,8 @@ choices just to preserve old golden outputs.
 |---|---|---|
 | M0 source baseline | Implemented | Full base archive verified against Git blobs; final tree diff of the two experiment heads recorded; isolated branch and read-only source audit exist. Baseline test and diagnostic scope is in the handoff. |
 | M1a real history time | Implemented candidate; validation recorded per commit | Shared source clock; separate state/control encoding; padding/dropout masks through S, coarse and proposal; bounded online history; new config/components/ABI. This is not all of M1. |
-| M1b remaining ingress | Open, next unit | Real tail current-state coverage versus policy/future-label validity; rotation/coordinate/normalizer semantics; nominal control-step versus seconds metadata; downstream seed/missing-evidence and reset distribution review. Do not fabricate future truth or silently repurpose padding. |
+| M1b real-tail labels | Implemented candidate; validation recorded per commit | All labelled real current centers and independent action/state/visual support through loader, Teacher, auxiliary/formal losses and validation. Source files/caches and old defaults unchanged. |
+| M1b remaining ingress | Open, next unit | Rotation/coordinate/normalizer semantics; nominal control-step versus seconds metadata; downstream seed/missing-evidence and reset distribution review. M1 is not complete; do not bypass these obligations when entering G1. |
 | M2 observation/G1 | Not started | Audit preprocessing/flow charts; retain distinguishable candidate modes, support and provenance rather than relying exclusively on means. |
 | M3 G2 | Not started | Entity-consistent attribute/localization refinement and bounded-error recovery/reassociation. |
 | M4 G3 + current Teacher identity | Not started | One entity state with per-camera support and causal association; update reconstruction and Teacher references together. |
@@ -36,7 +37,7 @@ choices just to preserve old golden outputs.
 | M7 P1/P2 | History context adapted only | Shared operated entity, current target facts, view-aware geometry and corresponding candidate consequences. |
 | M8 P3 | Not started | Task-related local coordination and actual-prefix execution feedback; no task-clock or oracle state machine. |
 | M9 transition/bottom/outlets | Padding values quarantined only | Audit actual consumers, redundant/frozen paths, action codec, clipping/history feedback and endpoint heads. Do not treat retained topology as approved. |
-| M10 training/deployment/resume | M1a integration only | Local supervised train/restore/sample path is exercised; tail masks, W supervision, endpoint context and new entity/task state lifecycle remain open. |
+| M10 training/deployment/resume | M1a/history and M1b/label interfaces integrated only | Production CPU train/restore/sample and source-label masks are exercised; W supervision, endpoint context and new entity/task state lifecycle remain open. |
 | M11 full release review | Not started | Rewalk output-to-input gradients and input-to-output semantics, remove temporary transport/compatibility paths, record all remaining unsupported claims. |
 
 ## M1a source and lifecycle map
@@ -51,12 +52,26 @@ choices just to preserve old golden outputs.
 | Snapshot cache | Every dynamic/ODE consumer | No clock increment, mask mutation, or entity/task-state update within a numerical solver call. |
 | Config/component selection | Model factory / checkpoint / deployment ABI | Explicit candidate identity; no automatic old-checkpoint or optimizer migration. |
 
+## M1b real-label producer/consumer map
+
+| Producer | Consumers reviewed in this unit | Invariant |
+|---|---|---|
+| Real terminal + labelled start | `future_clock`, window admission, sampler, audit progress | A stored suffix is not observed future; every admitted label owns a real row-zero command. |
+| Dataset masks | Cached transport, actual loader, shared `FutureLabelSupport` | Keys can repeat terminal storage; independent masks must survive collation/device moves. |
+| Future support | Teacher, recognizer, W/S targets, coarse/proposal losses | No partial fixed interval, unknown future attention key, or artificial hold label. |
+| Action support | Flow bridge, action/decoded/command/motion and execution-value objectives | Missing rows remain source noise; no contribution or gradient from unavailable label payload. |
+| Metric support | All target-dependent validation errors, event/motion counts, ablation errors | Denominator is real labels; report band support; keep model-only action deltas separately defined. |
+| New config/source identity | Ordinary save/exact reload | No M1a exact-resume alias or old-weight migration exception. |
+
 ## Review and publishing gates
 
 Run `bash scripts/check_structural_rebuild.sh /path/outside/repository` in the
 project-compatible Python/PyTorch environment. It executes the actual
 production modules through source-owned tests, not a replacement toy policy.
-It records the untouched baseline separately and refuses new Pyright errors;
+It runs each selected test file in a fresh process to bound allocator lifetime,
+keeps the complete per-file inventory/log/JUnit, and marks a killed, timed-out or
+empty child as a failure. It records the untouched baseline separately and
+refuses new Pyright errors;
 Ruff must pass on all changed Python files. Historical repository diagnostics
 remain visible in JSON. This differential gate does not claim the whole old
 repository is type-clean. Tests that encode old optional-field assumptions may

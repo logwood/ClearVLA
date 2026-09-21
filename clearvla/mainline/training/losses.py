@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -24,6 +24,7 @@ from ..model.observation_contract import (
 )
 from ..model.policy import PolicyStepOutput
 from ..model.types import FlowStepContext, FutureObjectDynamics, ObjectTopTrainingTargets
+from ..supervision import quarantine, supported_mean
 from ..v120_core.gauges import masked_candidate_center
 
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ class FlowMatchingState:
     # Optional numerical context used only by a schedule-aware bottom run.
     # Keeping this appended/defaulted preserves every historical constructor.
     flow_step_context: FlowStepContext | None = None
+    row_valid: Tensor | None = None  # source labels only; never passed to velocity
 
 
 def _gripper_field_error_terms(
@@ -90,7 +92,11 @@ def _gripper_field_error_terms(
     return legacy, deployed, compatibility, owned
 
 
-def balanced_event_row_weights(event_mask: Tensor, horizon_weight: Tensor) -> Tensor:
+def balanced_event_row_weights(
+    event_mask: Tensor,
+    horizon_weight: Tensor,
+    row_valid: Tensor | None = None,
+) -> Tensor:
     """Return audit-only inverse-root-frequency gripper weights.
 
     Information-balanced sampling operates at the *window* level.  A selected
@@ -108,6 +114,9 @@ def balanced_event_row_weights(event_mask: Tensor, horizon_weight: Tensor) -> Te
         raise ValueError("event rows and horizon weights do not align")
     event = event_mask.to(device=horizon_weight.device, dtype=torch.float32)
     hold = 1.0 - event
+    if row_valid is not None:
+        event = event * row_valid
+        hold = hold * row_valid
     event_count = event.sum()
     hold_count = hold.sum()
     total = event_count + hold_count
@@ -117,6 +126,8 @@ def balanced_event_row_weights(event_mask: Tensor, horizon_weight: Tensor) -> Te
     both_classes = (event_count > 0.0) & (hold_count > 0.0)
     raw = torch.where(both_classes, raw, torch.ones_like(raw))
     step = horizon_weight.float()[None]
+    if row_valid is not None:
+        step = step * row_valid
     denominator = step.expand_as(raw).sum().clamp_min(1.0)
     normalization = (raw * step).sum() / denominator
     balanced = raw / normalization.clamp_min(1e-8)
@@ -132,6 +143,7 @@ def calvin_selective_frame_weights(
     action_state: Tensor,
     event_mask: Tensor,
     horizon_weight: Tensor,
+    row_valid: Tensor | None = None,
 ) -> Tensor:
     """Build bounded CALVIN row weights without changing the policy graph.
 
@@ -205,6 +217,8 @@ def calvin_selective_frame_weights(
     ).clamp_min(1.0)
     raw = raw.clamp_max(float(config.objectives.calvin_frame_max_weight))
     horizon = horizon_weight.detach().float()[None]
+    if row_valid is not None:
+        horizon = horizon * row_valid
     denominator = (horizon.expand_as(raw)).sum().clamp_min(1e-8)
     weighted_mean = (raw * horizon).sum() / denominator
     weights = raw / weighted_mean.clamp_min(1e-8)
@@ -331,6 +345,7 @@ def sample_flow_matching(
     distribution: str,
     generator: torch.Generator | None = None,
     schedule: ScheduleSpec | None = None,
+    row_valid: Tensor | None = None,
 ) -> FlowMatchingState:
     if target.ndim != 3:
         raise ValueError("flow-matching native action target must be [B,T,A]")
@@ -354,6 +369,10 @@ def sample_flow_matching(
     v120_time = numerator / denominator.clamp_min(1e-8)
     v120_time = v120_time * 0.999 + 0.001
     time = 1.0 - v120_time
+    if row_valid is not None:
+        if row_valid.dtype != torch.bool or tuple(row_valid.shape) != tuple(target.shape[:2]):
+            raise ValueError("flow label support must be bool [B,T]")
+        target = quarantine(target, row_valid)
     target_physical = codec.encode(
         target,
         action_state,
@@ -367,6 +386,11 @@ def sample_flow_matching(
     )
     alpha = time.to(dtype=target.dtype)[:, None, None]
     noisy = (1.0 - alpha) * noise + alpha * target_physical
+    if row_valid is not None:
+        target_physical = quarantine(target_physical, row_valid)
+        # Unknown rows remain source noise; they are not trained as a zero or
+        # a frozen terminal command. The label mask is NOT an online input.
+        noisy = torch.where(row_valid[..., None], noisy, noise)
     flow_step_context: FlowStepContext | None = None
     if schedule is not None:
         schedule.validate()
@@ -401,7 +425,12 @@ def sample_flow_matching(
         source_physical_noise=noise,
         noisy_physical=noisy,
         target_physical=target_physical,
-        target_physical_velocity=target_physical - noise,
+        target_physical_velocity=(
+            target_physical - noise
+            if row_valid is None
+            else quarantine(target_physical - noise, row_valid)
+        ),
+        row_valid=row_valid,
         flow_step_context=flow_step_context,
     )
 
@@ -640,6 +669,7 @@ def future_dynamics_terms(
     target: FutureObjectDynamics,
     *,
     current_loss_support: Tensor,
+    interval_valid: Tensor | None = None,
     collect_diagnostics: bool = False,
 ) -> dict[str, Tensor]:
     prediction.validate()
@@ -656,6 +686,10 @@ def future_dynamics_terms(
         posinf=0.0,
         neginf=0.0,
     )[:, None].expand(-1, intervals, -1, -1, -1).clamp(0.0, 1.0)
+    if interval_valid is not None:
+        if tuple(interval_valid.shape) != (batch, intervals) or interval_valid.dtype != torch.bool:
+            raise ValueError("future interval support must be bool [B,I]")
+        camera_validity = camera_validity * interval_valid[:, :, None, None, None]
     object_validity = camera_validity.amax(dim=3)
 
     def masked(error: Tensor, weight: Tensor) -> Tensor:
@@ -705,7 +739,14 @@ def future_dynamics_terms(
         if not scale_floored:
             return raw, raw
         target_rms = target_f.square().mean(dim=-1, keepdim=True).sqrt()
-        scale_floor = (0.25 * target_rms.mean(dim=(0, 2), keepdim=True)).clamp_min(1e-3)
+        if interval_valid is None:
+            floor_mean = target_rms.mean(dim=(0, 2), keepdim=True)
+        else:
+            row_support = support_f[..., :1]
+            floor_mean = (target_rms * row_support).sum(dim=(0, 2), keepdim=True) / (
+                row_support.sum(dim=(0, 2), keepdim=True).clamp_min(1.0)
+            )
+        scale_floor = (0.25 * floor_mean).clamp_min(1e-3)
         scale = torch.sqrt(target_rms.square() + scale_floor.square())
         normalized = F.smooth_l1_loss(
             prediction_f / scale,
@@ -731,6 +772,7 @@ def future_dynamics_terms(
     def transport_row_audits(
         prediction_value: Tensor,
         target_value: Tensor,
+        support: Tensor,
     ) -> tuple[Tensor, Tensor]:
         """Return detached relative-coordinate audits for diagnostic batches.
 
@@ -744,9 +786,12 @@ def future_dynamics_terms(
         prediction_f = prediction_value.detach().float()
         target_f = target_value.detach().float()
         target_rms = target_f.square().mean(dim=-1, keepdim=True).sqrt()
-        scale_floor = (
-            0.25 * target_rms.mean(dim=(0, 2), keepdim=True)
-        ).clamp_min(1e-3)
+        floor_mean = target_rms.mean(dim=(0, 2), keepdim=True)
+        if interval_valid is not None:
+            floor_mean = (target_rms * support).sum(dim=(0, 2), keepdim=True) / support.sum(
+                dim=(0, 2), keepdim=True
+            ).clamp_min(1.0)
+        scale_floor = (0.25 * floor_mean).clamp_min(1e-3)
         scale = torch.sqrt(target_rms.square() + scale_floor.square())
         normalized_audit = F.smooth_l1_loss(
             prediction_f / scale,
@@ -801,7 +846,9 @@ def future_dynamics_terms(
         common_error, common_raw_error = row_loss(
             prediction_common[:, None],
             target_common[:, None],
-            support=weight[:, :1],
+            support=weight.amax(dim=1, keepdim=True)
+            if interval_valid is not None
+            else weight[:, :1],
             scale_floored=scale_floored,
         )
         innovation_error, innovation_raw_error = row_loss(
@@ -810,7 +857,10 @@ def future_dynamics_terms(
             support=weight,
             scale_floored=scale_floored,
         )
-        common = masked(common_error, weight[:, :1])
+        common = masked(
+            common_error,
+            weight.amax(dim=1, keepdim=True) if interval_valid is not None else weight[:, :1],
+        )
         innovation = masked(innovation_error, weight)
         return (
             common,
@@ -870,14 +920,22 @@ def future_dynamics_terms(
         scale_floored=False,
     )
     covariance = masked(covariance_error, camera_validity)
-    semantic_transition_prediction = (
-        prediction.semantic_interval_innovation[:, 1:]
-        - prediction.semantic_interval_innovation[:, :-1]
-    )
-    semantic_transition_target = (
-        target.semantic_interval_innovation.detach()[:, 1:]
-        - target.semantic_interval_innovation.detach()[:, :-1]
-    )
+    if interval_valid is None:
+        semantic_transition_prediction = (
+            prediction.semantic_interval_innovation[:, 1:]
+            - prediction.semantic_interval_innovation[:, :-1]
+        )
+        semantic_transition_target = (
+            target.semantic_interval_innovation.detach()[:, 1:]
+            - target.semantic_interval_innovation.detach()[:, :-1]
+        )
+    else:
+        # Common modes cancel in adjacent differences. Do not first compute
+        # an unmasked mean containing unavailable future intervals.
+        semantic_prediction = quarantine(prediction.semantic_delta, interval_valid)
+        semantic_target = quarantine(target.semantic_delta.detach(), interval_valid)
+        semantic_transition_prediction = semantic_prediction[:, 1:] - semantic_prediction[:, :-1]
+        semantic_transition_target = semantic_target[:, 1:] - semantic_target[:, :-1]
     transition_validity = torch.minimum(
         object_validity[:, 1:],
         object_validity[:, :-1],
@@ -894,6 +952,12 @@ def future_dynamics_terms(
     # unobserved status budgets are retired rather than reassigned.
     total = 0.55 * semantic_delta + 0.15 * transport + 0.05 * covariance
     terms = {
+        "future_observed_intervals": (
+            camera_validity.new_tensor(batch * intervals)
+            if interval_valid is None
+            else interval_valid.float().sum()
+        ),
+        "future_supervised_object_intervals": (object_validity > 0).float().sum(),
         "future_dynamics": total,
         "future_semantic_delta": semantic_delta,
         "future_semantic_common": semantic_common,
@@ -966,7 +1030,12 @@ def future_dynamics_terms(
             common_support = _finite_support(support).amax(dim=1)
             return common, innovation, common_support
 
-        terms["future_current_loss_support"] = camera_validity.mean().detach()
+        terms["future_current_loss_support"] = current_loss_support.detach().float().mean()
+        terms["future_label_support_fraction"] = (
+            camera_validity.new_ones(())
+            if interval_valid is None
+            else interval_valid.float().mean()
+        )
         terms["future_target_semantic_delta_rms"] = (
             diagnostic_rms(target.semantic_delta, object_validity)
         )
@@ -995,12 +1064,12 @@ def future_dynamics_terms(
         common_normalized_audit, common_direction_audit = transport_row_audits(
             prediction_transport_common[:, None],
             target_transport_common[:, None],
+            camera_common_support[:, None],
         )
-        innovation_normalized_audit, innovation_direction_audit = (
-            transport_row_audits(
-                prediction_transport_innovation,
-                target_transport_innovation,
-            )
+        innovation_normalized_audit, innovation_direction_audit = transport_row_audits(
+            prediction_transport_innovation,
+            target_transport_innovation,
+            camera_validity,
         )
         terms["future_transport_normalized_audit"] = 0.5 * (
             masked(common_normalized_audit, camera_validity[:, :1])
@@ -1085,7 +1154,19 @@ def execution_value_terms(
         raise ValueError("execution baseline has the wrong physical shape")
 
     batch, blocks, candidate_count, horizon, physical = candidates.shape
+    row_valid = flow_state.row_valid
+    source_rows = (
+        torch.ones(batch, horizon, device=candidates.device, dtype=torch.bool)
+        if row_valid is None
+        else row_valid
+    )
+    if tuple(source_rows.shape) != (batch, horizon):
+        raise ValueError("execution label support must be [B,T]")
+    label_field = source_rows[:, None, None, :, None]
     residual = candidates - target[:, None, None]
+    if row_valid is not None:
+        residual = torch.where(label_field, residual, torch.zeros_like(residual))
+        predicted = torch.where(label_field, predicted, torch.zeros_like(predicted))
     flat = residual.reshape(batch * blocks * candidate_count, horizon, physical)
     parts = codec.split(flat)
     # Both established value/difference arm branches retain symmetric
@@ -1129,7 +1210,7 @@ def execution_value_terms(
         valid,
         candidate_dim=2,
     )
-    valid_field = valid[..., None, None].expand_as(predicted)
+    valid_field = valid[..., None, None].expand_as(predicted) & label_field
     component_weight = (
         predicted.new_tensor([1.0, 0.0])
         if binary_command
@@ -1137,15 +1218,11 @@ def execution_value_terms(
         / float(codec.arm_dim + 1)
     )
     physical_weight = valid_field.float() * component_weight[None, None, None, None]
-    active = valid.float().sum(dim=2) > 1.0
+    active = (valid.float().sum(dim=2) > 1.0) & source_rows.any(dim=-1)[:, None]
     active_float = active.float()
     active_denominator = active_float.sum().clamp_min(1.0)
     row_denominator = (
-        valid[..., None]
-        .expand(-1, -1, -1, horizon)
-        .float()
-        .sum(dim=(2, 3))
-        .clamp_min(1.0)
+        (valid[..., None] & source_rows[:, None, None]).float().sum(dim=(2, 3)).clamp_min(1.0)
     )
     target_spread = torch.sqrt(
         (target_centered.square() * physical_weight).sum(dim=(2, 3, 4))
@@ -1172,15 +1249,18 @@ def execution_value_terms(
     value_rows = value_field.sum(dim=(2, 3, 4)) / row_denominator
     value_loss = (value_rows * reliability).sum() / reliability_denominator
 
-    predicted_scalar = (
-        (predicted * component_weight[None, None, None, None])
-        .sum(dim=-1)
-        .mean(dim=-1)
+    def label_time_mean(value: Tensor) -> Tensor:
+        if row_valid is None:
+            return value.mean(dim=-1)
+        return (value * source_rows[:, None, None]).sum(dim=-1) / source_rows.float().sum(dim=-1)[
+            :, None, None
+        ].clamp_min(1.0)
+
+    predicted_scalar = label_time_mean(
+        (predicted * component_weight[None, None, None, None]).sum(dim=-1)
     )
-    target_scalar = (
-        (normalized_target * component_weight[None, None, None, None])
-        .sum(dim=-1)
-        .mean(dim=-1)
+    target_scalar = label_time_mean(
+        (normalized_target * component_weight[None, None, None, None]).sum(dim=-1)
     )
     invalid_max = torch.finfo(predicted_scalar.dtype).max
     predicted_best = predicted_scalar.masked_fill(~valid, invalid_max).argmin(dim=-1)
@@ -1213,13 +1293,13 @@ def execution_value_terms(
         / row_denominator.sum().clamp_min(1.0)
     ).sqrt()
     active_common = active_float[..., None, None, None]
+    common_denominator = active_common.sum() * horizon
+    if row_valid is not None:
+        active_common = active_common * label_field
+        common_denominator = active_common.sum()
     predicted_common_rms = (
-        (
-            predicted_mean.square()
-            * active_common
-            * component_weight[None, None, None, None]
-        ).sum()
-        / (active_common.sum() * horizon).clamp_min(1.0)
+        (predicted_mean.square() * active_common * component_weight[None, None, None, None]).sum()
+        / common_denominator.clamp_min(1.0)
     ).sqrt()
     predicted_standardized_spread = torch.sqrt(
         (predicted_centered.square() * physical_weight).sum(dim=(2, 3, 4))
@@ -1251,18 +1331,44 @@ def execution_value_terms(
         execution_cost = value_loss.new_zeros(())
     return {
         "execution_value": value_loss,
-        "execution_gripper_error_legacy": gripper_error_legacy.detach().mean(),
-        "execution_gripper_error_deployed": gripper_error_deployed.detach().mean(),
-        "execution_gripper_error_compatibility": gripper_error_compatibility.detach().mean(),
-        "execution_gripper_error_owned": gripper_error_owned.detach().mean(),
+        "execution_gripper_error_legacy": supported_mean(
+            gripper_error_legacy.detach(),
+            None
+            if row_valid is None
+            else source_rows[:, None, None]
+            .expand(batch, blocks, candidate_count, horizon)
+            .reshape(-1, horizon),
+        ),
+        "execution_gripper_error_deployed": supported_mean(
+            gripper_error_deployed.detach(),
+            None
+            if row_valid is None
+            else source_rows[:, None, None]
+            .expand(batch, blocks, candidate_count, horizon)
+            .reshape(-1, horizon),
+        ),
+        "execution_gripper_error_compatibility": supported_mean(
+            gripper_error_compatibility.detach(),
+            None
+            if row_valid is None
+            else source_rows[:, None, None]
+            .expand(batch, blocks, candidate_count, horizon)
+            .reshape(-1, horizon),
+        ),
+        "execution_gripper_error_owned": supported_mean(
+            gripper_error_owned.detach(),
+            None
+            if row_valid is None
+            else source_rows[:, None, None]
+            .expand(batch, blocks, candidate_count, horizon)
+            .reshape(-1, horizon),
+        ),
         "execution_gripper_compatibility_weight": predicted.new_tensor(
             float(config.objectives.gripper_compatibility_weight), dtype=torch.float32
         ),
         "execution_cost_audit": execution_cost.detach().float(),
         "execution_value_reliability_scale": reliability_scale.detach(),
-        "execution_value_reliability": (
-            reliability.sum() / active_denominator
-        ).detach(),
+        "execution_value_reliability": (reliability.sum() / active_denominator).detach(),
         "execution_value_target_spread": (
             (target_spread * active_float).sum() / active_denominator
         ).detach(),
@@ -1270,8 +1376,7 @@ def execution_value_terms(
             (predicted_spread * active_float).sum() / active_denominator
         ).detach(),
         "execution_value_predicted_standardized_spread": (
-            (predicted_standardized_spread * active_float).sum()
-            / active_denominator
+            (predicted_standardized_spread * active_float).sum() / active_denominator
         ).detach(),
         "execution_value_target_spread_p25": spread_p25.detach(),
         "execution_value_target_spread_p50": spread_p50.detach(),
@@ -1283,20 +1388,19 @@ def execution_value_terms(
             predicted_common_rms / predicted_rms.clamp_min(1e-8)
         ).detach(),
         "execution_candidate_coverage": valid.float().mean().detach(),
-        "execution_terminal_identity_error": (
-            candidates[:, :, -1] - baseline
-        ).square().mean().sqrt().detach(),
+        "execution_terminal_identity_error": (candidates[:, :, -1] - baseline)
+        .square()
+        .mean()
+        .sqrt()
+        .detach(),
         "execution_terminal_target_cost_margin": (
-            (terminal_target_margin * terminal_valid.float()).sum()
-            / terminal_denominator
+            (terminal_target_margin * terminal_valid.float()).sum() / terminal_denominator
         ).detach(),
         "execution_terminal_predicted_cost_margin": (
-            (terminal_predicted_margin * terminal_valid.float()).sum()
-            / terminal_denominator
+            (terminal_predicted_margin * terminal_valid.float()).sum() / terminal_denominator
         ).detach(),
         "execution_terminal_target_preferred_fraction": (
-            ((terminal_target_margin < 0.0) & terminal_valid).float().sum()
-            / terminal_denominator
+            ((terminal_target_margin < 0.0) & terminal_valid).float().sum() / terminal_denominator
         ).detach(),
     }
 
@@ -1312,6 +1416,23 @@ def action_terms(
     collect_diagnostics: bool = False,
 ) -> dict[str, Tensor]:
     objective = config.objectives
+    row_valid = target.row_valid
+    if row_valid is not None:
+        target = replace(
+            target,
+            normalized=quarantine(target.normalized, row_valid),
+            raw_units=quarantine(target.raw_units, row_valid),
+        )
+    valid = (
+        torch.ones_like(target.normalized[..., 0], dtype=torch.bool)
+        if row_valid is None
+        else row_valid
+    )
+
+    def mean_rows(value: Tensor, rows: slice | int = slice(None)) -> Tensor:
+        mask = None if row_valid is None else row_valid[:, rows]
+        return supported_mean(value, mask)
+
     binary_command = is_binary_gripper_mode(config.bottom.gripper_output_mode)
     calvin_binary = str(config.bottom.gripper_output_mode) == "calvin_binary_command"
     profile = resolve_action_state_profile(config.data.data_profile)
@@ -1340,6 +1461,8 @@ def action_terms(
         torch.full_like(event_target, 2),
         event_target,
     )
+    if row_valid is not None:
+        event_target = torch.where(row_valid, event_target, torch.zeros_like(event_target))
     event_mask = (event_target != 0).to(dtype=torch.float32)
     # Older probes and compatibility callers construct a minimal bottom
     # namespace without the optional binary-command field. Treat that as the
@@ -1370,7 +1493,15 @@ def action_terms(
         command_rows = torch.zeros_like(raw_grip)
     prediction = output.bottom.physical_velocity.float()
     velocity_target = flow_state.target_physical_velocity.detach().float()
+    if (row_valid is None) != (flow_state.row_valid is None):
+        raise ValueError("action and flow label support disagree")
+    if row_valid is not None and (
+        flow_state.row_valid is None or not torch.equal(row_valid, flow_state.row_valid)
+    ):
+        raise ValueError("action and flow rows must use the same source support")
     residual = prediction - velocity_target
+    if row_valid is not None:
+        residual = quarantine(residual, row_valid)
     residual_parts = codec.split(residual)
     arm_error = 0.5 * (
         residual_parts.arm_absolute.square() + residual_parts.arm_delta.square()
@@ -1391,6 +1522,14 @@ def action_terms(
         device=prediction.device,
     )
     horizon_step_weight = horizon_weight[None]
+    if row_valid is not None:
+        # Preserve legacy horizon weighting, but normalize by the number of
+        # observed rows rather than the padded tensor size. No tail dilution.
+        horizon_step_weight = (
+            horizon_step_weight
+            * row_valid
+            * (row_valid.numel() / row_valid.float().sum().clamp_min(1.0))
+        )
     frame_weight = calvin_selective_frame_weights(
         config,
         codec,
@@ -1398,6 +1537,7 @@ def action_terms(
         history.action_state,
         event_mask,
         horizon_weight,
+        row_valid=row_valid,
     ).to(device=prediction.device, dtype=torch.float32)
     # The selective profile is normalized against the existing horizon mass;
     # this is a row-level reallocation, not a hidden action-group gain.
@@ -1424,7 +1564,7 @@ def action_terms(
         phase_transport = torch.zeros_like(event_mask)
         phase_pre_event_hold = torch.zeros_like(event_mask)
         phase_weight = torch.ones_like(step_weight)
-    event_row_weight = balanced_event_row_weights(event_mask, horizon_weight)
+    event_row_weight = balanced_event_row_weights(event_mask, horizon_weight, row_valid)
     # ``*_legacy`` remains the exact V120 six-channel audit.  The owned error
     # is the only continuous-gripper field error allowed into the formal
     # physical-flow objective; its lane budget is unchanged at weight=1 and
@@ -1513,7 +1653,7 @@ def action_terms(
         * event_row_weight
         * horizon_step_weight
     ).mean()
-    uniform_flow = residual.square().mean()
+    uniform_flow = mean_rows(residual.square())
     native_arm, _ = codec.project_arm_tangent(residual[..., : 2 * codec.arm_dim])
     native_grip = residual_parts.gripper_field[..., 0]
     native_error = (
@@ -1525,6 +1665,9 @@ def action_terms(
         / float(codec.arm_dim + 1)
     )
     native_flow = (native_error * step_weight).mean()
+    if row_valid is not None:
+        complete = row_valid.all(dim=1)
+        native_flow = supported_mean(native_error * horizon_weight[None], complete)
     remaining = (1.0 - flow_state.time.float())[:, None, None]
     clean_physical = flow_state.noisy_physical.float() + remaining * prediction
     # Unlike the standalone codec compatibility API, the formal loss path
@@ -1547,7 +1690,9 @@ def action_terms(
     # command.  This narrow auxiliary surface explicitly prices only a
     # target opening transition at row zero; it is disabled for binary-command
     # outlets and remains zero when a batch has no such row.
-    first_step_release_mask = (event_target[:, 0] == open_class).to(dtype=torch.float32)
+    first_step_release_mask = ((event_target[:, 0] == open_class) & valid[:, 0]).to(
+        dtype=torch.float32
+    )
     first_step_release_denominator = first_step_release_mask.sum().clamp_min(1.0)
     first_step_release = (
         (decoded_gripper_error[:, 0] * first_step_release_mask).sum()
@@ -1647,7 +1792,7 @@ def action_terms(
     # row in the 24-step target contains a close/open transition.  Supervise
     # both the decoded absolute lane and the local-delta lane so this remains
     # effective for the two independently-owned physical coordinates.
-    first_step_hold_mask = (event_target[:, 0] == 0).to(dtype=torch.float32)
+    first_step_hold_mask = ((event_target[:, 0] == 0) & valid[:, 0]).to(dtype=torch.float32)
     first_step_hold_local = F.smooth_l1_loss(
         clean_gripper_local_delta[:, 0],
         continuous_gripper_target_delta[:, 0],
@@ -1674,6 +1819,10 @@ def action_terms(
         event_mask
     )
     event_and_after_mask = causal_event_trajectory_mask(event_mask)
+    if row_valid is not None:
+        transition_mask = transition_mask * row_valid
+        persistence_mask = persistence_mask * row_valid
+        event_and_after_mask = event_and_after_mask * row_valid
     transition_weight = transition_mask * step_weight
     persistence_weight = persistence_mask * step_weight
 
@@ -1776,19 +1925,13 @@ def action_terms(
         command_correct = (command_prediction == command_target).float()
         command_target_positive = (command_target == 1).float()
         command_prediction_positive = (command_prediction == 1).float()
-        command_tp = (
-            (command_prediction == 1) & (command_target == 1)
-        ).float().sum()
-        command_fp = (
-            (command_prediction == 1) & (command_target == 0)
-        ).float().sum()
-        command_fn = (
-            (command_prediction == 0) & (command_target == 1)
-        ).float().sum()
-        command_rows_count = command_target.new_tensor(float(command_target.numel()))
-        command_accuracy = command_correct.mean()
-        command_positive_rate = command_prediction_positive.mean()
-        command_target_positive_rate = command_target_positive.mean()
+        command_tp = (((command_prediction == 1) & (command_target == 1)) & valid).float().sum()
+        command_fp = (((command_prediction == 1) & (command_target == 0)) & valid).float().sum()
+        command_fn = (((command_prediction == 0) & (command_target == 1)) & valid).float().sum()
+        command_rows_count = valid.float().sum()
+        command_accuracy = mean_rows(command_correct)
+        command_positive_rate = mean_rows(command_prediction_positive)
+        command_target_positive_rate = mean_rows(command_target_positive)
         command_precision = command_tp / (command_tp + command_fp).clamp_min(1.0)
         command_recall = command_tp / (command_tp + command_fn).clamp_min(1.0)
         command_f1 = (
@@ -1816,7 +1959,7 @@ def action_terms(
         command_positive_weight = zero_command
         command_negative_weight = zero_command
     event_mask = event_mask.to(dtype=gripper_error_legacy.dtype)
-    hold_mask = 1.0 - event_mask
+    hold_mask = (1.0 - event_mask) * valid
     event_denominator = (event_mask * step_weight).sum().clamp_min(1.0)
     hold_denominator = (hold_mask * step_weight).sum().clamp_min(1.0)
     event_gripper_flow = (
@@ -1843,9 +1986,9 @@ def action_terms(
     hold_row_weight_mean = (event_row_weight * hold_mask).sum() / hold_count.clamp_min(1.0)
     predicted_motion = torch.sigmoid(output.bottom.motion_logits.detach().float()) >= 0.5
     target_motion = motion_target >= 0.5
-    motion_true_positive = (predicted_motion & target_motion).float().sum()
-    motion_false_positive = (predicted_motion & (~target_motion)).float().sum()
-    motion_false_negative = ((~predicted_motion) & target_motion).float().sum()
+    motion_true_positive = ((predicted_motion & target_motion) & valid).float().sum()
+    motion_false_positive = ((predicted_motion & (~target_motion)) & valid).float().sum()
+    motion_false_negative = (((~predicted_motion) & target_motion) & valid).float().sum()
     motion_precision = motion_true_positive / (
         motion_true_positive + motion_false_positive
     ).clamp_min(1.0)
@@ -1884,7 +2027,7 @@ def action_terms(
 
         close_class = 1 if open_class == 2 else 2
         context_masks = {
-            "hold": event_target == 0,
+            "hold": (event_target == 0) & valid,
             "event": event_target != 0,
             "open": event_target == open_class,
             "close": event_target == close_class,
@@ -2008,21 +2151,21 @@ def action_terms(
     for end in (4, 12, 24):
         # Preserve the historical metric as an unweighted diagnostic.  The
         # counterfactual event-balanced geometry is reported as audit-only.
-        band_metrics[f"action_flow_band_{start + 1}_{end}"] = physical_error_unweighted[
-            :, start:end
-        ].mean()
-        band_metrics[
-            f"action_flow_event_balanced_audit_band_{start + 1}_{end}"
-        ] = physical_error[:, start:end].mean()
+        band_metrics[f"action_flow_band_{start + 1}_{end}"] = mean_rows(
+            physical_error_unweighted[:, start:end], slice(start, end)
+        )
+        band_metrics[f"action_flow_event_balanced_audit_band_{start + 1}_{end}"] = mean_rows(
+            physical_error[:, start:end], slice(start, end)
+        )
         band_metrics[f"action_horizon_weight_band_{start + 1}_{end}"] = horizon_weight[
             start:end
         ].mean()
         band_metrics[f"action_horizon_mass_band_{start + 1}_{end}"] = horizon_weight[
             start:end
         ].sum() / horizon_weight.sum()
-        band_metrics[
-            f"action_flow_owned_band_{start + 1}_{end}"
-        ] = physical_error_owned_unweighted[:, start:end].mean()
+        band_metrics[f"action_flow_owned_band_{start + 1}_{end}"] = mean_rows(
+            physical_error_owned_unweighted[:, start:end], slice(start, end)
+        )
         start = end
     selective_mode = str(objective.calvin_frame_weight_mode)
     # Continuous outlets use the owned gripper lane.  At the default weight
@@ -2038,6 +2181,8 @@ def action_terms(
     else:
         formal_action_flow = flow_owned_unbalanced
     return {
+        "action_observed_label_rows": valid.float().sum(),
+        "action_observed_label_fraction": valid.float().mean(),
         **band_metrics,
         **gripper_private_metrics,
         # The explicit Calvin selective profile owns row reallocation. The
@@ -2047,13 +2192,12 @@ def action_terms(
         "action_flow_owned_unbalanced": flow_owned_unbalanced,
         "action_flow_owned_delta": flow_owned_unbalanced - flow_v120_comparable,
         "action_flow_selective_unbalanced": flow_selective_unbalanced,
-        "action_flow_selective_delta": (
-            flow_selective_unbalanced - flow_v120_comparable
-        ),
+        "action_flow_selective_delta": (flow_selective_unbalanced - flow_v120_comparable),
         "action_flow_event_balance_delta": flow - flow_selective_unbalanced,
         "action_flow_event_balanced_audit": flow,
         "action_flow_uniform_field_mse": uniform_flow,
         "action_flow_native": native_flow,
+        "action_flow_native_complete_samples": valid.all(dim=1).float().sum(),
         "action_arm_flow": arm,
         "action_gripper_flow": grip_unweighted,
         "action_gripper_flow_v120_comparable": grip_unweighted,
@@ -2086,7 +2230,7 @@ def action_terms(
         "gripper_first_step_hold_rows": first_step_hold_mask.detach().sum(),
         "action_gripper_event_row_weight": event_row_weight_mean,
         "action_gripper_hold_row_weight": hold_row_weight_mean,
-        "action_gripper_event_rate": event_mask.mean(),
+        "action_gripper_event_rate": mean_rows(event_mask),
         # Binary command-state supervision. These are zero-valued, detached
         # compatibility metrics on continuous paths.
         "gripper_command": command_loss,
@@ -2118,15 +2262,15 @@ def action_terms(
         "gripper_trajectory": gripper_trajectory,
         "gripper_trajectory_absolute": gripper_trajectory_absolute.detach(),
         "gripper_trajectory_delta": gripper_trajectory_delta.detach(),
-        "gripper_trajectory_mask_fraction": event_and_after_mask.detach().mean(),
+        "gripper_trajectory_mask_fraction": mean_rows(event_and_after_mask.detach()),
         "gripper_trajectory_transition": (
             0.5 * (gripper_transition_absolute + gripper_transition_delta)
         ).detach(),
         "gripper_trajectory_persistence": (
             0.5 * (gripper_persistence_absolute + gripper_persistence_delta)
         ).detach(),
-        "gripper_trajectory_transition_mask_fraction": transition_mask.detach().mean(),
-        "gripper_trajectory_persistence_mask_fraction": persistence_mask.detach().mean(),
+        "gripper_trajectory_transition_mask_fraction": mean_rows(transition_mask.detach()),
+        "gripper_trajectory_persistence_mask_fraction": mean_rows(persistence_mask.detach()),
         "phase_control_mode_code": prediction.new_tensor(
             1.0 if phase_mode == "stackcube_phase_v1" else 0.0,
             dtype=torch.float32,
@@ -2145,26 +2289,34 @@ def action_terms(
             1.0 if selective_mode == "motion_event_v1" else 0.0,
             dtype=torch.float32,
         ),
-        "action_frame_weight_mean": frame_weight.detach().mean(),
+        "action_frame_weight_mean": mean_rows(frame_weight.detach()),
         "action_frame_weight_min": frame_weight.detach().amin(),
         "action_frame_weight_max": frame_weight.detach().amax(),
-        "action_frame_weight_selective_fraction": (
-            frame_weight.detach() > 1.0001
-        ).float().mean(),
-        "action_flow_first": physical_error_unweighted[:, 0].mean(),
-        "action_flow_first4": physical_error_unweighted[:, :4].mean(),
-        "action_flow_first8": physical_error_unweighted[:, :8].mean(),
-        "action_flow_tail": physical_error_unweighted[:, 8:].mean(),
-        "action_flow_event_balanced_audit_first": physical_error[:, 0].mean(),
-        "action_flow_event_balanced_audit_first8": physical_error[:, :8].mean(),
-        "action_flow_event_balanced_audit_tail": physical_error[:, 8:].mean(),
-        "action_flow_owned_first": physical_error_owned_unweighted[:, 0].mean(),
-        "action_flow_owned_first4": physical_error_owned_unweighted[:, :4].mean(),
-        "action_flow_owned_first8": physical_error_owned_unweighted[:, :8].mean(),
-        "action_flow_owned_tail": physical_error_owned_unweighted[:, 8:].mean(),
-        "action_flow_owned_event_balanced_audit_first": physical_error_owned[:, 0].mean(),
-        "action_flow_owned_event_balanced_audit_first8": physical_error_owned[:, :8].mean(),
-        "action_flow_owned_event_balanced_audit_tail": physical_error_owned[:, 8:].mean(),
+        "action_frame_weight_selective_fraction": mean_rows(
+            (frame_weight.detach() > 1.0001).float()
+        ),
+        "action_flow_first": mean_rows(physical_error_unweighted[:, 0], 0),
+        "action_flow_first4": mean_rows(physical_error_unweighted[:, :4], slice(None, 4)),
+        "action_flow_first8": mean_rows(physical_error_unweighted[:, :8], slice(None, 8)),
+        "action_flow_tail": mean_rows(physical_error_unweighted[:, 8:], slice(8, None)),
+        "action_flow_event_balanced_audit_first": mean_rows(physical_error[:, 0], 0),
+        "action_flow_event_balanced_audit_first8": mean_rows(physical_error[:, :8], slice(None, 8)),
+        "action_flow_event_balanced_audit_tail": mean_rows(physical_error[:, 8:], slice(8, None)),
+        "action_flow_owned_first": mean_rows(physical_error_owned_unweighted[:, 0], 0),
+        "action_flow_owned_first4": mean_rows(
+            physical_error_owned_unweighted[:, :4], slice(None, 4)
+        ),
+        "action_flow_owned_first8": mean_rows(
+            physical_error_owned_unweighted[:, :8], slice(None, 8)
+        ),
+        "action_flow_owned_tail": mean_rows(physical_error_owned_unweighted[:, 8:], slice(8, None)),
+        "action_flow_owned_event_balanced_audit_first": mean_rows(physical_error_owned[:, 0], 0),
+        "action_flow_owned_event_balanced_audit_first8": mean_rows(
+            physical_error_owned[:, :8], slice(None, 8)
+        ),
+        "action_flow_owned_event_balanced_audit_tail": mean_rows(
+            physical_error_owned[:, 8:], slice(8, None)
+        ),
     }
 
 
@@ -2223,6 +2375,7 @@ def compose_losses(
         predicted_dynamics,
         top_targets.teacher_dynamics,
         current_loss_support=top_targets.current_loss_support,
+        interval_valid=top_targets.future_interval_valid,
         collect_diagnostics=collect_diagnostics,
     )
     objective = config.objectives

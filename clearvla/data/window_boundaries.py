@@ -12,10 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
-
 STRICT_COMPLETE_V1 = "strict_complete_v1"
 CAUSAL_PREFIX_V1 = "causal_prefix_v1"
 CAUSAL_PREFIX_TERMINAL_SUFFIX_V2 = "causal_prefix_terminal_suffix_v2"
+OBSERVED_TAIL_V1 = "observed_tail_v1"
 
 STRICT_REGION = "strict"
 PREFIX_REGION = "prefix"
@@ -25,6 +25,7 @@ WINDOW_BOUNDARY_CONTRACTS = (
     STRICT_COMPLETE_V1,
     CAUSAL_PREFIX_V1,
     CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    OBSERVED_TAIL_V1,
 )
 BOUNDARY_REGIONS = (STRICT_REGION, PREFIX_REGION, TAIL_REGION)
 BOUNDARY_REGION_TO_INDEX = {
@@ -174,6 +175,35 @@ def resolve_window_boundary_plan(
     selected = str(contract)
     if selected not in WINDOW_BOUNDARY_CONTRACTS:
         raise ValueError(f"unknown window boundary contract {selected!r}")
+    if selected == OBSERVED_TAIL_V1:
+        if metadata.terminal_state_index is None or metadata.valid_center_start is None:
+            raise ValueError("observed-tail windows need a source terminal and label start")
+        terminal = int(metadata.terminal_state_index)
+        if metadata.source_action_count is not None and metadata.source_action_count != terminal:
+            raise ValueError(
+                "observed-tail source actions must end at the real terminal observation"
+            )
+        start = int(metadata.valid_center_start)
+        if start >= terminal:
+            raise ValueError("observed-tail label range has no real current action")
+        # The old valid_center_end priced a complete 24/48-step window. It is
+        # NOT the last real label. Use terminal, but retain the language start.
+        # Regions describe evidence completeness, never sampling quotas.
+        regions: list[tuple[str, int, int]] = []
+        prefix_end = min(terminal - 1, int(strict_computed_start) - 1)
+        if start <= prefix_end:
+            regions.append((PREFIX_REGION, start, prefix_end))
+        remaining = max(start, prefix_end + 1)
+        strict_end = min(terminal - 1, int(complete_future_end))
+        if remaining <= strict_end:
+            regions.append((STRICT_REGION, remaining, strict_end))
+        tail_start = max(remaining, strict_end + 1)
+        if tail_start < terminal:
+            regions.append((TAIL_REGION, tail_start, terminal - 1))
+        plan = WindowBoundaryPlan(selected, tuple(regions), terminal)
+        plan.validate()
+        return plan
+
     strict_start, strict_end = _declared_strict_bounds(
         metadata,
         computed_start=int(strict_computed_start),
@@ -301,6 +331,7 @@ __all__ = [
     "BOUNDARY_REGION_TO_INDEX",
     "CAUSAL_PREFIX_TERMINAL_SUFFIX_V2",
     "CAUSAL_PREFIX_V1",
+    "OBSERVED_TAIL_V1",
     "PREFIX_REGION",
     "STRICT_COMPLETE_V1",
     "STRICT_REGION",

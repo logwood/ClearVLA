@@ -45,3 +45,34 @@ def test_type_gate_rejects_same_message_in_different_definition(tmp_path: Path):
     before = type_counter(_payload(path, 2), tmp_path)
     after = type_counter(_payload(path, 4), tmp_path)
     assert sum((after - before).values()) == 1
+
+
+def test_junit_merge_retains_each_source_test_and_records_killed_process(tmp_path: Path):
+    import xml.etree.ElementTree as ET
+
+    from scripts.run_structural_tests import merge_junit
+
+    xml = tmp_path / "one.xml"
+    xml.write_text(
+        '<testsuites><testsuite tests="3" failures="1" errors="0" skipped="1">'
+        '<testcase name="ok"/><testcase name="bad"><failure/></testcase>'
+        '<testcase name="skip"><skipped/></testcase></testsuite></testsuites>'
+    )
+    output = tmp_path / "merged.xml"
+    counts = merge_junit([xml], [("two.py", "process killed")], output)
+    assert counts == {"tests": 4, "failures": 1, "errors": 1, "skipped": 1}
+    root = ET.parse(output).getroot()
+    assert len(root.findall("testsuite")) == 2
+    assert len(root.findall(".//testcase")) == 4
+    assert root.find(".//error") is not None
+
+
+def test_junit_merge_rejects_empty_file(tmp_path: Path):
+    import pytest
+
+    from scripts.run_structural_tests import merge_junit
+
+    xml = tmp_path / "empty.xml"
+    xml.write_text('<testsuites><testsuite tests="0"/></testsuites>')
+    with pytest.raises(ValueError, match="empty JUnit"):
+        merge_junit([xml], [], tmp_path / "out.xml")

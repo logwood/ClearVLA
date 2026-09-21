@@ -70,6 +70,7 @@ from .runtime.sampling import (
     sample_refined_cached_action,
     sample_refined_cached_action_with_cache,
 )
+from .supervision import quarantine, supported_mean
 from .training.engine import (
     MainlineTrainingEngine,
     NonFiniteGradientError,
@@ -1169,6 +1170,7 @@ def _validation_action_estimator_match(
     batch.validate(config)
     flow_state = sample_flow_matching(
         batch.action_target.normalized,
+        row_valid=batch.action_target.row_valid,
         action_state=batch.online.history.action_state,
         codec_gripper_boundary=batch.online.history.codec_gripper_boundary,
         codec=model.outlet_adapter.codec,
@@ -1177,9 +1179,7 @@ def _validation_action_estimator_match(
         schedule=(
             None
             if config.runtime.deployment_flow_schedule is None
-            else DeploymentFlowSchedule.from_dict(
-                config.runtime.deployment_flow_schedule
-            ).refined
+            else DeploymentFlowSchedule.from_dict(config.runtime.deployment_flow_schedule).refined
         ),
     )
     source_noise = initial_physical_noise.to(
@@ -1192,6 +1192,8 @@ def _validation_action_estimator_match(
     noisy_physical = (
         (1.0 - alpha) * source_noise + alpha * flow_state.target_physical
     )
+    if flow_state.row_valid is not None:
+        noisy_physical = torch.where(flow_state.row_valid[..., None], noisy_physical, source_noise)
     device = cache.history.state.device
     autocast_enabled = device.type in {"cuda", "cpu"} and dtype in {
         torch.bfloat16,
@@ -1807,6 +1809,9 @@ def _validate(
                 "dtype": dtype,
             }
             target = batch.action_target.normalized.float()
+            label_rows = batch.action_target.row_valid
+            if label_rows is not None:
+                target = quarantine(target, label_rows)
             primary = prediction.action.float()
             primary_error = primary - target
         if run_proposal_ablation:
@@ -1828,20 +1833,22 @@ def _validate(
             proposal_delta = proposal_zero.action.float() - primary
             proposal_ablations.update(
                 {
-                    "proposal_primary_mse_normalized": primary_error.square().mean(),
-                    "proposal_primary_mse_physical": (
-                        primary_error / action_scale
-                    ).square().mean(),
-                    "proposal_zero_mse_normalized": proposal_error.square().mean(),
-                    "proposal_zero_mse_physical": (
-                        proposal_error / action_scale
-                    ).square().mean(),
-                    "proposal_zero_action_delta_mse_normalized": (
-                        proposal_delta.square().mean()
+                    "proposal_primary_mse_normalized": supported_mean(
+                        primary_error.square(), label_rows
                     ),
-                    "proposal_zero_action_delta_mse_physical": (
-                        proposal_delta / action_scale
-                    ).square().mean(),
+                    "proposal_primary_mse_physical": supported_mean(
+                        (primary_error / action_scale).square(), label_rows
+                    ),
+                    "proposal_zero_mse_normalized": supported_mean(
+                        proposal_error.square(), label_rows
+                    ),
+                    "proposal_zero_mse_physical": supported_mean(
+                        (proposal_error / action_scale).square(), label_rows
+                    ),
+                    "proposal_zero_action_delta_mse_normalized": (proposal_delta.square().mean()),
+                    "proposal_zero_action_delta_mse_physical": (proposal_delta / action_scale)
+                    .square()
+                    .mean(),
                 },
                 weight=batch.online.batch,
             )
@@ -1849,10 +1856,12 @@ def _validate(
         if run_execution_ablation:
             execution_ablation_batches += 1
             execution_rows: dict[str, torch.Tensor] = {
-                "execution_primary_mse_normalized": primary_error.square().mean(),
-                "execution_primary_mse_physical": (
-                    primary_error / action_scale
-                ).square().mean(),
+                "execution_primary_mse_normalized": supported_mean(
+                    primary_error.square(), label_rows
+                ),
+                "execution_primary_mse_physical": supported_mean(
+                    (primary_error / action_scale).square(), label_rows
+                ),
             }
             for mode in _execution_ablation_modes(config):
                 if mode == "spine_zero_full_lifecycle":
@@ -1886,10 +1895,12 @@ def _validate(
                 error = execution.action.float() - target
                 delta = execution.action.float() - primary
                 stem = f"execution_{mode}"
-                execution_rows[f"{stem}_mse_normalized"] = error.square().mean()
-                execution_rows[f"{stem}_mse_physical"] = (
-                    error / action_scale
-                ).square().mean()
+                execution_rows[f"{stem}_mse_normalized"] = supported_mean(
+                    error.square(), label_rows
+                )
+                execution_rows[f"{stem}_mse_physical"] = supported_mean(
+                    (error / action_scale).square(), label_rows
+                )
                 execution_rows[f"{stem}_action_delta_mse_normalized"] = (
                     delta.square().mean()
                 )

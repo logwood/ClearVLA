@@ -953,6 +953,7 @@ def test_validation_first_gripper_transition_uses_the_profile_command_boundary()
     previous_command_boundary[..., -1] = 1.0
     batch = SimpleNamespace(
         action_target=SimpleNamespace(
+            row_valid=None,  # legacy full-label fixture; retain all boundary assertions
             normalized=target,
             raw_units=target,
             current_raw_units=current_qpos_boundary,
@@ -1312,6 +1313,7 @@ def test_calvin_validation_removes_raw_zero_offset_from_motion_accounting() -> N
     normalized_current = normalized_target[:, 0].clone()
     batch = SimpleNamespace(
         action_target=SimpleNamespace(
+            row_valid=None,  # legacy full-label fixture; retain all boundary assertions
             normalized=normalized_target,
             raw_units=raw_target,
             current_raw_units=raw_target[:, 0],

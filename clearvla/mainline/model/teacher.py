@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..supervision import quarantine, supported_mean
 from .types import (
     INTERVAL_BOUNDS,
     FutureObjectDynamics,
@@ -113,6 +114,7 @@ class ObjectFutureTeacher(nn.Module):
         facts: ObjectFactSet,
         future_supports: Tensor,
         future_offsets: Tensor,
+        future_observed: Tensor | None = None,
         collect_diagnostics: bool = True,
     ) -> tuple[FutureObjectDynamics, dict[str, Tensor]]:
         # Teacher association is a target-construction plane, not an online
@@ -129,12 +131,14 @@ class ObjectFutureTeacher(nn.Module):
                     facts=facts,
                     future_supports=future_supports,
                     future_offsets=future_offsets,
+                    future_observed=future_observed,
                     collect_diagnostics=collect_diagnostics,
                 )
         return self._forward_fp32(
             facts=facts,
             future_supports=future_supports,
             future_offsets=future_offsets,
+            future_observed=future_observed,
             collect_diagnostics=collect_diagnostics,
         )
 
@@ -144,6 +148,7 @@ class ObjectFutureTeacher(nn.Module):
         facts: ObjectFactSet,
         future_supports: Tensor,
         future_offsets: Tensor,
+        future_observed: Tensor | None = None,
         collect_diagnostics: bool,
     ) -> tuple[FutureObjectDynamics, dict[str, Tensor]]:
         facts.validate()
@@ -152,6 +157,13 @@ class ObjectFutureTeacher(nn.Module):
         batch, supports, cameras, rows, columns, width = future_supports.shape
         if batch != facts.batch or width != self.content_dim:
             raise ValueError("future supports do not match current object content")
+        if future_observed is not None:
+            if (
+                tuple(future_observed.shape) != (batch, supports)
+                or future_observed.dtype != torch.bool
+            ):
+                raise ValueError("Teacher source support must be bool [B,F]")
+            future_supports = quarantine(future_supports, future_observed)
         if not bool(torch.isfinite(future_supports).all()):
             raise ValueError("Teacher future supports contain non-finite values")
         offsets = self._offsets(
@@ -328,6 +340,8 @@ class ObjectFutureTeacher(nn.Module):
             rows,
             columns,
         )
+        if future_observed is not None:
+            candidate_support = candidate_support & future_observed[:, :, None, None, None, None]
         # Keep the null hypothesis as the finite all-invalid fallback while
         # removing unsupported camera cells from the real candidate partition.
         candidate_flat = torch.where(
@@ -395,6 +409,7 @@ class ObjectFutureTeacher(nn.Module):
         transport_rows: list[Tensor] = []
         covariance_rows: list[Tensor] = []
         support_counts: list[Tensor] = []
+        interval_observed_rows: list[Tensor] = []
         for lower, upper in INTERVAL_BOUNDS:
             selected = ((offsets >= lower) & (offsets <= upper)).float()
             # Configured support sets normally cover every interval.  The
@@ -408,8 +423,19 @@ class ObjectFutureTeacher(nn.Module):
                 selected,
                 fallback,
             )
+            interval_observed = torch.ones(batch, device=offsets.device, dtype=torch.bool)
+            if future_observed is not None:
+                interval_observed = ((selected == 0) | future_observed).all(dim=1)
+            interval_observed_rows.append(interval_observed)
             weight = selected / selected.sum(dim=1, keepdim=True).clamp_min(1.0)
+            # An incomplete fixed interval is unavailable, not a shorter target.
+            if future_observed is not None:
+                weight = weight * interval_observed[:, None]
             interval_successor = torch.einsum("bf,bfkd->bkd", weight, successor_per_support)
+            if future_observed is not None:
+                interval_successor = torch.where(
+                    interval_observed[:, None, None], interval_successor, current_reference[:, 0]
+                )
             successor_rows.append(interval_successor)
             interval_transport = torch.einsum("bf,bfkcd->bkcd", weight, transport_per_support)
             transport_rows.append(interval_transport)
@@ -420,7 +446,7 @@ class ObjectFutureTeacher(nn.Module):
                     covariance_per_support,
                 )
             )
-            support_counts.append(selected.sum(dim=1).float().mean())
+            support_counts.append((selected.sum(dim=1).float() * interval_observed).mean())
         successor = torch.stack(successor_rows, dim=1)
         transport = torch.stack(transport_rows, dim=1)
         covariance = torch.stack(covariance_rows, dim=1)
@@ -448,10 +474,16 @@ class ObjectFutureTeacher(nn.Module):
         if not collect_diagnostics:
             return target, {}
         metrics = {
-            "object_teacher_association_real_mass": (association_real_mass_per_support.mean()),
-            "object_teacher_association_uncertainty": uncertainty_per_support.mean(),
-            "object_teacher_reliability": reliability_per_support.mean(),
-            "object_teacher_association_confidence": association_confidence.mean(),
+            "object_teacher_association_real_mass": (
+                supported_mean(association_real_mass_per_support, future_observed)
+            ),
+            "object_teacher_association_uncertainty": supported_mean(
+                uncertainty_per_support, future_observed
+            ),
+            "object_teacher_reliability": supported_mean(reliability_per_support, future_observed),
+            "object_teacher_association_confidence": supported_mean(
+                association_confidence, future_observed
+            ),
             "object_teacher_interval_variation": target.semantic_delta.float()
             .std(dim=1, unbiased=False)
             .mean(),
@@ -465,7 +497,7 @@ class ObjectFutureTeacher(nn.Module):
             )
             .abs()
             .amax(),
-            "object_teacher_null_probability": null_probability.mean(),
+            "object_teacher_null_probability": supported_mean(null_probability, future_observed),
             "object_teacher_semantic_max": semantic.detach().float().amax(dim=(-3, -2, -1)).mean(),
             "object_teacher_semantic_margin": (
                 semantic.detach().float().amax(dim=(-3, -2, -1))
@@ -490,6 +522,45 @@ class ObjectFutureTeacher(nn.Module):
                 successor[:, 1:].flatten(2), successor[:, :-1].flatten(2), dim=-1
             ).mean(),
         }
+        if future_observed is not None:
+            observed_intervals = torch.stack(interval_observed_rows, dim=1)
+            metrics["object_teacher_observed_support_count"] = future_observed.float().sum()
+            metrics["object_teacher_observed_interval_count"] = observed_intervals.float().sum()
+            metrics["object_teacher_semantic_delta_rms"] = supported_mean(
+                target.semantic_delta.square(), observed_intervals
+            ).sqrt()
+            metrics["object_teacher_transport_rms"] = supported_mean(
+                transport.square(), observed_intervals
+            ).sqrt()
+            metrics["object_teacher_covariance_rms"] = supported_mean(
+                covariance.square(), observed_intervals
+            ).sqrt()
+            for name, value in (
+                ("semantic", semantic),
+                ("appearance", appearance),
+                ("geometry", geometry),
+            ):
+                maximum = value.detach().float().amax(dim=(-3, -2, -1))
+                margin = maximum - value.detach().float().mean(dim=(-3, -2, -1))
+                if name != "geometry":
+                    metrics[f"object_teacher_{name}_max"] = supported_mean(maximum, future_observed)
+                metrics[f"object_teacher_{name}_margin"] = supported_mean(margin, future_observed)
+            pair_valid = observed_intervals[:, 1:] & observed_intervals[:, :-1]
+            metrics["object_teacher_adjacent_cosine"] = supported_mean(
+                F.cosine_similarity(
+                    successor[:, 1:].flatten(2), successor[:, :-1].flatten(2), dim=-1
+                ),
+                pair_valid,
+            )
+            weights = observed_intervals[:, :, None, None]
+            count = weights.float().sum(dim=1, keepdim=True).clamp_min(1.0)
+            common = (target.semantic_delta * weights).sum(dim=1, keepdim=True) / count
+            variance = ((target.semantic_delta - common).square() * weights).sum(dim=1) / count[
+                :, 0
+            ]
+            metrics["object_teacher_interval_variation"] = supported_mean(
+                variance.sqrt(), observed_intervals.any(dim=1)
+            )
         successor_innovation = successor - target.current_reference[:, None]
         for index in range(len(INTERVAL_BOUNDS)):
             row = f"object_teacher_interval_{index}"
@@ -500,6 +571,17 @@ class ObjectFutureTeacher(nn.Module):
                 target.semantic_delta[:, index].square().mean().sqrt()
             )
             metrics[f"{row}_transport_rms"] = transport[:, index].square().mean().sqrt()
+            if future_observed is not None:
+                interval_mask = interval_observed_rows[index]
+                metrics[f"{row}_observed_samples"] = interval_mask.float().sum()
+                for name, value in (
+                    ("successor_innovation", successor_innovation),
+                    ("semantic_delta", target.semantic_delta),
+                    ("transport", transport),
+                ):
+                    metrics[f"{row}_{name}_rms"] = supported_mean(
+                        value[:, index].square(), interval_mask
+                    ).sqrt()
         return target, metrics
 
     @staticmethod

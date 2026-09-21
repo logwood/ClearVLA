@@ -17,9 +17,10 @@ from ..model.policy import (
     OnlinePolicyCache,
     OnlineTrainingState,
 )
+from ..runtime.flow_schedule import DeploymentFlowSchedule
 from ..runtime.logging import tensor_scalars
 from ..runtime.numerics import resolve_compute_dtype
-from ..runtime.flow_schedule import DeploymentFlowSchedule
+from ..supervision import quarantine
 from .gradient_audit import (
     DEFAULT_GRADIENT_SPIKE_AUDIT_THRESHOLD,
     FiniteGradientSpikeReport,
@@ -113,9 +114,30 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
         "future.action": batch.future.action_sequence,
         "future.state": batch.future.state_sequence,
     }
+    support = batch.future.support
+    if support is not None:
+        support.validate(
+            batch=batch.future.batch,
+            horizon=int(batch.future.action_sequence.shape[1]),
+            offsets=batch.future.offsets,
+            device=batch.future.action_sequence.device,
+            strict=True,
+        )
+        for name in ("target.action", "target.action_raw_units"):
+            values[name] = quarantine(values[name], support.action[:, : values[name].shape[1]])
+        for name, mask in (
+            ("future.action", support.action),
+            ("future.state", support.state),
+            ("future.dino", support.visual),
+        ):
+            values[name] = quarantine(values[name], mask)
     invalid = [name for name, value in values.items() if not bool(torch.isfinite(value).all())]
     if invalid:
         raise ValueError(f"training batch contains non-finite tensors: {', '.join(invalid)}")
+    if support is not None and not torch.equal(
+        values["target.action"], values["future.action"][:, : values["target.action"].shape[1]]
+    ):
+        raise ValueError("policy and world supervision disagree on observed source actions")
     expected_offsets = torch.arange(
         4,
         49,
@@ -821,6 +843,7 @@ class MainlineTrainingEngine:
         )
         flow_state = sample_flow_matching(
             batch.action_target.normalized,
+            row_valid=batch.action_target.row_valid,
             action_state=batch.online.history.action_state,
             codec_gripper_boundary=batch.online.history.codec_gripper_boundary,
             codec=self.model.outlet_adapter.codec,

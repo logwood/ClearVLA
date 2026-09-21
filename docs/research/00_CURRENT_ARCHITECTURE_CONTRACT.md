@@ -19,11 +19,12 @@ they do not define the current graph.
 ## Structural rebuild branch status
 
 `codex/structural-rebuild-20260921` is based on immutable commit
-`0f07160d692ec8c8302880420a3d93d74512c39b`. The current implemented unit is
-**M1a: physical-step history provenance and its actual S/proposal consumers**.
+`0f07160d692ec8c8302880420a3d93d74512c39b`. The implemented units are **M1a physical-step history** and **M1b real-tail
+current-state coverage with source-owned future-label support**.
 The complete G/S/W/P structural redesign is not implemented or behaviorally
-validated. The default old graph stays a control; the explicit candidate is
-`configs/mainline/structural_rebuild_m1_calvin.json`. Future work and unresolved
+validated. The default old graph and the M1a config remain controls. The new
+explicit candidate is `configs/mainline/structural_rebuild_m1b_calvin.json`;
+`structural_rebuild_m1_calvin.json` remains unchanged. Future work and unresolved
 review boundaries are in the existing repair plan, not declarations of current
 architecture. The 2026-09-21 user authorization permits reviewed architectural
 changes on this branch; historical exact-arithmetic rules do not prohibit a
@@ -68,6 +69,7 @@ These are source/config selections, not claims about trained-model success.
 
 | Boundary | Default | Explicit alternative |
 |---|---|---|
+| Future-label support | `strict_complete_v1` / existing explicit boundary controls | `observed_tail_v1`; all labelled real current states, independent observed action/state/visual support, no synthetic future truth |
 | S/history encoding | `paired_rows_v1` historical control | `timestamped_streams_v1`; separate causal state/control streams, source times and padding provenance |
 | P2 spatial intent | `post_pool_only`; typed S selects interval after spatial pooling | `shared_target_prior_v1`; one shared S-owned target-K prior conditions semantic K and geometry K*C before pooling |
 | Visual NPY read transport | `mmap` | `pread`; cache layout, logical indices and dataset identity are unchanged |
@@ -138,6 +140,76 @@ migration from old weights. Ordinary exact restoration checks the new config,
 component selection and source closure. New history modules belong to that
 closure. Preserved legacy initializer/state-dict arithmetic does not waive the
 old source-identity check across changed source revisions.
+
+## Implemented M1b real-label support contract
+
+`observed_tail_v1` is an explicit **data/supervision** change, not a new online
+condition. It requires `timestamped_streams_v1`, stride one, and a verified
+CALVIN/LIBERO terminal observation. A converted episode's original labelled
+start is retained. If `L` is its last real observation, every labelled current
+center through `L-1` is admitted; `L` itself has no recorded next command.
+The old complete-window upper bound is not misread as the last real label.
+This operates on the existing admitted source inventory; previously excluded
+annotations are not claimed to have been recovered. Original data files,
+splits, decoded/DINO caches, language bank and normalizer fitting are unchanged.
+
+`clearvla.data.future_clock.future_source_rows` owns the pre-action clock:
+commands `a[t+h]` are known for `t+h<L`; successor states `o[t+h+1]` are known
+through `L`; sparse visual targets at their declared offsets are known through
+`L`. Safe gather indices may repeat a real terminal observation for transport,
+but the repeats have false label masks. Stored absorbing suffixes never become
+new observed actions, states or images. Missing values are quarantined before
+normalization-sensitive target operations, projections and losses.
+
+The loader creates one `FutureLabelSupport` shared by `ActionSupervision` and
+`FutureSupervision`. Its boolean action/state/visual masks are immutable by
+convention and strictly admitted at the source boundary; they are not learned
+confidence or current object validity. No such record exists in
+`OnlinePolicyInput`, the candidate W world or the ODE cache. A missing new-mode
+mask or a supplied mask in a legacy-mode batch is rejected. Preflight verifies
+that policy and world labels agree on their shared real command rows.
+
+The mask is consumed by the actual Teacher association, fixed-interval targets,
+future dynamics/transition losses, recognizer attention/reconstruction, online
+S target match, coarse and history-proposal auxiliary losses, flow-matching
+bridge, action/decoded/gripper/motion losses, execution-value targets and
+validation error counts. A W interval is supervised only if ALL supports of
+that fixed interval are observed; a shorter partial interval is not relabeled
+as the full interval. Unavailable interval tokens cannot become recognizer
+attention keys. A sample may therefore own a valid next action while owning no
+fixed-interval W or S future target.
+
+Unknown rows in the flow bridge remain the sampled source noise. They are not
+trained toward zero, a frozen gripper, a synthetic stop, or an invented expert
+future. Real-label error reductions count only observed entries while retaining
+the existing declared horizon weighting. The historical full-24-row native
+tangent-projection diagnostic is reported only on fully labelled samples,
+with its contributing sample count, because that operator mixes the horizon.
+Model-only output-delta diagnostics do not need future labels and keep their
+original full-prediction domain.
+
+Train, validation and test datasets all use the selected real-label contract.
+Validation records actual observed action rows and per-error element counts;
+an empty band is not evidence of a perfect prediction. Its score is not a
+strict-window/E8-equivalent score. Window-sampling motion/event signals use
+real source commands only; no new fixed boundary quotas were introduced.
+Current-state coverage counts are distinct from the union of future target
+rows. Source normalizers still exclude synthetic absorbing rows.
+
+The mask record adds no policy parameter; it still changes config/data/source
+identity and is not an exact resume from M1a. New helpers belong to the source
+closure; checkpoint tests exercise ordinary exact save/reload and reject
+silent old-config reuse. No migration allow-list is expanded. The supplied
+candidate is CALVIN. The continuous outlet loss path is covered with a LIBERO
+profile fixture, but the legacy LIBERO conversion/config-generation CLI is not
+newly advertised as an observed-tail workflow.
+
+This closes only M1b's **real-tail/label-support unit**. Physical rotation charts,
+coordinate/normalizer units, nominal step-versus-seconds metadata, downstream
+compact seed missing-evidence semantics and reset-distribution alignment remain
+open before declaring M1 complete. It does not resolve the W candidate-action
+versus demonstration-future mismatch, Q5 endpoint-head training, entity/task
+memory, or G/S-task/P architecture. Those keep their scheduled reviews.
 
 ## Authority and document ownership
 

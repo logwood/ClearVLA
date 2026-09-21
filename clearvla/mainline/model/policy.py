@@ -10,6 +10,7 @@ from torch import Tensor, nn
 
 from ..config import ExperimentConfig
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
+from ..supervision import quarantine, supported_mean
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from .action_contract import BottomOutput
 from .component_contracts import ComponentSelection, modular_to_legacy_name
@@ -698,20 +699,26 @@ class ClearVLAMainlinePolicy(nn.Module):
         future.validate(self.config)
         if training_state.top.facts.batch != future.batch:
             raise ValueError("online cache and future supervision batch do not align")
+        source_dino = future.dino_supports
+        source_action = future.action_sequence
+        source_state = future.state_sequence
+        if future.support is not None:
+            source_dino = quarantine(source_dino, future.support.visual)
+            source_action = quarantine(source_action, future.support.action)
+            source_state = quarantine(source_state, future.support.state)
         targets, metrics = self.training_targets.build(
             training_state.top,
-            future_supports=self.observation.teacher_supports(future.dino_supports),
+            future_supports=self.observation.teacher_supports(source_dino),
             future_offsets=future.offsets,
-            future_action=future.action_sequence,
-            future_state=future.state_sequence,
+            future_action=source_action,
+            future_state=source_state,
             coarse_action=self.intent.coarse_action,
+            label_support=future.support,
             collect_diagnostics=collect_diagnostics,
         )
         proposal_rows = F.smooth_l1_loss(
             training_state.history_proposal.action_prediction.float(),
-            future.action_sequence[:, : self.config.dimensions.action_horizon]
-            .detach()
-            .float(),
+            source_action[:, : self.config.dimensions.action_horizon].detach().float(),
             reduction="none",
         ).mean(dim=-1)
         proposal_weight = anchor_horizon_weights(
@@ -720,7 +727,10 @@ class ClearVLAMainlinePolicy(nn.Module):
             first_step_protection=self.config.objectives.horizon_first_step_protection,
             device=proposal_rows.device,
         )
-        proposal_loss = (proposal_rows * proposal_weight[None]).mean()
+        proposal_loss = supported_mean(
+            proposal_rows * proposal_weight[None],
+            None if future.support is None else future.support.action[:, : proposal_rows.shape[1]],
+        )
         targets = replace(targets, history_proposal_loss=proposal_loss)
         if collect_diagnostics:
             metrics = {

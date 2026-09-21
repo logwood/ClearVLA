@@ -2,68 +2,72 @@
 
 Updated: 2026-09-21. This file describes this branch, not live server state.
 
-## Identity
+## Identity and scope
 
 - Branch: `codex/structural-rebuild-20260921`.
 - Immutable base: `0f07160d692ec8c8302880420a3d93d74512c39b`.
-- Control: `a0e1f5d5b9736d37a51faec36039144f181d4b12` (read-only).
-- Candidate: `configs/mainline/structural_rebuild_m1_calvin.json`.
-- Implemented: M0 source isolation and M1a physical-step history path.
-- Not implemented: M1b and the G1/G2/G3/S-task/W/P structural redesign.
+- Read-only control: `a0e1f5d5b9736d37a51faec36039144f181d4b12`.
+- Previous implemented unit: `329819bb12008d8ccf6211350bc64a8d8a4d7de1`, M1a real-time history.
+- Current candidate: `configs/mainline/structural_rebuild_m1b_calvin.json`.
+- Current source unit: M1b real-tail current states and source-owned future-label support.
+- Still open: remaining M1b coordinate/rotation/unit/reset/seed review, then G1/G2/G3/S-task/W/P.
 
-The source at this commit, its workflow output and this candidate's serialized
-config are authoritative. Do not infer full rebuild completion from the
-branch name. The user authorized normal pushes to this isolated branch; no
-master/old-branch update, deletion, checkpoint conversion or formal training
-has been performed. GitHub API writes work; direct Git DNS in the local
-execution container does not. Fixed Git archives were obtained through the
-read-only CI artifact and checked against the baseline tree. Final head-to-head
-comparison: 20 files, 3009 additions, 201 deletions; common raw-reader fixes were
-already present in both heads and were not re-applied.
+The current source commit, source-owned tests, serialized config and CI artifact
+are authoritative. Do not infer a complete rebuild from the branch name. User
+authorization covers normal pushes to this isolated branch. No master or old
+branch update, deletion, data/cache write, checkpoint migration, formal training
+or server job was performed. A CI-generated commit must be verified by its
+publisher's final source tree and test artifact, not merely by a green bootstrap
+job. Direct Git DNS in the local container is unavailable; GitHub API writes
+and downloaded workflow artifacts are available.
 
-## Implemented source unit
+## Current semantic unit
 
-New clock, typed HistoryTiming and separate timestamped state/action encoder;
-actual dataset/loader and online checkpoint-policy adapters; S/coarse masking;
-real-time and masked proposal memory; bounded CausalHistory (9 recent
-observations, 24 commands, plus reset boundary); explicit config, component
-and deployment ABI identity. Factory identity resolution has a single path.
-The old S encoder is a deliberate control, not a fallback for missing new
-metadata. New candidates require new training; no old checkpoint migration
-allow-list was added.
+Read the architecture contract's M1b section and the repair plan's map. This is
+not a dataset-only switch: the actual loader shares one source-support record
+with action/future supervision; Teacher, recognizer, W/S targets, coarse/history
+proposal, flow bridge, all formal target losses, execution value and validation
+consume it. It never enters online conditioning. Unknown flow rows remain source
+noise. Fixed W intervals require complete actual support. Validation uses real
+label denominators and reports empty-band coverage. The old M1a candidate and
+legacy defaults remain controls; source/semantic changes are not resume aliases.
 
-## Verification record
+## Verification and resource boundary
 
-Local preliminary baseline used Python 3.13.5 / PyTorch 2.10.0+cpu, not the
-repository's required Python 3.12 / PyTorch 2.11.x. The initial untouched
-mainline suite reported 352 passed, 1 skipped. Exact old-mode initialization
-and parameter order matched for seeds 0 and 71. The new tests exercise the
-real model's forward/backward, nonzero time-encoder parameter gradients,
-normalized/native output, source-owned checkpoint save/exact reload, and
-same-noise sampling. Fixtures replace image/T5/environment transport only
-where specifically stated by a test; they do not replace the production
-history/model path. CPU BF16 encoder tests are not CUDA BF16 tests.
+The local execution environment is Python 3.13.5 / PyTorch 2.10.0+cpu, not the
+repository's required Python 3.12 / PyTorch 2.11.x. Local checks are supplemental.
+M1a was first rerun locally (153 focused tests). The M1b first complete-suite
+attempt was killed by the local 4 GiB cgroup memory limit (exit 137), not
+accepted as a pass. Subsequent per-file runs also exposed the large policy
+file exceeding local memory in both untouched baseline and candidate; local
+rechecks shard that same collected node inventory, not the assertions. `run_structural_tests.py` now isolates each test
+file in a fresh process without dropping tests; per-file logs and combined
+JUnit retain failures, missing results and abnormal exits explicitly.
 
-Full-repository Ruff has pre-existing failures (785 in the initial base).
-The first scoped Pyright comparison reported 105 inherited errors in the
-changed legacy files and zero newly introduced errors after fixes. Raw
-inventories and final counts belong in workflow/test artifacts; a scoped
-regression pass is not a clean full-repository static audit. The first parallel
-four-worker Pyright attempt exceeded local memory; subsequent scoped checks
-run single-process. This is recorded, not hidden as a pass.
+Final counts belong to the final commit's workflow artifacts: `runtime.json`,
+`baseline-tests.xml`, `current-tests.xml`, per-file process inventory and
+`static-delta.json`. The supported-runtime publisher reruns the untouched base
+and the complete selected current inventory before publishing. The persistent
+read-only audit explicitly selects Python 3.12. A static regression pass means
+no NEW errors in reviewed files, not zero historical repository errors.
 
-For final checks of this commit, use its `Structural rebuild audit` workflow
-artifact (`runtime.json`, baseline/current JUnit, and `static-delta.json`).
-The workflow installs the repository's Python/PyTorch generation. The source
-bootstrap CI runs alone prove only syntax/archive/tooling, not neural tests.
-GPU/CUDA, full dataset training, real checkpoint behavior and physical
-closed-loop validation remain unrun. No job was started on the user's server.
+Tests exercise actual production model forward/backward, target-payload
+invariance for every formal loss and parameter gradient, cached-loader mask
+transport, validation subset denominators, continuous/binary outlet loss paths,
+ordinary checkpoint save/exact reload, real deployment-checkpoint loading
+with data-only support omitted, and same-noise online independence. Additional
+CPU BF16 tail forward/backward checks are explicitly not CUDA BF16 checks.
+Only declared image/token/language/environment I/O fixtures replace external
+transport; they do not replace the neural or supervision path. CPU tests are
+not CUDA BF16 tests, formal dataset training or physical closed-loop results.
+No task-success improvement has been established by this source unit.
 
 ## Resume work
 
-Read the architecture contract and current repair plan first. Finish M1b's
-remaining ingress semantics before declaring M1 complete or starting G1.
-Each upstream change requires downstream interface, loss/mask and lifecycle
-review; consumers already adapted for M1a still need their scheduled deeper
-structural reviews. Do not reopen or expand the old behavior-probe checklist
-as a prerequisite to this implementation.
+Finish M1b's coordinate/rotation/action-normalizer meanings, nominal physical
+step metadata, compact downstream missing-evidence and reset distribution
+review. Then enter G1 with its producer/consumer/loss contracts. Current source
+support fixes do not close W's candidate-action/observed-future mismatch, Q5
+endpoint conditioning or future entity/task-state lifecycle. Keep each next
+semantic unit coherent; update downstream consumers and supervision with the
+producer rather than leaving silent adapters or invented labels.

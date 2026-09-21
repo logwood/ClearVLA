@@ -18,6 +18,7 @@ from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.data.window_boundaries import (
     CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
     CAUSAL_PREFIX_V1,
+    OBSERVED_TAIL_V1,
     STRICT_COMPLETE_V1,
     WINDOW_BOUNDARY_CONTRACTS,
 )
@@ -29,6 +30,7 @@ from .gripper_contract import (
     VALID_GRIPPER_OUTPUT_MODES,
 )
 from .manifest import ARCHITECTURE_MANIFEST
+from .temporal import TIMED_HISTORY_ENCODING
 from .v120_core.bspine import (
     BSPINE0_BASIS_DIGEST,
     BSPINE0_CONTROL_POINTS,
@@ -274,12 +276,17 @@ class DataConfig:
                     "data.information_batches_per_epoch must be a positive integer when set"
                 )
         if (
-            self.window_boundary_contract != STRICT_COMPLETE_V1
+            self.window_boundary_contract not in {STRICT_COMPLETE_V1, OBSERVED_TAIL_V1}
             and self.data_profile != "libero_relative_7d_v1"
         ):
             raise ValueError(
                 "causal prefix/terminal boundary contracts are valid only for LIBERO"
             )
+        if self.window_boundary_contract == OBSERVED_TAIL_V1:
+            if self.data_profile not in {"calvin_relative_7d_v1", "libero_relative_7d_v1"}:
+                raise ValueError("observed-tail requires a verified real terminal observation")
+            if self.stride != 1:
+                raise ValueError("observed-tail requires every real current action (stride=1)")
         if self.data_profile == "maniskill_pd_ee_delta_pose_7d_v2" and self.stride != 1:
             raise ValueError("ManiSkill v2 requires stride=1 for all-source first-action coverage")
         resolve_action_state_profile(self.data_profile).validate()
@@ -917,6 +924,11 @@ class ExperimentConfig:
             raise ValueError(
                 "StackCube phase control is valid only for a ManiSkill outlet"
             )
+        if (
+            self.data.window_boundary_contract == OBSERVED_TAIL_V1
+            and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING
+        ):
+            raise ValueError("observed-tail windows require explicit source history timing")
         if self.data.window_boundary_contract in {
             CAUSAL_PREFIX_V1,
             CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
