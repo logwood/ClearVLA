@@ -10,17 +10,18 @@ import torch
 
 from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.data.instructions import normalize_instruction
+from clearvla.mainline.gripper_contract import (
+    VALID_GRIPPER_OUTPUT_MODES,
+    is_binary_gripper_mode,
+)
 from clearvla.mainline.interfaces import (
     CurrentObservation,
     GoalCondition,
     ObservableHistory,
     OnlinePolicyInput,
 )
-from clearvla.mainline.gripper_contract import (
-    VALID_GRIPPER_OUTPUT_MODES,
-    is_binary_gripper_mode,
-)
 from clearvla.mainline.runtime.sampling import sample_action
+from clearvla.mainline.temporal import TIMED_HISTORY_ENCODING, HistoryTiming
 from clearvla.vision.preprocessing import PreprocessConfig, preprocessing_identity
 
 from .checkpoint import DeploymentBundle, load_deployment_checkpoint
@@ -206,6 +207,21 @@ class ClearVLACheckpointPolicy:
         codec_gripper_boundary = action_state[:, -1:]
         if profile.gripper_transition_boundary == "previous_command":
             codec_gripper_boundary = executed_action_history[:, -1, -1:]
+        timing = None
+        if config.top.history_encoding_mode == TIMED_HISTORY_ENCODING:
+            timing = HistoryTiming.from_mapping(
+                {
+                    name: torch.from_numpy(value[None]).to(device=self.device)
+                    for name, value in history.timing_arrays().items()
+                }
+            )
+            timing.validate(
+                batch=1,
+                states=config.dimensions.state_history_length,
+                actions=config.dimensions.executed_history_length,
+                device=action_state.device,
+                strict=True,
+            )
         online = OnlinePolicyInput(
             observation=CurrentObservation(
                 dino_history=dino.unsqueeze(0),
@@ -214,6 +230,7 @@ class ClearVLACheckpointPolicy:
             history=ObservableHistory(
                 state=self._normal(history.state[None], action=False),
                 action_state=action_state,
+                timing=timing,
                 codec_gripper_boundary=codec_gripper_boundary,
                 state_history=self._normal(history.state_history[None], action=False),
                 executed_action_history=executed_action_history,

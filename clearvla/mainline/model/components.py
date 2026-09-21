@@ -110,14 +110,41 @@ class ConditioningStage(nn.Module):
             dtype=policy_input.history.executed_action_history.dtype,
         )
         history_proposal = self.history_proposal(
-            policy_input.history.executed_action_history
+            policy_input.history.executed_action_history,
+            **(
+                {"timing": policy_input.history.timing}
+                if config.top.history_encoding_mode == "timestamped_streams_v1"
+                else {}
+            ),
         )
+        if config.top.history_encoding_mode == "timestamped_streams_v1":
+            assert policy_input.history.timing is not None
+            history_keep = history_keep * policy_input.history.timing.action_executed.any(dim=1).to(
+                history_keep.dtype
+            )
+        state_history = policy_input.history.state_history
+        executed_history = policy_input.history.executed_action_history
+        timing = policy_input.history.timing
+        if config.top.history_encoding_mode == "timestamped_streams_v1":
+            assert timing is not None
+            # Quarantine padded values before *all* consumers, not only S.
+            # The current state has one authoritative row across the graph.
+            state_history = torch.cat(
+                (state_history[:, :-1], policy_input.history.state[:, None]), dim=1
+            )
+            state_history = torch.where(
+                timing.state_observed[..., None], state_history, torch.zeros_like(state_history)
+            )
+            executed_history = torch.where(
+                timing.action_executed[..., None],
+                executed_history,
+                torch.zeros_like(executed_history),
+            )
         conditioned_history = replace(
             policy_input.history,
-            executed_action_history=(
-                policy_input.history.executed_action_history
-                * history_keep[:, None, None]
-            ),
+            timing=None if timing is None else timing.without_actions(history_keep),
+            state_history=state_history,
+            executed_action_history=executed_history * history_keep[:, None, None],
         )
         conditioned_goal = replace(
             policy_input.goal,

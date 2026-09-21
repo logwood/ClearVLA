@@ -1,6 +1,6 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-20
+Updated: 2026-09-21
 
 This is the compact source of truth for the active mainline graph. Read it
 before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
@@ -15,6 +15,20 @@ or refactor work in
 [CURRENT_MAINLINE_REPAIR_PLAN.md](CURRENT_MAINLINE_REPAIR_PLAN.md).
 Expanded historical narratives remain recoverable from Git and the archive;
 they do not define the current graph.
+
+## Structural rebuild branch status
+
+`codex/structural-rebuild-20260921` is based on immutable commit
+`0f07160d692ec8c8302880420a3d93d74512c39b`. The current implemented unit is
+**M1a: physical-step history provenance and its actual S/proposal consumers**.
+The complete G/S/W/P structural redesign is not implemented or behaviorally
+validated. The default old graph stays a control; the explicit candidate is
+`configs/mainline/structural_rebuild_m1_calvin.json`. Future work and unresolved
+review boundaries are in the existing repair plan, not declarations of current
+architecture. The 2026-09-21 user authorization permits reviewed architectural
+changes on this branch; historical exact-arithmetic rules do not prohibit a
+new, explicitly identified component. Existing experimental source and data
+remain untouched.
 
 ## Agent quick contract
 
@@ -54,6 +68,7 @@ These are source/config selections, not claims about trained-model success.
 
 | Boundary | Default | Explicit alternative |
 |---|---|---|
+| S/history encoding | `paired_rows_v1` historical control | `timestamped_streams_v1`; separate causal state/control streams, source times and padding provenance |
 | P2 spatial intent | `post_pool_only`; typed S selects interval after spatial pooling | `shared_target_prior_v1`; one shared S-owned target-K prior conditions semantic K and geometry K*C before pooling |
 | Visual NPY read transport | `mmap` | `pread`; cache layout, logical indices and dataset identity are unchanged |
 | W camera condition | `motion_prior_only` | `coordinate_role_v1`; separate initialization migration |
@@ -62,6 +77,67 @@ These are source/config selections, not claims about trained-model success.
 
 An opt-in's source tests do not promote it to the default. The checkpoint's
 serialized selection remains authoritative for evaluation and resume.
+
+## Implemented M1a history contract
+
+An observation `o[t]` precedes execution of `a[t]`. Times below are integer
+**physical control steps**, not seconds, wall-clock inference latency, task
+progress, action-horizon indices, or flow/ODE time. State samples retain
+`[-8,-4,0]`; already executed command samples retain
+`[-24,-16,-12,-8,-6,-4,-2,-1]`. They are never paired by array row number.
+
+`clearvla.data.history_clock.sparse_history_clock` is the common source-index
+rule for the training dataset and `CausalHistory`. It exports actual state
+source offsets, requested command offsets, `state_observed`, and
+`action_executed`. A repeated reset state is padding, not an additional
+observation; an absent command is not a recorded zero command. Absolute episode
+position is used only to construct this provenance and is not a model feature.
+
+The explicit new mode requires `ObservableHistory.timing: HistoryTiming`.
+Missing metadata is an error, not a guessed legacy clock. Value/time admission
+is strict at the input boundary; shape/device checks inside the ODE do not
+perform tensor-value reductions. The loader and online adapter both use this
+same record. The native `action_state`/gripper boundary remains a separate
+outlet-owned observation and is not relabeled as an executed command.
+
+`TimedHistoryEncoder` maps state and action events separately, includes their
+actual relative times and event types, sorts them chronologically, and uses
+causal attention. At equal time, state comes before command. The current state
+appears once and owns the last state row. Its state-change feature is a
+normalized-coordinate difference divided by the actual positive control-step
+gap, admitted only when both observations exist. This is **not** a claim of
+metric velocity or a corrected rotational chart; rotation/unit auditing
+remains in M1b. The mixed stream currently has 3 state + 8 command slots, not
+8 pseudo-paired rows. Masked padding has zero value and cannot be an attention
+key. S's interval history read, observed-state-change read and coarse history
+read consume the corresponding masks. No-observed-interval state change is
+exact zero, including at reset.
+
+Conditioning quarantines padded numeric values before all consumers. The
+auxiliary history proposal also uses actual command offsets, gap-aware command
+changes, masked summary reads and exact-zero absent memory. Its future query
+may still express a learned prior; that is not presented as executed evidence.
+Action-history condition dropout changes the execution mask together with the
+values and disables the executed-memory path; it never removes real state
+observation provenance. Existing compact downstream seed/state consumers keep
+their prior topology for now; a clock-aware source does **not** mean M9's
+complete bottom/history information-retention review is closed.
+
+`CausalHistory` retains the latest 9 observations and 24 commands, plus one
+fixed reset observation/action boundary; the separate absolute step counter
+survives eviction. Snapshots copy values, and attempts to read future or evicted
+non-reset entries fail. The physical clock and masks are read-only throughout
+proposal/refined ODE evaluation and are rebuilt on a new physical observation.
+
+New component selections are `timestamped_observable_history_v1` and
+`timestamped_object_intent_v1`; the deployment observation ABI additionally
+requires `physical_step_sparse_history_v1`. Old default config serialization
+omits the legacy selection to retain its prior identity. New mode is an
+explicit new-training candidate, **not** an exact-resume or silent partial-load
+migration from old weights. Ordinary exact restoration checks the new config,
+component selection and source closure. New history modules belong to that
+closure. Preserved legacy initializer/state-dict arithmetic does not waive the
+old source-identity check across changed source revisions.
 
 ## Authority and document ownership
 

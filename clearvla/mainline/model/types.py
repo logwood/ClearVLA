@@ -833,6 +833,7 @@ class ActionIntentDock:
     # mask padded/invalid rows without reopening ObjectFactSet or creating a
     # second object-binding path.
     public_object_validity: Tensor | None = None  # FP32 [B,K,1]
+    history_validity: Tensor | None = None  # bool [B,L], source padding only
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -843,6 +844,13 @@ class ActionIntentDock:
         )
         if self.history_memory.ndim != 3 or int(self.history_memory.shape[0]) != batch:
             raise ValueError("action-intent history memory must be [B,L,H]")
+        if self.history_validity is not None:
+            if (
+                tuple(self.history_validity.shape) != tuple(self.history_memory.shape[:2])
+                or self.history_validity.dtype != torch.bool
+                or self.history_validity.device != self.history_memory.device
+            ):
+                raise ValueError("intent history validity must be boolean [B,L] on memory device")
         if self.public_object_memory.ndim != 3 or int(
             self.public_object_memory.shape[0]
         ) != batch:
@@ -957,6 +965,7 @@ class ObjectIntentState:
     # validity mask.  It is optional only for old in-memory fixtures that
     # construct this compatibility container by hand.
     object_validity: Tensor | None = None  # FP32 [B,K,1]
+    history_validity: Tensor | None = None  # bool [B,L]
 
     @property
     def interval_queries(self) -> Tensor:
@@ -994,6 +1003,7 @@ class ObjectIntentState:
             history_memory=self.history_tokens,
             public_object_memory=self.object_tokens,
             public_object_validity=self.object_validity,
+            history_validity=self.history_validity,
         )
 
     def factual_dock(self) -> FactualIntentDock:
@@ -1101,6 +1111,7 @@ class ObjectIntentState:
         return ObjectIntentState(
             protected_goal_set=self.protected_goal_set,
             history_tokens=self.history_tokens,
+            history_validity=self.history_validity,
             object_tokens=self.object_tokens[:, index],
             public_interval_carrier=self.public_interval_carrier,
             policy_interval_context=self.policy_interval_context,
@@ -1109,21 +1120,15 @@ class ObjectIntentState:
             target_object_address_logit=self.target_object_address_logit[:, :, index],
             typed_common_mass=self.typed_common_mass[:, index],
             typed_common_value=self.typed_common_value[:, index],
-            typed_interval_residual_mass=self.typed_interval_residual_mass[
-                :, :, index
-            ],
-            typed_interval_residual_value=self.typed_interval_residual_value[
-                :, :, index
-            ],
+            typed_interval_residual_mass=self.typed_interval_residual_mass[:, :, index],
+            typed_interval_residual_value=self.typed_interval_residual_value[:, :, index],
             typed_policy_components=self.typed_policy_components,
             goal_attention=self.goal_attention,
             interval_goal_attention=self.interval_goal_attention,
             interval_history_attention=self.interval_history_attention,
             interval_object_attention=self.interval_object_attention[:, :, index],
             object_validity=(
-                None
-                if self.object_validity is None
-                else self.object_validity[:, index]
+                None if self.object_validity is None else self.object_validity[:, index]
             ),
         )
 

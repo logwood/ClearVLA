@@ -6,7 +6,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
 from .routing import register_gradient_rms_metric, smooth_rms_contract
+from .timed_history import TimedHistoryEncoder
 from .types import (
     INTERVAL_BOUNDS,
     ActionIntentDock,
@@ -197,6 +199,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         horizon: int,
         heads: int,
         target_object_address_mode: str = "post_pool_only",
+        history_encoding_mode: str = LEGACY_HISTORY_ENCODING,
     ) -> None:
         super().__init__()
         if target_object_address_mode not in {
@@ -211,12 +214,24 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.goal_queries = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.goal_read = _CrossRead(hidden, heads)
         self.goal_self = _SelfBlock(hidden, heads)
-        history_width = state_dim + action_dim + state_dim + 1
-        self.history_input = nn.Sequential(
-            nn.LayerNorm(history_width, elementwise_affine=False),
-            nn.Linear(history_width, hidden, bias=False),
-        )
-        self.history_blocks = nn.ModuleList(_SelfBlock(hidden, heads) for _ in range(2))
+        self.history_encoding_mode = history_encoding_mode
+        self.timed_history: TimedHistoryEncoder | None = None
+        self.history_input: nn.Sequential | None = None
+        self.history_blocks: nn.ModuleList
+        if history_encoding_mode == LEGACY_HISTORY_ENCODING:
+            history_width = state_dim + action_dim + state_dim + 1
+            self.history_input = nn.Sequential(
+                nn.LayerNorm(history_width, elementwise_affine=False),
+                nn.Linear(history_width, hidden, bias=False),
+            )
+            self.history_blocks = nn.ModuleList(_SelfBlock(hidden, heads) for _ in range(2))
+        elif history_encoding_mode == TIMED_HISTORY_ENCODING:
+            self.history_blocks = nn.ModuleList()
+            self.timed_history = TimedHistoryEncoder(
+                state_dim=state_dim, action_dim=action_dim, hidden=hidden, heads=heads
+            )
+        else:
+            raise ValueError("unknown history_encoding_mode")
         self.object_content = nn.Linear(content_dim, hidden, bias=False)
         self.object_semantic = nn.Linear(route_dim, hidden, bias=False)
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
@@ -430,6 +445,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         executed_history: Tensor,
         facts: ObjectFactSet,
         collect_diagnostics: bool,
+        history_timing: HistoryTiming | None = None,
     ) -> tuple[ObjectIntentState, dict[str, Tensor]]:
         if goal_tokens.ndim != 3 or goal_mask.ndim != 2:
             raise ValueError("intent organizer requires full T5 tokens and mask")
@@ -445,12 +461,25 @@ class StatelessObjectIntentOrganizer(nn.Module):
             diagnostics=collect_diagnostics,
         )
         protected_goal = self.goal_self(protected_goal)
-        paired_history, observed_state_delta = self._paired_history(
-            state_history, state, executed_history
-        )
-        history = self.history_input(paired_history)
-        for block in self.history_blocks:
-            history = block(history, causal=True)
+        history_validity = None
+        rate_validity = None
+        if self.timed_history is None:
+            if self.history_input is None:
+                raise RuntimeError("legacy history encoder is absent")
+            paired_history, observed_state_delta = self._paired_history(
+                state_history, state, executed_history
+            )
+            history = self.history_input(paired_history)
+            for block in self.history_blocks:
+                history = block(history, causal=True)
+        else:
+            if history_timing is None:
+                raise ValueError("timestamped history requires explicit producer timing")
+            encoded = self.timed_history(state_history, state, executed_history, history_timing)
+            history = encoded.tokens
+            history_validity = encoded.valid
+            observed_state_delta = encoded.state_rates
+            rate_validity = encoded.rate_valid
         # Materialize the producer-owned object support before any learned
         # projection.  This keeps invalid/unknown rows out of both the S
         # language read and the backward graph.
@@ -524,7 +553,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
             interval_base, protected_goal, diagnostics=collect_diagnostics
         )
         _, history_innovation, interval_history_attention = self.interval_history(
-            interval_base, history, diagnostics=collect_diagnostics
+            interval_base,
+            history,
+            diagnostics=collect_diagnostics,
+            padding_mask=None if history_validity is None else ~history_validity,
         )
         # This is the repaired language/object seam.  The old query was only
         # ``interval_base``; consequently its K attention and object update
@@ -571,20 +603,32 @@ class StatelessObjectIntentOrganizer(nn.Module):
             temporal_base, public_intervals, diagnostics=False
         )
         state_change_values = self.state_change_input(observed_state_delta)
+        rate_padding = None
+        no_rate = None
+        if rate_validity is not None:
+            no_rate = ~rate_validity.any(dim=1)
+            rate_padding = ~rate_validity.clone()
+            # Zero value sentinel for a reset with no observed state interval.
+            rate_padding[no_rate, -1] = False
         state_change_history, state_change_attention = self.state_change_read(
             self.state_change_query_norm(
-                self.state_change_query.to(
-                    device=history.device, dtype=history.dtype
-                ).expand(batch, -1, -1)
+                self.state_change_query.to(device=history.device, dtype=history.dtype).expand(
+                    batch, -1, -1
+                )
             ),
             self.state_change_key_norm(history),
             state_change_values,
+            key_padding_mask=rate_padding,
             need_weights=collect_diagnostics,
             average_attn_weights=True,
         )
         if state_change_attention is None:
             state_change_attention = history.new_zeros(batch, 1, history.shape[1])
         state_change_history = state_change_history[:, 0]
+        if no_rate is not None:
+            state_change_history = torch.where(
+                no_rate[:, None], torch.zeros_like(state_change_history), state_change_history
+            )
         transport_prior = facts.transport_prior.to(
             device=objects.device,
             dtype=objects.dtype,
@@ -610,6 +654,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         state_out = ObjectIntentState(
             protected_goal_set=protected_goal,
             history_tokens=history,
+            history_validity=history_validity,
             object_tokens=objects,
             public_interval_carrier=public_intervals,
             policy_interval_context=policy_intervals,
@@ -685,6 +730,18 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 state_change_attention, dim=-1
             ).detach().mean(),
         }
+        if self.timed_history is not None:
+            # A physical-step rate is not the legacy paired-row displacement.
+            metrics["object_intent_observed_state_rate_per_step_rms"] = metrics.pop(
+                "object_intent_observed_state_delta_rms"
+            )
+            assert history_validity is not None
+            metrics["object_intent_timed_history_real_rows"] = (
+                history_validity.float().sum(dim=1).mean()
+            )
+            metrics["object_intent_timed_history_active"] = history.new_ones(
+                (), dtype=torch.float32
+            )
         # The returned attention probability is an auxiliary observation; it
         # is not consumed by the action path and therefore has no ordinary
         # owner VJP.  Observe the two value tensors that actually carry the
@@ -949,6 +1006,7 @@ class CoarseActionIntent(nn.Module):
         _, history_delta, _ = self.history_read(
             conditioned_query,
             intent.history_memory,
+            padding_mask=None if intent.history_validity is None else ~intent.history_validity,
             diagnostics=collect_diagnostics,
         )
         token = self.block(

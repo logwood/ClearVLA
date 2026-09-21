@@ -25,6 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..temporal import HistoryTiming
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
 from ..v120_core.role_delta_attnres import AffineVarianceFlooredCenteredNorm
 from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
@@ -196,6 +197,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         world_camera_condition_mode: str = "motion_prior_only",
         world_action_condition_mode: str = "interval_mean_v1",
         p2_spatial_intent_mode: str = "post_pool_only",
+        history_encoding_mode: str = "paired_rows_v1",
         core_config=None,
     ) -> None:
         super().__init__()
@@ -249,6 +251,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             horizon=horizon,
             heads=heads,
             target_object_address_mode=p2_spatial_intent_mode,
+            history_encoding_mode=history_encoding_mode,
         )
         self.coarse_action = CoarseActionIntent(
             hidden=hidden,
@@ -557,6 +560,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         action_state: Tensor,
         executed_history: Tensor,
         collect_diagnostics: bool = False,
+        history_timing: HistoryTiming | None = None,
     ) -> tuple[OnlineTopContext, dict[str, Tensor]]:
         """Build current G/S/W without a future-capable argument."""
 
@@ -570,6 +574,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             state_history=state_history,
             state=state,
             executed_history=executed_history,
+            history_timing=history_timing,
             facts=facts,
             collect_diagnostics=collect_diagnostics,
         )

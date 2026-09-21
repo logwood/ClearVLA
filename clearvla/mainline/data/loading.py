@@ -24,6 +24,7 @@ from clearvla.data.hdf5_episode import (
     load_hdf5_instruction,
     resolve_too_short_episode_exclusions,
 )
+from clearvla.data.history_clock import HISTORY_TIMING_KEYS
 from clearvla.data.libero_retarget import (
     LIBERO_RETARGET_NORMALIZER_POLICY,
     load_libero_retarget_overlay_contract,
@@ -71,6 +72,7 @@ from ..interfaces import (
     OnlinePolicyInput,
     TrainingBatch,
 )
+from ..temporal import TIMED_HISTORY_ENCODING, HistoryTiming
 from .dataset import (
     CachedTokenPolicyWindowDataset,
     ObservedStateDatasetConfig,
@@ -513,6 +515,7 @@ def _load_mainline_data(
     cameras = tuple(data.camera_names)
     profile = resolve_action_state_profile(data.data_profile)
     strict_dataset_config = ObservedStateDatasetConfig(
+        emit_history_timing=config.top.history_encoding_mode == TIMED_HISTORY_ENCODING,
         world_horizon=48,
         policy_horizon=dims.action_horizon,
         support_stride=4,
@@ -1098,6 +1101,18 @@ def to_training_batch(
         device=device,
         dtype=torch.float32,
     )
+    timing = None
+    if config.top.history_encoding_mode == TIMED_HISTORY_ENCODING:
+        timing = HistoryTiming.from_mapping(
+            {name: _device_tensor(batch, name, device=device) for name in HISTORY_TIMING_KEYS}
+        )
+        timing.validate(
+            batch=batch_size,
+            states=config.dimensions.state_history_length,
+            actions=config.dimensions.executed_history_length,
+            device=dino_history.device,
+            strict=True,
+        )
     online = OnlinePolicyInput(
         observation=CurrentObservation(
             dino_history=dino_history,
@@ -1106,6 +1121,7 @@ def to_training_batch(
         history=ObservableHistory(
             state=_device_tensor(batch, "state", device=device, dtype=torch.float32),
             action_state=action_state,
+            timing=timing,
             codec_gripper_boundary=gripper_transition_boundary[:, -1:],
             state_history=_device_tensor(
                 batch, "history_state", device=device, dtype=torch.float32

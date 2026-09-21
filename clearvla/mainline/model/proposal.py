@@ -1,4 +1,4 @@
-"""Causal executed-history proposal preserved from the active V120 graph."""
+"""Causal executed-history proposal with legacy and source-timed ingress."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import math
 import torch
 from torch import Tensor, nn
 
+from ..temporal import HistoryTiming
+from .timed_history import physical_time_encoding
 from .types import HistoryActionProposalState
 
 
@@ -25,14 +27,24 @@ class _ProposalBlock(nn.Module):
             nn.Linear(int(hidden * expansion), hidden),
         )
 
-    def forward(self, query: Tensor, memory: Tensor) -> Tensor:
+    def forward(self, query: Tensor, memory: Tensor, valid: Tensor | None = None) -> Tensor:
+        no_memory = None
+        padding = None
+        if valid is not None:
+            memory = torch.where(valid[..., None], memory, torch.zeros_like(memory))
+            no_memory = ~valid.any(dim=1)
+            padding = ~valid.clone()
+            padding[no_memory, 0] = False
         normalized_memory = self.memory_norm(memory)
         update, _ = self.cross(
             self.query_norm(query),
             normalized_memory,
             normalized_memory,
+            key_padding_mask=padding,
             need_weights=False,
         )
+        if no_memory is not None:
+            update = torch.where(no_memory[:, None, None], torch.zeros_like(update), update)
         query = query + update
         return query + self.ffn(query)
 
@@ -43,7 +55,9 @@ class HistoryActionProposal(nn.Module):
     The 4 recent + 3 summary layout and two proposal blocks are the fixed
     formal-launcher path.  The module is deliberately outside S: S may read
     the complete observable history, while this proposal retains its original
-    action-trajectory algorithm and its own supervised head.
+    action-trajectory algorithm and its own supervised head. An explicit timing
+    record selects real-gap changes and masked history aggregation; its
+    parameter inventory remains shared but the component identity is different.
     """
 
     OFFSETS = (-24, -16, -12, -8, -6, -4, -2, -1)
@@ -168,14 +182,66 @@ class HistoryActionProposal(nn.Module):
         summary = summary + self.summary_ffn(summary)
         return torch.cat((summary, recent), dim=1)
 
-    def forward(self, executed_history: Tensor) -> HistoryActionProposalState:
-        memory = self.encode_history(executed_history)
+    def _encode_timed_history(
+        self, executed_history: Tensor, timing: HistoryTiming
+    ) -> tuple[Tensor, Tensor]:
+        if tuple(executed_history.shape[1:]) != (self.history_length, self.action_dim):
+            raise ValueError("timed proposal requires the declared sparse action history")
+        valid = timing.action_executed
+        source = torch.where(valid[..., None], executed_history, torch.zeros_like(executed_history))
+        dt = timing.action_offsets[:, 1:] - timing.action_offsets[:, :-1]
+        pair_valid = valid[:, 1:] & valid[:, :-1] & (dt > 0)
+        rates = (source[:, 1:] - source[:, :-1]) / dt.clamp_min(1)[..., None].to(source.dtype)
+        rates = torch.where(pair_valid[..., None], rates, torch.zeros_like(rates))
+        delta = torch.cat((torch.zeros_like(source[:, :1]), rates), dim=1)
+        time = self.history_time(
+            physical_time_encoding(timing.action_offsets, self.hidden).to(source.dtype)
+        )
+        memory = self.history_projection(source) + self.history_delta_projection(delta) + time
+        memory = torch.where(valid[..., None], memory, torch.zeros_like(memory))
+        older, recent = memory[:, : -self.recent_tokens], memory[:, -self.recent_tokens :]
+        older_valid = valid[:, : -self.recent_tokens]
+        has_older = older_valid.any(dim=1)
+        padding = ~older_valid.clone()
+        padding[~has_older, 0] = False
+        query = self.summary_query.expand(source.shape[0], -1, -1).to(source.dtype)
+        normalized = self.summary_memory_norm(older)
+        update, _ = self.summary_cross(
+            self.summary_query_norm(query),
+            normalized,
+            normalized,
+            key_padding_mask=padding,
+            need_weights=False,
+        )
+        summary = query + update
+        summary = summary + self.summary_ffn(summary)
+        summary = torch.where(has_older[:, None, None], summary, torch.zeros_like(summary))
+        memory_valid = torch.cat(
+            (has_older[:, None].expand(-1, self.summary_tokens), valid[:, -self.recent_tokens :]),
+            dim=1,
+        )
+        return torch.cat((summary, recent), dim=1), memory_valid
+
+    def forward(
+        self, executed_history: Tensor, *, timing: HistoryTiming | None = None
+    ) -> HistoryActionProposalState:
+        if timing is None:
+            memory = self.encode_history(executed_history)
+            memory_valid = None
+        else:
+            timing.validate(
+                batch=executed_history.shape[0],
+                states=timing.state_offsets.shape[1],
+                actions=self.history_length,
+                device=executed_history.device,
+            )
+            memory, memory_valid = self._encode_timed_history(executed_history, timing)
         tokens = self.future_query.expand(int(executed_history.shape[0]), -1, -1).to(
             device=executed_history.device,
             dtype=executed_history.dtype,
         )
         for block in self.blocks:
-            tokens = block(tokens, memory)
+            tokens = block(tokens, memory, memory_valid)
         state = HistoryActionProposalState(
             tokens=tokens,
             action_prediction=self.action_head(tokens),

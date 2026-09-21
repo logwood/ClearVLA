@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Mapping
 
 import numpy as np
 
-from .contracts import ACTION_DIM, CAMERA_NAMES, STATE_DIM, PolicyObservation
+from clearvla.data.history_clock import (
+    EXECUTED_ACTION_OFFSETS,
+    STATE_OFFSETS,
+    VISUAL_OFFSETS,
+    sparse_history_clock,
+)
 
-VISUAL_OFFSETS = (-8, -4, 0)
-STATE_OFFSETS = (-8, -4, 0)
-EXECUTED_ACTION_OFFSETS = (-24, -16, -12, -8, -6, -4, -2, -1)
+from .contracts import ACTION_DIM, CAMERA_NAMES, STATE_DIM, PolicyObservation
 
 
 @dataclass(frozen=True)
@@ -24,6 +28,9 @@ class HistorySnapshot:
     action_state: np.ndarray  # [7]
     state_history: np.ndarray  # [3,7]
     executed_action_history: np.ndarray  # [8,7]
+
+    def timing_arrays(self) -> dict[str, np.ndarray]:
+        return sparse_history_clock(self.time_index)
 
     def validate(self) -> None:
         if self.time_index < 0:
@@ -67,15 +74,19 @@ class CausalHistory:
     """
 
     def __init__(self) -> None:
-        self._observations: list[PolicyObservation] = []
-        self._actions: list[np.ndarray] = []
+        self._observations: deque[PolicyObservation] = deque(
+            maxlen=1 - min(VISUAL_OFFSETS + STATE_OFFSETS)
+        )
+        self._actions: deque[np.ndarray] = deque(maxlen=-min(EXECUTED_ACTION_OFFSETS))
+        self._time_index = 0
+        self._reset_observation: PolicyObservation | None = None
         self._reset_action: np.ndarray | None = None
 
     @property
     def time_index(self) -> int:
         if not self._observations:
             raise RuntimeError("causal history has not been reset")
-        return len(self._observations) - 1
+        return self._time_index
 
     def reset(
         self,
@@ -88,8 +99,11 @@ class CausalHistory:
         boundary = np.asarray(boundary, dtype=np.float32)
         if boundary.shape != (ACTION_DIM,) or not np.isfinite(boundary).all():
             raise ValueError("reset action must be one finite [7] vector")
-        self._observations = [copied]
-        self._actions = []
+        self._observations.clear()
+        self._observations.append(copied)
+        self._actions.clear()
+        self._time_index = 0
+        self._reset_observation = copied
         self._reset_action = boundary.copy()
 
     def append(self, executed_action: np.ndarray, observation: PolicyObservation) -> None:
@@ -101,19 +115,25 @@ class CausalHistory:
         copied = observation.copied()
         self._actions.append(action.copy())
         self._observations.append(copied)
-        if len(self._observations) != len(self._actions) + 1:
-            raise RuntimeError("causal observation/action timeline lost alignment")
+        self._time_index += 1
 
     def _observation_at(self, index: int) -> PolicyObservation:
-        return self._observations[max(int(index), 0)]
+        if index < 0:
+            assert self._reset_observation is not None
+            return self._reset_observation
+        first = self._time_index - len(self._observations) + 1
+        if not first <= index <= self._time_index:
+            raise IndexError("requested observation is outside retained physical history")
+        return self._observations[index - first]
 
     def _action_at(self, index: int) -> np.ndarray:
         assert self._reset_action is not None
         if index < 0:
             return self._reset_action
-        if index >= len(self._actions):
-            raise IndexError("requested an action that has not executed")
-        return self._actions[index]
+        first = self._time_index - len(self._actions)
+        if not first <= index < self._time_index:
+            raise IndexError("requested action is unexecuted or outside retained physical history")
+        return self._actions[index - first]
 
     def snapshot(self) -> HistorySnapshot:
         if not self._observations or self._reset_action is None:

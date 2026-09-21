@@ -14,8 +14,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from clearvla.data.hdf5_episode import LoadedEpisode
-from clearvla.data.hdf5_episode import LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING
+from clearvla.data.hdf5_episode import LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING, LoadedEpisode
+from clearvla.data.history_clock import sparse_history_clock
 from clearvla.data.window_boundaries import (
     BOUNDARY_REGION_TO_INDEX,
     BOUNDARY_REGIONS,
@@ -47,9 +47,16 @@ class ObservedStateDatasetConfig:
     action_offset: int = 0
     stride: int = 1
     causal_reset_padding: bool = False
+    emit_history_timing: bool = False
     window_boundary_contract: str = STRICT_COMPLETE_V1
 
     def validate(self) -> None:
+        if type(self.emit_history_timing) is not bool:
+            raise ValueError("emit_history_timing must be boolean")
+        if self.emit_history_timing and (
+            self.state_offset or self.image_offset or self.action_offset
+        ):
+            raise ValueError("timestamped history requires an aligned pre-action observation chart")
         if type(self.causal_reset_padding) is not bool:
             raise ValueError("causal_reset_padding must be boolean")
         if self.causal_reset_padding and (self.state_offset or self.image_offset or self.action_offset):
@@ -526,6 +533,18 @@ class ObservedStateWindowDataset(Dataset):
             axis=1,
         )
         return {
+            **(
+                {
+                    name: torch.from_numpy(value)
+                    for name, value in sparse_history_clock(
+                        center,
+                        state_offsets=cfg.state_history_offsets,
+                        action_offsets=cfg.executed_action_offsets,
+                    ).items()
+                }
+                if cfg.emit_history_timing
+                else {}
+            ),
             "sample_index": torch.tensor(int(index), dtype=torch.long),
             "episode_idx": torch.tensor(ref.episode_idx, dtype=torch.long),
             "center_index": torch.tensor(center, dtype=torch.long),

@@ -1,6 +1,6 @@
 # ClearVLA current decision ledger
 
-Updated: 2026-09-14
+Updated: 2026-09-21
 
 This file contains only unresolved questions that can select the next source
 unit or change a release claim. The active graph and invariants live in
@@ -10,6 +10,35 @@ the ordered work in
 volatile process state in
 [auxiliary/ACTIVE_MAINLINE_HANDOFF.md](auxiliary/ACTIVE_MAINLINE_HANDOFF.md).
 Completed repair narratives belong to Git history or the archive.
+
+## Structural rebuild: current decision boundary
+
+The 2026-09-21 user-authorized rebuild supersedes the older source-entry
+priorities below on `codex/structural-rebuild-20260921`. Retain old experimental
+evidence as history, not as a prerequisite to indefinitely defer structural
+implementation. The new M1a candidate closes pseudo-synchronous row pairing in
+S/proposal and carries real control-step clocks and padding masks through the
+actual loader and online adapter. Legacy mode deliberately remains unchanged
+as a control. No claim of learned task improvement is attached to this repair.
+
+Still open before/through subsequent milestones:
+
+- M1b: final real states as row-zero training centers; independent policy and
+  future-supervision support; reset distribution; physical rotation/unit
+  charts and all compact downstream missing-evidence representations.
+- G: multi-modal positions versus moment summaries; local attributes sharing
+  entity support; completed G3 block versus binder entity identity; causal
+  entity association and Teacher's dependence on current G.
+- S: target/operation/progress separation, object-specific change, shared
+  target binding and future recognizer objectives. New time encoding does not
+  close these semantic questions.
+- W: candidate-action versus demonstration-future target mismatch, missing
+  explicit robot-object relations, and control support past the known 24 rows.
+- P/bottom: same-target current facts and consequences, camera-aware geometry,
+  genuine executed-prefix feedback, endpoint command conditions and retained
+  unused/redundant/frozen paths.
+- Verification: historical Ruff/Pyright debt is not newly introduced but is
+  not resolved; CPU tensor tests do not certify GPU/BF16 or closed-loop success.
 
 ## Maintenance rule
 

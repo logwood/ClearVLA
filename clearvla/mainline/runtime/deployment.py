@@ -30,6 +30,7 @@ from ..gripper_contract import (
     MANISKILL_BINARY_GRIPPER_OUTPUT_MODE,
     VALID_GRIPPER_OUTPUT_MODES,
 )
+from ..temporal import HISTORY_TIMING_CONTRACT, TIMED_HISTORY_ENCODING
 from .flow_schedule import DeploymentFlowSchedule
 
 DEPLOYMENT_ABI_SCHEMA = "clearvla-mainline-deployment-abi-v1"
@@ -337,6 +338,11 @@ def build_deployment_abi(
         "flow_schedule_sha256": canonical_sha256(flow_schedule),
         "observation": {
             "camera_names": list(config.data.camera_names),
+            **(
+                {"history_timing_contract": HISTORY_TIMING_CONTRACT}
+                if config.top.history_encoding_mode == TIMED_HISTORY_ENCODING
+                else {}
+            ),
             "visual_offsets": [-8, -4, 0],
             "state_offsets": [-8, -4, 0],
             "executed_action_offsets": [-24, -16, -12, -8, -6, -4, -2, -1],
@@ -404,6 +410,16 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         if abi.get("flow_schedule_sha256") != canonical_sha256(stored_schedule):
             raise ValueError("deployment flow schedule digest is inconsistent")
     observation = _mapping(abi.get("observation"), name="observation")
+    graph_top = _mapping(
+        _mapping(abi.get("graph_config"), name="graph_config").get("top"), name="graph_config.top"
+    )
+    expected_timing = (
+        HISTORY_TIMING_CONTRACT
+        if graph_top.get("history_encoding_mode") == TIMED_HISTORY_ENCODING
+        else None
+    )
+    if observation.get("history_timing_contract") != expected_timing:
+        raise ValueError("deployment history timing contract differs from selected graph")
     action = _mapping(abi.get("action"), name="action")
     normalizers = _mapping(abi.get("normalizers"), name="normalizers")
     language = _mapping(abi.get("language"), name="language")

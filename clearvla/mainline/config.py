@@ -432,8 +432,12 @@ class TopConfig:
     # address, shared over semantic and geometry readers, while W retains
     # value/support authority and the geometry reader retains its camera axis.
     p2_spatial_intent_mode: str = "post_pool_only"
+    # Explicit new behavior; legacy checkpoints keep their existing history chart.
+    history_encoding_mode: str = "paired_rows_v1"
 
     def validate(self) -> None:
+        if self.history_encoding_mode not in {"paired_rows_v1", "timestamped_streams_v1"}:
+            raise ValueError("unknown top history_encoding_mode")
         if self.world_camera_condition_mode not in {
             "motion_prior_only",
             "coordinate_role_v1",
@@ -1072,6 +1076,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.history_encoding_mode == "paired_rows_v1":
+            cast(dict[str, object], payload["top"]).pop("history_encoding_mode")
         if self.top.p2_spatial_intent_mode == "post_pool_only":
             # Keep legacy checkpoint identities exact unless opted in.
             cast(dict[str, object], payload["top"]).pop("p2_spatial_intent_mode")

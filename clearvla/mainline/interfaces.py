@@ -20,6 +20,7 @@ import torch
 from torch import Tensor
 
 from .config import ExperimentConfig
+from .temporal import TIMED_HISTORY_ENCODING, HistoryTiming
 
 
 def _floating(value: Tensor, name: str) -> None:
@@ -128,6 +129,7 @@ class ObservableHistory:
     codec_gripper_boundary: Tensor  # [B,1], normalized action-command chart
     state_history: Tensor  # [B,Hs,S]
     executed_action_history: Tensor  # [B,Ha,A]
+    timing: HistoryTiming | None = None  # required by timestamped_streams_v1
 
     @property
     def batch(self) -> int:
@@ -173,6 +175,15 @@ class ObservableHistory:
         }
         if len(devices) != 1:
             raise ValueError("observable history tensors must share a device")
+        if config.top.history_encoding_mode == TIMED_HISTORY_ENCODING and self.timing is None:
+            raise ValueError("timestamped history requires explicit producer timing")
+        if self.timing is not None:
+            self.timing.validate(
+                batch=batch,
+                states=dims.state_history_length,
+                actions=dims.executed_history_length,
+                device=self.state.device,
+            )
 
 
 @dataclass(frozen=True)

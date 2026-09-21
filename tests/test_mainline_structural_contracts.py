@@ -49,9 +49,9 @@ from clearvla.mainline.model.types import (
     intersect_object_camera_validity,
 )
 from clearvla.mainline.training.losses import flow_geometry_terms, future_dynamics_terms
+from clearvla.mainline.v120_core.gauges import masked_candidate_center
 from clearvla.mainline.v120_core.profile import build_v120_visual_config
 from clearvla.mainline.v120_core.refinement import NestedLowRankContractionBank
-from clearvla.mainline.v120_core.gauges import masked_candidate_center
 
 
 def _assert_same_typed_value(left, right) -> None:
@@ -3861,12 +3861,14 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     relabeled_intent = organize(relabeled_facts)
     expected_intent = intent.permute(permutation)
     for field in fields(type(intent)):
-        assert torch.allclose(
-            getattr(relabeled_intent, field.name),
-            getattr(expected_intent, field.name),
-            atol=2e-5,
-            rtol=2e-5,
-        ), field.name
+        actual = getattr(relabeled_intent, field.name)
+        expected = getattr(expected_intent, field.name)
+        if actual is None or expected is None:
+            # Legacy S has no padding-mask field; absence must survive the
+            # same permutation just as every populated tensor does.
+            assert actual is expected is None, field.name
+        else:
+            assert torch.allclose(actual, expected, atol=2e-5, rtol=2e-5), field.name
 
     coarse = top.coarse_action(intent.action_dock())
     relabeled_coarse = top.coarse_action(relabeled_intent.action_dock())

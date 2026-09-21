@@ -65,6 +65,18 @@ def _execution_bottom_selection(config: "ExperimentConfig") -> str:
     raise ValueError(f"unsupported B-spine implementation: {implementation!r}")
 
 
+def _conditioning_selection(config: "ExperimentConfig") -> str:
+    if config.top.history_encoding_mode == "timestamped_streams_v1":
+        return "timestamped_observable_history_v1"
+    return "observable_history_v1"
+
+
+def _intent_selection(config: "ExperimentConfig") -> str:
+    if config.top.history_encoding_mode == "timestamped_streams_v1":
+        return "timestamped_object_intent_v1"
+    return "stateless_object_intent_v1"
+
+
 @dataclass(frozen=True)
 class ComponentSelection:
     """Exactly one implementation selected for every replaceable slot."""
@@ -88,35 +100,8 @@ class ComponentSelection:
     def from_config(cls, config: "ExperimentConfig") -> "ComponentSelection":
         """Resolve outlet/terminal identity before constructing any module."""
 
-        profile = str(config.data.data_profile)
         output_mode = str(config.bottom.gripper_output_mode)
-        if profile == "calvin_relative_7d_v1":
-            terminal = "calvin_binary_command_v1"
-            outlet = "calvin_7d_binary_v1"
-        elif profile == "libero_relative_7d_v1":
-            terminal = "continuous_physical_v1"
-            outlet = "libero_7d_continuous_v1"
-        elif profile == "maniskill_pd_ee_delta_pose_7d_v1":
-            terminal = "continuous_physical_v1"
-            outlet = "maniskill_7d_continuous_v1"
-        elif profile == "maniskill_pd_ee_delta_pose_7d_v2":
-            if output_mode == MANISKILL_BINARY_GRIPPER_OUTPUT_MODE:
-                terminal = "maniskill_binary_command_v1"
-                outlet = MANISKILL_BINARY_GRIPPER_SELECTION
-            else:
-                terminal = "continuous_physical_v1"
-                outlet = "maniskill_7d_continuous_v2"
-        elif profile == "rdt_right_arm_action_chart_v1":
-            terminal = "continuous_physical_v1"
-            outlet = "rdt_right_arm_7d_v1"
-        else:
-            terminal = "continuous_physical_v1"
-            outlet = "pen_7d_continuous_v1"
-        selection = cls(
-            execution_bottom=_execution_bottom_selection(config),
-            terminal_controller=terminal,
-            outlet_adapter=outlet,
-        )
+        selection = cls.from_config_without_validation(config)
         selection.validate(config)
         if is_binary_gripper_mode(output_mode) != selection.terminal_controller.endswith(
             "binary_command_v1"
@@ -161,37 +146,53 @@ class ComponentSelection:
         output_mode = str(config.bottom.gripper_output_mode)
         if profile == "calvin_relative_7d_v1":
             return cls(
+                conditioning=_conditioning_selection(config),
+                intent=_intent_selection(config),
                 execution_bottom=_execution_bottom_selection(config),
                 terminal_controller="calvin_binary_command_v1",
                 outlet_adapter="calvin_7d_binary_v1",
             )
         if profile == "libero_relative_7d_v1":
             return cls(
+                conditioning=_conditioning_selection(config),
+                intent=_intent_selection(config),
                 execution_bottom=_execution_bottom_selection(config),
                 outlet_adapter="libero_7d_continuous_v1",
             )
         if profile == "maniskill_pd_ee_delta_pose_7d_v1":
             return cls(
+                conditioning=_conditioning_selection(config),
+                intent=_intent_selection(config),
                 execution_bottom=_execution_bottom_selection(config),
                 outlet_adapter="maniskill_7d_continuous_v1",
             )
         if profile == "maniskill_pd_ee_delta_pose_7d_v2":
             if output_mode == MANISKILL_BINARY_GRIPPER_OUTPUT_MODE:
                 return cls(
+                    conditioning=_conditioning_selection(config),
+                    intent=_intent_selection(config),
                     execution_bottom=_execution_bottom_selection(config),
                     terminal_controller="maniskill_binary_command_v1",
                     outlet_adapter=MANISKILL_BINARY_GRIPPER_SELECTION,
                 )
             return cls(
+                conditioning=_conditioning_selection(config),
+                intent=_intent_selection(config),
                 execution_bottom=_execution_bottom_selection(config),
                 outlet_adapter="maniskill_7d_continuous_v2",
             )
         if profile == "rdt_right_arm_action_chart_v1":
             return cls(
+                conditioning=_conditioning_selection(config),
+                intent=_intent_selection(config),
                 execution_bottom=_execution_bottom_selection(config),
                 outlet_adapter="rdt_right_arm_7d_v1",
             )
-        return cls(execution_bottom=_execution_bottom_selection(config))
+        return cls(
+            conditioning=_conditioning_selection(config),
+            intent=_intent_selection(config),
+            execution_bottom=_execution_bottom_selection(config),
+        )
 
     def as_dict(self) -> dict[str, str]:
         return {

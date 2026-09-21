@@ -226,6 +226,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             world_camera_condition_mode=top.world_camera_condition_mode,
             world_action_condition_mode=top.world_action_condition_mode,
             p2_spatial_intent_mode=top.p2_spatial_intent_mode,
+            history_encoding_mode=top.history_encoding_mode,
             core_config=raw_observation.v120_config,
         )
         raw_history_proposal = HistoryActionProposal(
@@ -440,6 +441,15 @@ class ClearVLAMainlinePolicy(nn.Module):
 
         policy_input.validate(self.config)
         batch = policy_input.batch
+        if self.config.top.history_encoding_mode == "timestamped_streams_v1":
+            assert policy_input.history.timing is not None
+            policy_input.history.timing.validate(
+                batch=batch,
+                states=self.config.dimensions.state_history_length,
+                actions=self.config.dimensions.executed_history_length,
+                device=policy_input.device,
+                strict=True,
+            )
         # Conditioning owns the two masks and the auxiliary proposal.  It is
         # called once, preserving the original RNG draw order.
         conditioned_policy_input, history_proposal, goal_keep, history_keep = (
@@ -498,6 +508,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             state_history=conditioned_policy_input.history.state_history,
             state=conditioned_policy_input.history.state,
             executed_history=conditioned_policy_input.history.executed_action_history,
+            history_timing=conditioned_policy_input.history.timing,
             facts=facts,
             collect_diagnostics=collect_diagnostics,
         )
