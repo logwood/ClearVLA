@@ -8,7 +8,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .types import INTERVAL_BOUNDS, FutureObjectDynamics, ObjectFactSet
+from .types import (
+    INTERVAL_BOUNDS,
+    FutureObjectDynamics,
+    ObjectFactSet,
+    intersect_object_camera_validity,
+)
 
 
 class ObjectFutureTeacher(nn.Module):
@@ -66,6 +71,41 @@ class ObjectFutureTeacher(nn.Module):
 
         return offsets.float() / float(self.flow_reference_frames)
 
+    @staticmethod
+    def _supported_finite(
+        value: Tensor,
+        support: Tensor,
+        *,
+        name: str,
+    ) -> Tensor:
+        """Quarantine unsupported rows and fail closed on supported NaNs.
+
+        The Teacher is detached, but its output is consumed by trainable
+        recognizer/loss code.  A producer-invalid value must therefore be
+        removed *before* any weighted product (``NaN * 0`` is still NaN).
+        Conversely, a value marked physically supported but non-finite is a
+        producer contract violation and should stop target construction rather
+        than silently changing supervision.
+        """
+
+        value_f = value.detach().float()
+        support_f = torch.nan_to_num(
+            support.detach().float(),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp_min(0.0)
+        legal = support_f > 0.0
+        if bool((legal & ~torch.isfinite(value_f)).any()):
+            raise ValueError(f"Teacher {name} contains non-finite supported values")
+        value_f = torch.nan_to_num(
+            value_f,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        return torch.where(legal, value_f, torch.zeros_like(value_f))
+
     @torch.no_grad()
     def forward(
         self,
@@ -112,16 +152,43 @@ class ObjectFutureTeacher(nn.Module):
         batch, supports, cameras, rows, columns, width = future_supports.shape
         if batch != facts.batch or width != self.content_dim:
             raise ValueError("future supports do not match current object content")
+        if not bool(torch.isfinite(future_supports).all()):
+            raise ValueError("Teacher future supports contain non-finite values")
         offsets = self._offsets(
             future_offsets.to(device=future_supports.device),
             batch=batch,
             supports=supports,
         )
+        if not bool(torch.isfinite(offsets.float()).all()):
+            raise ValueError("Teacher future offsets contain non-finite values")
         objects = facts.objects
-        candidate_content = facts.dense_chart.candidate_content.detach().float()
+        # ``DenseObjectGrounder`` quarantines invalid candidate rows before its
+        # learned projections, but the complete dense chart intentionally keeps
+        # the producer values for reconstruction/audit.  A malformed invalid
+        # row can therefore still be NaN here.  The Teacher consumes detached
+        # G assignments, so applying the producer-owned validity boundary once
+        # before the assignment/value product is the only safe way to prevent
+        # ``NaN * 0`` from poisoning the target plane (and the downstream loss
+        # graph when the target is later read by the recognizer).
+        candidate_validity = torch.nan_to_num(
+            facts.dense_chart.candidate_validity.detach().float(),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp(0.0, 1.0)
+        candidate_content = self._supported_finite(
+            facts.dense_chart.candidate_content,
+            candidate_validity,
+            name="dense candidate content",
+        )
 
         def typed_current(assignment: Tensor, value: Tensor) -> Tensor:
-            weight = assignment.detach().float().flatten(2)
+            weight = torch.nan_to_num(
+                assignment.detach().float(),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp_min(0.0).flatten(2)
             weight = weight / weight.sum(dim=-1, keepdim=True).clamp_min(1e-6)
             flat_value = value.detach().float().flatten(1, -2)
             return torch.einsum("bkn,bnd->bkd", weight, flat_value)
@@ -182,9 +249,42 @@ class ObjectFutureTeacher(nn.Module):
         # normalized-coordinate units.  It is only a prior: semantic matching
         # remains global within the camera, so zero flow and non-equal-pixel
         # motion are legal.
-        geometry_coordinate = facts.camera_coordinates.detach().float()
-        geometry_support = facts.camera_support.detach().float()
-        flow_hint = facts.camera_transport_prior.detach().float()
+        object_validity = torch.nan_to_num(
+            facts.validity.detach().float(),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp(0.0, 1.0)
+        camera_validity = intersect_object_camera_validity(
+            object_validity,
+            facts.camera_validity,
+        )
+        camera_support = torch.nan_to_num(
+            facts.camera_support.detach().float(),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp_min(0.0)
+        camera_legal = (
+            (object_validity[:, :, None, :] > 0.0)
+            & (camera_validity > 0.0)
+            & (camera_support > 0.0)
+        )
+        geometry_coordinate = self._supported_finite(
+            facts.camera_coordinates,
+            camera_legal,
+            name="camera coordinates",
+        )
+        geometry_support = torch.where(
+            camera_legal,
+            camera_support,
+            torch.zeros_like(camera_support),
+        )
+        flow_hint = self._supported_finite(
+            facts.camera_transport_prior,
+            camera_legal,
+            name="camera transport prior",
+        )
         prior = geometry_coordinate[:, None] + (
             fraction[:, :, None, None, None] * flow_hint[:, None]
         )
@@ -201,7 +301,11 @@ class ObjectFutureTeacher(nn.Module):
             )
         )
         geometry = geometry.clamp(-8.0, 0.0)
-        camera_prior = facts.object_to_chart.detach().float().sum(dim=(-2, -1))
+        camera_prior = self._supported_finite(
+            facts.object_to_chart,
+            camera_legal[..., 0, None, None],
+            name="object-to-chart posterior",
+        ).sum(dim=(-2, -1))
         camera_prior = camera_prior / camera_prior.sum(dim=-1, keepdim=True).clamp_min(1e-6)
         camera_log = camera_prior.clamp_min(1e-5).log()[:, None, :, :, None, None]
         # Camera prior already integrates to one across cameras.  Normalize
@@ -216,6 +320,21 @@ class ObjectFutureTeacher(nn.Module):
             - math.log(float(max(rows * columns, 1)))
         )
         candidate_flat = candidate_logit.flatten(3)
+        candidate_support = camera_legal.squeeze(-1)[:, None, :, :, None, None].expand(
+            batch,
+            supports,
+            objects,
+            cameras,
+            rows,
+            columns,
+        )
+        # Keep the null hypothesis as the finite all-invalid fallback while
+        # removing unsupported camera cells from the real candidate partition.
+        candidate_flat = torch.where(
+            candidate_support.flatten(3),
+            candidate_flat,
+            torch.full_like(candidate_flat, -torch.inf),
+        )
         null_logit = torch.zeros(
             batch,
             supports,
@@ -237,7 +356,7 @@ class ObjectFutureTeacher(nn.Module):
         candidate_flat_probability = candidate_posterior.flatten(3)
         matched = torch.einsum("bfkn,bfnd->bfkd", candidate_flat_probability, support_content)
         candidate_coordinate = coordinate[0, 0, 0, 0].unsqueeze(0).expand(cameras, -1, -1, -1)
-        current_camera_measure = facts.camera_validity.detach().float()
+        current_camera_measure = camera_validity
         current_camera_measure = torch.where(
             current_camera_measure.sum(dim=2, keepdim=True) > 1.0e-8,
             current_camera_measure
@@ -247,7 +366,7 @@ class ObjectFutureTeacher(nn.Module):
         transport_per_support, covariance_per_support = self._relative_geometry_moments(
             candidate_posterior=candidate_posterior,
             candidate_coordinate=candidate_coordinate,
-            current_camera_coordinate=facts.camera_coordinates.detach().float(),
+            current_camera_coordinate=geometry_coordinate,
             null_probability=null_probability,
             null_camera_measure=current_camera_measure,
         )
@@ -261,7 +380,11 @@ class ObjectFutureTeacher(nn.Module):
         uncertainty_per_support = null_probability + association_real_mass_per_support * entropy
         association_confidence = (1.0 - entropy).clamp(0.0, 1.0)
         reliability_per_support = association_real_mass_per_support * association_confidence
-        current_reference = facts.content.detach().float()[:, None]
+        current_reference = self._supported_finite(
+            facts.content,
+            object_validity,
+            name="current object content",
+        )[:, None]
         # This is the exact V120 physical target algebra.  Null mass already
         # supplies the only identity fallback.  Association confidence remains
         # a calibration diagnostic and must not contract a diffuse-but-visible
@@ -302,17 +425,23 @@ class ObjectFutureTeacher(nn.Module):
         transport = torch.stack(transport_rows, dim=1)
         covariance = torch.stack(covariance_rows, dim=1)
         target = FutureObjectDynamics(
-            current_reference=facts.content.detach().float(),
+            current_reference=current_reference[:, 0],
             successor_content=successor,
-            semantic_delta=(successor - facts.content.detach().float()[:, None]),
+            semantic_delta=(successor - current_reference),
             transport_mean=transport,
             transport_covariance=covariance,
-            chart_availability=facts.validity.detach().float(),
-            log_chart_availability=facts.log_validity.detach().float(),
-            camera_coordinates=facts.camera_coordinates.detach().float(),
-            camera_chart_availability=facts.camera_validity.detach().float(),
-            log_camera_chart_availability=(
-                facts.log_camera_validity.detach().float()
+            chart_availability=object_validity,
+            log_chart_availability=self._supported_finite(
+                facts.log_validity,
+                object_validity,
+                name="object log validity",
+            ),
+            camera_coordinates=geometry_coordinate,
+            camera_chart_availability=camera_validity,
+            log_camera_chart_availability=self._supported_finite(
+                facts.log_camera_validity,
+                camera_legal,
+                name="camera log validity",
             ),
         )
         target.validate()
@@ -329,7 +458,7 @@ class ObjectFutureTeacher(nn.Module):
             "object_teacher_semantic_delta_rms": target.semantic_delta.square().mean().sqrt(),
             "object_teacher_transport_rms": transport.square().mean().sqrt(),
             "object_teacher_covariance_rms": covariance.square().mean().sqrt(),
-            "object_teacher_current_loss_support": facts.camera_validity.detach().float().mean(),
+            "object_teacher_current_loss_support": camera_validity.mean(),
             "object_teacher_successor_delta_identity_max_abs": (
                 target.semantic_delta
                 - (target.successor_content - target.current_reference[:, None])

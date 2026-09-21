@@ -56,7 +56,6 @@ from clearvla.mainline.interfaces import TrainingBatch
 from clearvla.mainline.manifest import ARCHITECTURE_MANIFEST
 from clearvla.mainline.model import grounding as grounding_module
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
-from clearvla.mainline.model.types import PhysicalActionCondition
 from clearvla.mainline.runtime.checkpoints import load_checkpoint_for_validation
 from clearvla.mainline.runtime.identity import dataset_identity, language_identity
 from clearvla.mainline.runtime.numerics import resolve_compute_dtype
@@ -1305,14 +1304,18 @@ def _formal_forward(
                         pass0_clean_physical = flow_state.noisy_physical + remaining * (
                             pass0.bottom.physical_velocity.to(dtype=flow_state.noisy_physical.dtype)
                         )
-                        pass0_action = model.outlet_adapter.decode(
+                        pass0_outlet = model.outlet_adapter.finalize(
                             pass0_clean_physical,
                             cache0.history.action_state,
                             codec_gripper_boundary=cache0.history.codec_gripper_boundary,
-                        ).detach()
-                        pass0_condition = PhysicalActionCondition.from_horizon_action(
-                            pass0_action,
-                            cache0.history.action_state.detach(),
+                            command_logits=pass0.bottom.gripper_command_logits,
+                        )
+                        pass0_action = pass0_outlet.deployed_action.detach()
+                        pass0_condition = (
+                            model.outlet_adapter.world_condition_from_horizon_action(
+                                pass0_outlet.world_condition_action.detach(),
+                                cache0.history.action_state.detach(),
+                            )
                         )
                         del pass0, pass0_clean_physical
             refined_top, _ = model.world.refine_deployment_world(
@@ -2048,6 +2051,7 @@ def main() -> None:
         language=language_identity(bundle, config),
     )
     model = ClearVLAMainlinePolicy(config).to(device)
+    model.configure_action_normalizer(bundle.action_normalizer)
     replay = load_checkpoint_for_validation(
         args.checkpoint,
         model=model,

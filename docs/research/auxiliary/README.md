@@ -8,14 +8,23 @@ first.
 
 | File | Use |
 |---|---|
-| [`ACTIVE_MAINLINE_HANDOFF.md`](ACTIVE_MAINLINE_HANDOFF.md) | Rolling remote/local state, run tags and immediate next action |
+| [`ACTIVE_MAINLINE_HANDOFF.md`](ACTIVE_MAINLINE_HANDOFF.md) | Task-scoped permissions, last-verified run observations and operational locations; each timestamp is a snapshot, not a liveness guarantee |
 | [`RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md`](RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md) | Current bounded RDT data/language/camera/action adapter contract |
+
+[`SCHEMA31_BSPINE_EARLY_AUDIT.md`](SCHEMA31_BSPINE_EARLY_AUDIT.md) is a historical
+early-decision snapshot for its named run. Its continuation recommendation is
+not a live instruction, pending check or architecture contract.
+
+Old handoff instructions and PIDs are retained only in the
+[historical handoff snapshot](../archive/operational_handoff_20260919.md).
+They do not grant or revoke authority for a current task.
 
 ## Exploratory research
 
 | File | Use |
 |---|---|
 | [`CLEARVLA_WAM_LITERATURE_INTEGRATION.md`](CLEARVLA_WAM_LITERATURE_INTEGRATION.md) | Non-authoritative literature-to-source map with falsifiable WAM, solver/MIP, future-supervision and chunk-continuity hypotheses |
+| [`CALVIN_SCHEMA30_HEALTH_LITERATURE_SOURCE_MEMO.md`](CALVIN_SCHEMA30_HEALTH_LITERATURE_SOURCE_MEMO.md) | Remote CALVIN health audit mapped to launch/current source, original literature, matched counterfactuals and code-change gates |
 
 ## Historical indexes
 

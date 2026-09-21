@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from clearvla.action_solvers.flow_solver.spec import ScheduleSpec
+from clearvla.data.action_chart import resolve_action_state_profile
+
 from ..config import ExperimentConfig
+from ..gripper_contract import is_binary_gripper_mode
 from ..interfaces import ActionSupervision, ObservableHistory
 from ..model.action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from ..model.observation_contract import (
@@ -17,8 +23,11 @@ from ..model.observation_contract import (
     _coordinate_grid,
 )
 from ..model.policy import PolicyStepOutput
-from ..model.types import FutureObjectDynamics, ObjectTopTrainingTargets
+from ..model.types import FlowStepContext, FutureObjectDynamics, ObjectTopTrainingTargets
 from ..v120_core.gauges import masked_candidate_center
+
+if TYPE_CHECKING:
+    from ..model.components import OutletAdapter
 
 _STANDARD_GAMMA = getattr(torch, "_standard_gamma")
 
@@ -30,6 +39,55 @@ class FlowMatchingState:
     noisy_physical: Tensor  # [B,T,Aphysical]
     target_physical: Tensor  # [B,T,Aphysical]
     target_physical_velocity: Tensor  # [B,T,Aphysical]
+    # Optional numerical context used only by a schedule-aware bottom run.
+    # Keeping this appended/defaulted preserves every historical constructor.
+    flow_step_context: FlowStepContext | None = None
+
+
+def _gripper_field_error_terms(
+    field: Tensor,
+    *,
+    compatibility_weight: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Return legacy, deployed-lane and owned gripper field errors.
+
+    The six gripper coordinates are one physical degree of freedom expressed
+    in two deployed operands (absolute/local-delta) plus four compatibility
+    coordinates.  ``compatibility_weight=1`` is algebraically the historical
+    six-channel mean.  Lower values preserve the deployed lane's total budget
+    while reducing only the compatibility lane; zero therefore does not
+    silently weaken the deployed gripper objective by a factor of six.
+
+    The helper accepts arbitrary leading dimensions so it can be shared by
+    the direct flow objective and the detached execution-value target.  It
+    never changes the field shape or decoder semantics.
+    """
+
+    if not isinstance(field, Tensor) or field.ndim < 1:
+        raise ValueError("gripper field must be a tensor with a final channel axis")
+    channels = int(field.shape[-1])
+    if channels != 6:
+        raise ValueError(
+            "the resolved legacy gripper field requires exactly six channels, "
+            f"got {channels}"
+        )
+    weight = float(compatibility_weight)
+    if not math.isfinite(weight):
+        raise ValueError("gripper compatibility weight must be finite")
+    if weight < 0.0:
+        raise ValueError("gripper compatibility weight must be non-negative")
+
+    squared = field.square()
+    deployed = squared[..., :2].mean(dim=-1)
+    compatibility = squared[..., 2:].mean(dim=-1)
+    # Weight by the number of coordinates in each lane.  This makes weight=1
+    # exactly the old six-channel mean and keeps the deployed lane's aggregate
+    # scale unchanged when compatibility is disabled.
+    owned = (2.0 * deployed + (4.0 * weight) * compatibility) / (
+        2.0 + 4.0 * weight
+    )
+    legacy = (2.0 * deployed + 4.0 * compatibility) / 6.0
+    return legacy, deployed, compatibility, owned
 
 
 def balanced_event_row_weights(event_mask: Tensor, horizon_weight: Tensor) -> Tensor:
@@ -67,38 +125,92 @@ def balanced_event_row_weights(event_mask: Tensor, horizon_weight: Tensor) -> Te
     return torch.where(both_classes, balanced, torch.ones_like(balanced))
 
 
-def balanced_binary_command_weights(
-    command_target: Tensor,
+def calvin_selective_frame_weights(
+    config: ExperimentConfig,
+    codec: PhysicalActionFieldCodec | "OutletAdapter",
+    normalized_action: Tensor,
+    action_state: Tensor,
+    event_mask: Tensor,
     horizon_weight: Tensor,
 ) -> Tensor:
-    """Give both CALVIN command states equal effective CE mass.
+    """Build bounded CALVIN row weights without changing the policy graph.
 
-    The information sampler owns whole-window motion/event coverage and must
-    not be changed merely to repair the binary head.  Its selected CALVIN
-    windows can nevertheless have a very different persistent-command prior
-    from validation.  Equalize only the command objective, using the exact
-    horizon-weighted mass seen by that objective, and normalize the result to
-    preserve its configured scalar budget.  A single-class batch remains
-    unchanged because it contains no within-batch contrast to rebalance.
+    CALVIN's information sampler already selects informative *windows*, but
+    the formal action objective historically gave every row inside a selected
+    24-step window the same weight (apart from the fixed horizon bands).  This
+    helper adds a deliberately small, target-only focus on actual centered TCP
+    motion and gripper transition rows.  The result is normalized against the
+    existing horizon budget, so enabling it reallocates action supervision
+    rather than silently changing the action group's overall scale.
+
+    The selective profile is CALVIN-only.  Pen/RDT and the default ``uniform``
+    mode return an exact all-ones tensor, preserving their objective and
+    checkpoint behavior.  Event/motion values are detached supervision
+    metadata; no future tensor crosses into the deployed model path.
     """
 
-    if command_target.ndim != 2 or horizon_weight.ndim != 1:
-        raise ValueError("command balancing requires [B,T] target and [T] weights")
-    if int(command_target.shape[1]) != int(horizon_weight.shape[0]):
-        raise ValueError("command target and horizon weights do not align")
-    if not bool(((command_target == 0) | (command_target == 1)).all()):
-        raise ValueError("binary command target must contain only class 0/1")
-    step = horizon_weight.float()[None].expand_as(command_target)
-    positive = (command_target == 1).to(device=step.device, dtype=torch.float32)
-    negative = 1.0 - positive
-    positive_mass = (positive * step).sum()
-    negative_mass = (negative * step).sum()
-    total_mass = positive_mass + negative_mass
-    positive_scale = total_mass / (2.0 * positive_mass.clamp_min(1e-8))
-    negative_scale = total_mass / (2.0 * negative_mass.clamp_min(1e-8))
-    balanced = positive * positive_scale + negative * negative_scale
-    both_classes = (positive_mass > 0.0) & (negative_mass > 0.0)
-    return torch.where(both_classes, balanced, torch.ones_like(balanced))
+    mode = str(config.objectives.calvin_frame_weight_mode)
+    if mode == "uniform":
+        return normalized_action.new_ones(normalized_action.shape[:2], dtype=torch.float32)
+    if mode != "motion_event_v1":
+        raise ValueError(f"unsupported CALVIN frame weighting mode: {mode!r}")
+    if str(config.data.data_profile) != "calvin_relative_7d_v1":
+        raise ValueError("selective frame weighting is valid only for CALVIN")
+    if not bool(getattr(codec, "is_binary_command", False)):
+        raise ValueError(
+            "CALVIN selective frame weighting requires the configured OutletAdapter"
+        )
+    if normalized_action.ndim != 3 or action_state.ndim != 2:
+        raise ValueError("CALVIN frame weighting received invalid action shapes")
+    batch, horizon = normalized_action.shape[:2]
+    if tuple(event_mask.shape) != (batch, horizon):
+        raise ValueError("CALVIN event rows must align with the action horizon")
+    if tuple(horizon_weight.shape) != (horizon,):
+        raise ValueError("CALVIN horizon weights must align with the action horizon")
+
+    # OutletAdapter.arm_motion_magnitude removes the z-score representation of
+    # raw zero for CALVIN relative commands.  Calling it here, rather than
+    # taking a norm of normalized values, prevents a normalizer offset from
+    # masquerading as physical motion.
+    motion = codec.arm_motion_magnitude(
+        normalized_action.detach(),
+        action_state.detach(),
+    ).float()
+    if tuple(motion.shape) != (batch, horizon) or not bool(torch.isfinite(motion).all()):
+        raise ValueError("CALVIN centered motion scores must be finite [B,T]")
+    motion = motion.clamp_min(0.0)
+    # Use the same centered magnitude threshold that owns the motion-head
+    # target, rather than a per-window percentile.  Percentiles silently make
+    # a one- or two-row arm movement look like a hold window (p90 is still
+    # zero), which is exactly the sparse-tail failure this profile is meant to
+    # repair.  The bounded ratio keeps tiny numerical motion close to one while
+    # giving genuinely active rows a predictable, source-independent boost.
+    motion_threshold = max(float(config.objectives.arm_motion_threshold), 1e-6)
+    motion_focus = (motion / motion_threshold).clamp(0.0, 1.0)
+
+    event = event_mask.detach().float().clamp(0.0, 1.0)
+    radius = int(config.objectives.calvin_frame_event_radius)
+    if radius:
+        event_focus = F.max_pool1d(
+            F.pad(event[:, None], (radius, radius)),
+            kernel_size=2 * radius + 1,
+            stride=1,
+        ).squeeze(1)
+    else:
+        event_focus = event
+    raw = (
+        1.0
+        + float(config.objectives.calvin_frame_motion_gain) * motion_focus
+        + float(config.objectives.calvin_frame_event_gain) * event_focus
+    ).clamp_min(1.0)
+    raw = raw.clamp_max(float(config.objectives.calvin_frame_max_weight))
+    horizon = horizon_weight.detach().float()[None]
+    denominator = (horizon.expand_as(raw)).sum().clamp_min(1e-8)
+    weighted_mean = (raw * horizon).sum() / denominator
+    weights = raw / weighted_mean.clamp_min(1e-8)
+    if not bool(torch.isfinite(weights).all()):
+        raise ValueError("CALVIN selective frame weights became non-finite")
+    return weights
 
 
 def causal_event_trajectory_mask(event_mask: Tensor) -> Tensor:
@@ -127,6 +239,49 @@ def event_transition_persistence_masks(
     after_or_event = torch.cummax(event, dim=1).values
     persistence = (after_or_event - event).clamp(0.0, 1.0)
     return event, persistence
+
+
+def stackcube_phase_masks(
+    event_target: Tensor,
+    gripper_boundary_raw: Tensor,
+    *,
+    open_class: int = 2,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Return target-only approach, transport and pre-event-hold masks.
+
+    The event convention stores a negative delta as class ``1`` and a
+    positive delta as class ``2``.  ``open_class`` maps that sign convention
+    to the native outlet direction.  The masks are derived exclusively from
+    detached target rows and the causal command boundary; no object state,
+    reward or future observation is exposed to the policy.
+
+    Windows beginning after the close event are still recognized as transport
+    windows through the closed command boundary.  Windows with no close event
+    are not treated as approach rows, avoiding a false approach boost on
+    post-release tails.
+    """
+
+    if event_target.ndim != 2 or gripper_boundary_raw.ndim != 1:
+        raise ValueError("StackCube phase masks require [B,T] events and [B] boundaries")
+    if int(event_target.shape[0]) != int(gripper_boundary_raw.shape[0]):
+        raise ValueError("StackCube phase mask batch dimensions must align")
+    if int(open_class) not in {1, 2}:
+        raise ValueError("StackCube open event class must be 1 or 2")
+    close_class = 1 if int(open_class) == 2 else 2
+    close = event_target == close_class
+    open_ = event_target == int(open_class)
+    close_seen = close.cumsum(dim=1).to(dtype=torch.bool)
+    open_seen = open_.cumsum(dim=1).to(dtype=torch.bool)
+    boundary_closed = gripper_boundary_raw[:, None] <= 0.0
+    has_close = close.any(dim=1, keepdim=True)
+    approach = (~close_seen) & (~open_seen) & (~boundary_closed) & has_close
+    transport = (boundary_closed | close_seen) & (~open_seen)
+    pre_event_hold = ~(close_seen | open_seen)
+    return (
+        approach.to(dtype=torch.float32),
+        transport.to(dtype=torch.float32),
+        pre_event_hold.to(dtype=torch.float32),
+    )
 
 
 def anchored_gripper_persistence(
@@ -175,6 +330,7 @@ def sample_flow_matching(
     codec: PhysicalActionFieldCodec,
     distribution: str,
     generator: torch.Generator | None = None,
+    schedule: ScheduleSpec | None = None,
 ) -> FlowMatchingState:
     if target.ndim != 3:
         raise ValueError("flow-matching native action target must be [B,T,A]")
@@ -211,12 +367,42 @@ def sample_flow_matching(
     )
     alpha = time.to(dtype=target.dtype)[:, None, None]
     noisy = (1.0 - alpha) * noise + alpha * target_physical
+    flow_step_context: FlowStepContext | None = None
+    if schedule is not None:
+        schedule.validate()
+        # An explicit legacy E5 schedule is still the no-context ABI.  A
+        # non-uniform schedule opts into the numerical context contract and
+        # uses the sampled continuous time to select its containing interval.
+        legacy_boundaries = ScheduleSpec.uniform(5).boundaries
+        if tuple(schedule.boundaries) != tuple(legacy_boundaries):
+            boundaries = torch.tensor(
+                schedule.boundaries,
+                device=time.device,
+                dtype=time.dtype,
+            )
+            interval_index = torch.bucketize(
+                time,
+                boundaries[1:-1],
+                right=True,
+            )
+            step_sizes = boundaries[1:] - boundaries[:-1]
+            step_size = step_sizes.index_select(0, interval_index)
+            normalized_index = interval_index.to(dtype=time.dtype) / float(
+                schedule.interval_count
+            )
+            flow_step_context = FlowStepContext(
+                time=time,
+                step_size=step_size,
+                normalized_index=normalized_index,
+                endpoint=torch.zeros_like(time),
+            )
     return FlowMatchingState(
         time=time,
         source_physical_noise=noise,
         noisy_physical=noisy,
         target_physical=target_physical,
         target_physical_velocity=target_physical - noise,
+        flow_step_context=flow_step_context,
     )
 
 
@@ -464,29 +650,53 @@ def future_dynamics_terms(
     cameras = int(current_loss_support.shape[2])
     if tuple(current_loss_support.shape) != (batch, objects, cameras, 1):
         raise ValueError("current loss support must be [B,K,C,1] and align with future dynamics")
-    camera_validity = (
-        current_loss_support.detach()
-        .float()[:, None]
-        .expand(-1, intervals, -1, -1, -1)
-        .clamp(0.0, 1.0)
-    )
+    camera_validity = torch.nan_to_num(
+        current_loss_support.detach().float(),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )[:, None].expand(-1, intervals, -1, -1, -1).clamp(0.0, 1.0)
     object_validity = camera_validity.amax(dim=3)
 
     def masked(error: Tensor, weight: Tensor) -> Tensor:
-        expanded = weight
+        expanded = torch.nan_to_num(
+            weight.float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(0.0, 1.0)
         while expanded.ndim < error.ndim:
             expanded = expanded.unsqueeze(-1)
         expanded = expanded.expand_as(error)
-        return (error * expanded).sum() / expanded.sum().clamp_min(1.0)
+        # Quarantine unsupported rows before reducing.  Multiplying a NaN
+        # error by a zero mask is still NaN and can poison the scalar loss and
+        # its backward graph.
+        safe_error = torch.where(
+            expanded > 0.0,
+            error,
+            torch.zeros_like(error),
+        )
+        return (safe_error * expanded).sum() / expanded.sum().clamp_min(1.0)
 
     def row_loss(
         prediction_value: Tensor,
         target_value: Tensor,
         *,
+        support: Tensor,
         scale_floored: bool,
     ) -> tuple[Tensor, Tensor]:
         prediction_f = prediction_value.float()
         target_f = target_value.detach().float()
+        support_f = torch.nan_to_num(
+            support.detach().float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(0.0, 1.0)
+        while support_f.ndim < prediction_f.ndim:
+            support_f = support_f.unsqueeze(-1)
+        support_f = support_f.expand_as(prediction_f)
+        supported = support_f > 0.0
+        if bool((supported & ~torch.isfinite(prediction_f)).any()):
+            raise ValueError("future dynamics prediction contains non-finite supported values")
+        if bool((supported & ~torch.isfinite(target_f)).any()):
+            raise ValueError("future dynamics target contains non-finite supported values")
+        prediction_f = torch.where(supported, prediction_f, torch.zeros_like(prediction_f))
+        target_f = torch.where(supported, target_f, torch.zeros_like(target_f))
         raw = F.smooth_l1_loss(
             prediction_f,
             target_f,
@@ -561,18 +771,43 @@ def future_dynamics_terms(
         weight: Tensor,
         scale_floored: bool,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-        prediction_common = prediction_value.float().mean(dim=1)
-        target_common = target_value.detach().float().mean(dim=1)
+        prediction_value = prediction_value.float()
+        target_value = target_value.detach().float()
+        support_f = torch.nan_to_num(
+            weight.detach().float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(0.0, 1.0)
+        while support_f.ndim < prediction_value.ndim:
+            support_f = support_f.unsqueeze(-1)
+        support_f = support_f.expand_as(prediction_value)
+        supported = support_f > 0.0
+        if bool((supported & ~torch.isfinite(prediction_value)).any()):
+            raise ValueError("future dynamics prediction contains non-finite supported values")
+        if bool((supported & ~torch.isfinite(target_value)).any()):
+            raise ValueError("future dynamics target contains non-finite supported values")
+        # Invalid intervals/cameras are not values.  Remove them before the
+        # interval common-mode reduction so they cannot enter the mean or
+        # leave a NaN that a later zero mask would fail to suppress.
+        prediction_value = torch.where(
+            supported, prediction_value, torch.zeros_like(prediction_value)
+        )
+        target_value = torch.where(
+            supported, target_value, torch.zeros_like(target_value)
+        )
+        support_count = support_f.sum(dim=1).clamp_min(1.0)
+        prediction_common = (prediction_value * support_f).sum(dim=1) / support_count
+        target_common = (target_value * support_f).sum(dim=1) / support_count
         prediction_innovation = prediction_value.float() - prediction_common[:, None]
-        target_innovation = target_value.detach().float() - target_common[:, None]
+        target_innovation = target_value - target_common[:, None]
         common_error, common_raw_error = row_loss(
             prediction_common[:, None],
             target_common[:, None],
+            support=weight[:, :1],
             scale_floored=scale_floored,
         )
         innovation_error, innovation_raw_error = row_loss(
             prediction_innovation,
             target_innovation,
+            support=weight,
             scale_floored=scale_floored,
         )
         common = masked(common_error, weight[:, :1])
@@ -631,6 +866,7 @@ def future_dynamics_terms(
     covariance_error, _covariance_raw_error = row_loss(
         prediction.transport_covariance,
         target.transport_covariance,
+        support=camera_validity,
         scale_floored=False,
     )
     covariance = masked(covariance_error, camera_validity)
@@ -642,14 +878,15 @@ def future_dynamics_terms(
         target.semantic_interval_innovation.detach()[:, 1:]
         - target.semantic_interval_innovation.detach()[:, :-1]
     )
-    transition_error, _transition_raw_error = row_loss(
-        semantic_transition_prediction,
-        semantic_transition_target,
-        scale_floored=True,
-    )
     transition_validity = torch.minimum(
         object_validity[:, 1:],
         object_validity[:, :-1],
+    )
+    transition_error, _transition_raw_error = row_loss(
+        semantic_transition_prediction,
+        semantic_transition_target,
+        support=transition_validity,
+        scale_floored=True,
     )
     transition = masked(transition_error, transition_validity)
     # The old successor objective was an algebraic duplicate of semantic
@@ -669,49 +906,100 @@ def future_dynamics_terms(
         "future_transition": transition,
     }
     if collect_diagnostics:
+        # Diagnostics must obey the same support boundary as the active
+        # objective.  In particular, ``FutureObjectDynamics`` exposes
+        # interval-common views with the interval axis already reduced, so a
+        # full [B,I,K,C,1] mask cannot be broadcast onto them directly.
+        def _finite_support(weight: Tensor) -> Tensor:
+            return torch.nan_to_num(
+                weight.detach().float(),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp(0.0, 1.0)
+
+        def _support_for(value: Tensor, weight: Tensor) -> Tensor:
+            support = _finite_support(weight)
+            # A reduced common value has lost the interval axis.  Reduce the
+            # corresponding support over that axis before appending feature
+            # dimensions; ``amax`` preserves the legal-source semantics.
+            while support.ndim > value.ndim:
+                support = support.amax(dim=1)
+            while support.ndim < value.ndim:
+                support = support.unsqueeze(-1)
+            try:
+                return support.expand_as(value)
+            except RuntimeError as error:
+                raise ValueError(
+                    "future diagnostic support does not align with its value: "
+                    f"{tuple(weight.shape)} vs {tuple(value.shape)}"
+                ) from error
+
+        def diagnostic_rms(value: Tensor, support: Tensor) -> Tensor:
+            value_f = value.detach().float()
+            support_f = _support_for(value_f, support)
+            safe_value = torch.where(
+                support_f > 0.0,
+                value_f,
+                torch.zeros_like(value_f),
+            )
+            numerator = (safe_value.square() * support_f).sum()
+            denominator = support_f.sum().clamp_min(1.0)
+            return (numerator / denominator).sqrt()
+
+        def diagnostic_interval_views(
+            value: Tensor,
+            support: Tensor,
+        ) -> tuple[Tensor, Tensor, Tensor]:
+            """Return sanitized common/innovation views and reduced support."""
+
+            value_f = value.detach().float()
+            support_f = _support_for(value_f, support)
+            safe_value = torch.where(
+                support_f > 0.0,
+                value_f,
+                torch.zeros_like(value_f),
+            )
+            count = support_f.sum(dim=1).clamp_min(1.0)
+            common = (safe_value * support_f).sum(dim=1) / count
+            innovation = safe_value - common[:, None]
+            common_support = _finite_support(support).amax(dim=1)
+            return common, innovation, common_support
+
         terms["future_current_loss_support"] = camera_validity.mean().detach()
         terms["future_target_semantic_delta_rms"] = (
-            target.semantic_delta.detach().float().square().mean().sqrt()
+            diagnostic_rms(target.semantic_delta, object_validity)
         )
         terms["future_target_transport_rms"] = (
-            target.transport_mean.detach().float().square().mean().sqrt()
+            diagnostic_rms(target.transport_mean, camera_validity)
+        )
+        prediction_transport_common, prediction_transport_innovation, camera_common_support = (
+            diagnostic_interval_views(prediction.transport_mean, camera_validity)
+        )
+        target_transport_common, target_transport_innovation, _ = diagnostic_interval_views(
+            target.transport_mean,
+            camera_validity,
         )
         terms["future_prediction_transport_common_rms"] = (
-            prediction.transport_common.detach().float().square().mean().sqrt()
+            diagnostic_rms(prediction_transport_common, camera_common_support)
         )
         terms["future_target_transport_common_rms"] = (
-            target.transport_common.detach().float().square().mean().sqrt()
+            diagnostic_rms(target_transport_common, camera_common_support)
         )
         terms["future_prediction_transport_innovation_rms"] = (
-            prediction.transport_interval_innovation.detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt()
+            diagnostic_rms(prediction_transport_innovation, camera_validity)
         )
         terms["future_target_transport_innovation_rms"] = (
-            target.transport_interval_innovation.detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt()
-        )
-        prediction_common = prediction.transport_mean.float().mean(dim=1)
-        target_common = target.transport_mean.detach().float().mean(dim=1)
-        prediction_innovation = (
-            prediction.transport_mean.float() - prediction_common[:, None]
-        )
-        target_innovation = (
-            target.transport_mean.detach().float() - target_common[:, None]
+            diagnostic_rms(target_transport_innovation, camera_validity)
         )
         common_normalized_audit, common_direction_audit = transport_row_audits(
-            prediction_common[:, None],
-            target_common[:, None],
+            prediction_transport_common[:, None],
+            target_transport_common[:, None],
         )
         innovation_normalized_audit, innovation_direction_audit = (
             transport_row_audits(
-                prediction_innovation,
-                target_innovation,
+                prediction_transport_innovation,
+                target_transport_innovation,
             )
         )
         terms["future_transport_normalized_audit"] = 0.5 * (
@@ -723,7 +1011,7 @@ def future_dynamics_terms(
             + masked(innovation_direction_audit, camera_validity)
         )
         terms["future_target_covariance_rms"] = (
-            target.transport_covariance.detach().float().square().mean().sqrt()
+            diagnostic_rms(target.transport_covariance, camera_validity)
         )
         for index in range(prediction.intervals):
             interval_slice = slice(index, index + 1)
@@ -741,7 +1029,7 @@ def future_dynamics_terms(
 
 def execution_value_terms(
     config: ExperimentConfig,
-    codec: PhysicalActionFieldCodec,
+    codec: PhysicalActionFieldCodec | OutletAdapter,
     output: PolicyStepOutput,
     flow_state: FlowMatchingState,
 ) -> dict[str, Tensor]:
@@ -800,23 +1088,31 @@ def execution_value_terms(
     residual = candidates - target[:, None, None]
     flat = residual.reshape(batch * blocks * candidate_count, horizon, physical)
     parts = codec.split(flat)
-    # In the direct CALVIN chart these are two direct-command residuals, not
-    # position and acceleration.  The symmetric score remains appropriate and
-    # keeps the 12-channel execution-value ABI unchanged.
+    # Both established value/difference arm branches retain symmetric
+    # execution-value pressure.  Outlet semantics never replace this field.
     arm_error = 0.5 * (
         parts.arm_absolute.square() + parts.arm_delta.square()
     ).sum(dim=-1) / float(codec.arm_dim)
-    gripper_error = parts.gripper_field.square().mean(dim=-1)
-    target_value = torch.stack((arm_error, gripper_error), dim=-1).reshape(
+    (
+        gripper_error_legacy,
+        gripper_error_deployed,
+        gripper_error_compatibility,
+        gripper_error_owned,
+    ) = _gripper_field_error_terms(
+        parts.gripper_field,
+        compatibility_weight=config.objectives.gripper_compatibility_weight,
+    )
+    target_value = torch.stack((arm_error, gripper_error_owned), dim=-1).reshape(
         batch,
         blocks,
         candidate_count,
         horizon,
         2,
     )
-    calvin_binary = str(config.bottom.gripper_output_mode) == "calvin_binary_command"
-    if calvin_binary:
-        # The continuous gripper field is compatibility/audit-only for CALVIN;
+    binary_command = is_binary_gripper_mode(config.bottom.gripper_output_mode)
+    if binary_command:
+        # The continuous gripper field is compatibility/audit-only for a
+        # binary outlet;
         # execution candidate values must rank candidates from the arm field
         # alone so random continuous gripper coordinates cannot steer routing.
         target_value = torch.stack(
@@ -836,7 +1132,7 @@ def execution_value_terms(
     valid_field = valid[..., None, None].expand_as(predicted)
     component_weight = (
         predicted.new_tensor([1.0, 0.0])
-        if calvin_binary
+        if binary_command
         else predicted.new_tensor([float(codec.arm_dim), 1.0])
         / float(codec.arm_dim + 1)
     )
@@ -955,6 +1251,13 @@ def execution_value_terms(
         execution_cost = value_loss.new_zeros(())
     return {
         "execution_value": value_loss,
+        "execution_gripper_error_legacy": gripper_error_legacy.detach().mean(),
+        "execution_gripper_error_deployed": gripper_error_deployed.detach().mean(),
+        "execution_gripper_error_compatibility": gripper_error_compatibility.detach().mean(),
+        "execution_gripper_error_owned": gripper_error_owned.detach().mean(),
+        "execution_gripper_compatibility_weight": predicted.new_tensor(
+            float(config.objectives.gripper_compatibility_weight), dtype=torch.float32
+        ),
         "execution_cost_audit": execution_cost.detach().float(),
         "execution_value_reliability_scale": reliability_scale.detach(),
         "execution_value_reliability": (
@@ -1000,7 +1303,7 @@ def execution_value_terms(
 
 def action_terms(
     config: ExperimentConfig,
-    codec: PhysicalActionFieldCodec,
+    codec: PhysicalActionFieldCodec | OutletAdapter,
     output: PolicyStepOutput,
     target: ActionSupervision,
     history: ObservableHistory,
@@ -1009,12 +1312,14 @@ def action_terms(
     collect_diagnostics: bool = False,
 ) -> dict[str, Tensor]:
     objective = config.objectives
+    binary_command = is_binary_gripper_mode(config.bottom.gripper_output_mode)
     calvin_binary = str(config.bottom.gripper_output_mode) == "calvin_binary_command"
-    direct_arm = codec.uses_relative_command_direct
-    if direct_arm != (
-        str(config.bottom.arm_flow_mode) == "relative_command_direct"
-    ):
-        raise ValueError("action codec and experiment arm-flow modes disagree")
+    profile = resolve_action_state_profile(config.data.data_profile)
+    # ``event_target`` below is sign-coded (1=negative delta, 2=positive
+    # delta), while each source chart has its own native open sign.  Resolve
+    # this once at the data boundary so every row-zero/phase diagnostic uses
+    # the same meaning.
+    open_class = 2 if profile.gripper_open_direction > 0 else 1
     raw_grip = target.raw_units[..., -1].float()
     raw_boundary = torch.cat(
         (
@@ -1037,13 +1342,13 @@ def action_terms(
     )
     event_mask = (event_target != 0).to(dtype=torch.float32)
     # Older probes and compatibility callers construct a minimal bottom
-    # namespace without the optional CALVIN field.  Treat that as the
+    # namespace without the optional binary-command field. Treat that as the
     # continuous-path default; the binary profile still fails closed below
     # when the command head is genuinely missing.
     command_logits = getattr(output.bottom, "gripper_command_logits", None)
-    if calvin_binary:
+    if binary_command:
         if command_logits is None:
-            raise ValueError("CALVIN action loss requires gripper command logits")
+            raise ValueError("binary action loss requires gripper command logits")
         expected_command_shape = (
             int(raw_grip.shape[0]),
             int(raw_grip.shape[1]),
@@ -1051,7 +1356,7 @@ def action_terms(
         )
         if tuple(command_logits.shape) != expected_command_shape:
             raise ValueError(
-                "CALVIN gripper command logits must be [B,T,2], got "
+                "binary gripper command logits must be [B,T,2], got "
                 f"{tuple(command_logits.shape)}"
             )
         command_target = (raw_grip >= 0.0).to(dtype=torch.long)
@@ -1070,64 +1375,150 @@ def action_terms(
     arm_error = 0.5 * (
         residual_parts.arm_absolute.square() + residual_parts.arm_delta.square()
     )
-    gripper_error_unweighted = residual_parts.gripper_field.square().mean(dim=-1)
+    (
+        gripper_error_legacy,
+        gripper_error_deployed,
+        gripper_error_compatibility,
+        gripper_error_owned,
+    ) = _gripper_field_error_terms(
+        residual_parts.gripper_field,
+        compatibility_weight=objective.gripper_compatibility_weight,
+    )
     horizon_weight = anchor_horizon_weights(
         horizon=config.dimensions.action_horizon,
         tail_emphasis=objective.horizon_tail_emphasis,
         first_step_protection=objective.horizon_first_step_protection,
         device=prediction.device,
     )
-    step_weight = horizon_weight[None]
+    horizon_step_weight = horizon_weight[None]
+    frame_weight = calvin_selective_frame_weights(
+        config,
+        codec,
+        target.normalized,
+        history.action_state,
+        event_mask,
+        horizon_weight,
+    ).to(device=prediction.device, dtype=torch.float32)
+    # The selective profile is normalized against the existing horizon mass;
+    # this is a row-level reallocation, not a hidden action-group gain.
+    step_weight = horizon_step_weight * frame_weight
+    phase_mode = str(objective.phase_control_mode)
+    if phase_mode == "stackcube_phase_v1":
+        phase_approach, phase_transport, phase_pre_event_hold = stackcube_phase_masks(
+            event_target.detach(),
+            target.gripper_transition_boundary_raw_units[:, -1].detach().float(),
+            open_class=open_class,
+        )
+        phase_raw_weight = (
+            1.0
+            + float(objective.phase_approach_arm_gain) * phase_approach
+            + float(objective.phase_transport_arm_gain) * phase_transport
+        )
+        phase_mass = step_weight.sum(dim=1, keepdim=True).clamp_min(1e-8)
+        phase_denominator = (phase_raw_weight * step_weight).sum(
+            dim=1, keepdim=True
+        ).clamp_min(1e-8)
+        phase_weight = phase_raw_weight * phase_mass / phase_denominator
+    else:
+        phase_approach = torch.zeros_like(event_mask)
+        phase_transport = torch.zeros_like(event_mask)
+        phase_pre_event_hold = torch.zeros_like(event_mask)
+        phase_weight = torch.ones_like(step_weight)
     event_row_weight = balanced_event_row_weights(event_mask, horizon_weight)
-    gripper_error = gripper_error_unweighted * event_row_weight
-    if calvin_binary:
-        # CALVIN's formal action objective is arm-only; the discrete command
+    # ``*_legacy`` remains the exact V120 six-channel audit.  The owned error
+    # is the only continuous-gripper field error allowed into the formal
+    # physical-flow objective; its lane budget is unchanged at weight=1 and
+    # excludes only compatibility coordinates at weight=0.
+    gripper_error = gripper_error_owned * event_row_weight
+    if binary_command:
+        # A binary outlet's formal action objective is arm-only; the command
         # head owns gripper supervision below.  Keep continuous gripper terms
         # available as detached audits, but never let them enter the ledger.
         physical_error_unweighted = arm_error.mean(dim=-1)
         physical_error = physical_error_unweighted
+        physical_error_owned_unweighted = physical_error_unweighted
+        physical_error_owned = physical_error
     else:
         physical_error_unweighted = (
-            arm_error.sum(dim=-1) + gripper_error_unweighted
+            arm_error.sum(dim=-1) + gripper_error_legacy
+        ) / float(codec.arm_dim + 1)
+        physical_error_owned_unweighted = (
+            arm_error.sum(dim=-1) + gripper_error_owned
         ) / float(codec.arm_dim + 1)
         physical_error = (arm_error.sum(dim=-1) + gripper_error) / float(codec.arm_dim + 1)
+        physical_error_owned = (
+            arm_error.sum(dim=-1) + gripper_error
+        ) / float(codec.arm_dim + 1)
     flow = (physical_error * step_weight).mean()
+    flow_owned_unbalanced = (
+        physical_error_owned_unweighted * step_weight
+    ).mean()
     # V120 used no event-row boost in its physical flow objective.  Serialize
     # the balanced counterfactual under an explicit audit name; it is not sent
     # to backward and cannot be mistaken for the recovered formal geometry.
-    flow_v120_comparable = (physical_error_unweighted * step_weight).mean()
+    flow_selective_unbalanced = (physical_error_unweighted * step_weight).mean()
+    flow_v120_comparable = (physical_error_unweighted * horizon_step_weight).mean()
     arm = (arm_error.mean(dim=-1) * step_weight).mean()
     grip = (
         torch.zeros((), device=prediction.device, dtype=prediction.dtype)
-        if calvin_binary
+        if binary_command
         else (gripper_error * step_weight).mean()
     )
-    grip_unweighted = (gripper_error_unweighted * step_weight).mean()
-    grip_value = (residual_parts.gripper_field[..., 0].square() * step_weight).mean()
+    # Keep the historical metric names as six-channel audit values.  The
+    # explicit deployed/compatibility values below make the active ownership
+    # decision visible without changing old log interpretation.
+    grip_unweighted = (gripper_error_legacy * horizon_step_weight).mean()
+    grip_owned_unweighted = (gripper_error_owned * horizon_step_weight).mean()
+    grip_deployed_unweighted = (
+        gripper_error_deployed * horizon_step_weight
+    ).mean()
+    grip_compatibility_unweighted = (
+        gripper_error_compatibility * horizon_step_weight
+    ).mean()
+    grip_owned = (gripper_error * horizon_step_weight).mean()
+    owned_deployed_mass = (
+        2.0 * gripper_error_deployed * horizon_step_weight
+    ).mean()
+    owned_compatibility_mass = (
+        4.0
+        * float(objective.gripper_compatibility_weight)
+        * gripper_error_compatibility
+        * horizon_step_weight
+    ).mean()
+    owned_compatibility_fraction = owned_compatibility_mass / (
+        owned_deployed_mass + owned_compatibility_mass
+    ).clamp_min(1e-8)
+    grip_value = (
+        residual_parts.gripper_field[..., 0].square() * horizon_step_weight
+    ).mean()
     grip_value_balanced = (
-        residual_parts.gripper_field[..., 0].square() * event_row_weight * step_weight
+        residual_parts.gripper_field[..., 0].square()
+        * event_row_weight
+        * horizon_step_weight
     ).mean()
     grip_delta_unweighted = (
-        residual_parts.gripper_field[..., 1].square() * step_weight
+        residual_parts.gripper_field[..., 1].square() * horizon_step_weight
     ).mean()
     grip_delta = (
-        residual_parts.gripper_field[..., 1].square() * event_row_weight * step_weight
+        residual_parts.gripper_field[..., 1].square()
+        * event_row_weight
+        * horizon_step_weight
     ).mean()
     grip_auxiliary_unweighted = (
         residual_parts.gripper_field[..., 2:].square().mean(dim=-1)
-        * step_weight
+        * horizon_step_weight
     ).mean()
     grip_auxiliary = (
         residual_parts.gripper_field[..., 2:].square().mean(dim=-1)
         * event_row_weight
-        * step_weight
+        * horizon_step_weight
     ).mean()
     uniform_flow = residual.square().mean()
     native_arm, _ = codec.project_arm_tangent(residual[..., : 2 * codec.arm_dim])
     native_grip = residual_parts.gripper_field[..., 0]
     native_error = (
         native_arm.float().square().mean(dim=-1)
-        if calvin_binary
+        if binary_command
         else (
             native_arm.float().square().sum(dim=-1) + native_grip.float().square()
         )
@@ -1150,9 +1541,32 @@ def action_terms(
         reduction="none",
     )
     decoded_gripper_error = decoded_element_error[..., -1]
+    # Receding-horizon deployment executes row zero and discards the rest of
+    # this proposal.  A window-level event objective can therefore teach a
+    # release at row 4 while the environment keeps receiving the old closed
+    # command.  This narrow auxiliary surface explicitly prices only a
+    # target opening transition at row zero; it is disabled for binary-command
+    # outlets and remains zero when a batch has no such row.
+    first_step_release_mask = (event_target[:, 0] == open_class).to(dtype=torch.float32)
+    first_step_release_denominator = first_step_release_mask.sum().clamp_min(1.0)
+    first_step_release = (
+        (decoded_gripper_error[:, 0] * first_step_release_mask).sum()
+        / first_step_release_denominator
+    )
+    if binary_command:
+        first_step_release = first_step_release * 0.0
+    decoded_rows_unbalanced = (
+        decoded_element_error[..., : codec.arm_dim].mean(dim=-1)
+        if binary_command
+        else (
+            decoded_element_error[..., : codec.arm_dim].sum(dim=-1)
+            + decoded_gripper_error
+        )
+        / float(codec.arm_dim + 1)
+    )
     decoded_rows = (
         decoded_element_error[..., : codec.arm_dim].mean(dim=-1)
-        if calvin_binary
+        if binary_command
         else (
             decoded_element_error[..., : codec.arm_dim].sum(dim=-1)
             + decoded_gripper_error * event_row_weight
@@ -1160,8 +1574,11 @@ def action_terms(
         / float(codec.arm_dim + 1)
     )
     decoded_action = (decoded_rows * step_weight).mean()
+    decoded_action_selective_unbalanced = (
+        decoded_rows_unbalanced * step_weight
+    ).mean()
     decoded_action_v120_comparable = (
-        decoded_element_error.mean(dim=-1) * step_weight
+        decoded_element_error.mean(dim=-1) * horizon_step_weight
     ).mean()
     transition_start = torch.cat(
         (
@@ -1182,33 +1599,23 @@ def action_terms(
         (transition_start[:, None], decoded[:, :-1]), dim=1
     )
     predicted_delta = decoded - predicted_boundary
-    if direct_arm:
-        # A difference between adjacent CALVIN relative commands is a command
-        # derivative, not the physical arm delta represented by the old chart.
-        # Retire that auxiliary rather than supervising an accidental
-        # acceleration target.  The direct branch closure below remains active.
-        smooth_delta = prediction.sum() * 0.0
-    else:
-        smooth_delta_all = F.smooth_l1_loss(
-            predicted_delta,
-            delta,
-            reduction="none",
-        )
-        smooth_delta_rows = (
-            smooth_delta_all[..., : codec.arm_dim].mean(dim=-1)
-            if calvin_binary
-            else smooth_delta_all.mean(dim=-1)
-        )
-        smooth_delta = (smooth_delta_rows * step_weight).mean()
+    # For relative-command outlets this is adjacent-command consistency; it is
+    # deliberately not reused as W's physical delta. Pen/RDT retain their
+    # original calculation.
+    smooth_delta_all = F.smooth_l1_loss(
+        predicted_delta,
+        delta,
+        reduction="none",
+    )
+    smooth_delta_rows = (
+        smooth_delta_all[..., : codec.arm_dim].mean(dim=-1)
+        if binary_command
+        else smooth_delta_all.mean(dim=-1)
+    )
+    smooth_delta = (smooth_delta_rows * step_weight).mean()
     clean_parts = codec.split(clean_physical)
-    if direct_arm:
-        physical_delta_rows = F.smooth_l1_loss(
-            clean_parts.arm_absolute,
-            clean_parts.arm_delta,
-            reduction="none",
-        ).mean(dim=-1)
-    elif calvin_binary:
-        clean_arm_delta = codec.split(clean_physical).arm_delta.float()
+    if binary_command:
+        clean_arm_delta = clean_parts.arm_delta.float()
         decoded_boundary = torch.cat(
             (history.action_state[:, None].float(), decoded[:, :-1]),
             dim=1,
@@ -1235,6 +1642,34 @@ def action_terms(
     )
     continuous_gripper_target = target.normalized[..., -1:].float()
     continuous_gripper_target_delta = delta[..., -1:].detach().float()
+    # The deployment loop consumes only row zero.  On a no-event row zero the
+    # correct command is to hold the current gripper state, even when a later
+    # row in the 24-step target contains a close/open transition.  Supervise
+    # both the decoded absolute lane and the local-delta lane so this remains
+    # effective for the two independently-owned physical coordinates.
+    first_step_hold_mask = (event_target[:, 0] == 0).to(dtype=torch.float32)
+    first_step_hold_local = F.smooth_l1_loss(
+        clean_gripper_local_delta[:, 0],
+        continuous_gripper_target_delta[:, 0],
+        reduction="none",
+    )[..., 0]
+    first_step_hold_absolute = decoded_gripper_error[:, 0]
+    first_step_hold_rows = 0.5 * (
+        first_step_hold_local + first_step_hold_absolute
+    )
+    first_step_hold = (
+        first_step_hold_rows * first_step_hold_mask
+    ).sum() / first_step_hold_mask.sum().clamp_min(1.0)
+    if binary_command or profile.name not in {
+        "libero_relative_7d_v1",
+        "maniskill_pd_ee_delta_pose_7d_v1",
+        "maniskill_pd_ee_delta_pose_7d_v2",
+    }:
+        # Config validation restricts this auxiliary to continuous
+        # relative-command outlets.  The explicit zero also makes
+        # compatibility/minimal callers fail closed if they construct an
+        # unrelated namespace without running validation.
+        first_step_hold = first_step_hold * 0.0
     transition_mask, persistence_mask = event_transition_persistence_masks(
         event_mask
     )
@@ -1292,9 +1727,9 @@ def action_terms(
     gripper_trajectory = 0.5 * (
         gripper_trajectory_absolute + gripper_trajectory_delta
     )
-    if calvin_binary:
+    if binary_command:
         # Keep the old continuous trajectory quantities below as audit
-        # surfaces, but remove them from the formal CALVIN objective.
+        # surfaces, but remove them from the formal binary-command objective.
         gripper_trajectory = gripper_trajectory * 0.0
     motion_target = (
         codec.arm_motion_magnitude(
@@ -1307,13 +1742,36 @@ def action_terms(
         output.bottom.motion_logits.float(), motion_target, reduction="none"
     )
     motion = (motion_rows * step_weight).mean()
-    if calvin_binary:
+    phase_arm_flow = (
+        arm_error.mean(dim=-1) * phase_weight * step_weight
+    ).mean()
+    pre_event_hold_denominator = (
+        phase_pre_event_hold * step_weight
+    ).sum().clamp_min(1.0)
+    pre_event_hold_local_rows = F.smooth_l1_loss(
+        clean_gripper_local_delta,
+        continuous_gripper_target_delta,
+        reduction="none",
+    )[..., 0]
+    pre_event_hold_absolute_rows = F.smooth_l1_loss(
+        decoded[..., -1],
+        target.normalized[..., -1].float(),
+        reduction="none",
+    )
+    # The second term keeps the deployed absolute lane on the same target
+    # without introducing a new decoder or runtime gate.
+    pre_event_hold_rows = 0.5 * (
+        pre_event_hold_local_rows + pre_event_hold_absolute_rows
+    )
+    pre_event_hold = (
+        pre_event_hold_rows * phase_pre_event_hold * step_weight
+    ).sum() / pre_event_hold_denominator
+    if phase_mode != "stackcube_phase_v1":
+        phase_arm_flow = phase_arm_flow * 0.0
+        pre_event_hold = pre_event_hold * 0.0
+    if binary_command:
         if command_target is None or command_logits is None:
-            raise RuntimeError("CALVIN command target/logits were not materialized")
-        command_row_weight = balanced_binary_command_weights(
-            command_target,
-            horizon_weight,
-        )
+            raise RuntimeError("binary command target/logits were not materialized")
         command_prediction = command_logits.detach().float().argmax(dim=-1)
         command_correct = (command_prediction == command_target).float()
         command_target_positive = (command_target == 1).float()
@@ -1338,14 +1796,12 @@ def action_terms(
             / (command_precision + command_recall).clamp_min(1e-8)
         )
         command_loss_unbalanced = (command_rows * step_weight).mean()
-        command_loss = (command_rows * command_row_weight * step_weight).mean()
-        command_positive_weight = (
-            command_row_weight * command_target_positive
-        ).sum() / command_target_positive.sum().clamp_min(1.0)
-        command_negative = 1.0 - command_target_positive
-        command_negative_weight = (
-            command_row_weight * command_negative
-        ).sum() / command_negative.sum().clamp_min(1.0)
+        # The sampler owns data coverage; the binary head keeps ordinary CE.
+        # Hidden per-batch class reweighting changed the objective between
+        # batches and is intentionally absent from the formal path.
+        command_loss = command_loss_unbalanced
+        command_positive_weight = command_loss.new_ones(())
+        command_negative_weight = command_loss.new_ones(())
     else:
         zero_command = prediction.new_zeros((), dtype=torch.float32)
         command_accuracy = zero_command
@@ -1359,21 +1815,27 @@ def action_terms(
         command_loss_unbalanced = zero_command
         command_positive_weight = zero_command
         command_negative_weight = zero_command
-    event_mask = event_mask.to(dtype=gripper_error_unweighted.dtype)
+    event_mask = event_mask.to(dtype=gripper_error_legacy.dtype)
     hold_mask = 1.0 - event_mask
     event_denominator = (event_mask * step_weight).sum().clamp_min(1.0)
     hold_denominator = (hold_mask * step_weight).sum().clamp_min(1.0)
     event_gripper_flow = (
-        gripper_error_unweighted * event_mask * step_weight
+        gripper_error_legacy * event_mask * step_weight
     ).sum() / event_denominator
     hold_gripper_flow = (
-        gripper_error_unweighted * hold_mask * step_weight
+        gripper_error_legacy * hold_mask * step_weight
     ).sum() / hold_denominator
     event_decoded_gripper = (
         decoded_gripper_error * event_mask * step_weight
     ).sum() / event_denominator
     hold_decoded_gripper = (
         decoded_gripper_error * hold_mask * step_weight
+    ).sum() / hold_denominator
+    event_gripper_flow_owned = (
+        gripper_error_owned * event_mask * step_weight
+    ).sum() / event_denominator
+    hold_gripper_flow_owned = (
+        gripper_error_owned * hold_mask * step_weight
     ).sum() / hold_denominator
     event_count = event_mask.sum()
     hold_count = hold_mask.sum()
@@ -1420,11 +1882,12 @@ def action_terms(
         if tuple(clean_gripper_cumulative.shape) != (*expected_private, 1):
             raise ValueError("cumulative gripper trajectory must be [B,T,1]")
 
+        close_class = 1 if open_class == 2 else 2
         context_masks = {
             "hold": event_target == 0,
             "event": event_target != 0,
-            "open": event_target == 1,
-            "close": event_target == 2,
+            "open": event_target == open_class,
+            "close": event_target == close_class,
         }
 
         def conditional_mean(value: Tensor, mask: Tensor) -> Tensor:
@@ -1557,15 +2020,37 @@ def action_terms(
         band_metrics[f"action_horizon_mass_band_{start + 1}_{end}"] = horizon_weight[
             start:end
         ].sum() / horizon_weight.sum()
+        band_metrics[
+            f"action_flow_owned_band_{start + 1}_{end}"
+        ] = physical_error_owned_unweighted[:, start:end].mean()
         start = end
+    selective_mode = str(objective.calvin_frame_weight_mode)
+    # Continuous outlets use the owned gripper lane.  At the default weight
+    # of one this is algebraically the old V120 six-channel flow; binary
+    # outlets keep their established arm-only/command branches.
+    # Keep outlet/objective routing explicit. Calvin's opt-in selective profile
+    # owns its row reallocation; binary outlets otherwise use the exact arm-only
+    # V120 flow, while continuous outlets use the owned gripper lanes.
+    if calvin_binary and selective_mode == "motion_event_v1":
+        formal_action_flow = flow
+    elif binary_command:
+        formal_action_flow = flow_v120_comparable
+    else:
+        formal_action_flow = flow_owned_unbalanced
     return {
         **band_metrics,
         **gripper_private_metrics,
-        # The formal objective is the exact V120 physical metric.  Event-row
-        # balancing remains an audit, not an alternative training geometry.
-        "action_flow": flow_v120_comparable,
+        # The explicit Calvin selective profile owns row reallocation. The
+        # default binary and continuous outlets retain their exact V120 paths.
+        "action_flow": formal_action_flow,
         "action_flow_v120_comparable": flow_v120_comparable,
-        "action_flow_event_balance_delta": flow - flow_v120_comparable,
+        "action_flow_owned_unbalanced": flow_owned_unbalanced,
+        "action_flow_owned_delta": flow_owned_unbalanced - flow_v120_comparable,
+        "action_flow_selective_unbalanced": flow_selective_unbalanced,
+        "action_flow_selective_delta": (
+            flow_selective_unbalanced - flow_v120_comparable
+        ),
+        "action_flow_event_balance_delta": flow - flow_selective_unbalanced,
         "action_flow_event_balanced_audit": flow,
         "action_flow_uniform_field_mse": uniform_flow,
         "action_flow_native": native_flow,
@@ -1573,6 +2058,14 @@ def action_terms(
         "action_gripper_flow": grip_unweighted,
         "action_gripper_flow_v120_comparable": grip_unweighted,
         "action_gripper_flow_unweighted": grip_unweighted,
+        "action_gripper_flow_owned": grip_owned_unweighted,
+        "action_gripper_deployed_flow": grip_deployed_unweighted,
+        "action_gripper_compatibility_flow": grip_compatibility_unweighted,
+        "action_gripper_compatibility_weight": prediction.new_tensor(
+            float(objective.gripper_compatibility_weight), dtype=torch.float32
+        ),
+        "action_gripper_compatibility_fraction": owned_compatibility_fraction.detach(),
+        "action_gripper_flow_owned_event_balanced_audit": grip_owned,
         "action_gripper_flow_event_balanced_audit": grip,
         "action_gripper_value_flow": grip_value,
         "action_gripper_value_flow_unweighted": grip_value,
@@ -1583,13 +2076,19 @@ def action_terms(
         "action_gripper_auxiliary_flow_event_balanced_audit": grip_auxiliary,
         "action_gripper_event_flow": event_gripper_flow,
         "action_gripper_hold_flow": hold_gripper_flow,
+        "action_gripper_event_flow_owned": event_gripper_flow_owned,
+        "action_gripper_hold_flow_owned": hold_gripper_flow_owned,
         "action_decoded_gripper_event": event_decoded_gripper,
         "action_decoded_gripper_hold": hold_decoded_gripper,
+        "gripper_first_step_release": first_step_release,
+        "gripper_first_step_release_rows": first_step_release_mask.detach().sum(),
+        "gripper_first_step_hold": first_step_hold,
+        "gripper_first_step_hold_rows": first_step_hold_mask.detach().sum(),
         "action_gripper_event_row_weight": event_row_weight_mean,
         "action_gripper_hold_row_weight": hold_row_weight_mean,
         "action_gripper_event_rate": event_mask.mean(),
-        # CALVIN command-state supervision.  These are zero-valued, detached
-        # compatibility metrics on continuous Pen/RDT paths.
+        # Binary command-state supervision. These are zero-valued, detached
+        # compatibility metrics on continuous paths.
         "gripper_command": command_loss,
         "gripper_command_unbalanced_audit": command_loss_unbalanced.detach(),
         "gripper_command_positive_class_weight": command_positive_weight.detach(),
@@ -1601,13 +2100,17 @@ def action_terms(
         "gripper_command_recall": command_recall,
         "gripper_command_f1": command_f1,
         "gripper_command_rows": command_rows_count,
-        # Continuous Pen/RDT preserve the exact V120 metric.  CALVIN's formal
-        # decoded objective is arm-only; its compatibility gripper field is an
-        # audit and cannot add even a disconnected random scalar to the ledger.
-        "decoded_action": decoded_action if calvin_binary else decoded_action_v120_comparable,
+        # Continuous outlets preserve the exact V120 metric. A binary outlet's
+        # formal decoded objective is arm-only; its compatibility gripper field
+        # is an audit and cannot add even a disconnected random scalar to the ledger.
+        "decoded_action": decoded_action if binary_command else decoded_action_v120_comparable,
         "decoded_action_v120_comparable": decoded_action_v120_comparable,
+        "decoded_action_selective_unbalanced": decoded_action_selective_unbalanced,
+        "decoded_action_selective_delta": (
+            decoded_action_selective_unbalanced - decoded_action_v120_comparable
+        ),
         "decoded_action_event_balance_delta": (
-            decoded_action - decoded_action_v120_comparable
+            decoded_action - decoded_action_selective_unbalanced
         ),
         "decoded_action_event_balanced_audit": decoded_action,
         "smooth_delta": smooth_delta,
@@ -1624,11 +2127,30 @@ def action_terms(
         ).detach(),
         "gripper_trajectory_transition_mask_fraction": transition_mask.detach().mean(),
         "gripper_trajectory_persistence_mask_fraction": persistence_mask.detach().mean(),
+        "phase_control_mode_code": prediction.new_tensor(
+            1.0 if phase_mode == "stackcube_phase_v1" else 0.0,
+            dtype=torch.float32,
+        ),
+        "phase_approach_mask_fraction": phase_approach.detach().mean(),
+        "phase_transport_mask_fraction": phase_transport.detach().mean(),
+        "phase_pre_event_hold_mask_fraction": phase_pre_event_hold.detach().mean(),
+        "phase_arm_flow": phase_arm_flow,
+        "phase_gripper_hold": pre_event_hold,
         "motion": motion,
         "motion_precision": motion_precision,
         "motion_recall": motion_recall,
         "action_horizon_weight_first": horizon_weight[0],
         "action_horizon_weight_tail": horizon_weight[-1],
+        "action_frame_weight_mode_code": prediction.new_tensor(
+            1.0 if selective_mode == "motion_event_v1" else 0.0,
+            dtype=torch.float32,
+        ),
+        "action_frame_weight_mean": frame_weight.detach().mean(),
+        "action_frame_weight_min": frame_weight.detach().amin(),
+        "action_frame_weight_max": frame_weight.detach().amax(),
+        "action_frame_weight_selective_fraction": (
+            frame_weight.detach() > 1.0001
+        ).float().mean(),
         "action_flow_first": physical_error_unweighted[:, 0].mean(),
         "action_flow_first4": physical_error_unweighted[:, :4].mean(),
         "action_flow_first8": physical_error_unweighted[:, :8].mean(),
@@ -1636,6 +2158,13 @@ def action_terms(
         "action_flow_event_balanced_audit_first": physical_error[:, 0].mean(),
         "action_flow_event_balanced_audit_first8": physical_error[:, :8].mean(),
         "action_flow_event_balanced_audit_tail": physical_error[:, 8:].mean(),
+        "action_flow_owned_first": physical_error_owned_unweighted[:, 0].mean(),
+        "action_flow_owned_first4": physical_error_owned_unweighted[:, :4].mean(),
+        "action_flow_owned_first8": physical_error_owned_unweighted[:, :8].mean(),
+        "action_flow_owned_tail": physical_error_owned_unweighted[:, 8:].mean(),
+        "action_flow_owned_event_balanced_audit_first": physical_error_owned[:, 0].mean(),
+        "action_flow_owned_event_balanced_audit_first8": physical_error_owned[:, :8].mean(),
+        "action_flow_owned_event_balanced_audit_tail": physical_error_owned[:, 8:].mean(),
     }
 
 
@@ -1669,7 +2198,7 @@ def compose_losses(
     observation: ObservationEvidence,
     top_targets: ObjectTopTrainingTargets,
     predicted_dynamics: FutureObjectDynamics,
-    action_codec: PhysicalActionFieldCodec,
+    action_codec: PhysicalActionFieldCodec | OutletAdapter,
     collect_diagnostics: bool = False,
 ) -> LossLedger:
     action = action_terms(
@@ -1702,6 +2231,10 @@ def compose_losses(
         + objective.decoded_action * action["decoded_action"]
         + objective.gripper_command * action["gripper_command"]
         + objective.gripper_trajectory * action["gripper_trajectory"]
+        + objective.gripper_first_step_release * action["gripper_first_step_release"]
+        + objective.gripper_first_step_hold * action["gripper_first_step_hold"]
+        + objective.phase_arm_flow * action["phase_arm_flow"]
+        + objective.phase_gripper_hold * action["phase_gripper_hold"]
         + objective.motion * action["motion"]
         + objective.smooth_delta * action["smooth_delta"]
         + objective.physical_delta_consistency * action["physical_delta_consistency"]
@@ -1743,6 +2276,15 @@ def compose_losses(
         "gripper_trajectory": (
             objective.gripper_trajectory * action["gripper_trajectory"]
         ),
+        "gripper_first_step_release": (
+            objective.gripper_first_step_release
+            * action["gripper_first_step_release"]
+        ),
+        "gripper_first_step_hold": (
+            objective.gripper_first_step_hold * action["gripper_first_step_hold"]
+        ),
+        "phase_arm_flow": objective.phase_arm_flow * action["phase_arm_flow"],
+        "phase_gripper_hold": objective.phase_gripper_hold * action["phase_gripper_hold"],
         "motion": objective.motion * action["motion"],
         "smooth_delta": objective.smooth_delta * action["smooth_delta"],
         "physical_delta_consistency": (
@@ -1819,8 +2361,8 @@ __all__ = [
     "LossLedger",
     "anchored_gripper_persistence",
     "action_terms",
-    "balanced_binary_command_weights",
     "balanced_event_row_weights",
+    "calvin_selective_frame_weights",
     "causal_event_trajectory_mask",
     "compose_losses",
     "event_transition_persistence_masks",

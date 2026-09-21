@@ -68,12 +68,70 @@ class ActionStateChartProfile:
         if self.name in {"identity_7d_pen", "calvin_relative_7d_v1"}:
             return "current_action_state"
         if self.name in {
+            "maniskill_pd_ee_delta_pose_7d_v1",
+            "maniskill_pd_ee_delta_pose_7d_v2",
+            "libero_relative_7d_v1",
             "rdt_right_arm_action_chart_v1",
             "rdt_left_arm_action_chart_v1",
             "rdt_bimanual_action_chart_v1",
         }:
             return "previous_command"
         raise ValueError(f"profile {self.name!r} has no declared gripper transition boundary")
+
+    @property
+    def sampling_arm_motion(self) -> str:
+        """Return the source-native arm signal used only by the data sampler.
+
+        Pen and RDT actions are absolute command rows, so their established
+        information score is the adjacent action difference.  A CALVIN arm
+        row is already a relative TCP motion command; differencing adjacent
+        rows would rank command *derivative* instead of motion.  This property
+        is deliberately data-owned and is not part of the numeric projection
+        digest or a model-conditioning input.
+        """
+
+        if self.name in {"calvin_relative_7d_v1", "libero_relative_7d_v1",
+                         "maniskill_pd_ee_delta_pose_7d_v1", "maniskill_pd_ee_delta_pose_7d_v2"}:
+            return "relative_command_magnitude"
+        if self.name in {
+            "identity_7d_pen",
+            "rdt_right_arm_action_chart_v1",
+            "rdt_left_arm_action_chart_v1",
+            "rdt_bimanual_action_chart_v1",
+        }:
+            return "adjacent_action_delta"
+        raise ValueError(f"profile {self.name!r} has no sampling arm-motion contract")
+
+    @property
+    def gripper_open_direction(self) -> int:
+        """Return the source-chart sign that opens the gripper.
+
+        Event labels are represented internally as negative/positive deltas,
+        but the native command convention is outlet-specific.  Keeping this
+        fact on the data profile prevents loss, validation and sampler code
+        from silently treating a ManiSkill ``+1`` open command as a close (or
+        vice versa).  The property is metadata only and deliberately does not
+        alter the numeric profile digest.
+        """
+
+        if self.name in {
+            "maniskill_pd_ee_delta_pose_7d_v1",
+            "maniskill_pd_ee_delta_pose_7d_v2",
+            "calvin_relative_7d_v1",
+        }:
+            # ManiSkill pd_ee_delta_pose and CALVIN execute positive gripper
+            # commands as open; negative commands close.
+            return 1
+        if self.name in {
+            "identity_7d_pen",
+            "libero_relative_7d_v1",
+            "rdt_right_arm_action_chart_v1",
+            "rdt_left_arm_action_chart_v1",
+            "rdt_bimanual_action_chart_v1",
+        }:
+            # Pen/LIBERO/RDT retain their established negative-open chart.
+            return -1
+        raise ValueError(f"profile {self.name!r} has no declared gripper direction")
 
     def validate(self) -> None:
         if not self.name or not self.action_chart or not self.state_chart:
@@ -99,6 +157,8 @@ class ActionStateChartProfile:
         scale = np.asarray(self.state_to_action_scale, dtype=np.float64)
         if not np.isfinite(scale).all() or bool(np.any(scale <= 0.0)):
             raise ValueError("state-to-action scales must be finite and positive")
+        if self.gripper_open_direction not in {-1, 1}:
+            raise ValueError("profile gripper open direction must be -1 or +1")
 
     def as_dict(self) -> dict[str, object]:
         self.validate()
@@ -135,6 +195,13 @@ class ActionStateChartProfile:
         projected_action = np.ascontiguousarray(actions[:, self.action_indices])
         projected_state = np.ascontiguousarray(states[:, self.state_indices])
         source_action_state = episode.action_states_raw
+        if self.name in {"maniskill_pd_ee_delta_pose_7d_v1", "maniskill_pd_ee_delta_pose_7d_v2"}:
+            if source_action_state is None or episode.action_state_key != "action_state":
+                raise ValueError("ManiSkill requires explicit previous-command action_state")
+            if np.any(np.abs(actions) > 1.0):
+                raise ValueError("ManiSkill pd_ee_delta_pose actions must be in [-1,1]")
+            if not np.allclose(actions[:-1], source_action_state[1:], rtol=0, atol=1e-6):
+                raise ValueError("ManiSkill action_state is not the previous executed action")
         if source_action_state is None:
             # Legacy episodes do not carry a separate command-boundary array;
             # their observed state is already the action-state source.
@@ -210,6 +277,22 @@ def _profile(
 
 
 ACTION_STATE_CHART_PROFILES: dict[str, ActionStateChartProfile] = {
+    "maniskill_pd_ee_delta_pose_7d_v2": _profile(
+        name="maniskill_pd_ee_delta_pose_7d_v2",
+        action_indices=range(7), state_indices=range(7),
+        state_to_action_scale=(1.0,) * 7, gripper_indices=(6,),
+        action_chart="maniskill_normalized_pd_ee_delta_pose_plus_continuous_gripper",
+        state_chart="maniskill_tcp_xyz_fixed_down_causal_rotvec_plus_finger_opening_v2",
+        source_dim=7,
+    ),
+    "maniskill_pd_ee_delta_pose_7d_v1": _profile(
+        name="maniskill_pd_ee_delta_pose_7d_v1",
+        action_indices=range(7), state_indices=range(7),
+        state_to_action_scale=(1.0,) * 7, gripper_indices=(6,),
+        action_chart="maniskill_normalized_pd_ee_delta_pose_plus_continuous_gripper",
+        state_chart="maniskill_tcp_xyz_rotvec_plus_finger_opening",
+        source_dim=7,
+    ),
     "identity_7d_pen": _profile(
         name="identity_7d_pen",
         action_indices=range(7),
@@ -228,6 +311,16 @@ ACTION_STATE_CHART_PROFILES: dict[str, ActionStateChartProfile] = {
         gripper_indices=(6,),
         action_chart="calvin_relative_world_tcp_6d_plus_binary_gripper",
         state_chart="calvin_robot_obs_tcp_6d_plus_gripper",
+        source_dim=7,
+    ),
+    "libero_relative_7d_v1": _profile(
+        name="libero_relative_7d_v1",
+        action_indices=range(7),
+        state_indices=range(7),
+        state_to_action_scale=(1.0,) * 7,
+        gripper_indices=(6,),
+        action_chart="libero_normalized_osc_pose_6d_plus_continuous_gripper",
+        state_chart="libero_eef_6d_plus_gripper_opening_width",
         source_dim=7,
     ),
     "rdt_right_arm_action_chart_v1": _profile(

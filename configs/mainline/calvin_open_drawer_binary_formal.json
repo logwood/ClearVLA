@@ -1,0 +1,31 @@
+{
+  "data": {
+    "raw_hdf5_root": "/data/senwang/data/calvin/converted/abc_d_full",
+    "hdf5_glob": "*.hdf5",
+    "decoded_cache": "/data/senwang/data/calvin/caches/abc_d_full/decoded_336",
+    "dino_cache": "/data/senwang/data/calvin/caches/abc_d_full/dinov2_base_336",
+    "t5_condition": "/data/senwang/data/calvin/language/abc_d_full_t5_xxl_bank.pt",
+    "output_dir": "/data/senwang/data/calvin/runs/clearvla_open_drawer_binary_formal_20260903",
+    "data_profile": "calvin_relative_7d_v1",
+    "action_key": "action",
+    "action_state_key": "action_state",
+    "state_key": "state",
+    "top_camera_key": "observations/images/cam_high",
+    "wrist_camera_key": "observations/images/cam_right_wrist",
+    "split_mode": "episode-manifest",
+    "split_manifest": "/data/senwang/data/calvin/configs/open_drawer_splits.json",
+    "task_filter": "open_drawer",
+    "train_episodes": 0,
+    "val_episodes": 0,
+    "test_episodes": 0,
+    "sampling_gripper_event_threshold": 0.1
+  },
+  "bottom": {
+    "arm_flow_mode": "relative_command_adapter",
+    "gripper_output_mode": "calvin_binary_command"
+  },
+  "objectives": {
+    "gripper_command": 0.1,
+    "gripper_event_threshold": 0.1
+  }
+}

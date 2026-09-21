@@ -68,12 +68,16 @@ flowchart LR
 | 对象空间 | `K=4`，另有显式 null mass |
 | 世界区间 | `4-8 / 8-16 / 16-32 / 32-48` |
 | 动作输出 | 24 步 × 7 维 |
-| 训练方式 | fresh、single-stage、end-to-end |
+| 训练路径 | single-stage、end-to-end；起点区分 fresh、组件初始化与 exact resume |
 
-Schema31 只通过专用配置显式启用；它仍需完成真实 CUDA/BF16、运行时显存和
-只读生产 checkpoint 回放等远端门槛。分支名、run tag 和旧实验编号都不是模型
-身份，真正的恢复边界由 manifest、解析后的配置、源码摘要和 `run_context.json`
-共同决定。
+Schema31 只通过专用配置显式启用。各 B-spine 组件的 CUDA/BF16、显存、checkpoint
+回放和行为证据必须按具体源码与配置分别判断；某个历史实验的结果不能替代另一个
+候选的验收。分支名、run tag 和旧实验编号都不是模型身份，真正的恢复边界由
+manifest、解析后的配置、源码摘要和 `run_context.json` 共同决定。
+
+本页描述当前工作区的默认设计，不代表服务器上每个冻结实验。源码已实现、
+结构检查通过、完成训练和行为验证是四种不同状态；可选 W 相机/动作序列
+方案的存在不表示已成为默认或已证明有效。
 
 ## 快速开始
 
@@ -153,9 +157,10 @@ checkpoint。正式运行至少需要：
 5. [`docs/research/README.md`](docs/research/README.md)
    — 历史证据和辅助文档的分层索引。
 
-当文档冲突时，以活动源码和对应运行的 `run_context.json` 为最高事实，其次是
-当前架构合同。不要从旧文件名、旧 launcher、日志标题或 checkpoint 目录名反推
-当前行为。
+检查具体实验时，以该实验固定的源码、checkpoint/config 和 `run_context.json`
+为最高事实；修改当前实现时，以当前工作区源码及解析后的配置为准，再核对架构
+合同。交接页中的状态有各自的核验时间和任务范围，旧会话限制不能覆盖后来明确
+授权的工作。不要从文件名、launcher、日志标题或目录名反推当前行为。
 
 ## Checkpoint 与复现原则
 

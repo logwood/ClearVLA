@@ -602,10 +602,6 @@ class PhysicalActionCodec(nn.Module):
     def uses_arm_manifold(self) -> bool:
         return str(self.config.arm_flow_mode) == "manifold_native"
 
-    @property
-    def uses_relative_command_direct(self) -> bool:
-        return str(self.config.arm_flow_mode) == "relative_command_direct"
-
     def split_action(self, action: Tensor) -> tuple[Tensor, Tensor]:
         gi = self.gripper_index
         grip = action[..., gi : gi + 1]
@@ -627,7 +623,7 @@ class PhysicalActionCodec(nn.Module):
         boundary = self.boundary(action, action_state)
         arm, grip = self.split_action(action)
         prev_arm, prev_grip = self.split_action(boundary)
-        arm_delta = arm if self.uses_relative_command_direct else arm - prev_arm
+        arm_delta = arm - prev_arm
         grip_field = self.encode_gripper_field(grip, prev_grip=prev_grip, action_state=action_state)
         return torch.cat([arm, arm_delta, grip_field], dim=-1)
 
@@ -682,8 +678,6 @@ class PhysicalActionCodec(nn.Module):
                 f"[B,{int(self.config.action_horizon)},{self.arm_dim}], "
                 f"got {tuple(native_velocity.shape)}"
             )
-        if self.uses_relative_command_direct:
-            return torch.cat([native_velocity, native_velocity], dim=-1)
         return torch.cat([native_velocity, self._arm_difference(native_velocity)], dim=-1)
 
     def _sample_native_arm_noise(
@@ -717,8 +711,6 @@ class PhysicalActionCodec(nn.Module):
         return self.arm_source.diagnostics(native_source, state_arm)
 
     def encode_arm_coordinates(self, arm: Tensor, action_state: Tensor) -> tuple[Tensor, Tensor]:
-        if self.uses_relative_command_direct:
-            return arm, arm
         state_arm, _ = self.split_action(action_state.to(device=arm.device, dtype=arm.dtype))
         delta = self._arm_difference(arm)
         delta[:, 0] = delta[:, 0] - state_arm
@@ -732,14 +724,6 @@ class PhysicalActionCodec(nn.Module):
             )
         arm_abs = arm_field[..., : self.arm_dim].float()
         arm_delta = arm_field[..., self.arm_dim :].float()
-        if self.uses_relative_command_direct:
-            blend = float(self.config.physical_decode_delta_blend)
-            native = (1.0 - blend) * arm_abs + blend * arm_delta
-            return (
-                native.to(dtype=arm_field.dtype),
-                arm_field,
-                torch.zeros_like(arm_field),
-            )
         difference = self.arm_difference_matrix.to(device=arm_field.device, dtype=torch.float32)
         inverse = self.arm_projection_inverse.to(device=arm_field.device, dtype=torch.float32)
         with torch.autocast(device_type=arm_field.device.type, enabled=False):
@@ -760,8 +744,6 @@ class PhysicalActionCodec(nn.Module):
             raise ValueError(
                 f"arm_field must be [B,T,{2 * self.arm_dim}], got {tuple(arm_field.shape)}"
             )
-        if self.uses_relative_command_direct:
-            return arm_field
         state_arm, _ = self.split_action(
             action_state.to(device=arm_field.device, dtype=arm_field.dtype)
         )
@@ -927,11 +909,7 @@ class PhysicalActionCodec(nn.Module):
             state_arm, state_grip = self.split_action(
                 action_state.to(device=physical.device, dtype=physical.dtype)
             )
-            arm_from_delta = (
-                parts["arm_delta"]
-                if self.uses_relative_command_direct
-                else state_arm[:, None] + torch.cumsum(parts["arm_delta"], dim=1)
-            )
+            arm_from_delta = state_arm[:, None] + torch.cumsum(parts["arm_delta"], dim=1)
             arm = (1.0 - blend) * arm_abs + blend * arm_from_delta
             if self.uses_parseval_gripper_field:
                 grip = grip_abs
@@ -953,17 +931,6 @@ class PhysicalActionCodec(nn.Module):
     ) -> Tensor:
         """Consistency between physical delta channels and decoded action deltas."""
         parts = self.split_physical(physical)
-        if self.uses_relative_command_direct:
-            error = torch.nn.functional.smooth_l1_loss(
-                parts["arm_abs"],
-                parts["arm_delta"],
-                reduction="none",
-            ).mean(dim=-1)
-            if reduction == "none":
-                return error
-            if reduction == "mean":
-                return error.mean()
-            raise ValueError(f"unknown delta consistency reduction: {reduction!r}")
         boundary = self.boundary(
             decoded_action, action_state.to(decoded_action.device, decoded_action.dtype)
         )
@@ -1262,7 +1229,6 @@ class PhysicalActionTokenLift(nn.Module):
         h = config.hidden_size
         ad = config.arm_dim
         self.config = config
-        self.arm_direct = str(config.arm_flow_mode) == "relative_command_direct"
         self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
         self.arm_abs = nn.Linear(ad, h)
         self.arm_delta = nn.Linear(ad, h)
@@ -1340,7 +1306,6 @@ class NativeTimePhysicalActionTokenLift(nn.Module):
         self.config = config
         self.codec = PhysicalActionCodec(config)
         self.arm_manifold = str(config.arm_flow_mode) == "manifold_native"
-        self.arm_direct = str(config.arm_flow_mode) == "relative_command_direct"
         self.parseval_gripper = str(config.gripper_field_mode) == "parseval_temporal"
         self.arm_native = nn.Linear(ad, h) if self.arm_manifold else None
         self.arm_abs = None if self.arm_manifold else nn.Linear(ad, h)

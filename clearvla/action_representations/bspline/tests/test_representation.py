@@ -578,22 +578,11 @@ def test_current_physical_codec_adapter_is_exact_and_gripper_is_untouched() -> N
     )
 
 
-@pytest.mark.parametrize(
-    ("arm_flow_mode", "expected_relative_command_direct"),
-    [
-        ("legacy_independent", False),
-        ("relative_command_direct", True),
-    ],
-)
-def test_current_codec_complete_facade_forwards_explicit_gripper_boundary(
-    arm_flow_mode: str,
-    expected_relative_command_direct: bool,
-) -> None:
+def test_current_codec_complete_facade_forwards_explicit_gripper_boundary() -> None:
     torch.manual_seed(111)
     base = PhysicalActionFieldCodec(
         action_dim=7,
         horizon=24,
-        arm_flow_mode=arm_flow_mode,
     )
     representation = BSplineActionRepresentation(make_spec())
     adapter = PhysicalActionFieldBSplineAdapter(representation, base)
@@ -601,8 +590,6 @@ def test_current_codec_complete_facade_forwards_explicit_gripper_boundary(
     state = torch.randn(2, 7)
     codec_gripper_boundary = torch.tensor([[-3.0], [4.0]], dtype=action.dtype)
 
-    assert adapter.uses_relative_command_direct is base.uses_relative_command_direct
-    assert adapter.uses_relative_command_direct is expected_relative_command_direct
     assert (
         adapter.integration_metadata()["codec_gripper_boundary_semantics"]
         == "explicit_transparent_forwarding_only"
@@ -768,7 +755,7 @@ def test_codec_facade_rejects_an_incomplete_forwarding_contract_at_construction(
             return field[..., :7]
 
     representation = BSplineActionRepresentation(make_spec())
-    with pytest.raises(TypeError, match="uses_relative_command_direct"):
+    with pytest.raises(TypeError, match="sample_noise"):
         PhysicalActionFieldBSplineAdapter(
             representation,
             EncodeDecodeOnlyCodec(),  # type: ignore[arg-type]

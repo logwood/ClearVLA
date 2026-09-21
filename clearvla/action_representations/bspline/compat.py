@@ -27,9 +27,6 @@ class PhysicalActionCodecProtocol(Protocol):
     @property
     def physical_dim(self) -> int: ...
 
-    @property
-    def uses_relative_command_direct(self) -> bool: ...
-
     def encode(
         self,
         action: Tensor,
@@ -159,7 +156,6 @@ class PhysicalActionFieldBSplineAdapter(nn.Module):
             "physical_dim",
             "gripper_field_dim",
             "decode_delta_blend",
-            "uses_relative_command_direct",
         ):
             if not hasattr(physical_codec, attribute):
                 raise TypeError(f"physical_codec is missing required attribute {attribute!r}")
@@ -233,10 +229,6 @@ class PhysicalActionFieldBSplineAdapter(nn.Module):
     @property
     def decode_delta_blend(self) -> float:
         return float(self.physical_codec.decode_delta_blend)
-
-    @property
-    def uses_relative_command_direct(self) -> bool:
-        return bool(self.physical_codec.uses_relative_command_direct)
 
     def _validate_native(self, action: Tensor) -> None:
         if action.ndim != 3 or tuple(action.shape[1:]) != (

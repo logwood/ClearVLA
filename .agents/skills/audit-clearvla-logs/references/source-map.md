@@ -23,14 +23,14 @@
 - `clearvla/mainline/model/policy.py`, `top.py`
   - static online cache, training-only target plane and ODE-step-dependent
   P2/P3/bottom composition;
-- `clearvla/mainline/model/action_codec.py` and
-  `clearvla/mainline/v120_core/codec.py`
-  - outlet-owned 18-D physical-field encoding, source-noise construction,
-    direct/legacy arm branch semantics, profile-owned gripper boundary and
-    decode/projection behavior;
-  - CALVIN `relative_command_direct` must be audited as two direct relative-TCP
-    command branches, while Pen/RDT retain the legacy absolute/adjacent-delta
-    arm chart;
+- `clearvla/mainline/model/action_codec.py`,
+  `clearvla/mainline/model/components.py`, `clearvla/mainline/data/dataset.py`,
+  and `clearvla/mainline/v120_core/codec.py`
+  - the shared 18-D physical-field encoding, source-noise construction,
+    profile-owned gripper boundary and decode/projection behavior;
+  - every outlet keeps the established value/adjacent-difference arm field;
+    CALVIN relative-TCP semantics are adapted only at the sampler and W
+    boundaries by `OutletAdapter`, while Pen/RDT bypass that conversion;
 - `clearvla/mainline/training/losses.py`, `optimizer.py`, `engine.py`
   - exact action/representation ledger, owner groups, backward and clipping;
   - `optimizer.py` resolves the V120 role geometry explicitly: public top at
@@ -47,6 +47,11 @@
   unchanged raw action lift, its sole optimizer owner, evaluation-only
   `spine_zero` route, and the separately named fixed-W refined-pass versus
   complete proposal/W/refined lifecycle band/channel validation surfaces;
+  - `fixed_bspline_arm_private_reader_v1` reuses the arm-only coarse chart but
+    keeps it out of the shared MMDiT seed; `TerminalActionController` applies
+    its reader output only to the twelve arm physical-velocity channels. Audit
+    spline-lift and private-reader probe coordinates separately even though
+    both are in the `bottom_spine` optimizer group;
   - the spline reads only the deployed noisy physical field. It adds no loss,
     top carrier, action codec, output head, ODE step or W rebuild;
 - `clearvla/tools/audit_policy_logs.py`

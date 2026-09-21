@@ -3,11 +3,16 @@
 `clearvla/mainline/` is the only active capability-named implementation.
 V-numbered trainers and launchers are historical comparison material.
 
+Scope reviewed: 2026-09-19 UTC, current workspace source and its resolved
+configs. This package description does not describe every frozen mainline
+revision deployed on the server. Evaluate a checkpoint with its own source,
+config and ABI; a newer README does not migrate it.
+
 Read the [architecture contract](../../docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md)
 for graph semantics, the [issue ledger](../../docs/research/CURRENT_MAINLINE_ISSUES.md)
 for unresolved behavior, and the [handoff](../../docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md)
-for live process state. This file keeps only package boundaries and stable entry
-points.
+for timestamped process observations. This file keeps only package boundaries
+and stable entry points.
 
 ## Remote workspace
 
@@ -17,8 +22,8 @@ not model identity. New runs use a fixed repository plus commit-specific Git
 worktrees under `checkouts/` instead of another full clone per experiment.
 
 The [active handoff](../../docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md)
-owns the complete path contract, current imported-run mapping and protection
-boundary. Do not duplicate those volatile paths here.
+owns the path contract, dated run observations and task protection boundary.
+Do not duplicate those volatile observations here.
 
 ## Package boundary
 
@@ -63,14 +68,22 @@ the typed boundaries above.
 
 | Mode | Meaning |
 |---|---|
-| `new_training` | New model/optimizer state and empty output directory |
+| `new_training` | Fresh model initialization and fresh optimizer/schedule/RNG in a new output directory |
 | `exact_resume` | Continuation accepted by the serialized resume contract |
-| `validation_replay` | Read-only checkpoint evaluation; no optimizer/RNG restore or writes |
-| `component_initialization` | Bounded construction/smoke; not training evidence |
+| `validation_replay` | Evaluate saved model state without mutating the checkpoint or restoring training continuation; diagnostics may be written to a separate output directory |
+| `component_initialization` | Load admitted model weights/components from a verified checkpoint, then use fresh optimizer/schedule/RNG; this may start a formal training run or an explicitly bounded smoke |
+
+Initialization describes how a run starts. `--smoke` describes a limited run
+budget; completed training and validated task behavior are separate results.
+`--init-checkpoint` is not an exact resume. Its initialization checks alone are
+not training evidence, but a subsequent formal run can provide such evidence.
+Any model/data-contract migration must be explicitly selected and admitted.
 
 An output-directory guard is filesystem safety, not architecture identity.
 Exact resume requires matching architecture/component ABI, data, optimizer and
 continuation contracts.
+The mode name alone does not certify sampler/worker next-batch equivalence;
+the remaining continuation debt is tracked in the current issue ledger.
 
 ## Stable entry points
 
@@ -104,5 +117,5 @@ evidence before a semantic repair. Keep outlet conversion at the outlet
 boundary, and do not use gains, quotas, artificial gradients, clipping or extra
 loss weight to hide an unresolved connection.
 
-Live PIDs and current release claims belong in the handoff and issue ledger,
-not in this package README.
+Dated process observations belong in the handoff and release evidence in the
+issue ledger, not in this package README.

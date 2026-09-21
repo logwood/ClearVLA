@@ -132,7 +132,12 @@ class OnlineVisualStore:
 
     def _direct_frame(self, episode: LoadedEpisode, camera: str, idx: int) -> np.ndarray:
         self._ensure_process_local()
-        key = (str(episode.path.resolve()), camera, int(idx))
+        resolved_idx = int(
+            episode.resolve_cached_frame_indices(
+                np.asarray([int(idx)], dtype=np.int64)
+            )[0]
+        )
+        key = (str(episode.path.resolve()), camera, resolved_idx)
         cached = self._frame_lru.pop(key, None)
         if cached is not None:
             self._frame_lru[key] = cached
@@ -144,7 +149,9 @@ class OnlineVisualStore:
             dataset = handle[episode.camera_keys[camera]]
         except KeyError as exc:
             raise KeyError(f"{episode.path}: unresolved camera={camera!r}") from exc
-        frame = apply_preprocess(decode_image_value(dataset[int(idx)]), self.preprocessing)
+        frame = apply_preprocess(
+            decode_image_value(dataset[resolved_idx]), self.preprocessing
+        )
         frame = np.ascontiguousarray(frame, dtype=np.uint8)
         if self.frame_lru_capacity > 0:
             self._frame_lru[key] = frame

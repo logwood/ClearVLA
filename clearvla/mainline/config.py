@@ -15,7 +15,19 @@ from pathlib import Path
 from typing import Mapping, TypeVar, cast
 
 from clearvla.data.action_chart import resolve_action_state_profile
+from clearvla.data.window_boundaries import (
+    CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    CAUSAL_PREFIX_V1,
+    STRICT_COMPLETE_V1,
+    WINDOW_BOUNDARY_CONTRACTS,
+)
 
+from .gripper_contract import (
+    CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
+    CONTINUOUS_GRIPPER_OUTPUT_MODE,
+    MANISKILL_BINARY_GRIPPER_OUTPUT_MODE,
+    VALID_GRIPPER_OUTPUT_MODES,
+)
 from .manifest import ARCHITECTURE_MANIFEST
 from .v120_core.bspine import (
     BSPINE0_BASIS_DIGEST,
@@ -23,9 +35,11 @@ from .v120_core.bspine import (
     BSPINE0_DEGREE,
     BSPINE0_IMPLEMENTATION,
     BSPINE0_SPEC_FINGERPRINT,
+    BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
     BSPINE_ARM_ONLY_ACTION_GROUP_MASK,
     BSPINE_ARM_ONLY_IMPLEMENTATION,
     BSPINE_ARM_ONLY_SPEC_FINGERPRINT,
+    BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
     BSPINE_DISABLED_IMPLEMENTATION,
 )
 
@@ -47,6 +61,10 @@ class DataConfig:
     wrist_camera_key: str = "observations/images/cam_right_wrist"
     camera_key_overrides: tuple[tuple[str, str], ...] = ()
     image_store_mode: str = "decoded-cache"
+    # Opt-in physical NPY reads only; sampling and cache/data identity stay
+    # owned by their existing contracts. Legacy payloads omit these defaults.
+    visual_cache_read_backend: str = "mmap"
+    visual_pread_max_open_files: int = 16
     image_frame_lru_capacity: int = 512
     image_open_file_capacity: int = 8
     cache_side: int = 336
@@ -58,6 +76,16 @@ class DataConfig:
     dinov2_reference_batch_size: int = 32
     split_mode: str = "ordered-counts"
     split_manifest: str = ""
+    # Optional official CALVIN source used as a read-only truth overlay over
+    # an existing converted/cache prefix.  Large raw/cache artifacts stay
+    # outside the repository; the path is serialized in the run context but
+    # excluded from relocation-insensitive config digests below.
+    calvin_raw_source: str = ""
+    # Optional, simulator-admitted LIBERO training episodes.  The base split
+    # continues to own validation/test and both affine normalizers; the paired
+    # overlay is train-only and carries its own content-addressed manifest.
+    libero_retarget_overlay_root: str = ""
+    libero_retarget_overlay_manifest: str = ""
     task_selection_manifest: str = ""
     normalizer_artifact: str = ""
     # Optional source-side task filter.  It is applied before split resolution
@@ -78,6 +106,28 @@ class DataConfig:
     # identity profile.  Other source charts must opt into a threshold rather
     # than silently borrowing raw units from another dataset.
     sampling_gripper_event_threshold: float | None = None
+    # ``window_any`` preserves the historical event-window sampler.  The
+    # deployment policy executes only the first predicted row, so the
+    # ``first_action`` experiment reserves event quota for a transition that
+    # is actually executed at the current decision.  ``disabled`` is an
+    # explicit LIBERO-only continuous-action mode: no gripper event owns a
+    # sampler lane, while the ordinary dense 7-D action target is unchanged.
+    sampling_gripper_event_scope: str = "window_any"
+    # Optional LIBERO-only repair for receding-horizon release timing.  When
+    # non-zero, the boundary sampler reserves that fraction of its terminal
+    # tail slots for windows whose *first executed row* is an opening
+    # transition.  Zero is the historical sampler and is omitted from the
+    # serialized default payload for checkpoint compatibility.
+    release_first_action_fraction: float = 0.0
+    # Which causal episode centers are admitted for training.  The default is
+    # omitted from serialized configs to preserve existing checkpoint identity.
+    window_boundary_contract: str = STRICT_COMPLETE_V1
+    # Optional explicit number of information-sampler batches per epoch.  A
+    # boundary-aware LIBERO run otherwise keeps the historical strict-lane
+    # length, which under-samples prefix/tail windows.  ``None`` preserves
+    # legacy behavior; a positive value is serialized as an experiment
+    # semantic so the effective trajectory/window budget is auditable.
+    information_batches_per_epoch: int | None = None
 
     def camera_key_map(self) -> dict[str, str]:
         if self.camera_key_overrides:
@@ -134,10 +184,45 @@ class DataConfig:
             raise ValueError("data.dinov2_reference_batch_size must be positive")
         if self.image_store_mode not in {"decoded-cache", "hdf5-direct"}:
             raise ValueError("data.image_store_mode must be decoded-cache or hdf5-direct")
+        if self.visual_cache_read_backend not in {"mmap", "pread"}:
+            raise ValueError("data.visual_cache_read_backend must be mmap or pread")
+        if type(self.visual_pread_max_open_files) is not int or self.visual_pread_max_open_files <= 0:
+            raise ValueError("data.visual_pread_max_open_files must be a positive integer")
+        if self.visual_cache_read_backend == "mmap" and self.visual_pread_max_open_files != 16:
+            raise ValueError("a custom visual_pread_max_open_files requires the pread backend")
         if self.image_frame_lru_capacity < 0 or self.image_open_file_capacity <= 0:
             raise ValueError("image-store LRU capacity must be non-negative and files positive")
         if not isinstance(self.task_filter, str):
             raise ValueError("data.task_filter must be a string")
+        if not isinstance(self.calvin_raw_source, str):
+            raise ValueError("data.calvin_raw_source must be a string")
+        if not isinstance(self.libero_retarget_overlay_root, str) or not isinstance(
+            self.libero_retarget_overlay_manifest, str
+        ):
+            raise ValueError("LIBERO retarget overlay root/manifest must be strings")
+        if bool(self.libero_retarget_overlay_root.strip()) != bool(
+            self.libero_retarget_overlay_manifest.strip()
+        ):
+            raise ValueError(
+                "LIBERO retarget overlay root and manifest must be configured together"
+            )
+        if self.libero_retarget_overlay_root.strip():
+            if self.data_profile != "libero_relative_7d_v1":
+                raise ValueError("LIBERO retarget overlay requires the LIBERO profile")
+            if self.split_mode != "episode-manifest":
+                raise ValueError("LIBERO retarget overlay requires episode-manifest split")
+            if self.window_boundary_contract != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2:
+                raise ValueError(
+                    "LIBERO retarget overlay requires causal_prefix_terminal_suffix_v2"
+                )
+        if self.calvin_raw_source.strip() and self.data_profile != "calvin_relative_7d_v1":
+            raise ValueError(
+                "data.calvin_raw_source is valid only for the CALVIN action profile"
+            )
+        if self.calvin_raw_source.strip() and self.split_mode != "episode-manifest":
+            raise ValueError(
+                "data.calvin_raw_source requires split_mode=episode-manifest"
+            )
         if self.split_mode == "ordered-counts":
             if self.split_manifest or self.task_selection_manifest or self.normalizer_artifact:
                 raise ValueError(
@@ -176,19 +261,81 @@ class DataConfig:
             raise ValueError("data stride must be positive and worker count non-negative")
         if self.seed < 0:
             raise ValueError("data seed must be non-negative")
+        if self.window_boundary_contract not in WINDOW_BOUNDARY_CONTRACTS:
+            raise ValueError(
+                f"data.window_boundary_contract must be one of {WINDOW_BOUNDARY_CONTRACTS}"
+            )
+        if self.information_batches_per_epoch is not None:
+            if (
+                isinstance(self.information_batches_per_epoch, bool)
+                or int(self.information_batches_per_epoch)
+                != self.information_batches_per_epoch
+                or int(self.information_batches_per_epoch) <= 0
+            ):
+                raise ValueError(
+                    "data.information_batches_per_epoch must be a positive integer when set"
+                )
+        if (
+            self.window_boundary_contract != STRICT_COMPLETE_V1
+            and self.data_profile != "libero_relative_7d_v1"
+        ):
+            raise ValueError(
+                "causal prefix/terminal boundary contracts are valid only for LIBERO"
+            )
+        if self.data_profile == "maniskill_pd_ee_delta_pose_7d_v2" and self.stride != 1:
+            raise ValueError("ManiSkill v2 requires stride=1 for all-source first-action coverage")
         resolve_action_state_profile(self.data_profile).validate()
         if self.sampling_gripper_event_threshold is not None:
             threshold = float(self.sampling_gripper_event_threshold)
             if not math.isfinite(threshold) or threshold < 0.0:
                 raise ValueError("sampling gripper event threshold must be finite and non-negative")
-        if (
-            self.information_uniform_fraction != 0.50
-            or self.information_event_fraction != 0.125
-            or self.information_motion_quantile != 0.70
+        if self.sampling_gripper_event_scope not in {
+            "window_any",
+            "first_action",
+            "disabled",
+        }:
+            raise ValueError(
+                "sampling_gripper_event_scope must be window_any, first_action or disabled"
+            )
+        if self.sampling_gripper_event_scope == "disabled" and (
+            self.data_profile != "libero_relative_7d_v1"
+            or self.information_event_fraction != 0.0
+        ):
+            raise ValueError(
+                "disabled gripper-event sampling requires the LIBERO profile "
+                "and information_event_fraction=0"
+            )
+        release_fraction = float(self.release_first_action_fraction)
+        if not math.isfinite(release_fraction) or not 0.0 <= release_fraction <= 1.0:
+            raise ValueError(
+                "data.release_first_action_fraction must be finite and in [0,1]"
+            )
+        if release_fraction > 0.0 and (
+            self.data_profile != "libero_relative_7d_v1"
+            or self.window_boundary_contract != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+        ):
+            raise ValueError(
+                "release-first sampling is valid only for LIBERO terminal-suffix v2"
+            )
+        historical_information_sampler = (
+            self.information_uniform_fraction == 0.50
+            and self.information_event_fraction == 0.125
+            and self.information_motion_quantile == 0.70
+        )
+        libero_dense_information_sampler = (
+            self.data_profile == "libero_relative_7d_v1"
+            and self.sampling_gripper_event_scope == "disabled"
+            and self.information_uniform_fraction == 0.50
+            and self.information_event_fraction == 0.0
+            and self.information_motion_quantile == 0.70
+        )
+        if not (
+            historical_information_sampler or libero_dense_information_sampler
         ):
             raise ValueError(
                 "formal information-balanced sampling is fixed at "
-                "uniform=0.50, event=0.125, motion_quantile=0.70"
+                "uniform=0.50, event=0.125, motion_quantile=0.70, except "
+                "the explicit LIBERO dense continuous mode with event=0"
             )
 
 
@@ -298,8 +445,51 @@ class TopConfig:
     proposal_summary_tokens: int = 3
     goal_condition_dropout: float = 0.05
     action_history_condition_dropout: float = 0.10
+    # Single-edge research control. The default retains the accepted S graph;
+    # history_only removes goal innovation only from the interval K query.
+    interval_object_query_mode: str = "goal_history"
+    # The default preserves the accepted W camera path exactly.  The opt-in
+    # research mode adds a zero-initialized, zero-preserving condition from
+    # each camera's current image-plane coordinate and its explicitly declared
+    # role.  It does not add calibrated extrinsics or move language into W.
+    world_camera_condition_mode: str = "motion_prior_only"
+    # The accepted graph keeps the historical four interval means.  The
+    # opt-in sequence mode predicts and conditions W on the complete 24-row
+    # normalized physical proposal through a causal prefix encoder.
+    world_action_condition_mode: str = "interval_mean_v1"
+    # The accepted reader applies typed S only after K/K*C pooling.  The
+    # opt-in target-prior mode moves direct target identity to the spatial
+    # address, shared over semantic and geometry readers, while W retains
+    # value/support authority and the geometry reader retains its camera axis.
+    p2_spatial_intent_mode: str = "post_pool_only"
 
     def validate(self) -> None:
+        if self.interval_object_query_mode not in {"goal_history", "history_only"}:
+            raise ValueError("top interval_object_query_mode must be goal_history or history_only")
+        if self.world_camera_condition_mode not in {
+            "motion_prior_only",
+            "coordinate_role_v1",
+        }:
+            raise ValueError(
+                "top world_camera_condition_mode must be motion_prior_only "
+                "or coordinate_role_v1"
+            )
+        if self.world_action_condition_mode not in {
+            "interval_mean_v1",
+            "sequence_prefix_v1",
+        }:
+            raise ValueError(
+                "top world_action_condition_mode must be interval_mean_v1 "
+                "or sequence_prefix_v1"
+            )
+        if self.p2_spatial_intent_mode not in {
+            "post_pool_only",
+            "shared_target_prior_v1",
+        }:
+            raise ValueError(
+                "top p2_spatial_intent_mode must be post_pool_only "
+                "or shared_target_prior_v1"
+            )
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")
         if (
@@ -350,14 +540,16 @@ class BottomConfig:
     controlled_delta_dropout: float = 0.0
     gripper_field_dim: int = 6
     physical_decode_delta_blend: float = 0.25
-    # Arm chart carried by the fixed 12-channel arm field.  Pen/RDT retain the
-    # historical absolute plus finite-difference chart.  CALVIN actions are
-    # already relative TCP commands, so both branches carry that command
-    # directly instead of manufacturing a second temporal derivative.
+    # Source semantics at the outlet boundary.  The internal 12-channel arm
+    # field always retains its established value plus adjacent-difference
+    # representation.  CALVIN selects an adapter which interprets the value as
+    # a relative TCP command for sampler/W/deployment semantics without
+    # replacing the shared network representation.
     arm_flow_mode: str = "legacy_independent"
-    # Native deployment policy for the final gripper command.  Pen/RDT keep
-    # the continuous physical field; CALVIN owns an explicit two-class
-    # command-state head whose argmax is mapped to {-1,+1} by the adapter.
+    # Native deployment policy for the final gripper command.  Continuous
+    # outlets use the physical field.  CALVIN and the explicit ManiSkill
+    # binary outlet own a separate two-class command-state head whose argmax
+    # is mapped to {-1,+1} by the adapter.
     gripper_output_mode: str = "continuous"
     # B-spine is a separately identified execution-bottom implementation.
     # Disabled configs serialize none of these fields, preserving the exact
@@ -422,15 +614,16 @@ class BottomConfig:
             raise ValueError("the resolved physical action decode blend is exactly 0.25")
         if self.arm_flow_mode not in {
             "legacy_independent",
-            "relative_command_direct",
+            "relative_command_adapter",
         }:
             raise ValueError(
                 "bottom.arm_flow_mode must be legacy_independent or "
-                "relative_command_direct"
+                "relative_command_adapter"
             )
-        if self.gripper_output_mode not in {"continuous", "calvin_binary_command"}:
+        if self.gripper_output_mode not in VALID_GRIPPER_OUTPUT_MODES:
             raise ValueError(
-                "bottom.gripper_output_mode must be continuous or calvin_binary_command"
+                "bottom.gripper_output_mode must be continuous, "
+                "calvin_binary_command, or maniskill_binary_command"
             )
         if self.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
             if (
@@ -466,7 +659,11 @@ class BottomConfig:
                 raise ValueError(
                     "the existing all-field B-spine identity cannot carry a new group mask"
                 )
-        elif self.bspine_implementation == BSPINE_ARM_ONLY_IMPLEMENTATION:
+        elif self.bspine_implementation in {
+            BSPINE_ARM_ONLY_IMPLEMENTATION,
+            BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
+            BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
+        }:
             expected = (
                 BSPINE0_DEGREE,
                 BSPINE0_CONTROL_POINTS,
@@ -483,13 +680,15 @@ class BottomConfig:
             )
             if actual != expected:
                 raise ValueError(
-                    "arm-only B-spine must use the frozen cubic K=12 basis, "
-                    "arm-only spec fingerprint and serialized 11000 group mask"
+                    "arm-scoped B-spine variants must use the frozen cubic K=12 "
+                    "basis, arm-only spec fingerprint and serialized 11000 group mask"
                 )
         else:
             raise ValueError(
                 "bottom.bspine_implementation must be disabled, "
-                f"{BSPINE0_IMPLEMENTATION} or {BSPINE_ARM_ONLY_IMPLEMENTATION}"
+                f"{BSPINE0_IMPLEMENTATION}, {BSPINE_ARM_ONLY_IMPLEMENTATION} "
+                f"{BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION} or "
+                f"{BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION}"
             )
 
 
@@ -508,7 +707,32 @@ class ObjectiveConfig:
     # CALVIN's discrete gripper command-state objective.  It is deliberately
     # zero for the continuous Pen/RDT paths so their loss ledger is unchanged.
     gripper_command: float = 0.0
+    # Relative per-channel weight for the four non-deployed gripper
+    # compatibility coordinates (anchor_delta, previous, abs_delta,
+    # positive_delta).  The first two coordinates (absolute and local delta)
+    # are the deployed lane.  A value of 1.0 is the historical six-channel
+    # mean; 0.0 is the controlled deployed-lane-only experiment.  The field
+    # stays in the 18-D ABI in both cases.
+    gripper_compatibility_weight: float = 1.0
     gripper_trajectory: float = 0.03
+    # Narrow continuous-gripper auxiliary loss for the row that deployment
+    # executes immediately.  It is zero by default so historical objectives
+    # and checkpoints retain their exact ledger; LIBERO repair runs opt in.
+    gripper_first_step_release: float = 0.0
+    # Continuous relative-command auxiliary for the row consumed immediately
+    # by receding-horizon execution.  It supervises a no-event row to preserve
+    # the current gripper command (absolute and local-delta lanes), preventing
+    # a later horizon event from being emitted prematurely at row zero.  It is
+    # available to both LIBERO and ManiSkill; binary CALVIN remains excluded.
+    # Zero keeps the historical objective and serialized identity unchanged.
+    gripper_first_step_hold: float = 0.0
+    # Optional target-only phase repair for the ManiSkill StackCube outlet.
+    # ``none`` preserves the historical objective and serialized identity.
+    phase_control_mode: str = "none"
+    phase_arm_flow: float = 0.0
+    phase_gripper_hold: float = 0.0
+    phase_approach_arm_gain: float = 2.0
+    phase_transport_arm_gain: float = 2.0
     motion: float = 0.03
     decoded_action: float = 0.08
     smooth_delta: float = 0.02
@@ -523,11 +747,71 @@ class ObjectiveConfig:
     arm_motion_threshold: float = 0.02
     horizon_tail_emphasis: float = 0.20
     horizon_first_step_protection: float = 0.05
+    # Optional CALVIN-only row selection at the action-loss boundary.  The
+    # shared policy graph and action codec remain unchanged.  ``uniform`` is
+    # the historical/default behavior; the explicit motion/event profile is
+    # serialized only for a matched CALVIN experiment.
+    calvin_frame_weight_mode: str = "uniform"
+    calvin_frame_motion_gain: float = 0.0
+    calvin_frame_event_gain: float = 0.0
+    calvin_frame_event_radius: int = 0
+    calvin_frame_max_weight: float = 1.0
 
     def validate(self) -> None:
         for name, value in asdict(self).items():
+            if name in {"calvin_frame_weight_mode", "phase_control_mode"}:
+                continue
             if not math.isfinite(float(value)) or float(value) < 0.0:
                 raise ValueError(f"objective.{name} must be finite and non-negative")
+        if self.calvin_frame_weight_mode not in {"uniform", "motion_event_v1"}:
+            raise ValueError(
+                "objective.calvin_frame_weight_mode must be uniform or motion_event_v1"
+            )
+        if int(self.calvin_frame_event_radius) != self.calvin_frame_event_radius:
+            raise ValueError("objective.calvin_frame_event_radius must be an integer")
+        if self.calvin_frame_event_radius < 0 or self.calvin_frame_event_radius > 3:
+            raise ValueError("objective.calvin_frame_event_radius must be in [0,3]")
+        if self.calvin_frame_max_weight < 1.0:
+            raise ValueError("objective.calvin_frame_max_weight must be at least one")
+        if self.calvin_frame_weight_mode == "uniform" and (
+            self.calvin_frame_motion_gain != 0.0
+            or self.calvin_frame_event_gain != 0.0
+            or self.calvin_frame_event_radius != 0
+            or self.calvin_frame_max_weight != 1.0
+        ):
+            raise ValueError(
+                "uniform CALVIN frame weighting cannot carry non-default gains"
+            )
+        if self.phase_control_mode not in {"none", "stackcube_phase_v1"}:
+            raise ValueError(
+                "objective.phase_control_mode must be none or stackcube_phase_v1"
+            )
+        if self.phase_control_mode == "none" and (
+            self.phase_arm_flow != 0.0 or self.phase_gripper_hold != 0.0
+        ):
+            raise ValueError(
+                "phase objective weights require phase_control_mode=stackcube_phase_v1"
+            )
+        if self.phase_control_mode == "stackcube_phase_v1" and (
+            self.phase_arm_flow <= 0.0 and self.phase_gripper_hold <= 0.0
+        ):
+            raise ValueError(
+                "stackcube_phase_v1 requires a positive phase objective weight"
+            )
+        if self.phase_control_mode == "stackcube_phase_v1" and (
+            self.phase_approach_arm_gain <= 0.0
+            or self.phase_transport_arm_gain <= 0.0
+        ):
+            raise ValueError(
+                "stackcube_phase_v1 requires positive approach and transport gains"
+            )
+        if self.calvin_frame_weight_mode == "motion_event_v1" and (
+            self.calvin_frame_motion_gain <= 0.0
+            and self.calvin_frame_event_gain <= 0.0
+        ):
+            raise ValueError(
+                "motion_event_v1 requires a positive motion or event gain"
+            )
         if self.future_dynamics <= 0.0 or self.intent_structure <= 0.0:
             raise ValueError("W and G/S require active future/structure budgets")
         if self.arm_motion_threshold != 0.02:
@@ -584,9 +868,13 @@ class OptimizerConfig:
 class RuntimeConfig:
     compute_dtype: str = "bf16"
     inference_steps: int = 5
+    # Deployment flow time is independent of the training t distribution and
+    # the 24-row action-time chart. None preserves the historical uniform ABI.
+    deployment_flow_schedule: Mapping[str, object] | None = None
     log_every: int = 20
     max_train_batches: int = 0
     max_val_batches: int = 0
+    validation_panel: str = "prefix"
     eval_sampling_diagnostic_batches: int = 16
     eval_proposal_ablation_batches: int = 16
     eval_execution_ablation_batches: int = 8
@@ -594,8 +882,16 @@ class RuntimeConfig:
     def validate(self) -> None:
         if self.compute_dtype not in {"bf16", "fp32"}:
             raise ValueError("runtime.compute_dtype must be bf16 or fp32")
+        if self.validation_panel not in {"prefix", "evenly_spaced"}:
+            raise ValueError("runtime.validation_panel must be prefix or evenly_spaced")
+        if self.validation_panel == "evenly_spaced" and self.max_val_batches <= 0:
+            raise ValueError("evenly spaced validation requires max_val_batches > 0")
         if self.inference_steps != 5:
             raise ValueError("the active deployment contract uses five ODE steps")
+        if self.deployment_flow_schedule is not None:
+            from .runtime.flow_schedule import DeploymentFlowSchedule
+
+            DeploymentFlowSchedule.from_dict(self.deployment_flow_schedule)
         if self.log_every <= 0:
             raise ValueError("log_every must be positive")
         limits = (
@@ -647,6 +943,24 @@ class ExperimentConfig:
             raise ValueError("data profile width must align with dimensions.action_dim")
         if profile.output_dim != self.dimensions.state_dim:
             raise ValueError("data profile width must align with dimensions.state_dim")
+        if self.objectives.phase_control_mode != "none" and profile.name not in {
+            "maniskill_pd_ee_delta_pose_7d_v1",
+            "maniskill_pd_ee_delta_pose_7d_v2",
+        }:
+            raise ValueError(
+                "StackCube phase control is valid only for a ManiSkill outlet"
+            )
+        if self.data.window_boundary_contract in {
+            CAUSAL_PREFIX_V1,
+            CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+        } and self.optimizer.batch_size != 8:
+            raise ValueError("controlled LIBERO boundary experiments require batch size 8")
+        if profile.name != "calvin_relative_7d_v1" and (
+            self.objectives.calvin_frame_weight_mode != "uniform"
+        ):
+            raise ValueError(
+                "selective CALVIN frame weighting is valid only for the CALVIN outlet"
+            )
         sampling_threshold = self.data.sampling_gripper_event_threshold
         if profile.name == "identity_7d_pen":
             if self.objectives.gripper_event_threshold != 0.10:
@@ -669,8 +983,33 @@ class ExperimentConfig:
         profile_grippers = tuple(int(value) for value in profile.gripper_indices)
         mode = str(self.bottom.gripper_output_mode)
         arm_mode = str(self.bottom.arm_flow_mode)
+        continuous_relative_profiles = {
+            "libero_relative_7d_v1",
+            "maniskill_pd_ee_delta_pose_7d_v1",
+            "maniskill_pd_ee_delta_pose_7d_v2",
+        }
+        if float(self.objectives.gripper_first_step_release) != 0.0 and profile.name != (
+            "libero_relative_7d_v1"
+        ):
+            raise ValueError(
+                "gripper_first_step_release is valid only for the LIBERO continuous outlet"
+            )
+        if float(self.objectives.gripper_first_step_hold) != 0.0 and profile.name not in (
+            continuous_relative_profiles
+        ):
+            raise ValueError(
+                "gripper_first_step_hold is valid only for a continuous LIBERO or ManiSkill outlet"
+            )
         if profile.name == "calvin_relative_7d_v1":
-            if mode != "calvin_binary_command":
+            if float(self.objectives.gripper_first_step_release) != 0.0:
+                raise ValueError(
+                    "gripper_first_step_release is valid only for the LIBERO continuous outlet"
+                )
+            if float(self.objectives.gripper_first_step_hold) != 0.0:
+                raise ValueError(
+                    "gripper_first_step_hold is invalid for the CALVIN binary outlet"
+                )
+            if mode != CALVIN_BINARY_GRIPPER_OUTPUT_MODE:
                 raise ValueError(
                     "CALVIN profile requires bottom.gripper_output_mode="
                     "calvin_binary_command"
@@ -681,15 +1020,82 @@ class ExperimentConfig:
                 raise ValueError(
                     "CALVIN binary command mode requires a positive objective.gripper_command"
                 )
-            if arm_mode != "relative_command_direct":
+            if arm_mode != "relative_command_adapter":
                 raise ValueError(
                     "CALVIN relative-command profile requires bottom.arm_flow_mode="
-                    "relative_command_direct"
+                    "relative_command_adapter"
+                )
+        elif profile.name == "libero_relative_7d_v1":
+            if mode != CONTINUOUS_GRIPPER_OUTPUT_MODE:
+                raise ValueError(
+                    "LIBERO relative-command profile requires bottom.gripper_output_mode=continuous"
+                )
+            if profile.gripper_transition_boundary != "previous_command":
+                raise ValueError(
+                    "continuous relative-command profile requires a previous-command gripper boundary"
+                )
+            if float(self.objectives.gripper_command) != 0.0:
+                raise ValueError(
+                    "objective.gripper_command must be zero for continuous relative-command outlets"
+                )
+            if arm_mode != "relative_command_adapter":
+                raise ValueError(
+                    "LIBERO relative-command profile requires bottom.arm_flow_mode="
+                    "relative_command_adapter"
+                )
+        elif profile.name in {
+            "maniskill_pd_ee_delta_pose_7d_v1",
+            "maniskill_pd_ee_delta_pose_7d_v2",
+        }:
+            if profile.gripper_transition_boundary != "previous_command":
+                raise ValueError(
+                    "ManiSkill requires a previous-command gripper boundary"
+                )
+            if arm_mode != "relative_command_adapter":
+                raise ValueError(
+                    "ManiSkill relative-command profile requires bottom.arm_flow_mode="
+                    "relative_command_adapter"
+                )
+            if mode == CONTINUOUS_GRIPPER_OUTPUT_MODE:
+                if float(self.objectives.gripper_command) != 0.0:
+                    raise ValueError(
+                        "objective.gripper_command must be zero for the continuous "
+                        "ManiSkill outlet"
+                    )
+            elif mode == MANISKILL_BINARY_GRIPPER_OUTPUT_MODE:
+                if profile.name != "maniskill_pd_ee_delta_pose_7d_v2":
+                    raise ValueError(
+                        "ManiSkill binary command mode requires the repaired v2 data profile"
+                    )
+                if profile_grippers != (6,):
+                    raise ValueError(
+                        "ManiSkill binary command must own native action dimension 7"
+                    )
+                if float(self.objectives.gripper_command) <= 0.0:
+                    raise ValueError(
+                        "ManiSkill binary command mode requires a positive "
+                        "objective.gripper_command"
+                    )
+                if float(self.objectives.gripper_first_step_hold) != 0.0:
+                    raise ValueError(
+                        "continuous gripper_first_step_hold is invalid for the "
+                        "ManiSkill binary outlet"
+                    )
+                if float(self.objectives.phase_gripper_hold) != 0.0:
+                    raise ValueError(
+                        "continuous phase_gripper_hold is invalid for the "
+                        "ManiSkill binary outlet"
+                    )
+            else:
+                raise ValueError(
+                    "ManiSkill profile requires continuous or "
+                    "maniskill_binary_command gripper output"
                 )
         else:
-            if mode != "continuous":
+            if mode != CONTINUOUS_GRIPPER_OUTPUT_MODE:
                 raise ValueError(
-                    "calvin_binary_command is valid only for the CALVIN action profile"
+                    "binary gripper modes are valid only for their explicit "
+                    "CALVIN or ManiSkill action profile"
                 )
             if float(self.objectives.gripper_command) != 0.0:
                 raise ValueError(
@@ -697,11 +1103,109 @@ class ExperimentConfig:
                 )
             if arm_mode != "legacy_independent":
                 raise ValueError(
-                    "relative_command_direct is valid only for the CALVIN action profile"
+                    "relative_command_adapter is valid only for CALVIN, LIBERO or ManiSkill "
+                    "relative-command profiles"
                 )
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.runtime.validation_panel == "prefix":
+            cast(dict[str, object], payload["runtime"]).pop("validation_panel")
+        if self.top.interval_object_query_mode == "goal_history":
+            # Existing checkpoint configs still resolve to the accepted graph.
+            cast(dict[str, object], payload["top"]).pop("interval_object_query_mode")
+        if self.top.world_camera_condition_mode == "motion_prior_only":
+            # The opt-in W camera conditioner owns a new parameter and is an
+            # initialization migration, never an implicit exact resume.
+            cast(dict[str, object], payload["top"]).pop(
+                "world_camera_condition_mode"
+            )
+        if self.top.world_action_condition_mode == "interval_mean_v1":
+            # The sequence condition is an explicit model-contract change;
+            # keep old config/checkpoint identities byte-compatible by
+            # omitting the accepted legacy selector.
+            cast(dict[str, object], payload["top"]).pop(
+                "world_action_condition_mode"
+            )
+        if self.top.p2_spatial_intent_mode == "post_pool_only":
+            # Old Schema30 configs resolve byte-for-byte to the accepted
+            # post-pooling reader.  The shared target prior is an explicit
+            # model-contract initialization, never an implicit exact resume.
+            cast(dict[str, object], payload["top"]).pop("p2_spatial_intent_mode")
+        data = cast(dict[str, object], payload["data"])
+        if self.data.visual_cache_read_backend == "mmap":
+            data.pop("visual_cache_read_backend")
+            data.pop("visual_pread_max_open_files")
+        if self.data.window_boundary_contract == STRICT_COMPLETE_V1:
+            # Preserve historical E8 config identity exactly.  Parsing an old
+            # checkpoint supplies the dataclass default above.
+            data.pop("window_boundary_contract", None)
+        if not self.data.libero_retarget_overlay_root.strip():
+            # Preserve every pre-overlay config/checkpoint identity exactly.
+            data.pop("libero_retarget_overlay_root", None)
+            data.pop("libero_retarget_overlay_manifest", None)
+        if self.data.release_first_action_fraction == 0.0:
+            # The historical sampler has no release-first lane.  Keep old
+            # checkpoint/config payloads byte-compatible when this repair is
+            # not enabled.
+            data.pop("release_first_action_fraction", None)
+        if self.data.information_batches_per_epoch is None:
+            # The historical boundary sampler derives its epoch length from
+            # the strict pool.  Omit the optional override so legacy config
+            # payloads and checkpoint identities remain unchanged.
+            data.pop("information_batches_per_epoch", None)
+        # Keep the default Schema30 payload byte/identity-compatible with old
+        # checkpoints.  A non-uniform CALVIN experiment carries the explicit
+        # policy fields so its run identity cannot be confused with baseline.
+        objectives = cast(dict[str, object], payload["objectives"])
+        # The default value reproduces the historical six-channel objective;
+        # omit it so existing Schema30 config/checkpoint identities remain
+        # byte-compatible.  A non-default value is serialized explicitly and
+        # therefore cannot be mistaken for the baseline objective.
+        if self.objectives.gripper_compatibility_weight == 1.0:
+            objectives.pop("gripper_compatibility_weight", None)
+        if self.objectives.gripper_first_step_release == 0.0:
+            objectives.pop("gripper_first_step_release", None)
+        if self.objectives.gripper_first_step_hold == 0.0:
+            objectives.pop("gripper_first_step_hold", None)
+        if (
+            self.objectives.phase_control_mode == "none"
+            and self.objectives.phase_arm_flow == 0.0
+            and self.objectives.phase_gripper_hold == 0.0
+        ):
+            for name in (
+                "phase_control_mode",
+                "phase_arm_flow",
+                "phase_gripper_hold",
+                "phase_approach_arm_gain",
+                "phase_transport_arm_gain",
+            ):
+                objectives.pop(name, None)
+        if (
+            self.objectives.calvin_frame_weight_mode == "uniform"
+            and self.objectives.calvin_frame_motion_gain == 0.0
+            and self.objectives.calvin_frame_event_gain == 0.0
+            and self.objectives.calvin_frame_event_radius == 0
+            and self.objectives.calvin_frame_max_weight == 1.0
+        ):
+            for name in (
+                "calvin_frame_weight_mode",
+                "calvin_frame_motion_gain",
+                "calvin_frame_event_gain",
+                "calvin_frame_event_radius",
+                "calvin_frame_max_weight",
+            ):
+                objectives.pop(name, None)
+        runtime = cast(dict[str, object], payload["runtime"])
+        if self.runtime.deployment_flow_schedule is None:
+            # Old checkpoints must retain their exact resolved config digest.
+            runtime.pop("deployment_flow_schedule")
+        else:
+            from .runtime.flow_schedule import DeploymentFlowSchedule
+
+            runtime["deployment_flow_schedule"] = DeploymentFlowSchedule.from_dict(
+                self.runtime.deployment_flow_schedule
+            ).to_dict()
         bottom = cast(dict[str, object], payload["bottom"])
         if self.bottom.bspine_implementation == BSPINE_DISABLED_IMPLEMENTATION:
             for name in (
@@ -735,6 +1239,9 @@ class ExperimentConfig:
                 "t5_condition",
                 "output_dir",
                 "split_manifest",
+                "calvin_raw_source",
+                "libero_retarget_overlay_root",
+                "libero_retarget_overlay_manifest",
                 "task_selection_manifest",
                 "normalizer_artifact",
             ):

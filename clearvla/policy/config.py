@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from clearvla.mainline.gripper_contract import VALID_GRIPPER_OUTPUT_MODES
+
 
 @dataclass(frozen=True)
 class V362PolicyConfig:
@@ -27,6 +29,11 @@ class V362PolicyConfig:
     physical_decode_delta_blend: float = 0.25
     gripper_field_dim: int = 12
     gripper_field_mode: str = "legacy_handcrafted"
+    # Deployment command ABI.  The active mainline normally uses the
+    # continuous physical gripper field; CALVIN explicitly selects a
+    # two-class command-state readout and never consumes that field as a
+    # command source.
+    gripper_output_mode: str = "continuous"
     # Historical runs sampled arm_abs/arm_delta independently. New runs can
     # instead sample one native arm trajectory and map it into the redundant
     # [absolute, delta] coordinates used by the policy.
@@ -75,6 +82,11 @@ class V362PolicyConfig:
             raise ValueError("gripper_field_dim must be >= 2")
         if str(self.gripper_field_mode) not in {"legacy_handcrafted", "parseval_temporal"}:
             raise ValueError("gripper_field_mode must be legacy_handcrafted or parseval_temporal")
+        if str(self.gripper_output_mode) not in VALID_GRIPPER_OUTPUT_MODES:
+            raise ValueError(
+                "gripper_output_mode must be continuous, calvin_binary_command, "
+                "or maniskill_binary_command"
+            )
         if str(self.arm_flow_mode) not in {"legacy_independent", "manifold_native"}:
             raise ValueError("arm_flow_mode must be legacy_independent or manifold_native")
         if not 0.0 <= float(self.arm_noise_temporal_rho) < 1.0:

@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..gripper_contract import is_binary_gripper_selection
 from ..interfaces import CurrentObservation, ObservableHistory, OnlinePolicyInput
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
 from ..v120_core.primitives import TimeEmbedding
@@ -48,16 +49,24 @@ from .top import (
     OnlineTopContext,
 )
 from .types import (
+    ABSOLUTE_ACTION_SEQUENCE_CHART,
+    RELATIVE_COMMAND_SEQUENCE_CHART,
     CandidateWorld,
     CompletedP1PolicyState,
     ControlledTransitionState,
     FactualPrecisionDock,
+    FlowStepContext,
     LocalFactSet,
     ObjectFactSet,
     ObjectIntentState,
     ObjectTopTrainingTargets,
     ObjectWorldBelief,
+    OutletPhysicalActionCondition,
     PhysicalActionCondition,
+    PhysicalActionSequenceCondition,
+    WorldActionCondition,
+    intersect_object_camera_validity,
+    physical_action_normalizer_fingerprint,
 )
 
 
@@ -420,7 +429,7 @@ class WorldStage(nn.Module):
         self,
         *,
         belief: ObjectFactSet | ObjectWorldBelief,
-        action_condition: PhysicalActionCondition,
+        action_condition: WorldActionCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[CandidateWorld, dict[str, Tensor]]:
         belief.validate()
@@ -448,11 +457,22 @@ class WorldStage(nn.Module):
         self,
         context: DeploymentTopCache,
         *,
-        action_condition: PhysicalActionCondition,
+        action_condition: WorldActionCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[DeploymentTopCache, dict[str, Tensor]]:
         context.validate(hidden=self.hidden, horizon=self.horizon)
         action_condition.validate(action_dim=self.action_dim)
+        old_condition = context.action_condition
+        if isinstance(action_condition, PhysicalActionSequenceCondition):
+            if not isinstance(old_condition, PhysicalActionSequenceCondition):
+                raise TypeError("world refinement cannot change action condition schema")
+            if old_condition.metadata_identity != action_condition.metadata_identity:
+                raise ValueError("world refinement action sequence metadata changed")
+        elif isinstance(action_condition, PhysicalActionCondition):
+            if not isinstance(old_condition, PhysicalActionCondition):
+                raise TypeError("world refinement cannot change action condition schema")
+        else:
+            raise TypeError("world refinement received an unknown action condition schema")
         world, metrics = self.materialize(
             belief=context.belief,
             action_condition=action_condition,
@@ -465,10 +485,58 @@ class WorldStage(nn.Module):
         refined.validate(hidden=self.hidden, horizon=self.horizon)
         if not collect_diagnostics:
             return refined, {}
-        old_action = context.action_condition.interval_action.detach().float()
-        new_action = action_condition.interval_action.detach().float()
-        old_delta = context.action_condition.interval_delta.detach().float()
-        new_delta = action_condition.interval_delta.detach().float()
+        if isinstance(action_condition, PhysicalActionSequenceCondition):
+            old_action = old_condition.canonical_value.detach().float()
+            new_action = action_condition.canonical_value.detach().float()
+            old_delta = old_condition.canonical_delta.detach().float()
+            new_delta = action_condition.canonical_delta.detach().float()
+            reference = action_condition.source_action
+            action_metrics = {
+                "object_action_world_refinement_pre_action_sequence_rms": old_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_sequence_rms": new_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_action_sequence_change_rms": (
+                    new_action - old_action
+                )
+                .square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_pre_action_sequence_delta_rms": old_delta.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_sequence_delta_rms": new_delta.square()
+                .mean()
+                .sqrt(),
+            }
+        else:
+            old_action = old_condition.interval_action.detach().float()
+            new_action = action_condition.interval_action.detach().float()
+            old_delta = old_condition.interval_delta.detach().float()
+            new_delta = action_condition.interval_delta.detach().float()
+            reference = action_condition.interval_action
+            action_metrics = {
+                "object_action_world_refinement_pre_action_interval_rms": old_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_interval_rms": new_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_action_interval_delta_rms": (
+                    new_action - old_action
+                )
+                .square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_pre_action_delta_rms": old_delta.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_delta_rms": new_delta.square()
+                .mean()
+                .sqrt(),
+            }
         old_dynamics = context.predicted_dynamics
         new_dynamics = refined.predicted_dynamics
         old_semantic = old_dynamics.semantic_delta.detach().float()
@@ -477,28 +545,10 @@ class WorldStage(nn.Module):
         new_transport = new_dynamics.transport_mean.detach().float()
         metrics = {
             **metrics,
-            "object_action_world_refinement_count": action_condition.interval_action.new_ones(
+            **action_metrics,
+            "object_action_world_refinement_count": reference.new_ones(
                 (), dtype=torch.float32
             ),
-            # Keep the proposal and the re-materialized condition visible as
-            # separate quantities, without duplicate compatibility aliases.
-            "object_action_world_refinement_pre_action_interval_rms": old_action.square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_post_action_interval_rms": new_action.square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_action_interval_delta_rms": (
-                new_action - old_action
-            ).square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_pre_action_delta_rms": old_delta.square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_post_action_delta_rms": new_delta.square()
-            .mean()
-            .sqrt(),
             "object_action_world_refinement_pre_semantic_delta_rms": old_semantic.square()
             .mean()
             .sqrt(),
@@ -521,7 +571,7 @@ class WorldStage(nn.Module):
             ).square()
             .mean()
             .sqrt(),
-            "object_action_world_refinement_tag_identity_error": action_condition.interval_action.new_zeros(
+            "object_action_world_refinement_tag_identity_error": reference.new_zeros(
                 (), dtype=torch.float32
             ),
         }
@@ -850,11 +900,15 @@ class TrainingTargetsStage(nn.Module):
             future_offsets=future_offsets,
             collect_diagnostics=collect_diagnostics,
         )
+        current_loss_support = intersect_object_camera_validity(
+            context.facts.validity,
+            context.facts.camera_validity,
+        )
         recognition = self.recognizer(
             future_action=future_action,
             future_state=future_state,
             teacher=teacher,
-            current_loss_support=context.facts.camera_validity,
+            current_loss_support=current_loss_support,
         )
         online_intent_loss = F.smooth_l1_loss(
             context.intent.public_interval_carrier.float(),
@@ -863,11 +917,12 @@ class TrainingTargetsStage(nn.Module):
         supervised_coarse = coarse_action(
             context.intent.action_dock(),
             future_action=future_action[:, : self.horizon],
+            collect_diagnostics=collect_diagnostics,
         )
         coarse_loss = supervised_coarse.loss
         targets = ObjectTopTrainingTargets(
             teacher_dynamics=teacher,
-            current_loss_support=context.facts.camera_validity.detach().float(),
+            current_loss_support=current_loss_support,
             plan_recognition=recognition,
             online_intent_loss=online_intent_loss,
             plan_recognition_loss=recognition.reconstruction_loss,
@@ -1121,6 +1176,7 @@ class ExecutionBottomStage(nn.Module):
         *,
         noisy_action_field: Tensor,
         time: Tensor,
+        flow_step_context: FlowStepContext | None = None,
         action_query: Tensor,
         plan: ObjectPolicyPlanDeltaBank,
         intent: ObjectIntentState,
@@ -1139,6 +1195,17 @@ class ExecutionBottomStage(nn.Module):
         )
         if tuple(action_query.shape) != expected_query:
             raise ValueError("bottom and P2/P3 must share one action query")
+        if flow_step_context is not None:
+            flow_step_context.validate(
+                batch=int(noisy_action_field.shape[0]),
+                device=noisy_action_field.device,
+                time=time,
+                # The scheduler validates numerical bounds once at the host
+                # boundary.  This node-level adapter only needs the cheap
+                # shape/device seam; strict tensor reductions here would add
+                # a host synchronisation to every ODE update.
+                strict=False,
+            )
         plan.validate()
         intent.validate(horizon=self.horizon, hidden=self.hidden)
         transition.validate(hidden=self.hidden)
@@ -1164,6 +1231,7 @@ class ExecutionBottomStage(nn.Module):
             raw = self.decoder(
                 noisy_physical=noisy_action_field,
                 time=time,
+                flow_step_context=flow_step_context,
                 trajectory_tokens=trajectory,
                 trajectory_workspace_tokens=trajectory,
                 policy_action_tokens=None,
@@ -1286,12 +1354,31 @@ class ExecutionBottomStage(nn.Module):
 
 
 class OutletAdapter(nn.Module):
-    """Selected outlet's physical field codec (Pen/RDT/CALVIN ABI)."""
+    """Selected outlet's physical field codec and native action boundary."""
 
-    def __init__(self, codec: PhysicalActionFieldCodec, *, selection: str) -> None:
+    def __init__(
+        self,
+        codec: PhysicalActionFieldCodec,
+        *,
+        selection: str,
+        world_action_condition_mode: str = "interval_mean_v1",
+    ) -> None:
         super().__init__()
         self.codec = codec
         self.selection = str(selection)
+        self.world_action_condition_mode = str(world_action_condition_mode)
+        if self.world_action_condition_mode not in {
+            "interval_mean_v1",
+            "sequence_prefix_v1",
+        }:
+            raise ValueError("unknown outlet W action condition mode")
+        # Dataset normalization is an ordinary Python sidecar.  Keeping these
+        # values out of parameters and buffers preserves model/state/RNG
+        # identity for Pen and RDT while allowing relative/binary outlet
+        # semantics to be converted at the native action boundary.
+        self._action_normalizer_offset: tuple[float, ...] | None = None
+        self._action_normalizer_scale: tuple[float, ...] | None = None
+        self._action_normalizer_fingerprint: str | None = None
 
     @property
     def action_dim(self) -> int:
@@ -1319,15 +1406,301 @@ class OutletAdapter(nn.Module):
 
     @property
     def arm_flow_mode(self) -> str:
-        return self.codec.arm_flow_mode
+        return "relative_command_adapter" if self.is_relative_command else "legacy_independent"
 
     @property
-    def uses_relative_command_direct(self) -> bool:
-        return self.codec.uses_relative_command_direct
+    def is_relative_command(self) -> bool:
+        """Whether the outlet's six arm channels are relative TCP commands.
+
+        This is intentionally independent from the gripper controller: CALVIN
+        and ManiSkill can combine relative arms with a binary command head,
+        while LIBERO and legacy ManiSkill combine the same arm adapter with the
+        ordinary continuous gripper field.  Keeping the predicates separate
+        prevents one outlet's gripper policy from silently selecting another
+        outlet's arm chart.
+        """
+
+        return self.selection in {
+            "calvin_7d_binary_v1",
+            "libero_7d_continuous_v1",
+            "maniskill_7d_continuous_v1",
+            "maniskill_7d_continuous_v2",
+            "maniskill_7d_binary_v2",
+        }
 
     @property
     def is_binary_command(self) -> bool:
-        return self.selection == "calvin_7d_binary_v1"
+        return is_binary_gripper_selection(self.selection)
+
+    def configure_action_normalizer(self, normalizer: Any) -> None:
+        """Attach the verified affine action chart without model state.
+
+        Relative-command outlets need the normalized representation of native
+        zero to remove a z-score offset from TCP commands before W sees their
+        cumulative displacement.  Binary outlets additionally use the affine
+        chart to express their discrete gripper command in W coordinates.
+        Absolute Pen/RDT outlets never read this sidecar.
+        """
+
+        if (
+            not self.is_relative_command
+            and self.world_action_condition_mode == "interval_mean_v1"
+        ):
+            # Pen/RDT never read or retain a relative-command sidecar.
+            return
+        try:
+            offset = torch.as_tensor(normalizer.offset, dtype=torch.float32).reshape(-1)
+            scale = torch.as_tensor(normalizer.scale, dtype=torch.float32).reshape(-1)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise TypeError("action normalizer must expose finite offset and scale") from error
+        if int(offset.numel()) != self.action_dim or int(scale.numel()) != self.action_dim:
+            raise ValueError("action normalizer width does not match the outlet action chart")
+        if not bool(torch.isfinite(offset).all()) or not bool(torch.isfinite(scale).all()):
+            raise ValueError("action normalizer offset/scale must be finite")
+        if bool((scale <= 0.0).any()):
+            raise ValueError("action normalizer scale must be strictly positive")
+        self._action_normalizer_offset = tuple(float(value) for value in offset.tolist())
+        self._action_normalizer_scale = tuple(float(value) for value in scale.tolist())
+        self._action_normalizer_fingerprint = (
+            physical_action_normalizer_fingerprint(offset, scale)
+        )
+
+    def _normalizer_chart(
+        self,
+        reference: Tensor,
+        *,
+        dtype: torch.dtype | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        if self._action_normalizer_offset is None or self._action_normalizer_scale is None:
+            raise RuntimeError(
+                "relative-command outlet adapter requires the checkpoint/data action normalizer"
+            )
+        chart_dtype = reference.dtype if dtype is None else dtype
+        offset = reference.new_tensor(
+            self._action_normalizer_offset, dtype=chart_dtype
+        ).reshape(1, 1, -1)
+        scale = reference.new_tensor(
+            self._action_normalizer_scale, dtype=chart_dtype
+        ).reshape(1, 1, -1)
+        return offset, scale
+
+    def _normalizer_identity(self) -> str:
+        if self._action_normalizer_fingerprint is None:
+            raise RuntimeError(
+                "sequence action condition requires the checkpoint/data action normalizer"
+            )
+        return self._action_normalizer_fingerprint
+
+    def validate_world_condition(
+        self,
+        condition: WorldActionCondition,
+    ) -> None:
+        """Bind a cached W condition to this configured outlet unconditionally."""
+
+        if self.world_action_condition_mode == "interval_mean_v1":
+            if not isinstance(condition, PhysicalActionCondition):
+                raise TypeError(
+                    "interval-mean outlet rejected a sequence action condition"
+                )
+            condition.validate(action_dim=self.action_dim)
+            return
+        if not isinstance(condition, PhysicalActionSequenceCondition):
+            raise TypeError(
+                "sequence-prefix outlet rejected an interval action condition"
+            )
+        condition.validate(action_dim=self.action_dim)
+        expected_chart = (
+            RELATIVE_COMMAND_SEQUENCE_CHART
+            if self.is_relative_command
+            else ABSOLUTE_ACTION_SEQUENCE_CHART
+        )
+        if condition.outlet_profile != self.selection:
+            raise ValueError("sequence action condition outlet profile changed")
+        if condition.chart_version != expected_chart:
+            raise ValueError("sequence action condition chart version changed")
+        if condition.arm_dim != self.arm_dim:
+            raise ValueError("sequence action condition arm width changed")
+        if condition.normalizer_fingerprint != self._normalizer_identity():
+            raise ValueError("sequence action condition normalizer identity changed")
+
+    def world_condition_from_interval_action(
+        self,
+        interval_action: Tensor,
+        current_action: Tensor,
+    ) -> PhysicalActionCondition:
+        """Convert an outlet-native four-row proposal to W's physical chart."""
+
+        if self.world_action_condition_mode != "interval_mean_v1":
+            raise RuntimeError(
+                "four-row world condition is unavailable in sequence-prefix mode"
+            )
+
+        if not self.is_relative_command:
+            # This exact factory is the established Pen/RDT path.
+            return PhysicalActionCondition.from_interval_action(
+                interval_action,
+                current_action,
+            )
+        if interval_action.ndim != 3 or tuple(interval_action.shape[1:]) != (
+            4,
+            self.action_dim,
+        ):
+            raise ValueError("relative-command W proposal must be [B,4,7]")
+        batch = int(interval_action.shape[0])
+        if tuple(current_action.shape) != (batch, self.action_dim):
+            raise ValueError("relative-command W current action must be [B,7]")
+        offset, _scale = self._normalizer_chart(interval_action)
+        source_current = current_action.to(
+            device=interval_action.device,
+            dtype=interval_action.dtype,
+        )
+        # Relative arm rows are interval TCP commands.  Remove the affine
+        # chart's raw-zero offset, then expose cumulative displacement as W
+        # value and the centered command itself as W physical delta.
+        arm_command = interval_action[..., : self.arm_dim] - offset[..., : self.arm_dim]
+        canonical_arm = torch.cumsum(arm_command, dim=1)
+        gripper = interval_action[..., self.arm_dim :]
+        gripper_boundary = torch.cat(
+            (source_current[:, None, self.arm_dim :], gripper[:, :-1]),
+            dim=1,
+        )
+        canonical_interval = torch.cat((canonical_arm, gripper), dim=-1)
+        canonical_delta = torch.cat(
+            (arm_command, gripper - gripper_boundary),
+            dim=-1,
+        )
+        canonical_current = torch.cat(
+            (
+                torch.zeros_like(source_current[..., : self.arm_dim]),
+                source_current[..., self.arm_dim :],
+            ),
+            dim=-1,
+        )
+        condition = OutletPhysicalActionCondition(
+            interval_action=canonical_interval,
+            interval_delta=canonical_delta,
+            current_action=canonical_current,
+            source_action=interval_action,
+        )
+        condition.validate(action_dim=self.action_dim)
+        return condition
+
+    def world_condition_from_action_prediction(
+        self,
+        action_prediction: Tensor,
+        current_action: Tensor,
+    ) -> WorldActionCondition:
+        """Route the online coarse proposal through the configured W ABI."""
+
+        if self.world_action_condition_mode == "interval_mean_v1":
+            return self.world_condition_from_interval_action(
+                action_prediction,
+                current_action,
+            )
+        return self._sequence_condition_from_horizon_action(
+            action_prediction,
+            current_action,
+        )
+
+    def _sequence_condition_from_horizon_action(
+        self,
+        action: Tensor,
+        current_action: Tensor,
+    ) -> PhysicalActionSequenceCondition:
+        """Build one complete 24-row condition with outlet-owned semantics."""
+
+        if self.world_action_condition_mode != "sequence_prefix_v1":
+            raise RuntimeError("sequence condition requested from interval-mean outlet")
+        if action.ndim != 3 or tuple(action.shape[1:]) != (
+            self.horizon,
+            self.action_dim,
+        ):
+            raise ValueError("sequence-prefix W proposal must be [B,24,A]")
+        batch = int(action.shape[0])
+        if tuple(current_action.shape) != (batch, self.action_dim):
+            raise ValueError("sequence-prefix W current action does not align")
+        normalizer_identity = self._normalizer_identity()
+        # Identity describes the checkpoint chart, independently of AMP's
+        # action dtype. The condition factory casts only the arithmetic view.
+        offset, scale = self._normalizer_chart(action, dtype=torch.float32)
+        if not self.is_relative_command:
+            if self.selection not in {
+                "pen_7d_continuous_v1",
+                "rdt_right_arm_7d_v1",
+            }:
+                raise ValueError(
+                    "sequence-prefix W has no absolute chart for this outlet"
+                )
+            condition = PhysicalActionSequenceCondition.from_absolute_action(
+                action,
+                current_action,
+                outlet_profile=self.selection,
+                normalizer_offset=offset,
+                normalizer_scale=scale,
+            )
+        else:
+            condition = PhysicalActionSequenceCondition.from_relative_command(
+                action,
+                current_action,
+                outlet_profile=self.selection,
+                arm_dim=self.arm_dim,
+                normalizer_offset=offset,
+                normalizer_scale=scale,
+            )
+        if condition.normalizer_fingerprint != normalizer_identity:
+            raise RuntimeError("sequence action normalizer identity changed in factory")
+        self.validate_world_condition(condition)
+        return condition
+
+    def world_condition_action_from_deployed(
+        self,
+        deployed_action: Tensor,
+        *,
+        command: Tensor | None,
+    ) -> Tensor:
+        """Return the normalized action view used only for a W rebuild."""
+
+        if not self.is_binary_command:
+            if command is not None:
+                raise ValueError("continuous outlet cannot carry a binary command")
+            return deployed_action
+        if command is None:
+            raise RuntimeError(
+                "binary gripper W rebuild requires the deployed command tensor"
+            )
+        if tuple(command.shape) != tuple(deployed_action.shape[:2]):
+            raise ValueError("binary gripper command does not align with deployed action")
+        offset, scale = self._normalizer_chart(deployed_action)
+        result = deployed_action.clone()
+        result[..., -1] = (
+            command.to(device=result.device, dtype=result.dtype) * scale[..., -1]
+            + offset[..., -1]
+        )
+        return result
+
+    def world_condition_from_horizon_action(
+        self,
+        action: Tensor,
+        current_action: Tensor,
+    ) -> WorldActionCondition:
+        """Build the configured W condition from one deployed 24-row action."""
+
+        if self.world_action_condition_mode == "sequence_prefix_v1":
+            return self._sequence_condition_from_horizon_action(
+                action,
+                current_action,
+            )
+
+        source = PhysicalActionCondition.from_horizon_action(
+            action,
+            current_action,
+        )
+        if not self.is_relative_command:
+            return source
+        return self.world_condition_from_interval_action(
+            source.interval_action,
+            current_action,
+        )
 
     def prepare_model_input(self, field: Tensor) -> Tensor:
         """Apply the selected outlet's dynamic-consumer input boundary."""
@@ -1346,22 +1719,34 @@ class OutletAdapter(nn.Module):
         if not self.is_binary_command or not collect_diagnostics:
             return {}
         arm_channels = 2 * int(self.arm_dim)
-        return {
-            "bottom_calvin_binary_gripper_condition_removed_rms": (
-                original_field[..., arm_channels:]
-                .detach()
-                .float()
-                .square()
-                .mean()
-                .sqrt()
-            ),
-            "bottom_calvin_binary_gripper_condition_max_abs": (
-                model_field[..., arm_channels:].detach().float().abs().max()
-            ),
-            "bottom_calvin_binary_gripper_condition_neutral": (
-                original_field.new_ones((), dtype=torch.float32)
-            ),
+        removed_rms = (
+            original_field[..., arm_channels:].detach().float().square().mean().sqrt()
+        )
+        max_abs = model_field[..., arm_channels:].detach().float().abs().max()
+        neutral = original_field.new_ones((), dtype=torch.float32)
+        metrics = {
+            "bottom_binary_gripper_condition_removed_rms": removed_rms,
+            "bottom_binary_gripper_condition_max_abs": max_abs,
+            "bottom_binary_gripper_condition_neutral": neutral,
         }
+        if self.selection == "calvin_7d_binary_v1":
+            # Preserve the established CALVIN metric ABI for old dashboards.
+            metrics.update(
+                {
+                    "bottom_calvin_binary_gripper_condition_removed_rms": removed_rms,
+                    "bottom_calvin_binary_gripper_condition_max_abs": max_abs,
+                    "bottom_calvin_binary_gripper_condition_neutral": neutral,
+                }
+            )
+        elif self.selection == "maniskill_7d_binary_v2":
+            metrics.update(
+                {
+                    "bottom_maniskill_binary_gripper_condition_removed_rms": removed_rms,
+                    "bottom_maniskill_binary_gripper_condition_max_abs": max_abs,
+                    "bottom_maniskill_binary_gripper_condition_neutral": neutral,
+                }
+            )
+        return metrics
 
     def finalize(
         self,
@@ -1381,16 +1766,22 @@ class OutletAdapter(nn.Module):
         if self.is_binary_command:
             if command_logits is None:
                 raise RuntimeError(
-                    "CALVIN binary deployment requires gripper command logits from the bottom"
+                    "binary gripper deployment requires gripper command logits from the bottom"
                 )
             command = binary_gripper_command_from_logits(command_logits.float())
             if tuple(command.shape) != tuple(continuous_action.shape[:2]):
-                raise ValueError("CALVIN gripper command shape does not match decoded action")
+                raise ValueError(
+                    "binary gripper command shape does not match decoded action"
+                )
             action = continuous_action.clone()
             action[..., -1] = command.to(dtype=action.dtype)
+            world_action = self.world_condition_action_from_deployed(
+                action,
+                command=command,
+            )
             return OutletActionOutput(
                 deployed_action=action,
-                world_condition_action=action,
+                world_condition_action=world_action,
                 continuous_action=continuous_action,
                 command_logits=command_logits.float(),
                 command=command,
@@ -1510,6 +1901,13 @@ class OutletAdapter(nn.Module):
         return self.codec.project_arm_tangent(arm_field)
 
     def arm_motion_magnitude(self, action: Tensor, action_state: Tensor) -> Tensor:
+        if self.is_relative_command:
+            if action.ndim != 3 or int(action.shape[-1]) != self.action_dim:
+                raise ValueError("relative-command motion action must be [B,T,7]")
+            offset, _scale = self._normalizer_chart(action)
+            return (
+                action[..., : self.arm_dim] - offset[..., : self.arm_dim]
+            ).float().norm(dim=-1)
         return self.codec.arm_motion_magnitude(action, action_state)
 
 

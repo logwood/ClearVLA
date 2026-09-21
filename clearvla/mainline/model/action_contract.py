@@ -18,6 +18,7 @@ from ..interfaces import ObservableHistory
 from ..v120_core.codec import PhysicalActionTokenLift
 from ..v120_core.primitives import sinusoidal_positions as v120_sinusoidal_positions
 from ..v120_core.trunk_primitives import HorizonRoleEmbedding
+from .types import FlowStepContext
 
 
 def canonical_state_history(history: ObservableHistory) -> Tensor:
@@ -411,7 +412,7 @@ class ActionQueryEncoder(nn.Module):
 
 @dataclass(frozen=True)
 class BottomDecoderOutput:
-    """Active bottom result before the deployed continuous codec boundary."""
+    """Active bottom result before the selected outlet action boundary."""
 
     physical_velocity: Tensor
     motion_logits: Tensor
@@ -419,9 +420,9 @@ class BottomDecoderOutput:
     block_updates: tuple[Tensor, ...]
     evidence_tokens: Tensor
     decoder_tensors: dict[str, Tensor] = field(default_factory=lambda: {})
-    # Optional explicit command-state head.  It is populated only for the
-    # CALVIN binary-gripper profile and remains absent on Pen/RDT continuous
-    # checkpoints, preserving the old output ABI for those paths.
+    # Optional explicit command-state head. It is populated only for a binary
+    # gripper outlet and remains absent on continuous checkpoints, preserving
+    # the old output ABI for those paths.
     gripper_command_logits: Tensor | None = None
 
     def validate(self, *, action_dim: int, horizon: int, basis: int, hidden: int) -> None:
@@ -456,6 +457,7 @@ __all__ = [
     "ActionQueryEncoder",
     "BottomDecoderOutput",
     "BottomOutput",
+    "FlowStepContext",
     "V120SeedContext",
     "canonical_state_history",
 ]

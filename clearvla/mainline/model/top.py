@@ -56,6 +56,9 @@ from .types import (
     ObjectTopTrainingTargets,
     ObjectWorldBelief,
     PhysicalActionCondition,
+    PhysicalActionSequenceCondition,
+    WorldActionCondition,
+    intersect_object_camera_validity,
 )
 
 
@@ -69,7 +72,7 @@ class OnlineTopContext:
     candidate_world: CandidateWorld
 
     @property
-    def action_condition(self) -> PhysicalActionCondition:
+    def action_condition(self) -> WorldActionCondition:
         """Read the action tag from the atomically cached world."""
 
         return self.candidate_world.action_condition
@@ -96,7 +99,13 @@ class OnlineTopContext:
         self.action_condition.validate(
             action_dim=int(self.coarse_action.action_prediction.shape[-1])
         )
-        expected = (self.facts.batch, 4, hidden)
+        if isinstance(self.action_condition, PhysicalActionSequenceCondition):
+            expected_rows = int(horizon)
+            source_action = self.action_condition.source_action
+        else:
+            expected_rows = 4
+            source_action = self.action_condition.source_interval_action
+        expected = (self.facts.batch, expected_rows, hidden)
         if tuple(self.coarse_action.tokens.shape) != expected:
             raise ValueError("coarse action tokens lost the interval axis")
         if self.coarse_action.target is not None:
@@ -104,10 +113,12 @@ class OnlineTopContext:
         if self.coarse_action.loss.ndim != 0:
             raise ValueError("coarse action online placeholder loss must be scalar")
         if tuple(self.coarse_action.action_prediction.shape) != tuple(
-            self.action_condition.interval_action.shape
+            source_action.shape
         ):
             raise ValueError("coarse proposal and physical W condition do not align")
-        if self.action_condition.interval_action is not self.coarse_action.action_prediction:
+        if (
+            source_action is not self.coarse_action.action_prediction
+        ):
             raise ValueError("physical W condition must retain the exact proposal tensor")
 
 
@@ -120,7 +131,7 @@ class DeploymentTopCache:
     candidate_world: CandidateWorld
 
     @property
-    def action_condition(self) -> PhysicalActionCondition:
+    def action_condition(self) -> WorldActionCondition:
         """Read the action tag from the atomically cached world."""
 
         return self.candidate_world.action_condition
@@ -181,6 +192,11 @@ class ObjectIntentDynamicsTop(nn.Module):
         role_host_depth: int = 3,
         role_host_expansion: float = 4.0,
         role_host_dropout: float = 0.05,
+        interval_object_query_mode: str = "goal_history",
+        camera_names: tuple[str, ...] = ("top", "wrist"),
+        world_camera_condition_mode: str = "motion_prior_only",
+        world_action_condition_mode: str = "interval_mean_v1",
+        p2_spatial_intent_mode: str = "post_pool_only",
         core_config=None,
     ) -> None:
         super().__init__()
@@ -190,6 +206,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         self.action_dim = int(action_dim)
         self.horizon = int(horizon)
         self.basis = int(basis)
+        self.world_action_condition_mode = str(world_action_condition_mode)
         if int(objects) != 4:
             raise ValueError("the active object top requires K=4")
         del role_host_expansion, role_host_dropout
@@ -232,11 +249,15 @@ class ObjectIntentDynamicsTop(nn.Module):
             route_dim=route_dim,
             horizon=horizon,
             heads=heads,
+            interval_object_query_mode=interval_object_query_mode,
+            target_object_address_mode=p2_spatial_intent_mode,
         )
         self.coarse_action = CoarseActionIntent(
             hidden=hidden,
             action_dim=action_dim,
             heads=heads,
+            horizon=horizon,
+            action_condition_mode=self.world_action_condition_mode,
         )
         self.dynamics = ObjectFutureDynamicsCompiler(
             hidden=hidden,
@@ -247,6 +268,9 @@ class ObjectIntentDynamicsTop(nn.Module):
             normalization_floor=float(
                 core_config.flow_jepa_routing_norm_floor
             ),
+            camera_names=camera_names,
+            camera_condition_mode=world_camera_condition_mode,
+            action_condition_mode=self.world_action_condition_mode,
         )
         self.teacher = ObjectFutureTeacher(
             content_dim=content_dim,
@@ -264,6 +288,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             hidden=hidden,
             content_dim=content_dim,
             route_dim=route_dim,
+            spatial_intent_mode=p2_spatial_intent_mode,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)
         self.plan_compiler = ObjectPolicyPlanCompiler(
@@ -307,7 +332,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         self,
         *,
         belief: ObjectFactSet | ObjectWorldBelief,
-        action_condition: PhysicalActionCondition,
+        action_condition: WorldActionCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[CandidateWorld, dict[str, Tensor]]:
         """Materialize exactly one W prediction for one physical proposal."""
@@ -337,7 +362,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         self,
         context: DeploymentTopCache,
         *,
-        action_condition: PhysicalActionCondition,
+        action_condition: WorldActionCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[DeploymentTopCache, dict[str, Tensor]]:
         """Recompute W once for a decoded outer candidate action.
@@ -349,6 +374,17 @@ class ObjectIntentDynamicsTop(nn.Module):
 
         context.validate(hidden=self.hidden, horizon=self.horizon)
         action_condition.validate(action_dim=self.action_dim)
+        old_condition = context.action_condition
+        if isinstance(action_condition, PhysicalActionSequenceCondition):
+            if not isinstance(old_condition, PhysicalActionSequenceCondition):
+                raise TypeError("world refinement cannot change action condition schema")
+            if old_condition.metadata_identity != action_condition.metadata_identity:
+                raise ValueError("world refinement action sequence metadata changed")
+        elif isinstance(action_condition, PhysicalActionCondition):
+            if not isinstance(old_condition, PhysicalActionCondition):
+                raise TypeError("world refinement cannot change action condition schema")
+        else:
+            raise TypeError("world refinement received an unknown action condition schema")
         world, metrics = self.build_candidate_world(
             belief=context.belief,
             action_condition=action_condition,
@@ -361,10 +397,58 @@ class ObjectIntentDynamicsTop(nn.Module):
         refined.validate(hidden=self.hidden, horizon=self.horizon)
         if not collect_diagnostics:
             return refined, {}
-        old_action = context.action_condition.interval_action.detach().float()
-        new_action = action_condition.interval_action.detach().float()
-        old_delta = context.action_condition.interval_delta.detach().float()
-        new_delta = action_condition.interval_delta.detach().float()
+        if isinstance(action_condition, PhysicalActionSequenceCondition):
+            old_action = old_condition.canonical_value.detach().float()
+            new_action = action_condition.canonical_value.detach().float()
+            old_delta = old_condition.canonical_delta.detach().float()
+            new_delta = action_condition.canonical_delta.detach().float()
+            reference = action_condition.source_action
+            action_metrics = {
+                "object_action_world_refinement_pre_action_sequence_rms": old_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_sequence_rms": new_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_action_sequence_change_rms": (
+                    new_action - old_action
+                )
+                .square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_pre_action_sequence_delta_rms": old_delta.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_sequence_delta_rms": new_delta.square()
+                .mean()
+                .sqrt(),
+            }
+        else:
+            old_action = old_condition.interval_action.detach().float()
+            new_action = action_condition.interval_action.detach().float()
+            old_delta = old_condition.interval_delta.detach().float()
+            new_delta = action_condition.interval_delta.detach().float()
+            reference = action_condition.interval_action
+            action_metrics = {
+                "object_action_world_refinement_pre_action_interval_rms": old_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_interval_rms": new_action.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_action_interval_delta_rms": (
+                    new_action - old_action
+                )
+                .square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_pre_action_delta_rms": old_delta.square()
+                .mean()
+                .sqrt(),
+                "object_action_world_refinement_post_action_delta_rms": new_delta.square()
+                .mean()
+                .sqrt(),
+            }
         old_dynamics = context.predicted_dynamics
         new_dynamics = refined.predicted_dynamics
         old_semantic = old_dynamics.semantic_delta.detach().float()
@@ -373,28 +457,10 @@ class ObjectIntentDynamicsTop(nn.Module):
         new_transport = new_dynamics.transport_mean.detach().float()
         metrics = {
             **metrics,
-            "object_action_world_refinement_count": action_condition.interval_action.new_ones(
+            **action_metrics,
+            "object_action_world_refinement_count": reference.new_ones(
                 (), dtype=torch.float32
             ),
-            # Keep the proposal and the re-materialized condition visible as
-            # separate quantities, without duplicate compatibility aliases.
-            "object_action_world_refinement_pre_action_interval_rms": old_action.square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_post_action_interval_rms": new_action.square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_action_interval_delta_rms": (
-                new_action - old_action
-            ).square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_pre_action_delta_rms": old_delta.square()
-            .mean()
-            .sqrt(),
-            "object_action_world_refinement_post_action_delta_rms": new_delta.square()
-            .mean()
-            .sqrt(),
             "object_action_world_refinement_pre_semantic_delta_rms": old_semantic.square()
             .mean()
             .sqrt(),
@@ -417,7 +483,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             ).square()
             .mean()
             .sqrt(),
-            "object_action_world_refinement_tag_identity_error": action_condition.interval_action.new_zeros(
+            "object_action_world_refinement_tag_identity_error": reference.new_zeros(
                 (), dtype=torch.float32
             ),
         }
@@ -510,7 +576,15 @@ class ObjectIntentDynamicsTop(nn.Module):
             collect_diagnostics=collect_diagnostics,
         )
         action_intent = intent.action_dock()
-        coarse = self.coarse_action(action_intent)
+        coarse = self.coarse_action(
+            action_intent,
+            collect_diagnostics=collect_diagnostics,
+        )
+        if self.world_action_condition_mode != "interval_mean_v1":
+            raise RuntimeError(
+                "standalone ObjectIntentDynamicsTop cannot infer outlet sequence "
+                "semantics; use ClearVLAMainlinePolicy's OutletAdapter"
+            )
         action_condition = PhysicalActionCondition.from_interval_action(
             coarse.action_prediction,
             action_state,
@@ -547,7 +621,7 @@ class ObjectIntentDynamicsTop(nn.Module):
                 (), dtype=torch.float32
             ),
             "object_action_world_initial_tag_identity_error": (
-                action_condition.interval_action.detach().float()
+                action_condition.source_interval_action.detach().float()
                 - coarse.action_prediction.detach().float()
             )
             .abs()
@@ -579,11 +653,15 @@ class ObjectIntentDynamicsTop(nn.Module):
             future_offsets=future_offsets,
             collect_diagnostics=collect_diagnostics,
         )
+        current_loss_support = intersect_object_camera_validity(
+            context.facts.validity,
+            context.facts.camera_validity,
+        )
         recognition = self.recognizer(
             future_action=future_action,
             future_state=future_state,
             teacher=teacher,
-            current_loss_support=context.facts.camera_validity,
+            current_loss_support=current_loss_support,
         )
         online_intent_loss = F.smooth_l1_loss(
             context.intent.public_interval_carrier.float(),
@@ -596,11 +674,12 @@ class ObjectIntentDynamicsTop(nn.Module):
             # from that exact same prefix so one [B,4,A] ABI never means
             # 48 rows during training and 24 rows during deployment.
             future_action=future_action[:, : self.horizon],
+            collect_diagnostics=collect_diagnostics,
         )
         coarse_loss = supervised_coarse.loss
         targets = ObjectTopTrainingTargets(
             teacher_dynamics=teacher,
-            current_loss_support=context.facts.camera_validity.detach().float(),
+            current_loss_support=current_loss_support,
             plan_recognition=recognition,
             online_intent_loss=online_intent_loss,
             plan_recognition_loss=recognition.reconstruction_loss,

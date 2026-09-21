@@ -21,6 +21,12 @@ from ...action_representations.bspline import BSplineSpec, build_basis_bundle
 BSPINE_DISABLED_IMPLEMENTATION: Final[str] = "disabled"
 BSPINE0_IMPLEMENTATION: Final[str] = "fixed_bspline_coarse_detail_v1"
 BSPINE_ARM_ONLY_IMPLEMENTATION: Final[str] = "fixed_bspline_arm_only_v1"
+BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION: Final[str] = (
+    "fixed_bspline_arm_coarse_context_v1"
+)
+BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION: Final[str] = (
+    "fixed_bspline_arm_private_reader_v1"
+)
 BSPINE0_HORIZON: Final[int] = 24
 BSPINE0_PHYSICAL_DIM: Final[int] = 18
 BSPINE0_DEGREE: Final[int] = 3
@@ -154,6 +160,7 @@ class _FixedBSpineView(nn.Module):
         active_physical_dim: int,
         role_widths: dict[str, int],
         role_slices: dict[str, slice],
+        detail_path: bool = True,
     ) -> None:
         super().__init__()
         self.horizon = int(horizon)
@@ -164,6 +171,7 @@ class _FixedBSpineView(nn.Module):
         self.control_points = int(control_points)
         self.physical_dim = 2 * self.arm_dim + self.gripper_field_dim
         self.active_physical_dim = int(active_physical_dim)
+        self.detail_path = bool(detail_path)
         if not 0 < self.active_physical_dim <= self.physical_dim:
             raise ValueError("B-spine active physical width is invalid")
         if tuple(role_widths) != tuple(role_slices):
@@ -201,6 +209,8 @@ class _FixedBSpineView(nn.Module):
                 name: _ZeroInitializedBiasFreeLinear(width, self.hidden_size)
                 for name, width in role_widths.items()
             }
+            if self.detail_path
+            else {}
         )
         self._role_slices = dict(role_slices)
 
@@ -240,23 +250,32 @@ class _FixedBSpineView(nn.Module):
             detail_hidden: Tensor | None = None
             for name, field_slice in self._role_slices.items():
                 coarse_role = self.coarse_lifts[name](controls[..., field_slice])
-                detail_role = self.detail_lifts[name](detail[..., field_slice])
                 coarse_hidden_controls = (
                     coarse_role
                     if coarse_hidden_controls is None
                     else coarse_hidden_controls + coarse_role
                 )
-                detail_hidden = (
-                    detail_role if detail_hidden is None else detail_hidden + detail_role
-                )
-            if coarse_hidden_controls is None or detail_hidden is None:
+                if self.detail_path:
+                    detail_role = self.detail_lifts[name](detail[..., field_slice])
+                    detail_hidden = (
+                        detail_role
+                        if detail_hidden is None
+                        else detail_hidden + detail_role
+                    )
+            if coarse_hidden_controls is None:
                 raise RuntimeError("B-spine field-role chart is empty")
+            if self.detail_path and detail_hidden is None:
+                raise RuntimeError("B-spine detail path is empty")
             coarse_tokens = torch.einsum(
                 "tk,bkh->bth",
                 synthesis,
                 coarse_hidden_controls,
             )
-            unablated = coarse_tokens + detail_hidden
+            unablated = (
+                coarse_tokens + detail_hidden
+                if detail_hidden is not None
+                else coarse_tokens
+            )
             tokens = torch.zeros_like(unablated) if zero_output else unablated
         tokens = tokens.to(dtype=physical.dtype)
         if not collect_diagnostics:
@@ -266,7 +285,11 @@ class _FixedBSpineView(nn.Module):
             "bottom_spine_coarse_field_rms": coarse.detach().square().mean().sqrt(),
             "bottom_spine_detail_field_rms": detail.detach().square().mean().sqrt(),
             "bottom_spine_coarse_token_rms": (coarse_tokens.detach().square().mean().sqrt()),
-            "bottom_spine_detail_token_rms": (detail_hidden.detach().square().mean().sqrt()),
+            "bottom_spine_detail_token_rms": (
+                detail_hidden.detach().square().mean().sqrt()
+                if detail_hidden is not None
+                else coarse_tokens.new_zeros(())
+            ),
             "bottom_spine_update_rms": unablated.detach().square().mean().sqrt(),
             "bottom_spine_decomposition_max_abs": (
                 reconstruction.detach()
@@ -426,7 +449,170 @@ class ArmOnlyBSpine(_FixedBSpineView):
         return tokens, metrics
 
 
-BSpineModule = BSpine0 | ArmOnlyBSpine
+class ArmCoarseContextBSpine(_FixedBSpineView):
+    """Coarse arm context beside the unchanged complete raw action path.
+
+    Unlike :class:`ArmOnlyBSpine`, this implementation deliberately owns no
+    learned detail lift.  The existing raw action lift already preserves the
+    complete row-local physical field; the B-spline branch contributes only
+    the non-local, rank-12 temporal projection that is unique to this view.
+    """
+
+    implementation_id: Final[str] = BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION
+
+    def __init__(
+        self,
+        *,
+        horizon: int,
+        hidden_size: int,
+        arm_dim: int,
+        gripper_field_dim: int,
+        degree: int,
+        control_points: int,
+        expected_action_group_mask: str,
+        expected_basis_digest: str,
+        expected_spec_fingerprint: str,
+    ) -> None:
+        physical_dim = 2 * int(arm_dim) + int(gripper_field_dim)
+        if (
+            int(horizon) != BSPINE0_HORIZON
+            or physical_dim != BSPINE0_PHYSICAL_DIM
+            or int(arm_dim) <= 0
+            or int(gripper_field_dim) < 2
+            or int(hidden_size) <= 0
+            or int(degree) != BSPINE0_DEGREE
+            or int(control_points) != BSPINE0_CONTROL_POINTS
+        ):
+            raise ValueError(
+                "arm coarse-context B-spine is fixed at horizon=24, "
+                "physical_dim=18, degree=3 and control_points=12"
+            )
+        mask = str(expected_action_group_mask)
+        if mask != BSPINE_ARM_ONLY_ACTION_GROUP_MASK:
+            raise ValueError(
+                "arm coarse-context B-spine requires the serialized 11000 "
+                "action-group mask"
+            )
+        arm_stop = int(arm_dim)
+        active_physical_dim = 2 * arm_stop
+        super().__init__(
+            horizon=horizon,
+            hidden_size=hidden_size,
+            arm_dim=arm_dim,
+            gripper_field_dim=gripper_field_dim,
+            degree=degree,
+            control_points=control_points,
+            expected_basis_digest=expected_basis_digest,
+            expected_spec_fingerprint=expected_spec_fingerprint,
+            active_physical_dim=active_physical_dim,
+            role_widths={
+                "arm_absolute": arm_stop,
+                "arm_delta": arm_stop,
+            },
+            role_slices={
+                "arm_absolute": slice(0, arm_stop),
+                "arm_delta": slice(arm_stop, active_physical_dim),
+            },
+            detail_path=False,
+        )
+        self.register_buffer(
+            "action_group_mask",
+            torch.tensor(tuple(int(value) for value in mask), dtype=torch.uint8),
+            persistent=True,
+        )
+
+    def forward(
+        self,
+        physical: Tensor,
+        *,
+        zero_output: bool = False,
+        collect_diagnostics: bool = False,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        tokens, metrics = super().forward(
+            physical,
+            zero_output=zero_output,
+            collect_diagnostics=collect_diagnostics,
+        )
+        if collect_diagnostics:
+            metrics["bottom_spine_gripper_raw_only"] = physical.new_ones(
+                (), dtype=torch.float32
+            )
+            metrics["bottom_spine_detail_path_active"] = physical.new_zeros(
+                (), dtype=torch.float32
+            )
+        return tokens, metrics
+
+
+class ArmPrivateReaderBSpine(ArmCoarseContextBSpine):
+    """Coarse arm chart whose output is read only by an arm-private reader.
+
+    The temporal chart is intentionally identical to
+    :class:`ArmCoarseContextBSpine`; the implementation identity differs
+    because the decoder does *not* add these tokens to the shared MMDiT action
+    seed.  Instead, an arm-only physical correction is read at the terminal
+    controller boundary.  This gives a matched control experiment for the
+    direct shared-fusion candidate while keeping raw gripper detail untouched.
+    """
+
+    implementation_id: Final[str] = BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION
+
+
+class ArmPrivateBSpineReader(nn.Module):
+    """Read B-spline tokens into an arm-only physical-field correction.
+
+    The projection has a standard non-zero weight initialization, but its
+    input (the B-spline lift) is zero-initialized.  Consequently the new route
+    is exactly baseline-preserving at construction while the first arm loss
+    can still open the B-spline owner through the non-zero reader Jacobian.
+    Construction restores the host RNG state so selecting this optional
+    experiment does not perturb the retained baseline initialization stream.
+    """
+
+    def __init__(self, *, hidden_size: int, arm_dim: int) -> None:
+        super().__init__()
+        self.hidden_size = int(hidden_size)
+        self.arm_dim = int(arm_dim)
+        if self.hidden_size <= 0 or self.arm_dim <= 0:
+            raise ValueError("arm-private B-spline reader dimensions must be positive")
+        self.norm = nn.LayerNorm(self.hidden_size, elementwise_affine=False)
+        host_rng_state = torch.get_rng_state()
+        try:
+            self.projection = nn.Linear(
+                self.hidden_size,
+                2 * self.arm_dim,
+                bias=False,
+            )
+        finally:
+            torch.set_rng_state(host_rng_state)
+
+    def forward(self, tokens: Tensor) -> Tensor:
+        if tokens.ndim != 3 or int(tokens.shape[-1]) != self.hidden_size:
+            raise ValueError(
+                "arm-private B-spline reader expects [B,T,hidden] tokens"
+            )
+        device_type = tokens.device.type
+        if device_type in {"cpu", "cuda"}:
+            scope = torch.autocast(device_type=device_type, enabled=False)
+        else:
+            scope = nullcontext()
+        with scope:
+            normalized = self.norm(tokens.float())
+            # Keep the reader's numerical chart in FP32 even when a caller
+            # materializes the optional module itself in BF16/FP16.  Calling
+            # ``nn.Linear`` directly would require the input and parameter
+            # dtypes to match once autocast is disabled; an explicit cast of
+            # the weight preserves the parameter-owner gradient while making
+            # the CPU/CUDA contract independent of module storage dtype.
+            correction = F.linear(normalized, self.projection.weight.float())
+        return correction.to(dtype=tokens.dtype)
+
+
+BSpineModule = (
+    BSpine0
+    | ArmOnlyBSpine
+    | ArmCoarseContextBSpine
+    | ArmPrivateReaderBSpine
+)
 
 
 def validate_bspine_module(module: nn.Module) -> BSpineModule:
@@ -436,6 +622,8 @@ def validate_bspine_module(module: nn.Module) -> BSpineModule:
     expected_type = {
         BSPINE0_IMPLEMENTATION: BSpine0,
         BSPINE_ARM_ONLY_IMPLEMENTATION: ArmOnlyBSpine,
+        BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION: ArmCoarseContextBSpine,
+        BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION: ArmPrivateReaderBSpine,
     }.get(implementation)
     if expected_type is None or type(module) is not expected_type:
         raise TypeError(
@@ -446,6 +634,8 @@ def validate_bspine_module(module: nn.Module) -> BSpineModule:
 
 __all__ = [
     "BSPINE_ACTION_GROUPS",
+    "BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION",
+    "BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION",
     "BSPINE_ARM_ONLY_ACTION_GROUP_MASK",
     "BSPINE_ARM_ONLY_IMPLEMENTATION",
     "BSPINE_ARM_ONLY_SPEC_FINGERPRINT",
@@ -458,6 +648,9 @@ __all__ = [
     "BSPINE0_PHYSICAL_DIM",
     "BSPINE0_SPEC_FINGERPRINT",
     "ArmOnlyBSpine",
+    "ArmCoarseContextBSpine",
+    "ArmPrivateBSpineReader",
+    "ArmPrivateReaderBSpine",
     "BSpine0",
     "BSpineModule",
     "validate_bspine_module",

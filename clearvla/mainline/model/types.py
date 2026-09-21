@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from ..manifest import INTERVALS
@@ -16,6 +19,242 @@ INTERVAL_BOUNDS = INTERVALS
 def _shape(value: Tensor, expected: tuple[int, ...], name: str) -> None:
     if tuple(value.shape) != expected:
         raise ValueError(f"{name} must be {expected}, got {tuple(value.shape)}")
+
+
+def _camera_weighted_mean(
+    value: Tensor,
+    camera_validity: Tensor,
+    camera_support: Tensor,
+) -> Tensor:
+    """Reduce a camera axis without allowing unsupported values to leak.
+
+    Camera coordinates/transport are producer-owned evidence.  A malformed
+    value in a zero-validity camera must not survive as ``NaN * 0`` and poison
+    the compact object belief (or its backward graph).  Finite, supported
+    values retain the historical weighted-mean arithmetic exactly.
+    """
+
+    weight = camera_validity.float() * camera_support.float()
+    weight = torch.nan_to_num(weight, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+    value_f = value.float()
+    safe_value = torch.where(
+        weight > 0.0,
+        value_f,
+        torch.zeros_like(value_f),
+    )
+    numerator = (safe_value * weight).sum(dim=2)
+    denominator = weight.sum(dim=2).clamp_min(1e-6)
+    return numerator / denominator
+
+
+def intersect_object_camera_validity(
+    object_validity: Tensor,
+    camera_validity: Tensor,
+) -> Tensor:
+    """Return the detached legal camera support for an object loss boundary.
+
+    ``camera_validity`` is normally produced by the same K-to-chart read as
+    ``object_validity``, so the implication ``camera => object`` already holds
+    on the healthy Grounder path.  Keep the implication explicit at the
+    training seam as well: a replaced or malformed ``ObjectFactSet`` must not
+    make an object-invalid camera row supervise the Teacher/recognizer.
+    The result intentionally remains FP32 and detached because it is a
+    producer-owned support mask, not a learnable confidence.
+    """
+
+    if object_validity.ndim != 3 or tuple(object_validity.shape[-1:]) != (1,):
+        raise ValueError("object validity must be [B,K,1]")
+    if camera_validity.ndim != 4 or tuple(camera_validity.shape[-1:]) != (1,):
+        raise ValueError("camera validity must be [B,K,C,1]")
+    if tuple(camera_validity.shape[:2]) != tuple(object_validity.shape[:2]):
+        raise ValueError("object and camera validity must share [B,K]")
+    object_support = torch.nan_to_num(
+        object_validity.detach().float(),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).clamp(0.0, 1.0)
+    camera_support = torch.nan_to_num(
+        camera_validity.detach().float(),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).clamp(0.0, 1.0)
+    return camera_support * object_support[:, :, None, :]
+
+
+@dataclass(frozen=True)
+class FlowStepContext:
+    """Numerical context for one bottom velocity evaluation.
+
+    The action bottom predicts an instantaneous physical velocity.  The outer
+    integrator owns the Euler update, but a non-uniform grid still needs to be
+    visible to the bottom so a checkpoint trained for that contract can model
+    interval-dependent numerical error.  This record carries only numerical
+    quantities; it is deliberately incapable of carrying language, object
+    identity or outlet/task metadata.
+
+    ``normalized_index`` is the left-node ``k/N`` (not an integer index), and
+    ``endpoint`` is zero for an integrating node and one for the separate
+    non-updating ``t=1`` head read.
+    """
+
+    time: Tensor  # [B], continuous flow time t
+    step_size: Tensor  # [B], Euler delta-t (zero for endpoint read)
+    normalized_index: Tensor  # [B], k/N
+    endpoint: Tensor  # [B], 0 or 1
+
+    @property
+    def delta_t(self) -> Tensor:
+        """Explicit alias used by numerical-solver callers."""
+
+        return self.step_size
+
+    @property
+    def step_index(self) -> Tensor:
+        """Compatibility alias for the normalized ``k/N`` coordinate."""
+
+        return self.normalized_index
+
+    @classmethod
+    def from_step(
+        cls,
+        time: Tensor,
+        *,
+        step_size: float | Tensor,
+        step_index: float | Tensor,
+        endpoint: bool | float | Tensor = False,
+    ) -> "FlowStepContext":
+        """Create a batch-aligned context from scalar scheduler metadata."""
+
+        if time.ndim != 1:
+            raise ValueError("flow-step time must be [B]")
+        batch = int(time.shape[0])
+
+        def _batch_value(value: float | Tensor, *, name: str) -> Tensor:
+            if isinstance(value, Tensor):
+                if value.ndim == 0:
+                    return value.to(device=time.device, dtype=time.dtype).expand(batch)
+                if tuple(value.shape) != (batch,):
+                    raise ValueError(f"flow-step {name} tensor must be [B]")
+                return value.to(device=time.device, dtype=time.dtype)
+            return time.new_full((batch,), float(value))
+
+        result = cls(
+            time=time,
+            step_size=_batch_value(step_size, name="step_size"),
+            normalized_index=_batch_value(step_index, name="step_index"),
+            endpoint=_batch_value(endpoint, name="endpoint"),
+        )
+        result.validate(batch=batch, device=time.device)
+        return result
+
+    def validate(
+        self,
+        *,
+        batch: int | None = None,
+        device: torch.device | None = None,
+        time: Tensor | None = None,
+        strict: bool = True,
+    ) -> None:
+        """Validate the narrow numerical boundary before entering the bottom.
+
+        ``strict=True`` is the fail-closed constructor/diagnostic check.  The
+        sampler already validates its serialized schedule on the host and
+        constructs every node from those finite scalar boundaries.  Internal
+        calls in the ODE hot path therefore use ``strict=False``: shape,
+        dtype and device checks remain active, while tensor-to-Python
+        finite/range/equality checks (which synchronize CUDA) are deferred to
+        the external boundary.  This keeps numerical validation from becoming
+        an accidental per-node performance bottleneck.
+        """
+
+        values = {
+            "time": self.time,
+            "step_size": self.step_size,
+            "normalized_index": self.normalized_index,
+            "endpoint": self.endpoint,
+        }
+        for name, value in values.items():
+            if not isinstance(value, Tensor) or value.ndim != 1:
+                raise ValueError(f"flow-step {name} must be a rank-1 tensor")
+            if not value.is_floating_point():
+                raise TypeError(f"flow-step {name} must be floating point")
+        inferred_batch = int(self.time.shape[0])
+        expected_batch = inferred_batch if batch is None else int(batch)
+        if inferred_batch != expected_batch:
+            raise ValueError("flow-step context is not aligned with the bottom batch")
+        for name, value in values.items():
+            if int(value.shape[0]) != expected_batch:
+                raise ValueError(f"flow-step {name} batch is not aligned")
+            if device is not None and value.device != device:
+                raise ValueError(f"flow-step {name} is on a different device")
+        if strict:
+            for name, value in values.items():
+                if not bool(torch.isfinite(value).all()):
+                    raise ValueError(f"flow-step {name} contains non-finite values")
+        if time is not None:
+            if tuple(time.shape) != (expected_batch,):
+                raise ValueError("flow-step reference time must be [B]")
+            if time.device != self.time.device:
+                raise ValueError("flow-step reference time is on a different device")
+            if strict:
+                # Do not use an approximate comparison here: the context is
+                # built from the exact tensor handed to the decoder, and a
+                # mismatch is a caller bug that would make the numerical
+                # contract ambiguous.
+                if not torch.equal(self.time, time):
+                    raise ValueError("flow-step context time differs from decoder time")
+        if strict:
+            if bool((self.step_size < 0.0).any()):
+                raise ValueError("flow-step step_size must be non-negative")
+            if bool(((self.time < 0.0) | (self.time > 1.0)).any()):
+                raise ValueError("flow-step time must lie in [0,1]")
+            if bool(((self.normalized_index < 0.0) | (self.normalized_index > 1.0)).any()):
+                raise ValueError("flow-step normalized_index must lie in [0,1]")
+            if bool(((self.endpoint != 0.0) & (self.endpoint != 1.0)).any()):
+                raise ValueError("flow-step endpoint must be binary 0 or 1")
+
+    def embedding(self, hidden: int, *, dtype: torch.dtype | None = None) -> Tensor:
+        """Return a fixed, bounded Fourier code for the numerical tuple.
+
+        There are intentionally no parameters or buffers here.  The legacy
+        uniform/no-context path therefore keeps its state-dict and exact
+        arithmetic unchanged, while a context-aware run can learn to use this
+        code through the existing bottom condition projections.
+        """
+
+        hidden = int(hidden)
+        if hidden <= 0:
+            raise ValueError("flow-step embedding width must be positive")
+        values = torch.stack(
+            (
+                self.time.float(),
+                self.step_size.float(),
+                self.normalized_index.float(),
+                self.endpoint.float(),
+            ),
+            dim=-1,
+        )
+        # Four scalar lanes, each with sine/cosine pairs.  ceil(hidden/8)
+        # keeps the output exactly ``hidden`` after truncation/padding for both
+        # the production width and the tiny structural-test widths.
+        half = max((hidden + 7) // 8, 1)
+        frequency = torch.exp(
+            -torch.log(values.new_tensor(10000.0))
+            * torch.arange(half, device=values.device, dtype=values.dtype)
+            / float(max(half - 1, 1))
+        )
+        phase = values[..., None] * frequency
+        encoded = torch.cat((phase.sin(), phase.cos()), dim=-1).flatten(-2)
+        if int(encoded.shape[-1]) < hidden:
+            encoded = F.pad(encoded, (0, hidden - int(encoded.shape[-1])))
+        encoded = encoded[..., :hidden]
+        # A fixed small scale keeps an untrained custom-schedule diagnostic from
+        # overwhelming the learned time condition.  It remains nonzero so the
+        # path is observable and trainable through downstream weights.
+        encoded = 0.05 * encoded
+        return encoded.to(dtype=dtype or self.time.dtype)
 
 
 @dataclass(frozen=True)
@@ -257,19 +496,21 @@ class ObjectFactSet:
     def coordinates(self) -> Tensor:
         """V120 object coordinate reduced only over physical camera support."""
 
-        weight = self.camera_validity.float() * self.camera_support.float()
-        return (
-            self.camera_coordinates.float() * weight
-        ).sum(dim=2) / weight.sum(dim=2).clamp_min(1e-6)
+        return _camera_weighted_mean(
+            self.camera_coordinates,
+            self.camera_validity,
+            self.camera_support,
+        )
 
     @property
     def transport_prior(self) -> Tensor:
         """V120 object transport prior reduced only over valid cameras."""
 
-        weight = self.camera_validity.float() * self.camera_support.float()
-        return (
-            self.camera_transport_prior.float() * weight
-        ).sum(dim=2) / weight.sum(dim=2).clamp_min(1e-6)
+        return _camera_weighted_mean(
+            self.camera_transport_prior,
+            self.camera_validity,
+            self.camera_support,
+        )
 
     def validate(self) -> None:
         self.dense_chart.validate()
@@ -429,9 +670,10 @@ class ObjectWorldBelief:
 
     @property
     def transport_prior(self) -> Tensor:
-        weight = self.camera_validity.float() * self.camera_support.float()
-        return (self.camera_transport_prior.float() * weight).sum(dim=2) / (
-            weight.sum(dim=2).clamp_min(1e-6)
+        return _camera_weighted_mean(
+            self.camera_transport_prior,
+            self.camera_validity,
+            self.camera_support,
         )
 
     def validate(self) -> None:
@@ -586,6 +828,11 @@ class ActionIntentDock:
     public_interval_carrier: Tensor  # [B,I,H]
     history_memory: Tensor  # [B,L,H]
     public_object_memory: Tensor  # [B,K,H]
+    # Producer-owned physical validity is metadata, not a learned selector.
+    # Carrying it beside the materialized K memory lets the coarse reader
+    # mask padded/invalid rows without reopening ObjectFactSet or creating a
+    # second object-binding path.
+    public_object_validity: Tensor | None = None  # FP32 [B,K,1]
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -600,6 +847,19 @@ class ActionIntentDock:
             self.public_object_memory.shape[0]
         ) != batch:
             raise ValueError("action-intent object memory must be [B,K,H]")
+        if self.public_object_validity is not None:
+            if self.public_object_validity.ndim != 3 or tuple(
+                self.public_object_validity.shape[:2]
+            ) != tuple(self.public_object_memory.shape[:2]) or int(
+                self.public_object_validity.shape[-1]
+            ) != 1:
+                raise ValueError("action-intent object validity must be [B,K,1]")
+            if self.public_object_validity.dtype != torch.float32:
+                raise TypeError("action-intent object validity must remain FP32")
+            if self.public_object_validity.device != self.public_object_memory.device:
+                raise ValueError(
+                    "action-intent object validity must share object-memory device"
+                )
 
 
 @dataclass(frozen=True)
@@ -629,6 +889,7 @@ class PolicyIntentDock:
     interval_key: Tensor  # [B,I,H]
     temporal_control: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
+    target_object_address_logit: Tensor  # FP32 [B,I,K]
     typed_common_value: Tensor  # [B,K,3,R]
     typed_interval_residual_value: Tensor  # [B,I,K,3,R]
 
@@ -652,6 +913,17 @@ class PolicyIntentDock:
         objects = int(self.typed_common_value.shape[1])
         if int(self.typed_common_value.shape[2]) != 3:
             raise ValueError("policy-intent typed common value lost type identity")
+        _shape(
+            self.target_object_address_logit,
+            (batch, 4, objects),
+            "policy-intent target object address logit",
+        )
+        if self.target_object_address_logit.dtype != torch.float32:
+            raise TypeError("policy-intent target object address logit must remain FP32")
+        if self.target_object_address_logit.device != self.interval_key.device:
+            raise ValueError(
+                "policy-intent target object address logit must share intent device"
+            )
         route = int(self.typed_common_value.shape[3])
         _shape(
             self.typed_interval_residual_value,
@@ -671,6 +943,7 @@ class ObjectIntentState:
     policy_interval_context: Tensor  # [B,4,H]
     temporal_queries: Tensor  # [B,T,H]
     state_change_evidence: Tensor  # [B,H]
+    target_object_address_logit: Tensor  # FP32 [B,4,K]
     typed_common_mass: Tensor  # [B,K,3,1]
     typed_common_value: Tensor  # [B,K,3,R]
     typed_interval_residual_mass: Tensor  # [B,4,K,3,1]
@@ -680,6 +953,10 @@ class ObjectIntentState:
     interval_goal_attention: Tensor  # [B,4,4]
     interval_history_attention: Tensor  # [B,4,L]
     interval_object_attention: Tensor  # [B,4,K]
+    # The object memory is always accompanied by the producer-owned physical
+    # validity mask.  It is optional only for old in-memory fixtures that
+    # construct this compatibility container by hand.
+    object_validity: Tensor | None = None  # FP32 [B,K,1]
 
     @property
     def interval_queries(self) -> Tensor:
@@ -716,6 +993,7 @@ class ObjectIntentState:
             public_interval_carrier=self.public_interval_carrier,
             history_memory=self.history_tokens,
             public_object_memory=self.object_tokens,
+            public_object_validity=self.object_validity,
         )
 
     def factual_dock(self) -> FactualIntentDock:
@@ -735,6 +1013,7 @@ class ObjectIntentState:
             interval_key=self.policy_interval_context,
             temporal_control=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
+            target_object_address_logit=self.target_object_address_logit,
             typed_common_value=self.typed_common_value,
             typed_interval_residual_value=self.typed_interval_residual_value,
         )
@@ -759,6 +1038,27 @@ class ObjectIntentState:
         if self.object_tokens.ndim != 3 or int(self.object_tokens.shape[0]) != batch:
             raise ValueError("object intent public tokens must be [B,K,H]")
         objects = int(self.object_tokens.shape[1])
+        if self.object_validity is not None:
+            _shape(
+                self.object_validity,
+                (batch, objects, 1),
+                "intent object validity",
+            )
+            if self.object_validity.dtype != torch.float32:
+                raise TypeError("intent object validity must remain FP32")
+            if self.object_validity.device != self.object_tokens.device:
+                raise ValueError(
+                    "intent object validity must share object-token device"
+                )
+        _shape(
+            self.target_object_address_logit,
+            (batch, 4, objects),
+            "target object address logit",
+        )
+        if self.target_object_address_logit.dtype != torch.float32:
+            raise TypeError("target object address logit must remain FP32")
+        if self.target_object_address_logit.device != self.object_tokens.device:
+            raise ValueError("target object address logit must share object-token device")
         _shape(
             self.typed_common_mass,
             (batch, objects, 3, 1),
@@ -806,6 +1106,7 @@ class ObjectIntentState:
             policy_interval_context=self.policy_interval_context,
             temporal_queries=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
+            target_object_address_logit=self.target_object_address_logit[:, :, index],
             typed_common_mass=self.typed_common_mass[:, index],
             typed_common_value=self.typed_common_value[:, index],
             typed_interval_residual_mass=self.typed_interval_residual_mass[
@@ -819,6 +1120,11 @@ class ObjectIntentState:
             interval_goal_attention=self.interval_goal_attention,
             interval_history_attention=self.interval_history_attention,
             interval_object_attention=self.interval_object_attention[:, :, index],
+            object_validity=(
+                None
+                if self.object_validity is None
+                else self.object_validity[:, index]
+            ),
         )
 
 
@@ -865,15 +1171,15 @@ class PhysicalActionCondition:
     W predicts the four configured future intervals, so its physical action
     ABI uses the same four interval rows rather than inventing a 24-row chart
     whose final two intervals would not cover the W target horizons.  The
-    local delta is a deterministic view of the same normalized native action:
-    its first boundary is the currently observed action state and every later
-    boundary is the preceding interval action.  No hidden proposal coordinate,
-    goal token or S carrier is representable at this boundary.
+    local delta is a deterministic view of the canonical interval action.  An
+    outlet-specific subtype may retain a separate source proposal when its
+    command semantics require a deterministic conversion before W.  No hidden
+    proposal coordinate, goal token or S carrier is representable here.
     """
 
-    interval_action: Tensor  # [B,4,A], normalized native physical action
-    interval_delta: Tensor  # [B,4,A], deterministic adjacent physical delta
-    current_action: Tensor  # [B,A], observed normalized action state
+    interval_action: Tensor  # [B,4,A], canonical normalized physical action
+    interval_delta: Tensor  # [B,4,A], deterministic canonical physical delta
+    current_action: Tensor  # [B,A], canonical row-zero reconstruction boundary
 
     @classmethod
     def from_interval_action(
@@ -958,6 +1264,16 @@ class PhysicalActionCondition:
 
         return self.fingerprint
 
+    @property
+    def source_interval_action(self) -> Tensor:
+        """Return the unchanged proposal for the established Pen/RDT path.
+
+        This is a property rather than a dataclass field so continuous outlets
+        retain the exact historical three-field container ABI.
+        """
+
+        return self.interval_action
+
     def reconstructed_interval_action(self) -> Tensor:
         """Reconstruct interval absolutes from the stored adjacent deltas."""
 
@@ -999,7 +1315,11 @@ class PhysicalActionCondition:
             == self.current_action.device
         ):
             raise ValueError("physical action condition tensors must share a device")
-        if not self.interval_action.is_floating_point():
+        if not (
+            self.interval_action.is_floating_point()
+            and self.interval_delta.is_floating_point()
+            and self.current_action.is_floating_point()
+        ):
             raise TypeError("physical action condition must be floating point")
         expected_boundary = torch.cat(
             (
@@ -1028,6 +1348,485 @@ class PhysicalActionCondition:
         reconstructed = self.reconstructed_interval_action()
         if not torch.equal(reconstructed, self.interval_action):
             raise ValueError("physical action condition delta reconstruction failed")
+
+
+@dataclass(frozen=True)
+class OutletPhysicalActionCondition(PhysicalActionCondition):
+    """Relative-outlet W condition with an auditable source proposal.
+
+    Relative-command outlets convert arm commands before W consumes them, but
+    the exact native proposal remains tagged beside the canonical cumulative
+    condition. Pen and RDT continue to use the unchanged three-field
+    :class:`PhysicalActionCondition` container.
+    """
+
+    source_action: Tensor  # [B,4,A], exact outlet-native proposal tensor
+
+    @property
+    def source_interval_action(self) -> Tensor:
+        return self.source_action
+
+    def validate(self, *, action_dim: int, intervals: int = 4) -> None:
+        super().validate(action_dim=action_dim, intervals=intervals)
+        expected = (self.batch, int(intervals), int(action_dim))
+        _shape(
+            self.source_action,
+            expected,
+            "outlet physical action condition source action",
+        )
+        if self.source_action.device != self.interval_action.device:
+            raise ValueError("outlet source action must share the canonical device")
+        if not self.source_action.is_floating_point():
+            raise TypeError("outlet source action must be floating point")
+
+    def assert_exact_reconstruction(self) -> None:
+        """Audit relative-outlet integration without weakening the shared gate."""
+
+        if not torch.allclose(
+            self.reconstructed_interval_action(),
+            self.interval_action,
+            rtol=1e-5,
+            atol=1e-6,
+        ):
+            raise ValueError("outlet physical action delta reconstruction failed")
+
+
+PHYSICAL_ACTION_SEQUENCE_SCHEMA = "physical_action_sequence_prefix_v1"
+ABSOLUTE_ACTION_SEQUENCE_CHART = "absolute_action_sequence_v1"
+RELATIVE_COMMAND_SEQUENCE_CHART = "relative_command_sequence_v1"
+_ACTION_SEQUENCE_CHART_CODES = {
+    ABSOLUTE_ACTION_SEQUENCE_CHART: 1.0,
+    RELATIVE_COMMAND_SEQUENCE_CHART: 2.0,
+}
+
+
+def physical_action_normalizer_fingerprint(
+    offset: Tensor,
+    scale: Tensor,
+) -> str:
+    """Hash exactly the affine chart values used by the outlet adapter."""
+
+    offset_values = tuple(
+        float(value)
+        for value in offset.detach().float().cpu().reshape(-1).tolist()
+    )
+    scale_values = tuple(
+        float(value)
+        for value in scale.detach().float().cpu().reshape(-1).tolist()
+    )
+    encoded = json.dumps(
+        {"offset": offset_values, "scale": scale_values},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class PhysicalActionSequenceCondition:
+    """Versioned 24-row physical action condition consumed by W.
+
+    ``source_action`` is the normalized outlet-native proposal and remains the
+    sole producer-owned value.  ``canonical_value`` and ``canonical_delta``
+    are deterministic outlet-adapter views.  For an absolute action chart they
+    are the action and its adjacent difference.  For a relative-command chart
+    the arm value is the prefix command sum while the arm delta is the centered
+    command itself; the gripper lane remains an ordinary value/difference.
+
+    Row time is control-step time, not flow-ODE time.  Version one deliberately
+    accepts exactly 24 contiguous known steps and does not imply controls for
+    W's 32--48 future interval.
+    """
+
+    source_action: Tensor  # [B,24,A], normalized outlet-native proposal
+    canonical_value: Tensor  # [B,24,A], adapter-owned physical sequence value
+    canonical_delta: Tensor  # [B,24,A], adapter-owned adjacent/command delta
+    current_action: Tensor  # [B,A], canonical row-zero boundary
+    row_start: Tensor  # [B,24,1], inclusive control-step start
+    row_end: Tensor  # [B,24,1], exclusive control-step end
+    normalizer_offset: Tensor  # FP32 [B,1,A], normalized value of native zero
+    normalizer_scale: Tensor  # FP32 [B,1,A], native-to-normalized affine scale
+    outlet_profile: str
+    chart_version: str
+    normalizer_fingerprint: str
+    arm_dim: int
+    schema: str = PHYSICAL_ACTION_SEQUENCE_SCHEMA
+    known_prefix_end: int = 24
+
+    @classmethod
+    def from_absolute_action(
+        cls,
+        action: Tensor,
+        current_action: Tensor,
+        *,
+        outlet_profile: str,
+        normalizer_offset: Tensor,
+        normalizer_scale: Tensor,
+    ) -> "PhysicalActionSequenceCondition":
+        """Build the exact absolute-chart sequence without interval pooling."""
+
+        if action.ndim != 3 or int(action.shape[1]) != 24:
+            raise ValueError("physical action sequence must be [B,24,A]")
+        batch, horizon, action_dim = action.shape
+        _shape(
+            current_action,
+            (batch, action_dim),
+            "physical action sequence current action",
+        )
+        boundary = torch.cat(
+            (
+                current_action[:, None].to(
+                    device=action.device,
+                    dtype=action.dtype,
+                ),
+                action[:, :-1],
+            ),
+            dim=1,
+        )
+        row_start = torch.arange(
+            horizon,
+            device=action.device,
+            dtype=action.dtype,
+        ).reshape(1, horizon, 1).expand(batch, -1, -1)
+        offset, scale = cls._expanded_normalizer_chart(
+            action,
+            normalizer_offset,
+            normalizer_scale,
+        )
+        condition = cls(
+            source_action=action,
+            canonical_value=action,
+            canonical_delta=action - boundary,
+            current_action=current_action,
+            row_start=row_start,
+            row_end=row_start + 1,
+            normalizer_offset=offset,
+            normalizer_scale=scale,
+            outlet_profile=str(outlet_profile),
+            chart_version=ABSOLUTE_ACTION_SEQUENCE_CHART,
+            normalizer_fingerprint=physical_action_normalizer_fingerprint(
+                offset[0],
+                scale[0],
+            ),
+            arm_dim=action_dim - 1,
+        )
+        condition.validate(action_dim=action_dim)
+        return condition
+
+    @classmethod
+    def from_relative_command(
+        cls,
+        action: Tensor,
+        current_action: Tensor,
+        *,
+        outlet_profile: str,
+        arm_dim: int,
+        normalizer_offset: Tensor,
+        normalizer_scale: Tensor,
+    ) -> "PhysicalActionSequenceCondition":
+        """Build the deterministic centered-command/cumulative sequence."""
+
+        if action.ndim != 3 or int(action.shape[1]) != 24:
+            raise ValueError("physical action sequence must be [B,24,A]")
+        batch, horizon, action_dim = action.shape
+        if not 0 < int(arm_dim) < action_dim:
+            raise ValueError("relative action sequence arm width is invalid")
+        _shape(
+            current_action,
+            (batch, action_dim),
+            "physical action sequence current action",
+        )
+        offset, scale = cls._expanded_normalizer_chart(
+            action,
+            normalizer_offset,
+            normalizer_scale,
+        )
+        source_current = current_action.to(device=action.device, dtype=action.dtype)
+        # Metadata retains the exact FP32 chart; the numerical action view
+        # keeps the established arithmetic in the producer's dtype.
+        arm_command = action[..., :arm_dim] - offset[..., :arm_dim].to(
+            dtype=action.dtype
+        )
+        canonical_arm = torch.cumsum(arm_command, dim=1)
+        gripper = action[..., arm_dim:]
+        gripper_boundary = torch.cat(
+            (source_current[:, None, arm_dim:], gripper[:, :-1]),
+            dim=1,
+        )
+        canonical_value = torch.cat((canonical_arm, gripper), dim=-1)
+        canonical_delta = torch.cat(
+            (arm_command, gripper - gripper_boundary),
+            dim=-1,
+        )
+        canonical_current = torch.cat(
+            (
+                torch.zeros_like(source_current[..., :arm_dim]),
+                source_current[..., arm_dim:],
+            ),
+            dim=-1,
+        )
+        row_start = torch.arange(
+            horizon,
+            device=action.device,
+            dtype=action.dtype,
+        ).reshape(1, horizon, 1).expand(batch, -1, -1)
+        condition = cls(
+            source_action=action,
+            canonical_value=canonical_value,
+            canonical_delta=canonical_delta,
+            current_action=canonical_current,
+            row_start=row_start,
+            row_end=row_start + 1,
+            normalizer_offset=offset,
+            normalizer_scale=scale,
+            outlet_profile=str(outlet_profile),
+            chart_version=RELATIVE_COMMAND_SEQUENCE_CHART,
+            normalizer_fingerprint=physical_action_normalizer_fingerprint(
+                offset[0],
+                scale[0],
+            ),
+            arm_dim=int(arm_dim),
+        )
+        condition.validate(action_dim=action_dim)
+        return condition
+
+    @staticmethod
+    def _expanded_normalizer_chart(
+        action: Tensor,
+        offset: Tensor,
+        scale: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        batch, _, action_dim = action.shape
+
+        def expand(value: Tensor, name: str) -> Tensor:
+            flattened = value.to(device=action.device, dtype=torch.float32).reshape(
+                -1,
+                action_dim,
+            )
+            if int(flattened.shape[0]) not in {1, batch}:
+                raise ValueError(f"physical action sequence {name} batch is invalid")
+            if int(flattened.shape[0]) == 1:
+                flattened = flattened.expand(batch, -1)
+            return flattened[:, None]
+
+        return expand(offset, "normalizer offset"), expand(
+            scale,
+            "normalizer scale",
+        )
+
+    @property
+    def batch(self) -> int:
+        return int(self.source_action.shape[0])
+
+    @property
+    def horizon(self) -> int:
+        return int(self.source_action.shape[1])
+
+    @property
+    def action_dim(self) -> int:
+        return int(self.source_action.shape[-1])
+
+    @property
+    def device(self) -> torch.device:
+        return self.source_action.device
+
+    @property
+    def physical_fingerprint(self) -> Tensor:
+        """The two physical row streams read by W's sequence encoder."""
+
+        return torch.cat((self.canonical_value, self.canonical_delta), dim=-1)
+
+    @property
+    def fingerprint(self) -> Tensor:
+        """Lossless numeric audit view; metadata stays explicit beside it."""
+
+        chart_code = self.source_action.new_full(
+            (self.batch, self.horizon, 1),
+            _ACTION_SEQUENCE_CHART_CODES[self.chart_version],
+        )
+        current_boundary = self.current_action[:, None].to(
+            device=self.device,
+            dtype=self.source_action.dtype,
+        ).expand(-1, self.horizon, -1)
+        return torch.cat(
+            (
+                self.source_action,
+                self.canonical_value,
+                self.canonical_delta,
+                current_boundary,
+                self.normalizer_offset.expand(-1, self.horizon, -1),
+                self.normalizer_scale.expand(-1, self.horizon, -1),
+                self.row_start,
+                self.row_end,
+                chart_code,
+            ),
+            dim=-1,
+        )
+
+    @property
+    def action_fingerprint(self) -> Tensor:
+        return self.fingerprint
+
+    @property
+    def metadata_identity(self) -> tuple[str, str, str, str, int, int]:
+        return (
+            self.schema,
+            self.outlet_profile,
+            self.chart_version,
+            self.normalizer_fingerprint,
+            int(self.arm_dim),
+            int(self.known_prefix_end),
+        )
+
+    def validate(self, *, action_dim: int, horizon: int = 24) -> None:
+        if self.schema != PHYSICAL_ACTION_SEQUENCE_SCHEMA:
+            raise ValueError("unknown physical action sequence schema")
+        if self.chart_version not in _ACTION_SEQUENCE_CHART_CODES:
+            raise ValueError("unknown physical action sequence chart version")
+        if not self.outlet_profile:
+            raise ValueError("physical action sequence outlet profile is empty")
+        if not self.normalizer_fingerprint:
+            raise ValueError("physical action sequence normalizer identity is empty")
+        if (
+            type(self.known_prefix_end) is not int
+            or self.known_prefix_end != 24
+            or int(horizon) != 24
+        ):
+            raise ValueError("sequence-prefix-v1 requires one complete 24-row prefix")
+        if type(self.arm_dim) is not int or not 0 < self.arm_dim < int(action_dim):
+            raise ValueError("physical action sequence arm width is invalid")
+        expected = (self.batch, 24, int(action_dim))
+        _shape(self.source_action, expected, "physical action sequence source")
+        _shape(self.canonical_value, expected, "physical action sequence value")
+        _shape(self.canonical_delta, expected, "physical action sequence delta")
+        _shape(
+            self.current_action,
+            (self.batch, int(action_dim)),
+            "physical action sequence current action",
+        )
+        time_shape = (self.batch, 24, 1)
+        _shape(self.row_start, time_shape, "physical action sequence row start")
+        _shape(self.row_end, time_shape, "physical action sequence row end")
+        normalizer_shape = (self.batch, 1, int(action_dim))
+        _shape(
+            self.normalizer_offset,
+            normalizer_shape,
+            "physical action sequence normalizer offset",
+        )
+        _shape(
+            self.normalizer_scale,
+            normalizer_shape,
+            "physical action sequence normalizer scale",
+        )
+        tensors = (
+            self.source_action,
+            self.canonical_value,
+            self.canonical_delta,
+            self.current_action,
+            self.row_start,
+            self.row_end,
+            self.normalizer_offset,
+            self.normalizer_scale,
+        )
+        if any(value.device != self.source_action.device for value in tensors):
+            raise ValueError("physical action sequence tensors must share a device")
+        if any(not value.is_floating_point() for value in tensors):
+            raise TypeError("physical action sequence tensors must be floating point")
+        if (
+            self.normalizer_offset.dtype != torch.float32
+            or self.normalizer_scale.dtype != torch.float32
+        ):
+            raise TypeError(
+                "physical action sequence normalizer metadata must remain FP32"
+            )
+
+    def assert_exact_contract(self) -> None:
+        """Run synchronization-requiring value checks only in explicit audits."""
+
+        expected_start = torch.arange(
+            24,
+            device=self.device,
+            dtype=self.row_start.dtype,
+        ).reshape(1, 24, 1).expand(self.batch, -1, -1)
+        if not torch.equal(self.row_start, expected_start):
+            raise ValueError("physical action sequence row starts are not contiguous")
+        if not torch.equal(self.row_end, expected_start + 1):
+            raise ValueError("physical action sequence row ends are not contiguous")
+        if not bool(torch.isfinite(self.normalizer_offset).all()) or not bool(
+            torch.isfinite(self.normalizer_scale).all()
+        ):
+            raise ValueError("physical action sequence normalizer is non-finite")
+        if bool((self.normalizer_scale <= 0.0).any()):
+            raise ValueError("physical action sequence normalizer scale is not positive")
+        if not torch.equal(
+            self.normalizer_offset,
+            self.normalizer_offset[:1].expand_as(self.normalizer_offset),
+        ) or not torch.equal(
+            self.normalizer_scale,
+            self.normalizer_scale[:1].expand_as(self.normalizer_scale),
+        ):
+            raise ValueError("physical action sequence normalizer differs across batch")
+        expected_fingerprint = physical_action_normalizer_fingerprint(
+            self.normalizer_offset[0],
+            self.normalizer_scale[0],
+        )
+        if self.normalizer_fingerprint != expected_fingerprint:
+            raise ValueError("physical action sequence normalizer identity is inconsistent")
+        if self.chart_version == ABSOLUTE_ACTION_SEQUENCE_CHART:
+            if not torch.equal(self.source_action, self.canonical_value):
+                raise ValueError("absolute action sequence source/value diverged")
+            delta_source = self.source_action
+            delta = self.canonical_delta
+            current = self.current_action
+        else:
+            arm = self.arm_dim
+            expected_arm_delta = (
+                self.source_action[..., :arm]
+                - self.normalizer_offset[..., :arm].to(dtype=self.source_action.dtype)
+            )
+            if not torch.equal(
+                self.canonical_delta[..., :arm],
+                expected_arm_delta,
+            ):
+                raise ValueError("relative action sequence source/delta diverged")
+            if not torch.allclose(
+                self.canonical_value[..., :arm],
+                torch.cumsum(expected_arm_delta, dim=1),
+                rtol=1e-5,
+                atol=1e-6,
+            ):
+                raise ValueError("relative action sequence cumulative value diverged")
+            if not torch.equal(
+                self.canonical_value[..., arm:],
+                self.source_action[..., arm:],
+            ):
+                raise ValueError("relative action sequence gripper value diverged")
+            if not torch.equal(
+                self.current_action[..., :arm],
+                torch.zeros_like(self.current_action[..., :arm]),
+            ):
+                raise ValueError("relative action sequence arm boundary is not zero")
+            delta_source = self.source_action[..., arm:]
+            delta = self.canonical_delta[..., arm:]
+            current = self.current_action[..., arm:]
+        boundary = torch.cat(
+            (
+                current[:, None].to(
+                    device=self.device,
+                    dtype=delta_source.dtype,
+                ),
+                delta_source[:, :-1],
+            ),
+            dim=1,
+        )
+        # Recompute the producer's subtraction rather than trying to invert a
+        # rounded low-precision delta with addition. Both charts retain the
+        # same numerical factory operations under FP32, BF16 and FP16.
+        if not torch.equal(delta, delta_source - boundary):
+            raise ValueError("physical action sequence delta reconstruction failed")
+
+
+WorldActionCondition = PhysicalActionCondition | PhysicalActionSequenceCondition
 
 
 @dataclass(frozen=True)
@@ -1290,7 +2089,7 @@ class CandidateWorld:
     action-condition audit method when a probe needs it.
     """
 
-    action_condition: PhysicalActionCondition
+    action_condition: WorldActionCondition
     dynamics: FutureObjectDynamics
 
     @property
@@ -1302,12 +2101,17 @@ class CandidateWorld:
         self.dynamics.validate()
         if self.action_condition.batch != int(self.dynamics.current_reference.shape[0]):
             raise ValueError("candidate world action and dynamics batches do not align")
-        if self.action_condition.interval_action.device != self.dynamics.semantic_delta.device:
+        condition_device = (
+            self.action_condition.interval_action.device
+            if isinstance(self.action_condition, PhysicalActionCondition)
+            else self.action_condition.device
+        )
+        if condition_device != self.dynamics.semantic_delta.device:
             raise ValueError("candidate world action and dynamics must share a device")
 
     def assert_action_identity(
         self,
-        action_condition: PhysicalActionCondition,
+        action_condition: WorldActionCondition,
     ) -> None:
         """Reject a world paired with another candidate action object."""
 

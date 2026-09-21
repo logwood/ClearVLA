@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .routing import smooth_rms_contract
+from .routing import register_gradient_rms_metric, smooth_rms_contract
 from .types import (
     INTERVAL_BOUNDS,
     ActionIntentDock,
@@ -71,22 +72,67 @@ class _CrossRead(nn.Module):
         padding_mask: Tensor | None = None,
         diagnostics: bool = False,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        normalized_memory = self.memory_norm(memory)
+        # ``MultiheadAttention`` returns NaNs when every key in one batch row
+        # is masked.  More importantly, normalizing a padded/invalid key before
+        # masking still lets a malformed cache leak through the reduction.  A
+        # dummy zero key keeps the kernel finite for the all-invalid row; its
+        # update is discarded below so that the row is an exact identity read.
+        all_invalid: Tensor | None = None
+        effective_padding_mask = padding_mask
+        if padding_mask is not None:
+            if padding_mask.ndim != 2 or tuple(padding_mask.shape) != tuple(
+                memory.shape[:2]
+            ):
+                raise ValueError("cross-read padding mask must align with memory")
+            if int(memory.shape[1]) < 1:
+                raise ValueError("cross-read memory cannot be empty")
+            effective_padding_mask = padding_mask.to(
+                device=memory.device,
+                dtype=torch.bool,
+            )
+            valid = ~effective_padding_mask
+            all_invalid = ~valid.any(dim=-1)
+            safe_memory = torch.where(
+                valid[..., None],
+                memory,
+                torch.zeros_like(memory),
+            )
+            normalized_memory = self.memory_norm(safe_memory)
+            # Unmask one zero key only for rows with no legal key.  The
+            # resulting attention weight is removed after the kernel call.
+            effective_padding_mask = effective_padding_mask.clone()
+            effective_padding_mask[all_invalid, 0] = False
+        else:
+            normalized_memory = self.memory_norm(memory)
         update, weights = self.attention(
             self.query_norm(query),
             normalized_memory,
             normalized_memory,
-            key_padding_mask=padding_mask,
+            key_padding_mask=effective_padding_mask,
             need_weights=diagnostics,
             average_attn_weights=True,
         )
         update, _ = smooth_rms_contract(update, self.maximum_rms)
         value = query + update
         ffn, _ = smooth_rms_contract(self.ffn(value), self.maximum_rms)
+        innovation = update + ffn
         value = value + ffn
+        if all_invalid is not None:
+            invalid = all_invalid[:, None, None]
+            # No valid object/evidence is an exact no-op, including its FFN
+            # residual.  This is intentionally a value-level mask rather than
+            # a detached loss-side convention.
+            value = torch.where(invalid, query, value)
+            innovation = torch.where(invalid, torch.zeros_like(innovation), innovation)
+            if weights is not None:
+                weights = torch.where(
+                    all_invalid[:, None, None],
+                    torch.zeros_like(weights),
+                    weights,
+                )
         if weights is None:
             weights = query.new_zeros(query.shape[0], query.shape[1], memory.shape[1])
-        return value, update + ffn, weights
+        return value, innovation, weights
 
 
 class _SelfBlock(nn.Module):
@@ -118,6 +164,24 @@ class _SelfBlock(nn.Module):
         return value + ffn
 
 
+class _ZeroStartTargetAddress(nn.Module):
+    """Bias-free shared type-to-K address head without constructor RNG use."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        if int(width) <= 0:
+            raise ValueError("target-address width must be positive")
+        self.weight = nn.Parameter(torch.zeros(1, int(width), dtype=torch.float32))
+
+    def forward(self, value: Tensor) -> Tensor:
+        if int(value.shape[-1]) != int(self.weight.shape[-1]):
+            raise ValueError("target-address input lost typed evidence width")
+        # Elementwise FP32 arithmetic is deliberately used instead of an
+        # autocast-eligible GEMM.  Equal typed evidence must remain an exact
+        # K-common value before the centering contract below.
+        return (value.float() * self.weight.float()).sum(dim=-1, keepdim=True)
+
+
 class StatelessObjectIntentOrganizer(nn.Module):
     """V120 observable intent without scalar progress or synthetic phases."""
 
@@ -132,8 +196,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
         route_dim: int,
         horizon: int,
         heads: int,
+        interval_object_query_mode: str = "goal_history",
+        target_object_address_mode: str = "post_pool_only",
     ) -> None:
         super().__init__()
+        if interval_object_query_mode not in {"goal_history", "history_only"}:
+            raise ValueError("unknown interval object query mode")
+        if target_object_address_mode not in {
+            "post_pool_only",
+            "shared_target_prior_v1",
+        }:
+            raise ValueError("unknown target object address mode")
+        self.interval_object_query_mode = interval_object_query_mode
+        self.target_object_address_mode = target_object_address_mode
         self.hidden = int(hidden)
         self.horizon = int(horizon)
         self.goal_input = nn.Linear(goal_dim, hidden, bias=False)
@@ -158,6 +233,22 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.typed_relevance_queries = nn.ModuleList(
             nn.Linear(hidden, route_dim, bias=False) for _ in TYPED_INTENT_NAMES
         )
+        # One shared object identity must bind semantic and geometry reads.
+        # The head learns which typed evidence identifies the operated object
+        # (including appearance for color instructions) without creating one
+        # target per downstream reader.  Exact zero initialization preserves
+        # the legacy spatial reader at initialization and lets ordinary action
+        # loss open the route without a hand-set gain.
+        self.target_object_address: _ZeroStartTargetAddress | None
+        if target_object_address_mode == "shared_target_prior_v1":
+            self.target_object_address = _ZeroStartTargetAddress(
+                len(TYPED_INTENT_NAMES)
+            )
+        else:
+            # The accepted reader must retain the exact old parameter set and
+            # constructor RNG stream.  Runtime still exposes a typed zero field
+            # so the downstream dock has one stable schema.
+            self.target_object_address = None
         # Initial temperature is exactly one.  It remains bounded in [0.25, 4]
         # and therefore cannot turn the fixed-zero null comparison into an
         # unbounded selector gain.
@@ -205,7 +296,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
 
     def _object_tokens(self, facts: ObjectFactSet) -> Tensor:
         facts.validate()
-        return self.object_content(facts.content)
+        validity = torch.nan_to_num(
+            facts.validity.to(device=facts.content.device, dtype=torch.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp(0.0, 1.0)
+        support = validity[..., 0] > 0.0
+        content = torch.where(
+            support[..., None],
+            facts.content,
+            torch.zeros_like(facts.content),
+        )
+        return self.object_content(content)
 
     @staticmethod
     def _bounded_unit(value: Tensor, *, floor: float = 0.25) -> Tensor:
@@ -219,7 +322,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         *,
         public_interval_carrier: Tensor,
         facts: ObjectFactSet,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Build fixed-zero, per-type relevance without collapsing K."""
 
         query_source = self.typed_query_norm(public_interval_carrier)
@@ -227,9 +330,24 @@ class StatelessObjectIntentOrganizer(nn.Module):
             tuple(projection(query_source) for projection in self.typed_relevance_queries),
             dim=2,
         )  # [B,I,type,R]
+        validity_values = torch.nan_to_num(
+            facts.validity.to(device=public_interval_carrier.device, dtype=torch.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp(0.0, 1.0)
+        object_support = validity_values[..., 0] > 0.0
         typed_route = torch.stack(
             (facts.semantic, facts.appearance, facts.geometry), dim=2
         )  # [B,K,type,R]
+        # Quarantine invalid producer rows before the bounded cosine and the
+        # subsequent type/object reductions.  Multiplying after a projection
+        # would still allow NaN * 0 to poison the upstream VJP.
+        typed_route = torch.where(
+            object_support[..., None, None],
+            typed_route,
+            torch.zeros_like(typed_route),
+        )
         score = torch.einsum(
             "bitr,bktr->bikt",
             self._bounded_unit(typed_query),
@@ -241,7 +359,41 @@ class StatelessObjectIntentOrganizer(nn.Module):
         signal_probability = torch.sigmoid(
             score * temperature.to(device=score.device)[None, None, None]
         )
-        validity = facts.validity.float()[:, None, :, None, :].clamp(0.0, 1.0)
+        # Target identity is one shared K-indexed fact, not one independently
+        # chosen object per downstream P2 type.  The shared zero-start head can
+        # learn whether semantic, appearance or geometry identifies the target.
+        # Removing the supported K-common component makes uniform evidence an
+        # exact neutral prior and leaves producer support authority unchanged.
+        typed_address_score = score * temperature.to(device=score.device)[
+            None, None, None
+        ]
+        if self.target_object_address is None:
+            target_address_raw = torch.zeros_like(typed_address_score[..., 0])
+        else:
+            target_address_raw = self.target_object_address(typed_address_score)[..., 0]
+        target_support = object_support[:, None].expand_as(target_address_raw)
+        safe_target_address = torch.where(
+            target_support,
+            target_address_raw.float(),
+            torch.zeros_like(target_address_raw, dtype=torch.float32),
+        )
+        first_legal_k = target_support.to(dtype=torch.int64).argmax(
+            dim=-1, keepdim=True
+        )
+        target_address_reference = safe_target_address.gather(-1, first_legal_k)
+        target_address_relative = safe_target_address - target_address_reference
+        target_count = target_support.float().sum(dim=-1, keepdim=True)
+        target_address_mean = torch.where(
+            target_support,
+            target_address_relative,
+            torch.zeros_like(target_address_relative),
+        ).sum(dim=-1, keepdim=True) / target_count.clamp_min(1.0)
+        target_object_address_logit = torch.where(
+            target_support,
+            target_address_relative - target_address_mean,
+            torch.zeros_like(target_address_relative),
+        )
+        validity = validity_values[:, None, :, None, :]
         relevance_mass = signal_probability[..., None] * validity
         relevance_mass = relevance_mass.to(dtype=typed_route.dtype)
         relevance_value = (
@@ -267,6 +419,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             relevance_mass,
             relevance_value,
             typed_components,
+            target_object_address_logit,
             score,
             temperature,
         )
@@ -302,7 +455,72 @@ class StatelessObjectIntentOrganizer(nn.Module):
         history = self.history_input(paired_history)
         for block in self.history_blocks:
             history = block(history, causal=True)
-        objects = self._object_tokens(facts)
+        # Materialize the producer-owned object support before any learned
+        # projection.  This keeps invalid/unknown rows out of both the S
+        # language read and the backward graph.
+        validity_values = torch.nan_to_num(
+            facts.validity.to(device=facts.content.device, dtype=torch.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp(0.0, 1.0)
+        object_validity = validity_values[..., 0] > 0.0
+        object_mask = object_validity[..., None]
+        content_input = torch.where(
+            object_mask,
+            facts.content,
+            torch.zeros_like(facts.content),
+        )
+        semantic_input = torch.where(
+            object_mask,
+            facts.semantic,
+            torch.zeros_like(facts.semantic),
+        )
+        appearance_input = torch.where(
+            object_mask,
+            facts.appearance,
+            torch.zeros_like(facts.appearance),
+        )
+        geometry_input = torch.where(
+            object_mask,
+            facts.geometry,
+            torch.zeros_like(facts.geometry),
+        )
+        content_objects = self.object_content(content_input)
+        # Fuse the three observable object routes before the language read.
+        # The sum is shared over K and symmetric over semantic/appearance/
+        # geometry, so it supplies affordance/appearance evidence without
+        # creating a color-specific slot or a learned role sidecar.  Keep the
+        # update bounded and quarantine producer-invalid rows before any
+        # attention reduction.
+        typed_object_context = (
+            self.object_semantic(semantic_input)
+            + self.object_appearance(appearance_input)
+            + self.object_geometry(geometry_input)
+        ) / (3.0**0.5)
+        typed_object_context, _ = smooth_rms_contract(typed_object_context, 0.35)
+        # Keep the original content-only memory as the interval evidence
+        # source so typed S relevance remains owned by its named routes.  The
+        # symmetric route-enriched view is exported as the public K memory for
+        # the language-conditioned coarse compiler below; this prevents an
+        # appearance/geometry helper from becoming a second public interval
+        # owner while still making those facts available to action selection.
+        objects = content_objects + typed_object_context
+        interval_objects = content_objects
+        # Keep the public K memory physically safe before it reaches either
+        # S's language-conditioned read or the coarse-action compiler.  The
+        # producer-owned validity mask is not a learned confidence and is not
+        # renormalized into a task-dependent selector.
+        objects = torch.where(
+            object_validity[..., None],
+            objects,
+            torch.zeros_like(objects),
+        )
+        interval_objects = torch.where(
+            object_validity[..., None],
+            interval_objects,
+            torch.zeros_like(interval_objects),
+        )
         interval_base = self.interval_identity.to(
             device=objects.device, dtype=objects.dtype
         ).expand(batch, -1, -1)
@@ -312,8 +530,20 @@ class StatelessObjectIntentOrganizer(nn.Module):
         _, history_innovation, interval_history_attention = self.interval_history(
             interval_base, history, diagnostics=collect_diagnostics
         )
+        # This is the repaired language/object seam.  The old query was only
+        # ``interval_base``; consequently its K attention and object update
+        # were invariant to an instruction swap.  Goal/history innovations are
+        # already S-owned, bounded deltas, so using them as the object-read
+        # query preserves the K axis while making object identity conditional
+        # on the instruction and the current causal context.
+        language_object_query = interval_base + goal_innovation + history_innovation
+        if self.interval_object_query_mode == "history_only":
+            language_object_query = interval_base + history_innovation
         _, object_innovation, interval_object_attention = self.interval_object(
-            interval_base, objects, diagnostics=collect_diagnostics
+            language_object_query,
+            interval_objects,
+            padding_mask=~object_validity,
+            diagnostics=collect_diagnostics,
         )
         public_intervals = self.interval_self(
             interval_base
@@ -325,6 +555,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             typed_relevance_mass,
             typed_relevance_value,
             typed_policy_components,
+            target_object_address_logit,
             typed_relevance_score,
             typed_temperature,
         ) = self._typed_relevance(
@@ -360,8 +591,17 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if state_change_attention is None:
             state_change_attention = history.new_zeros(batch, 1, history.shape[1])
         state_change_history = state_change_history[:, 0]
-        transport_tokens = self.state_change_transport(facts.transport_prior)
-        transport_validity = facts.validity.to(
+        transport_prior = facts.transport_prior.to(
+            device=objects.device,
+            dtype=objects.dtype,
+        )
+        transport_prior = torch.where(
+            object_mask.to(device=transport_prior.device),
+            transport_prior,
+            torch.zeros_like(transport_prior),
+        )
+        transport_tokens = self.state_change_transport(transport_prior)
+        transport_validity = validity_values.to(
             device=transport_tokens.device, dtype=transport_tokens.dtype
         )
         state_change_transport = (
@@ -381,6 +621,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             policy_interval_context=policy_intervals,
             temporal_queries=temporal,
             state_change_evidence=state_change_evidence,
+            target_object_address_logit=target_object_address_logit,
             typed_common_mass=typed_common_mass,
             typed_common_value=typed_common_value,
             typed_interval_residual_mass=typed_interval_residual_mass,
@@ -390,11 +631,18 @@ class StatelessObjectIntentOrganizer(nn.Module):
             interval_goal_attention=interval_goal_attention,
             interval_history_attention=interval_history_attention,
             interval_object_attention=interval_object_attention,
+            object_validity=validity_values.detach().to(
+                device=objects.device,
+                dtype=torch.float32,
+            ),
         )
         state_out.validate(horizon=self.horizon, hidden=self.hidden)
         if not collect_diagnostics:
             return state_out, {}
         metrics: dict[str, Tensor] = {
+            "object_intent_interval_query_goal_enabled": objects.new_tensor(
+                float(self.interval_object_query_mode == "goal_history")
+            ),
             "object_intent_goal_attention_entropy": normalized_entropy(
                 goal_attention, dim=-1
             ).detach().mean(),
@@ -407,6 +655,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_interval_object_entropy": normalized_entropy(
                 interval_object_attention, dim=-1
             ).detach().mean(),
+            "object_intent_language_object_attention_entropy": normalized_entropy(
+                interval_object_attention, dim=-1
+            ).detach().mean(),
+            "object_intent_language_object_attention_valid_fraction": (
+                object_validity.detach().float().mean()
+            ),
             "object_intent_public_interval_variation": public_intervals.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
@@ -420,8 +674,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
             "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
             "object_intent_typed_action_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
+            "object_intent_target_address_logit_rms": target_object_address_logit.detach().square().mean().sqrt(),
+            "object_intent_target_address_logit_k_variation": target_object_address_logit.detach().std(
+                dim=2, unbiased=False
+            ).mean(),
+            "object_intent_target_address_logit_k_center_error": (
+                (
+                    target_object_address_logit.detach()
+                    * object_validity[:, None].detach().float()
+                ).sum(dim=2)
+                / object_validity.detach().float().sum(dim=1)[:, None].clamp_min(1.0)
+            ).abs().amax(),
             "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
-            "object_intent_observed_transport_rms": facts.transport_prior.detach().float().square().mean().sqrt(),
+            "object_intent_observed_transport_rms": transport_prior.detach().float().square().mean().sqrt(),
             "object_intent_state_change_history_rms": state_change_history.detach().float().square().mean().sqrt(),
             "object_intent_state_change_transport_rms": state_change_transport.detach().float().square().mean().sqrt(),
             "object_intent_state_change_evidence_rms": state_change_evidence.detach().float().square().mean().sqrt(),
@@ -429,7 +694,35 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 state_change_attention, dim=-1
             ).detach().mean(),
         }
-        raw_routes = (facts.semantic, facts.appearance, facts.geometry)
+        # The returned attention probability is an auxiliary observation; it
+        # is not consumed by the action path and therefore has no ordinary
+        # owner VJP.  Observe the two value tensors that actually carry the
+        # repaired language/object edge instead: the conditioned K query and
+        # its bounded object innovation.  Keep the historical attention name
+        # as a compatibility alias, but bind it to the consumed innovation
+        # rather than reporting a guaranteed zero from a sibling output.
+        register_gradient_rms_metric(
+            language_object_query,
+            metrics,
+            "gradient_tensor_s_language_object_query_rms",
+        )
+        register_gradient_rms_metric(
+            object_innovation,
+            metrics,
+            "gradient_tensor_s_language_object_update_rms",
+        )
+        register_gradient_rms_metric(
+            object_innovation,
+            metrics,
+            "gradient_tensor_s_language_object_attention_rms",
+        )
+        if self.target_object_address is not None:
+            register_gradient_rms_metric(
+                target_object_address_logit,
+                metrics,
+                "gradient_tensor_s_target_object_address_logit_rms",
+            )
+        raw_routes = (semantic_input, appearance_input, geometry_input)
         for type_index, name in enumerate(TYPED_INTENT_NAMES):
             mass = typed_relevance_mass[..., type_index, 0].detach().float()
             selected = typed_relevance_value[..., type_index, :].detach().float()
@@ -582,9 +875,34 @@ class FuturePlanRecognizer(nn.Module):
 class CoarseActionIntent(nn.Module):
     """V120 online clean action intent used exactly once by W."""
 
-    def __init__(self, *, hidden: int, action_dim: int, heads: int) -> None:
+    def __init__(
+        self,
+        *,
+        hidden: int,
+        action_dim: int,
+        heads: int,
+        horizon: int = 24,
+        action_condition_mode: str = "interval_mean_v1",
+    ) -> None:
         super().__init__()
+        self.horizon = int(horizon)
+        if self.horizon != 24:
+            raise ValueError("the active coarse action contract requires 24 rows")
+        self.action_condition_mode = str(action_condition_mode)
+        if self.action_condition_mode not in {
+            "interval_mean_v1",
+            "sequence_prefix_v1",
+        }:
+            raise ValueError("unknown coarse action condition mode")
         self.query = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
+        # Keep the trained four-query basis as the shared temporal scaffold.
+        # The new zero-initialized row offsets add row-specific capacity
+        # without replacing or resetting the existing action head/query.
+        self.sequence_row_offset: nn.Parameter | None = None
+        if self.action_condition_mode == "sequence_prefix_v1":
+            self.sequence_row_offset = nn.Parameter(
+                torch.zeros(1, self.horizon, hidden)
+            )
         self.intent_read = _CrossRead(hidden, heads)
         self.object_read = _CrossRead(hidden, heads)
         self.history_read = _CrossRead(hidden, heads)
@@ -596,21 +914,54 @@ class CoarseActionIntent(nn.Module):
         intent: ActionIntentDock,
         *,
         future_action: Tensor | None = None,
+        collect_diagnostics: bool = False,
     ) -> CoarseActionIntentState:
         intent.validate(hidden=int(self.query.shape[-1]))
         batch = int(intent.public_interval_carrier.shape[0])
-        query = self.query.to(
+        query_seed = self.query
+        if self.action_condition_mode == "sequence_prefix_v1":
+            if self.sequence_row_offset is None:
+                raise RuntimeError("sequence coarse action has no row offsets")
+            query_seed = F.interpolate(
+                self.query.transpose(1, 2),
+                size=self.horizon,
+                mode="linear",
+                align_corners=True,
+            ).transpose(1, 2) + self.sequence_row_offset
+        query = query_seed.to(
             device=intent.public_interval_carrier.device,
             dtype=intent.public_interval_carrier.dtype,
         ).expand(batch, -1, -1)
         _, intent_delta, _ = self.intent_read(
-            query, intent.public_interval_carrier
+            query,
+            intent.public_interval_carrier,
+            diagnostics=collect_diagnostics,
         )
-        _, object_delta, _ = self.object_read(query, intent.public_object_memory)
-        _, history_delta, _ = self.history_read(query, intent.history_memory)
+        # Carry the language-conditioned interval read into both auxiliary
+        # memories.  This keeps the object and history reads in the same S
+        # query frame instead of letting a learned query silently wash out the
+        # instruction before the physical proposal is formed.
+        conditioned_query = query + intent_delta
+        object_padding_mask = None
+        if intent.public_object_validity is not None:
+            validity = intent.public_object_validity.to(
+                device=intent.public_object_memory.device,
+                dtype=torch.float32,
+            ).squeeze(-1).clamp(0.0, 1.0)
+            object_padding_mask = ~(validity > 0.0)
+        _, object_delta, _ = self.object_read(
+            conditioned_query,
+            intent.public_object_memory,
+            padding_mask=object_padding_mask,
+            diagnostics=collect_diagnostics,
+        )
+        _, history_delta, _ = self.history_read(
+            conditioned_query,
+            intent.history_memory,
+            diagnostics=collect_diagnostics,
+        )
         token = self.block(
-            query
-            + intent_delta
+            conditioned_query
             + object_delta
             + history_delta
         )
@@ -619,10 +970,17 @@ class CoarseActionIntent(nn.Module):
             target = None
             loss = action_prediction.new_zeros(())
         else:
-            slices = _interval_slices(int(future_action.shape[1]))
-            target = torch.stack(
-                [future_action[:, row].mean(dim=1) for row in slices], dim=1
-            ).detach()
+            if self.action_condition_mode == "sequence_prefix_v1":
+                if int(future_action.shape[1]) < self.horizon:
+                    raise ValueError(
+                        "sequence coarse supervision requires 24 future rows"
+                    )
+                target = future_action[:, : self.horizon].detach()
+            else:
+                slices = _interval_slices(int(future_action.shape[1]))
+                target = torch.stack(
+                    [future_action[:, row].mean(dim=1) for row in slices], dim=1
+                ).detach()
             loss = (action_prediction.float() - target.float()).square().mean()
         return CoarseActionIntentState(
             tokens=token,

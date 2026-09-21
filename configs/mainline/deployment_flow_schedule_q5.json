@@ -1,0 +1,35 @@
+{
+  "deployment_flow_schedule": "clearvla.mainline.deployment_flow_schedule",
+  "schema_version": 2,
+  "method": "euler",
+  "bottom_context_contract": "flow_step_context_t_dt_kn_endpoint_fourier_v1",
+  "endpoint_policy": "external_t1_head",
+  "initial_state_policy": "reuse_exact_initial",
+  "cache_boundary_policy": "one_w_rebuild_no_history",
+  "proposal": {
+    "schedule": "clearvla.flow_schedule",
+    "schema_version": 1,
+    "kind": "custom",
+    "boundaries": [0.0, 0.1337480609952844, 0.3181082915068203, 0.528067042076036, 0.7565932872025407, 1.0],
+    "parameters": {
+      "candidate_id": "Q5",
+      "exponent": 1.25,
+      "formula": "t_i=(i/5)^exponent",
+      "label": "same-nfe-power-five",
+      "steps": 5
+    }
+  },
+  "refined": {
+    "schedule": "clearvla.flow_schedule",
+    "schema_version": 1,
+    "kind": "custom",
+    "boundaries": [0.0, 0.1337480609952844, 0.3181082915068203, 0.528067042076036, 0.7565932872025407, 1.0],
+    "parameters": {
+      "candidate_id": "Q5",
+      "exponent": 1.25,
+      "formula": "t_i=(i/5)^exponent",
+      "label": "same-nfe-power-five",
+      "steps": 5
+    }
+  }
+}

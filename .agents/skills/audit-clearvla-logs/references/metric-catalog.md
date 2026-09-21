@@ -852,15 +852,22 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
   first, first-8, tail, arm, gripper and source-native/normalized `1-4 / 5-12 /
   13-24` bands. The legacy `physical` projection must match source-native
   exactly; `tail/first` remains diagnostic, not a loss.
-- For `arm_flow_mode=relative_command_direct`, CALVIN's first and second
-  six-dimensional arm-field branches are two direct views of the same native
-  relative TCP command. `physical_decode_delta_blend=0.25` therefore means
-  `0.75 * branch0 + 0.25 * branch1`; neither branch is an adjacent command
-  difference and neither is cumulatively integrated. In this mode
-  `smooth_delta` is intentionally zero, while `physical_delta_consistency`
-  measures direct-branch agreement. Never compare its raw 18-D flow value or
-  branch semantics with a `legacy_independent` CALVIN checkpoint as though the
-  action chart matched.
+- For `gripper_output_mode=calvin_binary_command`, read
+  `validation_gripper_binary_command_rmse_normalized`,
+  `validation_gripper_binary_command_rmse_source_native`, command accuracy/F1
+  and error rate as a classifier surface.  The historical
+  `validation_gripper_command_rmse_physical` key is only a compatibility alias
+  for the source-native hard-command mismatch.  It must not be compared with
+  Pen/RDT continuous trajectory RMSE or used to infer a shared-scale failure.
+- For `arm_flow_mode=relative_command_adapter`, CALVIN keeps the same shared
+  value/adjacent-difference 18-D flow field as Pen/RDT. The second arm branch
+  and `smooth_delta` remain compatibility-chart adjacent-command quantities;
+  they must not be described as physical TCP displacement. The data sampler
+  instead ranks normalized commands after subtracting normalized raw zero,
+  and the W-only outlet adapter cumulatively integrates its four centered
+  command rows while exposing each centered command as W physical delta.
+  Historical `relative_command_direct` checkpoints used a different field
+  meaning and are rejected comparators, not resume sources.
 - For RDT-like command/state mismatches, read
   `validation_codec_gripper_boundary_qpos_gap_rms_normalized` together with
   its source-native counterpart. The `validation_action_state_gripper_abs_gt3_rate_normalized`
@@ -974,6 +981,23 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
   has no target value, quota, gate or loss. An exact-zero token/update row is
   expected before the first optimizer update because both lifts initialize at
   zero; persistent zero after learning must be read with owner gradients.
+- `fixed_bspline_arm_coarse_context_v1` is a separate fresh candidate: it keeps
+  only the arm coarse projection and has no detail owner. Its
+  `bottom_spine_detail_path_active=0` diagnostic is structural evidence, not a
+  quality target; do not compare its detail RMS to the old arm-only two-lift
+  implementation as if they were the same parameterization.
+- `fixed_bspline_arm_private_reader_v1` is a matched routing control, not a
+  fourth physical chart. It uses the same arm coarse projection as the
+  coarse-context candidate, then sends the hidden tokens through
+  `ArmPrivateBSpineReader` to an arm-only physical correction at the terminal
+  controller. The correction reaches only the first `2*arm_dim` velocity
+  channels; the shared action seed, gripper channels, gripper state/command
+  head and motion head remain raw-only. Its zero-initialized coarse lifts make
+  construction and the first forward baseline-preserving, while the reader's
+  non-zero Jacobian allows the spline owner to receive an arm-flow pull.
+  `bottom_spine_arm_private_reader_active` and
+  `bottom_spine_arm_private_correction_rms` describe this route; they are
+  diagnostics, never objective terms or gain targets.
 - Read `gradient_raw_bottom_spine_coarse_l2` and
   `gradient_raw_bottom_spine_detail_l2` separately. A healthy aggregate bottom
   or raw-action-lift gradient cannot establish that both numerical views learn.
@@ -993,6 +1017,27 @@ record is `metrics.jsonl`; `[mainline-train-*]`, `[mainline-val-*]` and
 - B-spine adds no objective contribution. Never infer optimization dominance
   from its token magnitude and never repair an unfavorable intervention with a
   hand-set fusion gain, smoothing loss, clipping or forced coarse/detail mass.
+
+- When the joint arm/gripper route is intentionally being trained, diagnostic
+  batches may emit `gradient_probe_bottom_spine_*`.  The `arm_flow_l2` and
+  `gripper_flow_l2` probes are the pre-weighted differentiable direct channel
+  terms from the action loss; `action_group_l2`, `representation_group_l2` and
+  `execution_group_l2` are gradients of the actual weighted ledger groups.
+  `arm_gripper_cosine` is the pre-clip cosine between the two channel probes:
+  negative values indicate opposing pulls on the same B-spine owner, while
+  positive values indicate locally aligned pulls.  The projection and ratio
+  are descriptive only.  These probes use `autograd.grad` on the existing
+  training graph and do not alter the subsequent total backward, optimizer,
+  loss weights or forward count.  Missing/zero values mean that the selected
+  term had no differentiable path to the B-spine, not that the complete model
+  was isolated.
+- For `fixed_bspline_arm_private_reader_v1`, the corresponding
+  `gradient_probe_bottom_spine_private_reader_*` metrics use only the reader
+  parameter coordinates; the unsuffixed B-spine probes use only the spline
+  lifts. This separation is required because both owners share one optimizer
+  group but have different causal routes. A zero reader gripper probe is the
+  expected structural result, whereas a non-zero reader arm probe indicates
+  that the private correction is reachable by the arm objective.
 
 ## Gradients and interventions
 

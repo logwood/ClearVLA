@@ -93,10 +93,14 @@ def masked_candidate_center(
             "candidate mask is not broadcastable to values: "
             f"{tuple(valid.shape)} vs {tuple(values.shape)}"
         ) from error
+    # Quarantine unsupported candidates before the reduction.  A masked
+    # multiplication is not sufficient here: ``NaN * 0`` remains NaN and
+    # would contaminate both the common-mode mean and the centered output.
+    safe_values = torch.where(mask, values, torch.zeros_like(values))
     mask_float = mask.to(dtype=values.dtype)
     count = mask_float.sum(dim=candidate_dim, keepdim=True).clamp_min(1.0)
-    mean = (values * mask_float).sum(dim=candidate_dim, keepdim=True) / count
-    centered = (values - mean) * mask_float
+    mean = (safe_values * mask_float).sum(dim=candidate_dim, keepdim=True) / count
+    centered = (safe_values - mean) * mask_float
     return centered, mean
 
 

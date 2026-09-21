@@ -6,7 +6,7 @@ import math
 import os
 import random
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, cast
 
@@ -29,6 +29,19 @@ from ..model.component_contracts import (
 from ..training.optimizer import WarmupCosineSchedule
 
 CHECKPOINT_SCHEMA = "clearvla-mainline-checkpoint-v4"
+LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION = (
+    "libero_window_boundary_supervision_v1"
+)
+LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION = (
+    "libero_retarget_training_overlay_v1"
+)
+LIBERO_RELEASE_FIRST_REPAIR_MIGRATION = "libero_release_first_repair_v1"
+WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION = (
+    "world_camera_coordinate_role_v1"
+)
+WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION = "world_action_sequence_prefix_v1"
+P2_SHARED_TARGET_PRIOR_V1_MIGRATION = "p2_shared_target_prior_v1"
+P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION = "p2_shared_target_prior_pread_v1"
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/model/compiler.py",
@@ -38,6 +51,84 @@ VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
         "clearvla/mainline/runtime/logging.py",
         "clearvla/mainline/train.py",
     }
+)
+INITIALIZATION_SOURCE_PATHS = VALIDATION_REPLAY_SOURCE_PATHS
+DATA_CONTRACT_MIGRATION_SOURCE_PATHS = INITIALIZATION_SOURCE_PATHS | frozenset(
+    {
+        "clearvla/benchmarks/common.py",
+        "clearvla/data/hdf5_episode.py",
+        "clearvla/data/libero_retarget.py",
+        "clearvla/data/samplers.py",
+        "clearvla/data/window_boundaries.py",
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/data/dataset.py",
+        "clearvla/mainline/data/loading.py",
+        "clearvla/mainline/training/losses.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/train.py",
+    }
+)
+WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/model/dynamics.py",
+        "clearvla/mainline/model/policy.py",
+        "clearvla/mainline/model/top.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/train.py",
+    }
+)
+WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/model/__init__.py",
+        "clearvla/mainline/model/components.py",
+        "clearvla/mainline/model/dynamics.py",
+        "clearvla/mainline/model/intent.py",
+        "clearvla/mainline/model/policy.py",
+        "clearvla/mainline/model/top.py",
+        "clearvla/mainline/model/types.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/runtime/logging.py",
+        "clearvla/mainline/runtime/sampling.py",
+        "clearvla/mainline/train.py",
+    }
+)
+WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS = frozenset(
+    {
+        "intent.coarse_action.sequence_row_offset",
+        "world.dynamics.sequence_time_condition.weight",
+        "world.dynamics.sequence_action_recurrence.weight_ih",
+        "world.dynamics.sequence_action_recurrence.weight_hh",
+        "world.dynamics.sequence_action_recurrence.bias_ih",
+        "world.dynamics.sequence_action_recurrence.bias_hh",
+    }
+)
+P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/model/compiler.py",
+        "clearvla/mainline/model/intent.py",
+        "clearvla/mainline/model/policy.py",
+        "clearvla/mainline/model/top.py",
+        "clearvla/mainline/model/types.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/train.py",
+    }
+)
+P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS = (
+    P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS
+    | frozenset(
+        {
+            "clearvla/mainline/data/loading.py",
+            "clearvla/mainline/data/token_store.py",
+            "clearvla/vision/decoded_image_store.py",
+            "clearvla/vision/npy_rows.py",
+        }
+    )
+)
+P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
+    "intent.organizer.target_object_address.weight"
 )
 LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS = frozenset(
     {
@@ -73,6 +164,30 @@ class ValidationReplayState:
     saved_source_digest: str
     current_source_digest: str
     changed_source_files: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class InitializationState:
+    """Metadata for a model-only checkpoint initialization.
+
+    Unlike exact resume, initialization deliberately discards optimizer,
+    scheduler, RNG and data-loader continuation state.  The metadata is
+    retained in the new run context so that the continuation is auditable.
+    """
+
+    epoch: int
+    global_step: int
+    best_metric: float | None
+    saved_source_digest: str
+    current_source_digest: str
+    changed_source_files: tuple[str, ...]
+    data_contract_migration: str | None
+    model_contract_migration: str | None
+    saved_window_boundary_contract: str
+    current_window_boundary_contract: str
+    saved_dataset_identity: dict[str, str]
+    current_dataset_identity: dict[str, str]
+    normalizer_identity_equal: bool
 
 
 @dataclass(frozen=True)
@@ -661,6 +776,619 @@ def load_checkpoint_for_validation(
     )
 
 
+def _initialization_config_view(config: ExperimentConfig) -> dict[str, object]:
+    """Return the semantic config retained when starting a fresh optimizer.
+
+    A model-only continuation is allowed to choose a new optimizer horizon,
+    learning rate, batch size and other optimizer controls.  The model,
+    objective, data contract and deployment/runtime semantics remain matched;
+    only loader/logging limits are ignored as operational controls.
+    Paths are already non-semantic for the checkpoint identity and are removed
+    here for the same relocation rule used by ``ExperimentConfig.digest``.
+    """
+
+    payload = config.as_dict()
+    data = dict(cast(Mapping[str, object], payload["data"]))
+    for name in (
+        "raw_hdf5_root",
+        "decoded_cache",
+        "dino_cache",
+        "t5_condition",
+        "output_dir",
+        "split_manifest",
+        "calvin_raw_source",
+        "task_selection_manifest",
+        "normalizer_artifact",
+        "num_workers",
+    ):
+        data.pop(name, None)
+    payload["data"] = data
+    runtime = dict(cast(Mapping[str, object], payload["runtime"]))
+    for name in (
+        "log_every",
+        "max_train_batches",
+        "max_val_batches",
+        "eval_sampling_diagnostic_batches",
+        "eval_proposal_ablation_batches",
+        "eval_execution_ablation_batches",
+    ):
+        runtime.pop(name, None)
+    payload["runtime"] = runtime
+    # The new run constructs a fresh optimizer and schedule by contract.
+    payload.pop("optimizer", None)
+    return payload
+
+
+def _libero_boundary_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the admitted LIBERO window-center contract difference."""
+
+    payload = _initialization_config_view(config)
+    data = dict(cast(Mapping[str, object], payload["data"]))
+    data.pop("window_boundary_contract", None)
+    payload["data"] = data
+    return payload
+
+
+def _libero_retarget_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the train-only retarget overlay location contract."""
+
+    payload = _initialization_config_view(config)
+    data = dict(cast(Mapping[str, object], payload["data"]))
+    data.pop("libero_retarget_overlay_root", None)
+    data.pop("libero_retarget_overlay_manifest", None)
+    payload["data"] = data
+    return payload
+
+
+def _libero_release_repair_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the two opt-in release-first repair controls."""
+
+    payload = _initialization_config_view(config)
+    data = dict(cast(Mapping[str, object], payload["data"]))
+    data.pop("release_first_action_fraction", None)
+    payload["data"] = data
+    objectives = dict(cast(Mapping[str, object], payload["objectives"]))
+    objectives.pop("gripper_first_step_release", None)
+    payload["objectives"] = objectives
+    return payload
+
+
+def _world_camera_condition_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the admitted opt-in W camera-condition selector."""
+
+    payload = _initialization_config_view(config)
+    top = dict(cast(Mapping[str, object], payload["top"]))
+    top.pop("world_camera_condition_mode", None)
+    payload["top"] = top
+    return payload
+
+
+def _world_action_sequence_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the admitted opt-in W action-sequence selector."""
+
+    payload = _initialization_config_view(config)
+    top = dict(cast(Mapping[str, object], payload["top"]))
+    top.pop("world_action_condition_mode", None)
+    payload["top"] = top
+    return payload
+
+
+def _p2_shared_target_prior_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the admitted opt-in P2 target-address selector."""
+
+    payload = _initialization_config_view(config)
+    top = dict(cast(Mapping[str, object], payload["top"]))
+    top.pop("p2_spatial_intent_mode", None)
+    payload["top"] = top
+    return payload
+
+
+def _p2_shared_target_prior_pread_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the admitted target-address and physical-read selectors."""
+
+    payload = _p2_shared_target_prior_migration_config_view(config)
+    data = dict(cast(Mapping[str, object], payload["data"]))
+    data.pop("visual_cache_read_backend", None)
+    data.pop("visual_pread_max_open_files", None)
+    payload["data"] = data
+    return payload
+
+
+def load_checkpoint_for_initialization(
+    path: str | Path,
+    *,
+    model: nn.Module,
+    config: ExperimentConfig,
+    identity: CheckpointIdentity,
+    data_contract_migration: str | None = None,
+    model_contract_migration: str | None = None,
+) -> InitializationState:
+    """Load only model parameters as the start of a fresh training run.
+
+    This is intentionally distinct from exact resume and validation replay:
+    optimizer, scheduler, RNG and data-loader state are never read or
+    restored.  Manifest, model selection, objective/data semantics,
+    normalizers and language identity must still match.  Only the narrow
+    validation/trainer source allow-list may differ, so an architecture edit
+    cannot be hidden behind a continuation label.
+    """
+
+    payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+    if not isinstance(payload, Mapping) or payload.get("schema") != CHECKPOINT_SCHEMA:
+        raise ValueError(
+            "model initialization requires a v4 mainline checkpoint with complete identity"
+        )
+    raw_config = payload.get("config")
+    raw_identity = payload.get("identity")
+    if not isinstance(raw_config, Mapping) or not isinstance(raw_identity, Mapping):
+        raise ValueError("model initialization checkpoint has no typed config/identity")
+    saved_config = config_from_mapping(raw_config)
+    saved_identity = checkpoint_identity_from_mapping(
+        raw_identity,
+        require_current_manifest=False,
+    )
+    saved_manifest = _identity_manifest(saved_identity)
+    if int(saved_manifest.layout_schema) != LAYOUT_SCHEMA:
+        raise ValueError(
+            "model initialization rejects the pre-modular model layout; use explicit migration"
+        )
+    saved_selection = _checkpoint_component_selection(
+        payload,
+        config=saved_config,
+        manifest=saved_manifest,
+    )
+    current_selection = _resolved_component_selection(model, config)
+    if saved_selection != current_selection:
+        raise ValueError("model initialization component selection differs")
+
+    selected_migration = (
+        None
+        if data_contract_migration is None
+        else str(data_contract_migration).strip()
+    )
+    selected_model_migration = (
+        None
+        if model_contract_migration is None
+        else str(model_contract_migration).strip()
+    )
+    if selected_migration is not None and selected_model_migration is not None:
+        raise ValueError(
+            "data-contract and model-contract initialization migrations "
+            "cannot be combined"
+        )
+    if selected_migration not in {
+        None,
+        LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION,
+        LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION,
+        LIBERO_RELEASE_FIRST_REPAIR_MIGRATION,
+    }:
+        raise ValueError(
+            f"unknown model-initialization data migration {selected_migration!r}"
+        )
+    if selected_model_migration not in {
+        None,
+        P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+        P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+        WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION,
+        WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
+    }:
+        raise ValueError(
+            "unknown model-initialization model migration "
+            f"{selected_model_migration!r}"
+        )
+
+    report = compare_checkpoint_identity(saved_identity, identity)
+    admitted_identity_reasons = {
+        "config identity differs",
+        "source identity differs",
+    }
+    if selected_migration is not None:
+        admitted_identity_reasons.add("dataset identity differs")
+    rejected_reasons = tuple(
+        reason
+        for reason in report.reasons
+        if reason not in admitted_identity_reasons
+    )
+    if rejected_reasons:
+        raise ValueError("model initialization rejected: " + "; ".join(rejected_reasons))
+    if selected_model_migration in {
+        P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+        P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+    }:
+        if (
+            saved_config.top.p2_spatial_intent_mode != "post_pool_only"
+            or config.top.p2_spatial_intent_mode != "shared_target_prior_v1"
+        ):
+            raise ValueError(
+                "P2 shared-target migration requires post_pool_only source "
+                "and shared_target_prior_v1 target"
+            )
+        if selected_model_migration == P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION:
+            if (
+                saved_config.data.visual_cache_read_backend != "mmap"
+                or config.data.visual_cache_read_backend != "pread"
+            ):
+                raise ValueError(
+                    "P2 shared-target pread migration requires mmap source and pread target"
+                )
+            if (
+                saved_config.data.visual_pread_max_open_files != 16
+                or type(config.data.visual_pread_max_open_files) is not int
+                or config.data.visual_pread_max_open_files <= 0
+            ):
+                raise ValueError(
+                    "P2 shared-target pread migration requires the legacy mmap cap "
+                    "and a positive target pread cap"
+                )
+            if _p2_shared_target_prior_pread_migration_config_view(
+                saved_config
+            ) != _p2_shared_target_prior_pread_migration_config_view(config):
+                raise ValueError(
+                    "P2 shared-target pread migration differs outside its model/read selectors"
+                )
+        elif _p2_shared_target_prior_migration_config_view(
+            saved_config
+        ) != _p2_shared_target_prior_migration_config_view(config):
+            raise ValueError(
+                "P2 shared-target migration differs outside its one model selector"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "P2 shared-target migration requires identical dataset identity"
+            )
+    elif selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
+        if (
+            saved_config.top.world_camera_condition_mode != "motion_prior_only"
+            or config.top.world_camera_condition_mode != "coordinate_role_v1"
+        ):
+            raise ValueError(
+                "W camera-condition migration requires motion_prior_only source "
+                "and coordinate_role_v1 target"
+            )
+        if tuple(saved_config.data.camera_names) != tuple(config.data.camera_names):
+            raise ValueError(
+                "W camera-condition migration requires the identical declared "
+                "camera role order"
+            )
+        if _world_camera_condition_migration_config_view(
+            saved_config
+        ) != _world_camera_condition_migration_config_view(config):
+            raise ValueError(
+                "W camera-condition migration differs outside its one model selector"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "W camera-condition migration requires identical dataset identity"
+            )
+    elif selected_model_migration == WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION:
+        if (
+            saved_config.top.world_action_condition_mode != "interval_mean_v1"
+            or config.top.world_action_condition_mode != "sequence_prefix_v1"
+        ):
+            raise ValueError(
+                "W action-sequence migration requires interval_mean_v1 source "
+                "and sequence_prefix_v1 target"
+            )
+        if (
+            saved_config.top.world_camera_condition_mode
+            != config.top.world_camera_condition_mode
+        ):
+            raise ValueError(
+                "W action-sequence migration cannot also change camera conditioning"
+            )
+        if _world_action_sequence_migration_config_view(
+            saved_config
+        ) != _world_action_sequence_migration_config_view(config):
+            raise ValueError(
+                "W action-sequence migration differs outside its one model selector"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "W action-sequence migration requires identical dataset identity"
+            )
+    elif selected_migration is None:
+        if _initialization_config_view(saved_config) != _initialization_config_view(config):
+            raise ValueError(
+                "model initialization config differs in model/data/objective/runtime semantics"
+            )
+    elif selected_migration == LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION:
+        from clearvla.data.window_boundaries import (
+            CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+            CAUSAL_PREFIX_V1,
+            STRICT_COMPLETE_V1,
+        )
+
+        if (
+            saved_config.data.data_profile != "libero_relative_7d_v1"
+            or config.data.data_profile != "libero_relative_7d_v1"
+        ):
+            raise ValueError("LIBERO boundary migration requires the LIBERO outlet")
+        if saved_config.data.window_boundary_contract != STRICT_COMPLETE_V1:
+            raise ValueError("LIBERO boundary migration source must use strict_complete_v1")
+        if config.data.window_boundary_contract not in {
+            CAUSAL_PREFIX_V1,
+            CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+        }:
+            raise ValueError(
+                "LIBERO boundary migration target must be causal_prefix_v1 or "
+                "causal_prefix_terminal_suffix_v2"
+            )
+        if _libero_boundary_migration_config_view(
+            saved_config
+        ) != _libero_boundary_migration_config_view(config):
+            raise ValueError(
+                "LIBERO boundary migration differs outside the admitted data-window contract"
+            )
+        if (
+            saved_identity.dataset.action_normalizer_sha256
+            != identity.dataset.action_normalizer_sha256
+            or saved_identity.dataset.state_normalizer_sha256
+            != identity.dataset.state_normalizer_sha256
+        ):
+            raise ValueError(
+                "LIBERO boundary migration requires identical action/state normalizers"
+            )
+    elif selected_migration == LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION:
+        from clearvla.data.window_boundaries import (
+            CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+        )
+
+        if selected_migration != LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION:
+            raise AssertionError("unreachable data-contract migration")
+        if (
+            saved_config.data.data_profile != "libero_relative_7d_v1"
+            or config.data.data_profile != "libero_relative_7d_v1"
+        ):
+            raise ValueError("LIBERO retarget migration requires the LIBERO outlet")
+        if (
+            saved_config.data.window_boundary_contract
+            != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+            or config.data.window_boundary_contract
+            != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+        ):
+            raise ValueError(
+                "LIBERO retarget migration requires terminal-suffix source and target"
+            )
+        if (
+            saved_config.data.libero_retarget_overlay_root.strip()
+            or saved_config.data.libero_retarget_overlay_manifest.strip()
+        ):
+            raise ValueError("LIBERO retarget migration source already has an overlay")
+        if not (
+            config.data.libero_retarget_overlay_root.strip()
+            and config.data.libero_retarget_overlay_manifest.strip()
+        ):
+            raise ValueError("LIBERO retarget migration target has no complete overlay")
+        if _libero_retarget_migration_config_view(
+            saved_config
+        ) != _libero_retarget_migration_config_view(config):
+            raise ValueError(
+                "LIBERO retarget migration differs outside the admitted training overlay"
+            )
+        if (
+            saved_identity.dataset.action_normalizer_sha256
+            != identity.dataset.action_normalizer_sha256
+            or saved_identity.dataset.state_normalizer_sha256
+            != identity.dataset.state_normalizer_sha256
+        ):
+            raise ValueError(
+                "LIBERO retarget migration requires identical action/state normalizers"
+            )
+        if (
+            saved_identity.dataset.raw_root != identity.dataset.raw_root
+            or saved_identity.dataset.hdf5_glob != identity.dataset.hdf5_glob
+        ):
+            raise ValueError(
+                "LIBERO retarget migration cannot replace the base dataset root/glob"
+            )
+        if saved_identity.dataset == identity.dataset:
+            raise ValueError("LIBERO retarget migration did not change dataset identity")
+    else:
+        from clearvla.data.window_boundaries import (
+            CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+        )
+
+        if (
+            saved_config.data.data_profile != "libero_relative_7d_v1"
+            or config.data.data_profile != "libero_relative_7d_v1"
+            or saved_config.data.window_boundary_contract
+            != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+            or config.data.window_boundary_contract
+            != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+        ):
+            raise ValueError(
+                "LIBERO release-first repair requires terminal-suffix v2 on both sides"
+            )
+        if float(config.data.release_first_action_fraction) <= 0.0 and float(
+            config.objectives.gripper_first_step_release
+        ) <= 0.0:
+            raise ValueError(
+                "LIBERO release-first repair must enable a sampling or loss control"
+            )
+        if _libero_release_repair_config_view(
+            saved_config
+        ) != _libero_release_repair_config_view(config):
+            raise ValueError(
+                "LIBERO release-first repair differs outside its two explicit controls"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "LIBERO release-first repair requires identical dataset identity"
+            )
+
+    saved_sources = dict(saved_identity.source.files)
+    current_sources = dict(identity.source.files)
+    changed_source_files = tuple(
+        sorted(
+            source_path
+            for source_path in set(saved_sources).union(current_sources)
+            if saved_sources.get(source_path) != current_sources.get(source_path)
+        )
+    )
+    if selected_model_migration == P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION:
+        allowed_source_paths = P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
+    elif selected_model_migration == P2_SHARED_TARGET_PRIOR_V1_MIGRATION:
+        allowed_source_paths = P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS
+    elif selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
+        allowed_source_paths = WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS
+    elif selected_model_migration == WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION:
+        allowed_source_paths = WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS
+    else:
+        allowed_source_paths = (
+            INITIALIZATION_SOURCE_PATHS
+            if selected_migration is None
+            else DATA_CONTRACT_MIGRATION_SOURCE_PATHS
+        )
+    unexpected_source_files = tuple(
+        source_path
+        for source_path in changed_source_files
+        if source_path not in allowed_source_paths
+    )
+    if unexpected_source_files:
+        raise ValueError(
+            "model initialization source drift escapes the allow-list: "
+            + ", ".join(unexpected_source_files)
+        )
+
+    saved_model = payload.get("model")
+    if not isinstance(saved_model, Mapping):
+        raise ValueError("model initialization checkpoint has no model state mapping")
+    mapped_model = _state_for_current_layout(
+        saved_model,
+        model=model,
+        saved_layout_schema=int(saved_manifest.layout_schema),
+    )
+    current_model = model.state_dict()
+    if selected_model_migration in {
+        P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+        P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+    }:
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        if missing != {P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY} or unexpected:
+            raise ValueError(
+                "P2 shared-target migration must add exactly its one address weight"
+            )
+        new_address = current_model[P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY]
+        if (
+            not isinstance(new_address, torch.Tensor)
+            or tuple(new_address.shape) != (1, 3)
+            or new_address.dtype != torch.float32
+        ):
+            raise ValueError(
+                "P2 shared-target migration requires one FP32 [1,3] address weight"
+            )
+        if not bool(torch.isfinite(new_address).all()) or int(
+            torch.count_nonzero(new_address).item()
+        ) != 0:
+            raise ValueError(
+                "P2 shared-target migration requires a finite exact-zero new address weight"
+            )
+        mapped_model = dict(mapped_model)
+        mapped_model[P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY] = (
+            new_address.detach().clone()
+        )
+    elif selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
+        new_condition_key = (
+            "world.dynamics.camera_coordinate_role_condition.weight"
+        )
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        if missing != {new_condition_key} or unexpected:
+            raise ValueError(
+                "W camera-condition migration must add exactly its one condition weight"
+            )
+        new_condition = current_model[new_condition_key]
+        if not isinstance(new_condition, torch.Tensor) or int(
+            torch.count_nonzero(new_condition).item()
+        ) != 0:
+            raise ValueError(
+                "W camera-condition migration requires an exact-zero new condition weight"
+            )
+        mapped_model = dict(mapped_model)
+        mapped_model[new_condition_key] = new_condition.detach().clone()
+    elif selected_model_migration == WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION:
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        if missing != set(WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS) or unexpected:
+            raise ValueError(
+                "W action-sequence migration must add exactly its declared "
+                "query/time/recurrent state"
+            )
+        row_offset = current_model["intent.coarse_action.sequence_row_offset"]
+        if not isinstance(row_offset, torch.Tensor) or int(
+            torch.count_nonzero(row_offset).item()
+        ) != 0:
+            raise ValueError(
+                "W action-sequence migration requires exact-zero row offsets"
+            )
+        mapped_model = dict(mapped_model)
+        for name in WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS:
+            mapped_model[name] = current_model[name].detach().clone()
+    elif set(mapped_model) != set(current_model):
+        raise ValueError("model initialization parameter ownership differs")
+    for name, current_value in current_model.items():
+        saved_value = mapped_model[name]
+        if not isinstance(saved_value, torch.Tensor):
+            raise ValueError(f"model state {name!r} is not a tensor")
+        if tuple(saved_value.shape) != tuple(current_value.shape):
+            raise ValueError(f"model state {name!r} has an incompatible shape")
+        if saved_value.dtype != current_value.dtype:
+            raise ValueError(f"model state {name!r} has an incompatible dtype")
+        if (saved_value.is_floating_point() or saved_value.is_complex()) and not bool(
+            torch.isfinite(saved_value).all()
+        ):
+            raise ValueError(f"model state {name!r} is non-finite")
+    try:
+        restored_epoch = int(payload["epoch"])
+        restored_step = int(payload["global_step"])
+        restored_best = (
+            None if payload.get("best_metric") is None else float(payload["best_metric"])
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("model initialization checkpoint scalar state is invalid") from error
+    if restored_epoch < 0 or restored_step < 0:
+        raise ValueError("model initialization epoch/global step must be non-negative")
+    if restored_best is not None and not math.isfinite(restored_best):
+        raise ValueError("model initialization best metric is non-finite")
+
+    model.load_state_dict(mapped_model, strict=True)
+    return InitializationState(
+        epoch=restored_epoch,
+        global_step=restored_step,
+        best_metric=restored_best,
+        saved_source_digest=saved_identity.source.digest,
+        current_source_digest=identity.source.digest,
+        changed_source_files=changed_source_files,
+        data_contract_migration=selected_migration,
+        model_contract_migration=selected_model_migration,
+        saved_window_boundary_contract=saved_config.data.window_boundary_contract,
+        current_window_boundary_contract=config.data.window_boundary_contract,
+        saved_dataset_identity=dict(asdict(saved_identity.dataset)),
+        current_dataset_identity=dict(asdict(identity.dataset)),
+        normalizer_identity_equal=bool(
+            saved_identity.dataset.action_normalizer_sha256
+            == identity.dataset.action_normalizer_sha256
+            and saved_identity.dataset.state_normalizer_sha256
+            == identity.dataset.state_normalizer_sha256
+        ),
+    )
+
+
 def migrate_bottom_only(
     path: str | Path,
     model: nn.Module,
@@ -783,12 +1511,29 @@ def migrate_bottom_only(
 
 __all__ = [
     "CHECKPOINT_SCHEMA",
+    "DATA_CONTRACT_MIGRATION_SOURCE_PATHS",
+    "INITIALIZATION_SOURCE_PATHS",
+    "InitializationState",
+    "LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION",
+    "LIBERO_RELEASE_FIRST_REPAIR_MIGRATION",
+    "LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION",
     "LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS",
+    "P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION",
+    "P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS",
+    "P2_SHARED_TARGET_PRIOR_V1_MIGRATION",
+    "P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY",
+    "P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS",
     "MigrationReport",
     "RestoredTrainingState",
     "VALIDATION_REPLAY_SOURCE_PATHS",
     "ValidationReplayState",
+    "WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION",
+    "WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS",
+    "WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION",
+    "WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS",
+    "WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS",
     "load_checkpoint_exact",
+    "load_checkpoint_for_initialization",
     "load_checkpoint_for_validation",
     "migrate_bottom_only",
     "save_checkpoint",

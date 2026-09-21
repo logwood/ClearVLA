@@ -1,306 +1,704 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-04
+Updated: 2026-09-19 UTC
 
-This is the compact source of truth for the active independent mainline. Read
-it before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
-language/history conditioning, long-horizon handling or the top-to-bottom
-evidence path. Live process state belongs in
-[`auxiliary/ACTIVE_MAINLINE_HANDOFF.md`](auxiliary/ACTIVE_MAINLINE_HANDOFF.md);
-open behavior questions and execution order belong in
-[`CURRENT_MAINLINE_ISSUES.md`](CURRENT_MAINLINE_ISSUES.md) and
-[`CURRENT_MAINLINE_REPAIR_PLAN.md`](CURRENT_MAINLINE_REPAIR_PLAN.md).
+This is the compact source of truth for the active mainline graph. Read it
+before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
+language/history conditioning, long-horizon phase handling or the
+top-to-bottom evidence path.
 
-The full pre-compaction contract remains recoverable at Git commit `f60bd80`.
-Historical experiment names never select current semantics.
+Operational state belongs in
+[auxiliary/ACTIVE_MAINLINE_HANDOFF.md](auxiliary/ACTIVE_MAINLINE_HANDOFF.md),
+open behavior questions in
+[CURRENT_MAINLINE_ISSUES.md](CURRENT_MAINLINE_ISSUES.md), and future repository
+or refactor work in
+[CURRENT_MAINLINE_REPAIR_PLAN.md](CURRENT_MAINLINE_REPAIR_PLAN.md).
+Expanded historical narratives remain recoverable from Git and the archive;
+they do not define the current graph.
+
+**Scope:** the current workspace implementation and resolved mainline configs;
+this is not a declaration that every experiment runs this graph or that the
+dirty workspace is a published release. For a checkpoint, first identify its
+pinned source, serialized config, deployment ABI and run context. Historical
+CALVIN direct-arm runs do not acquire this contract's shared-codec or S repairs
+by being evaluated today. Schema, branch name and documentation date alone do
+not identify a trained model.
+
+For a first reading, use [Agent quick contract](#agent-quick-contract),
+[Default and opt-in selections](#default-and-opt-in-selections),
+[Active graph](#active-graph) and
+[Non-negotiable invariants](#non-negotiable-invariants). Outlet, migration,
+residual-RL and B-spine sections are references for those explicit selections.
 
 ## Agent quick contract
 
-```text
+~~~text
 capability:             object_intent_dynamics_323
-manifest schema:        30
-layout schema:          2 (atomic modular owner layout)
-manifest digest:        c6742c2c5a8a381193a56ed2cf24ba632b472cfde168c021537f2d30b8d69863
-active source identity: Schema28-core recovery plus profile-owned gripper boundary, CALVIN direct relative-command arm chart and binary-command isolation
-historical Schema30 source: 3fef2fc0dce297f600c813307c998f587cca1ca3
-formal CALVIN checkout:  f9cee96a14dfb328830aa5c1fd4fd54cb33d4181
-branch:                 codex/schema29-mainline (historical branch name only)
-behavior reference:     Schema28, commit 097330a894d948d66c419f8af07325a5b0ff712e
-recovery reference:     V120 long, commit 0b92d359a2889a0a1b1eba256007c00ccbc54f3c
+default manifest:       schema 30
+optional B-spine:       schema 31 only when explicitly selected
+registered layout:      clearvla_mainline layout 2
+component selection:    mainline-modular-v1
 topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
 future intervals:       4-8 / 8-16 / 16-32 / 32-48
 global objects:         K=4 plus explicit null mass
-visual history:         DINO/raw at -8 / -4 / 0; two adjacent learned flows
-training:                fresh, single-stage end-to-end; recovery uses one formal forward/loss pass
-bottom:                 V120 seed/transition/CVAE/workspace/Evidence MMDiT/execution
-long launcher:          scripts/train_mainline.sh
+visual history:         DINO/raw at -8 / -4 / 0; two learned adjacent flows
+training:               one online encode, one formal velocity pass, one loss composition
+deployment:             proposal ODE, one W rebuild, refined ODE
+shared action core:     24 x 18 value/adjacent-difference/gripper field
+default config:         configs/mainline/object_intent_dynamics_323.json
+Pen launcher:           scripts/train_mainline.sh
 RDT-8 launcher:         scripts/train_rdt_multitask.sh
-smoke launchers:        scripts/smoke_mainline.sh / scripts/smoke_rdt_multitask.sh
 checkpoint validation: scripts/validate_mainline_checkpoint.sh (read-only)
-config:                 configs/mainline/object_intent_dynamics_323.json
-```
+working branch label:   codex/schema29-mainline (historical name, not semantics)
+~~~
 
-Release state: the source carries a conservative Schema28-core recovery overlay
-under the Schema30 ABI, a profile-owned continuous-gripper codec boundary, and
-an outlet-scoped CALVIN action repair. CALVIN's six arm values are already
-relative TCP commands, so its two six-dimensional arm-field branches now both
-encode that command directly and decode by the existing `0.75/0.25` blend;
-neither branch is temporally differenced or integrated. Its explicit binary
-command head remains isolated from the six compatibility-only future-gripper
-coordinates, which are replaced by exact zeros before every dynamic model
-consumer. These changes preserve the network blocks, parameter topology,
-controller and complete 18-D output ABI. Focused tests, a real CUDA smoke, the
-strict gripper-noise causal probe and read-only checkpoint replay passed. A
-fresh CALVIN run from commit `f9cee96a` is active; no historical checkpoint was
-resumed or migrated. These are interface observations, not an accepted
-behavior release; live Pen, RDT and CALVIN process state remains in the rolling
-handoff.
+The default is the Schema28-core recovery behavior under the schema-30 ABI,
+with a profile-owned continuous-gripper boundary and outlet-scoped binary
+adaptations. The shared action codec, G/S/W/P graph, training call count and
+two-pass deployment lifecycle are common across outlets. CALVIN and the
+repaired ManiSkill v2 base change only their outlet sampler/chart and terminal
+binary-command behavior; the ManiSkill choice is explicit and does not change
+Pen/RDT/LIBERO defaults. The opt-in B-spine is an experiment selection, not a
+new default.
 
-## Authority order
+## Default and opt-in selections
 
-When documents disagree, use this order:
+These are source/config selections, not a table of trained-model successes.
+Source admission, structural checks, completed training and behavior validation
+are separate evidence states; their current records belong in the issue ledger
+and dated handoff.
 
-1. active source plus the supplied run's serialized `run_context.json`;
+| Boundary | Default in this workspace | Explicit alternative |
+|---|---|---|
+| Manifest / bottom | Schema30, B-spine disabled | Schema31 only for a selected B-spine component |
+| S interval object query | `goal_history` | `history_only` is a single-edge research control |
+| W camera condition | `motion_prior_only` | `coordinate_role_v1`; separate old-checkpoint initialization migration |
+| W action condition | `interval_mean_v1`, four interval rows | `sequence_prefix_v1`, 24 source rows; separate initialization migration |
+| P2 spatial intent | `post_pool_only`; typed S selects interval after spatial pooling | `shared_target_prior_v1`; one shared S-owned target-K prior conditions semantic K and geometry K*C before pooling |
+| Visual NPY read transport | `mmap` | `pread`; existing cache layout and logical data contract are unchanged |
+| ODE schedule | Uniform E5 proposal/refined | Registered Q5 plus its versioned flow-step context |
+| Residual RL | Absent from the mainline trainer | External frozen-base pilot in `clearvla.rl` |
+
+An opt-in's presence or passing source tests does not promote it to the default.
+The checkpoint's own selection remains authoritative for evaluation and resume.
+
+## Authority and document ownership
+
+When records disagree, use:
+
+1. for a run, its pinned source, checkpoint identity and serialized run context;
+   for a source change, the actual workspace source and resolved config;
 2. this contract;
-3. current issues and repair plan;
-4. the two current detailed references: RDT adaptation and R1/R2 closure index;
-5. archived replay/design/log documents and Git history.
+3. the current issue ledger and repair plan;
+4. the bounded current adapter/design document named by this contract;
+5. archived documents and Git history.
 
-An old filename, log banner, launcher comment or conversation statement cannot
-override manifest, source, config, dataset and checkpoint identity.
+Branch names, run-directory names, old launchers and conversation labels are
+descriptive only. They cannot override source, config, manifest, dataset or
+checkpoint identity.
 
-## Living-memory policy
-
-This contract stores accepted architecture semantics, not a chronological
-experiment diary. `CURRENT_MAINLINE_ISSUES.md` stores one current observation
-per unresolved decision, and `ACTIVE_MAINLINE_HANDOFF.md` stores one current
-operational snapshot. A new comparable audit replaces the older observation in
-place; do not append epoch-by-epoch narration.
-
-Archive a superseded observation only when it is required to explain an
-accepted/rejected source change, a semantic-contract transition, a causal sign
-reversal that affected a decision, or a baseline that remains necessary for
-future comparisons. Git
-history and the raw run directory are the default recovery mechanisms. Keep
-only decision-making statistics, source references and reproducible commands
-in repository memory; never copy raw JSONL rows or probe dumps into it.
+Maintain this file as architecture, not chronology. Replace decisions in
+place. Keep only accepted semantics, invariants, typed boundaries and stable
+source locations. Metrics and unresolved causal questions belong in the issue
+ledger; PID, host, path and next-command state belong in the handoff; completed
+proof belongs in Git or the archive. Never copy checkpoints, caches, raw logs
+or full probe dumps into repository memory.
 
 ## Active graph
 
 ### Observation and grounding
 
-```text
+~~~text
 RGB/DINO at -8,-4,0
   -> V120 raw/DINO compiler + two learned adjacent flows
   -> current-only G1/G2/G3 progressive grounding
-     G2 rematerializes N=49 fine candidates exactly once
+     G2 rematerializes N=49 fine candidates once
   -> camera x 8x8 x local-M hypotheses
-  -> dense global K=4 + null grounder
-  -> ObjectFactSet and reversible K <-> chart correspondence
-```
+  -> dense global K=4 plus null grounder
+  -> ObjectFactSet and reversible K-to-chart correspondence
+~~~
 
-G is current-only: it cannot read language, executed-history proposal, noisy
-action or future Teacher evidence. Local-M rows are hypotheses, not persistent
-objects. The dense grounder owns physical real/null mass; G3 may refine only
-`P(K | real)`. Reconstruction uses detached current DINO over observed cells
-and exports one K-specific content value shared by reconstruction, S, W and the
-detached Teacher.
+G cannot read language, executed-history proposal, noisy action or future
+Teacher evidence. Local-M rows are hypotheses, not persistent objects. The
+dense grounder owns real/null mass; G3 may refine only the distribution over
+real K objects. Reconstruction uses detached current DINO on observed cells
+and exports one K-specific content value shared by reconstruction, S, W and
+the detached Teacher.
 
-### Intent, physical action and world
+K is an equivariant representation axis, not a fixed color or instance ID.
+The reversible chart correspondence is a typed interface; an entity-to-K
+mapping in a particular observation must be verified before using it as an
+oracle intervention or a target-grounding score.
 
-```text
-T5 + observed state/executed history + ObjectFactSet
+### Intent, action condition and world
+
+~~~text
+T5 + observed state/history + ObjectFactSet
   -> S public interval carrier + typed [interval,K,type] relevance
-  -> typed-free CoarseAction physical proposal [B,4,7]
-  -> PhysicalActionCondition
-     absolute interval means + current-anchored adjacent deltas [B,4,14]
-  -> W(ObjectWorldBelief, PhysicalActionCondition)
+  -> typed-free CoarseAction proposal
+     default: [B,4,7] interval means
+     opt-in sequence_prefix_v1: [B,24,7] physical action rows
+  -> outlet-owned physical action condition
+     default PhysicalActionCondition: four values + adjacent deltas
+     opt-in PhysicalActionSequenceCondition: 24 source/value/delta rows,
+       current boundary, control-step time, chart and normalizer identity
+  -> W(ObjectWorldBelief, selected physical action condition)
      W1 owns intervals 0/1; W2 reads W1 and owns intervals 2/3
   -> action-tagged CandidateWorld / FutureObjectDynamics
-```
+~~~
 
-W cannot read goal, S values, coarse hidden tokens, Teacher or noisy ODE
-action. Semantic successors remain `[B,4,K,D]`; transport/covariance and
-camera support remain camera-resolved `[B,4,K,C,*]` until P2. W predicts no
-visibility, status or validity authority.
+S is the sole intent owner. W cannot read goal tokens, S values, coarse hidden
+tokens, Teacher or noisy ODE action. Semantic successors retain
+[B,4,K,D]; transport, covariance and camera support retain
+[B,4,K,C,*] until P2. W predicts no validity, visibility or status authority.
 
-### P1, P2, P3, transition and bottom
+The accepted default W camera condition remains
+`top.world_camera_condition_mode=motion_prior_only`.  The opt-in
+`coordinate_role_v1` research unit adds each producer-valid camera's current
+image-plane coordinate and its declared `data.camera_names` role to the
+existing motion-prior condition.  A shared zero-initialized projection
+modulates only the existing geometry carrier, so its initialization is the
+exact default function, an exact-zero carrier stays zero, and invalid
+object/camera rows stay zero.  Role codes are keyed by the declared names, not
+hard-coded array indices; jointly permuting camera data and the declared role
+order is equivariant.  These inputs are view conditions, not calibrated
+extrinsics or world coordinates.  Enabling the mode adds a parameter and is
+therefore an explicit component initialization from an old checkpoint, never
+an exact resume.  The only admitted old-checkpoint path is
+`--init-checkpoint ... --init-model-contract-migration
+world_camera_coordinate_role_v1`: it retains every old model tensor, requires
+the same camera-role order/data/normalizers/language, initializes only the new
+weight to exact zero and starts fresh optimizer/schedule/RNG state.  It does
+not change S, P2, the coarse proposal, objectives or the one-rebuild deployment
+lifecycle.  Its source-drift allow-list is exactly `config.py`, `dynamics.py`,
+`policy.py`, `top.py`, `runtime/checkpoints.py` and `train.py`; P2
+`compiler.py`/`transition.py` drift is rejected rather than inherited from a
+generic initialization allowance.
 
-```text
-completed progressive chart
-  -> one cached V120 P1 high-resolution read
+The accepted action condition remains
+`top.world_action_condition_mode=interval_mean_v1`.  The opt-in
+`sequence_prefix_v1` unit closes the deterministic temporal blind spot of the
+four clipped means without changing W's four prediction intervals, P2, the
+bottom or the bounded two-pass lifecycle.  CoarseAction produces and is
+supervised on the same 24 normalized physical rows used at deployment.  One
+independent `PhysicalActionSequenceCondition` carries the complete outlet-
+native source sequence, deterministic canonical value/delta views, current
+boundary and contiguous control-step times; it never impersonates the legacy
+four-row type.  For relative-command outlets the arm value is the prefix sum
+of zero-centered commands and the arm delta is the command itself.  This is a
+command chart, not measured TCP pose or SE(3) integration; no extra `dt` is
+applied.  Gripper values are not accumulated.  Absolute Pen/RDT charts retain
+absolute value plus adjacent difference.  Normalizer offset/scale metadata and
+its fingerprint remain FP32 and are independent of the action/autocast dtype;
+only a temporary arithmetic view is cast to the source dtype.  A BF16/FP16
+condition therefore cannot silently acquire a different normalizer identity.
+
+W reuses the existing physical row projection, then applies an order-sensitive
+causal recurrent encoder.  Its four conditions read rows 1--8, 1--16, 1--24
+and 1--24 respectively; the last condition means prediction beyond the known
+24-row control prefix, not invented controls for rows 25--48.  In this mode W1
+keeps the shared typed common factual and action-independent so the second near
+prefix cannot flow backward into the first.  The CandidateWorld identity owns
+the full sequence/time/boundary/chart container.  Initial coarse and deployed
+rebuild conditions use the same OutletAdapter factory; a binary deployment
+command is first put back into the checkpoint normalizer chart, while the
+online coarse gripper estimate remains differentiable.  Online inference and
+training caches bind the configured condition schema/profile, and every real
+OutletAdapter consumption boundary revalidates mode, concrete condition type,
+profile, chart, arm dimension, prefix, and normalizer identity even when
+diagnostics are disabled.
+
+Enabling this unit adds exactly one zero-initialized 24-row coarse-query offset,
+one time projection and one recurrent cell.  The old four-query basis,
+H-to-action head and physical row projection are retained.  Old checkpoints
+may enter only through `--init-model-contract-migration
+world_action_sequence_prefix_v1`; camera mode, S/P2/bottom, data, language,
+normalizers, objectives, runtime and Q5 identity must otherwise match, and a
+fresh optimizer/schedule/RNG is mandatory.  This migration is separate from
+the camera-condition migration.  Its source-drift allow-list covers only the
+files needed to introduce this action-condition unit; P2 `compiler.py` drift is
+rejected.  Structural admission proves row identity, prefix causality and
+train/deploy ABI consistency only; action benefit still requires matched
+training and autonomous closed-loop validation.
+
+The language/object repair is part of this existing S path, not a CALVIN
+sidecar or a second object container. S keeps two explicit K-preserving views:
+the content-only interval evidence remains the owner of the established typed
+relevance decomposition, while a bounded symmetric
+semantic/appearance/geometry-enriched public K memory supplies the coarse
+object read. Both views are masked by producer-owned validity. Goal/history
+innovations condition the interval object query, and that same conditioned
+query is carried into the coarse object's K read and history read. Thus an
+instruction can change the K-preserving object attention and typed S context,
+while W receives intent only through the outlet-owned physical action
+condition. P2 has a separate direct S path: it reads typed S with the already
+formed spatial posteriors and uses the selected typed/public S context for
+interval selection. This remains the default
+`top.p2_spatial_intent_mode=post_pool_only` behavior.
+
+The opt-in `shared_target_prior_v1` adds one S-owned FP32 `[B,I,K]` address
+field before P2 spatial pooling. It is computed from the same typed semantic,
+appearance and geometry scores before validity amplitude multiplication, by a
+bias-free exact-zero 3-to-1 owner whose construction consumes no random draw.
+The address is centered over producer-supported K after first subtracting one
+legal reference K, so uniform evidence is exact zero under FP32 and autocast.
+The same K field is added once to the semantic K logit and once to the geometry
+K*C logit, broadcasting only over C. It cannot create support, rewrite W
+semantic/transport values, select a separate target for the two readers or
+change the interval terminal directly. Supported non-finite address values are
+rejected; unsupported K values are quarantined to exact zero. The retained
+post-pooling typed/public context owns only interval selection, so it is not a
+second target-K decision.
+
+No raw goal tokens, color labels or rank-1 selected-object tensor are added to
+W or the bottom. Enabling the opt-in adds exactly
+`intent.organizer.target_object_address.weight` with shape `[1,3]`; old
+checkpoints enter only by explicit component initialization. The standalone
+`p2_shared_target_prior_v1` migration admits only that model unit. The explicit
+`p2_shared_target_prior_pread_v1` combination additionally changes the physical
+NPY reader from default `mmap` to `pread`, while retaining identical dataset,
+language, normalizer, component and model-state identities apart from the one
+new exact-zero parameter. Both start fresh optimizer/schedule/RNG state and are
+never exact resume across modes.
+
+The default `top.interval_object_query_mode=goal_history` preserves this graph.
+An explicitly serialized `history_only` research control removes only the goal
+innovation from the interval K query. History, the public carrier's goal input,
+the coarse conditioned reads, parameters, objectives and action codec remain
+unchanged. It is a single-edge ablation, not a no-language baseline or a new
+default; checkpoint/deployment graph identity retains the selected mode.
+
+### Precision, policy, transition and execution
+
+~~~text
+completed G chart
+  -> one cached P1 high-resolution read
      24 factual queries, N=49, real 3x3 RGB/detail microgrid
   -> FactualPrecisionDock
 
-noisy action + time + cached factual detail
-  -> dynamic P1 policy residual
-  -> P2 semantic-K and geometry-K*C selection inside each interval
-  -> one no-null physical interval terminal per type
+noisy action + time + factual detail
+  -> dynamic P1 residual
+  -> P2 semantic-K and geometry-K*C selection per interval
+  -> no-null physical interval terminal per type
   -> semantic + geometry consequence
 
-P2 consequence + S/action context -> optional P3 temporal innovation
-observed state change + S/action context -> optional P3 state-change innovation
+P2 consequence + S/action context
+  -> optional temporal P3
+observed state change + S/action context
+  -> optional state-change P3
 
-completed G3 rollout -> cached ControlledTransitionSource
-noisy action + consequence + dynamic P1 residual -> dynamic transition
-all protected/optional carriers -> V120 bottom -> physical velocity/motion
-```
+completed G3 rollout
+  -> cached ControlledTransitionSource
+noisy action + consequence + dynamic P1
+  -> ControlledTransitionState
+all protected/optional carriers
+  -> V120 execution bottom
+  -> physical velocity, motion and optional outlet command
+~~~
 
-Protected consequence and raw dynamic P1 precision are no-null carriers.
-Only temporal and state-change P3 lanes own zero-null choices, through separate
-invocations of one shared reader. The Evidence MMDiT, continuous capacity and
-execution-value machinery remain intact.
+Protected consequence and raw dynamic-P1 precision are no-null carriers. Only
+the temporal and state-change P3 lanes own zero-null choices. Evidence MMDiT,
+CVAE/workspace, continuous capacity and execution-value machinery remain part
+of the bottom.
 
-### Training-only Teacher and training call graph
+In the default P2 reader, the per-interval semantic K and geometry K*C spatial
+posteriors are formed from the post-P1 action query, W keys, geometry address
+and producer-owned support; direct typed-S values are then read using those
+posteriors and condition the four-interval terminal. In the opt-in reader, the
+shared S target-K field conditions those two spatial posteriors first, while
+the same post-pooling typed context continues to condition only the interval
+terminal. Language still has the indirect S-to-P1 and S-to-coarse/W paths in
+both modes. W's per-camera transport values are camera-image-plane 2-vectors;
+P2 pools them over K*C and interval before its shared 2-to-hidden geometry
+projection. Neither this pooling nor W camera conditions imply calibrated
+world-frame geometry. These are graph contracts, not a claim that the trained
+target selection or geometry use is behaviorally adequate; attribution and
+closed-loop acceptance belong in the current issue ledger.
 
-Future DINO supports enter only the no-grad Teacher and auxiliary targets.
-Teacher builds once per training batch and zero times in deployment.
+## Training, deployment and runtime
 
-The active recovery training call has one ordinary online encode, one formal
-velocity forward, and one loss composition:
+Future DINO, action and state are available only to the no-grad Teacher and
+named training targets. Teacher builds once per training batch and never in
+deployment.
 
-```text
-sample one noisy FlowMatchingState
-  -> one formal velocity forward on the encoded cache
-  -> compose action/future/auxiliary losses once
-```
+The default training path is:
 
-There is no train-time endpoint estimate and no train-time W rebuild. The
-detached endpoint/self-conditioning lifecycle is retained only as historical
-Schema30 evidence; the AMP/BF16 cache isolation fix from `d8a77a1` remains in
-the code for any explicitly no-grad parameterized scope.
+~~~text
+encode online observation once
+  -> build detached Teacher/targets
+  -> sample one FlowMatchingState
+  -> one formal velocity forward
+  -> one loss composition
+~~~
 
-### Deployment and validation
+There is no train-time endpoint estimate or train-time W rebuild.
 
-Deployment performs exactly two complete five-update ODE passes from identical
-initial physical noise:
+Deployment and validation perform exactly two complete five-update ODE passes
+from identical initial physical noise:
 
-```text
-W(coarse) -> complete proposal ODE -> decoded 24-row proposal
-          -> deterministic 24-to-4 PhysicalActionCondition -> rebuild W once
-          -> complete refined ODE -> final action
-```
+~~~text
+W(coarse)
+  -> proposal ODE at t = 0,.2,.4,.6,.8
+  -> decode 24-row proposal
+  -> rebuild W once from the selected physical action condition
+  -> refined ODE at t = 0,.2,.4,.6,.8
+  -> final action
+~~~
 
 This is one bounded correction, not a fixed point. The final action may differ
-from the action that conditioned the rebuilt W; interval/delta mismatch is a
-required residual metric. Recomputing `W(final)` without a later policy consumer
-does not close the loop.
+from the action that conditioned the rebuilt W, so final interval/delta
+mismatch remains a residual metric. Recomputing W after the final action
+without another policy consumer would not close anything.
 
-The deployment ABI also owns the frozen DINO boundary: RGB preprocessing,
-encoder compute dtype, and the reference encoder batch shape are serialized and
-validated. The current CALVIN cache uses bf16 with reference batch size 32;
-online history rows are causally padded with the final observed row to reproduce
-that CUDA kernel shape before slicing back to the three real history rows.
+The default remains the exact uniform E5 grid above. The registered Q5
+schedule (`t_i=(i/5)^1.25`) is opt-in. A non-uniform schedule now carries the
+versioned bottom-context contract
+`FlowStepContext=(t,Δt,k/N,endpoint)` through the sampler and the matching
+training bridge, so the learned bottom field can account for the interval it
+is asked to integrate. The schedule schema/fingerprint records that context
+contract; an old sampler-only schedule artifact is rejected rather than being
+treated as an exact-resume alias. The bottom still predicts an instantaneous
+physical velocity and the integrator applies `Δt` exactly once. The 24-row
+action-time chart, B-spline basis and W rebuild remain separate contracts.
 
-## Historical Schema30 semantic delta (not active in recovery)
+Observation/G/S, static P1 and ControlledTransitionSource build once per
+observation. Dynamic P1, P2/P3, transition and the bottom run at every ODE
+node. Only the bottom receives the numerical `FlowStepContext`; it is not a
+semantic or outlet/task condition. The t=1 read supplies retained endpoint
+motion/command state but does not update action. Execution candidates remain
+mandatory for train/eval loss forwards and disabled during ordinary deployment
+passes.
 
-The following source/config changes were present in the historical Schema30
-checkout. They did not add a block, parameter,
-buffer, optimizer group, loss weight, RNG draw or deployment pass:
+An explicit deployment-only fastpath may reuse the exact block-major dwell
+prefixes and the current decision's already-computed neutral dwell-one result.
+It retains the complete candidate chart, values, probabilities, diagnostics,
+terminal baseline and action ABI; it is disabled by default, forbidden in
+training, and retains no reuse state across a decision or ODE node.
 
-1. `[reverted]` S sums complementary owners without the Schema28 fixed K/type
-   mean and per-branch RMS contract.
-2. `[reverted]` typed W innovations combine learned chronology with physical
-   action; recovery restores the Schema28 action-carrier modulation.
-3. `[reverted]` camera support was treated as metadata; recovery restores the
-   Schema28 validity-times-support coordinate reduction.
-4. `[superseded]` recovery initially restored current-qpos gripper anchors.
-   The active non-core repair instead uses the profile-owned causal command
-   boundary consistently in gripper encode/decode/loss/evaluation.
-5. `[reverted]` the historical single public validity boundary is not the
-   recovery owner layout; Schema28 typed validity/camera-carrier semantics are
-   restored.
-6. `[retained]` P3 optional `source_depths` uses the public
-   cardinality-checked compiler path.
-7. `[retained]` the unconsumed `proposal_condition_dropout` field is removed.
+The deployment ABI owns DINO preprocessing, dtype and reference batch shape.
+When the serialized profile requires a reference batch, causal padding may
+reproduce that encoder shape before slicing back to the real three history
+rows.
 
-These are ownership/semantic repairs, not numerical hardening. Do not add a
-gain, quota, hard event gate, entropy target, extra clipping stage or objective
-weight merely to make one logged magnitude look larger.
+## Action and outlet contract
+
+The shared canonical action is seven-dimensional and its physical flow field
+is [B,24,18]: six arm values, six arm adjacent differences and six continuous
+gripper coordinates. The two arm branches and cumulative decode remain common
+to every outlet.
+
+| Outlet | Native boundary | Mainline claim |
+|---|---|---|
+| Pen | Seven-dimensional continuous action; current action-state owns gripper anchoring | Core-behavior outlet |
+| RDT-8 | Right-arm seven-dimensional projection, high plus right-wrist RGB; previous executed command owns gripper anchoring | Adapter and cross-task outlet, not native three-camera/depth/14-D bimanual support |
+| CALVIN | Seven-dimensional relative TCP command; current action-state plus explicit binary gripper command | Outlet-specific command semantics, not a replacement shared codec |
+| LIBERO | Seven-dimensional normalized OSC_POSE relative command plus continuous gripper; previous clipped command owns the gripper boundary | Isolated external comparison; its ingress/egress adapter does not alter the shared codec or network core |
+| ManiSkill v1/v2 continuous | Seven-dimensional normalized `pd_ee_delta_pose` relative command; previous clipped command owns the gripper boundary | Retained compatibility baseline |
+| ManiSkill v2 binary | Same seven-dimensional relative arm command; private native gripper command owns dimension 7 and emits strict `{-1,+1}` | New StackCube base outlet; does not modify the shared 18-D codec |
+
+For every continuous gripper profile, one causal boundary owns row-zero delta,
+the full-horizon anchor, cumulative decode, loss and evaluation. Event masks
+select rows only; decoded events are evaluation metrics, never runtime gates.
+
+CALVIN applies exactly three outlet rules:
+
+1. motion sampling scores normalized command minus normalized raw zero;
+2. before W, four centered relative commands become cumulative canonical
+   displacement plus per-interval command delta;
+3. the binary command head maps argmax to {-1,+1}, while the six
+   compatibility-only future-gripper coordinates are zero before every dynamic
+   ODE consumer.
+
+Its dataset boundary is independently fail-closed. Split membership is by
+official `ep_start_end_ids.npy` source trajectory, never by language annotation
+row or sampled window. Every real action through the annotation's terminal
+state minus one must occur in a 24-row policy target. The extra support needed
+by the 48-frame Teacher follows CALVIN's absorbing convention: repeat terminal
+RGB/state, zero relative arm commands and hold the final binary gripper command.
+Synthetic absorbing rows are excluded from normalizer fitting. These are
+outlet data-interface rules and do not alter the shared policy graph. An
+annotation is admitted only when its source trajectory also provides the full
+24-frame causal history; short-prefix annotations are rejected before HDF5
+materialization rather than failing after a partial output is written.
+
+Pen and RDT bypass the CALVIN W adapter numerically. Task identity may control
+sampling, validation and logging but is not a hidden S/W/P condition.
+
+LIBERO has its own fail-closed ingress/egress contract.  Conversion derives the
+policy instruction from the official filename-based `Task.language` surface and
+records a BDDL `:language` value, when present, only as simulator provenance.
+The official BDDL task inventory is mandatory conversion input; HDF5 language
+metadata alone cannot assert the evaluator instruction identity.
+The HDF5 action/state arrays are required to be native seven-dimensional
+`OSC_POSE`/EEF charts with a reset-zero then previous-action `action_state`.
+The upstream LIBERO `create_dataset.py` records `obs[t]` after executing
+`action[t]`; that post-action row must never be presented as the observation
+that generated the same action.  The causal boundary converter therefore
+renders row zero from raw `states[0]`, shifts released post-action rows right by
+one, and treats the released final post-action row as the genuine terminal
+observation.  Prefix and terminal-suffix roots retain a numeric-only copy of
+the legacy real state rows solely to keep the E8 state-normalizer fingerprint
+identical; that reference is not model evidence.
+The controlled LIBERO continuation pair is explicit: `causal_prefix_v1`
+admits centers `0..T-49`, while
+`causal_prefix_terminal_suffix_v2` admits `0..T-1` after appending exactly 48
+absorbing rows (zero arm, held final gripper, repeated terminal state/RGB).
+Both reserve `1 prefix + 7 strict` or `1 prefix + 1 tail + 6 strict` in B8,
+keep strict validation as the checkpoint-selection metric, and allow the
+strict-to-causal transition only through the tested model-only migration
+`libero_window_boundary_supervision_v1`.
+An optional retarget training overlay may augment only the terminal-suffix
+train split.  Each admitted source demonstration owns one symmetric nonzero
+XY translation pair generated by simulator replay: the object initial free
+joint and the expert EEF trajectory change together, while the original
+receptacle remains the release target.  Manifest lineage, HDF5 content hashes,
+success, tracking/saturation/placement bounds and paired response direction
+all fail closed before loading.  The immutable base train split alone fits the
+action/state normalizers; overlay rows are appended only after that fit, and
+base validation/test membership and strict checkpoint-selection metrics remain
+unchanged.  This changes dataset/cache identity but not the model, objective,
+codec or outlet ABI.  A terminal-suffix checkpoint may initialize such a run
+only through the tested model-only migration
+`libero_retarget_training_overlay_v1`, which requires byte-identical action
+and state normalizer SHA-256 values.  Its source allow-list composes the
+ordinary model-only initialization/replay allow-list with the data-boundary
+files needed by the overlay; selecting the data migration must not revoke an
+already-admitted validation-only source change, and it still rejects drift in
+every source file outside that union.
+Conversion writes into a staging root, audits the complete inventory, and
+atomically publishes only an audited root.  XML model assets are relocated
+from the released `chiliocosm` absolute prefix to the installed LIBERO asset
+root with an existence check; the relocation is serialized as provenance.
+Terminal replay starts at raw `states[0]` and executes the complete recorded
+action sequence, because the OSC controller target is hidden outside the
+flattened MuJoCo state.  The raw writer's final reward/done entries are
+official terminal markers (the upstream writer sets them on the final row),
+so replay reward/done/success is retained as an audit comparison and never
+replaces or silently filters the raw label; mismatches are reported per
+episode.  Conversion still fails closed on malformed arrays, missing assets,
+state-restore failure, or a replay process exception.  Evaluation applies the
+fixed init
+state, performs the official five zero-action physics warmup without reading
+success/done, then asks the policy for a 24-row chunk and executes its first
+row after normalized `[-1,1]` clipping.  The clipped row is the next
+`action_state`; success is evaluator-only.  These are LIBERO outlet rules and
+do not add a second network forward path or change the shared action codec.
+The evaluator resume identity also includes the action/state normalizer
+digests, so a relocated bridge is allowed but a silently re-charted bridge is
+not.  Fixed init states retain their official first-N identity, and every
+resumed rollout must carry a complete executed-action audit.  `libero_100` is
+an archive union rather than an evaluator suite, so 90 and 10 are evaluated
+separately.  Only a checkpoint-backed, all-task 20-episode/600-action run with
+the five-step warmup, seed 10000 and 128-pixel camera input is labeled as using
+the official protocol; transport smokes never acquire that label.  Result
+identity includes `image_side` plus content digests of each used first-N fixed
+state matrix and BDDL file.  Bridge endpoint is relocatable provenance, not
+policy or benchmark identity.  Partial per-task checkpoints remain explicitly
+incomplete until the final bridge-identity check succeeds.
+
+Physical-chart units and nominal limits are metadata. They do not clip,
+normalize, decode, condition the model or silently define a full scale.
+Observed normalizer extrema and diagnostic probe constants are not physical
+unit declarations.
+
+RDT data and adapter detail lives in
+[auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md](auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md).
+Simulation and benchmark operational detail lives in
+[../development/SIMULATION.md](../development/SIMULATION.md).
+
+## Optional simulator residual-RL pilot
+
+The opt-in `clearvla.rl` pilot freezes a verified same-task ClearVLA/DINO base
+and learns an external bounded unit-residual SAC actor with independent twin
+Q critics. It runs after original outlet finalization and native decoding,
+before environment clipping/execution; the actual executed command owns the
+next history. Reward/success stay outside deployed policy inputs. The mainline
+18-D codec, G/S/W/P, one-W-rebuild two-pass sampler, Teacher and supervised
+trainer are unchanged; execution-value heads are not RL critics.
+
+New base preparation selects `maniskill_pd_ee_delta_pose_7d_v2` with the
+`maniskill_binary_command` / `maniskill_7d_binary_v2` outlet. The legacy v1
+profile remains readable for existing runs, but is not admitted as a binary
+base by the repaired RL runner. Passing `--gripper-output-mode continuous`
+remains an explicit compatibility baseline; it does not silently convert an
+existing checkpoint. Both are explicit StackCube/panda_wristcam boundaries,
+not Pen/CALVIN/LIBERO aliases. Relative-command W conversion, previous-command
+gripper anchoring, the shared 18-D codec and the neural graph remain unchanged.
+
+The ManiSkill binary outlet follows the Calvin isolation contract without
+copying Calvin's rejected direct-arm chart: a private two-class head owns the
+native gripper command, all six compatibility future-gripper field coordinates
+are zeroed before every dynamic consumer, and finalization plus W rebuild write
+the strict native command (`+1` open, `-1` close). Binary preparation admits
+only exact `{-1,+1}` values in both `action` and `action_state`; it therefore
+requires a fresh data/config/checkpoint identity rather than an exact resume of
+a continuous v2 run.
+
+V2 records a causal rotation vector of the fixed chart `Rx(pi)^-1 R_tcp`,
+choosing the nearest equivalent log branch from the last observed rotation
+and clearing that state on reset. This is an invertible outlet-side chart
+with the same 7D state width, not a globally nonsingular SO(3) parameterization.
+Training and deployment use exactly the same producer implementation.
+Every original source action owns a center from 0 through source_length-1;
+at least 48 real post-success hold steps provide future Teacher support.
+Only pre-reset history may pad: repeat the reset RGB/state and use the safe
+reset action_state for unexecuted command slots, never the first future action.
+All future supports remain actual recorded steps. Episode attributes and
+admission checks enforce first-executed-row coverage, not merely presence
+somewhere in a 24-row target. New data/caches/normalizers/checkpoints have new
+identities; no live v1 directory is recharted or exact-resumed into v2.
+Environment and reset-seed provenance remain serialized at the outlet.
+During fixed source-plus-hold collection only, a successful task terminal may
+be continued with live physics; the native terminal is retained in evaluator
+metadata. Failure/time-limit termination and ordinary online-RL termination
+are never suppressed by this data-collection rule.
+
+Adapter checkpoints have separate base/source/environment/replay identities.
+This is an implemented experimental interface, not a validated RL improvement
+or a replacement mainline. Preparation, limitations and gates live in
+[`../../clearvla/rl/README.md`](../../clearvla/rl/README.md).
+
+The single-task information sampler carries fractional event quotas across
+batches (B4/default alternates 0/1 dedicated event rows); integral B8 quotas
+retain their historical sample sequence. Logging separates configured fractions
+from realized dedicated quota. ManiSkill open/close names follow positive/negative
+native gripper changes respectively; this naming correction does not alter total
+event F1, RMSE, or losses. These changes require a fresh source identity.
+
+## Optional B-spine contract
+
+The default execution-bottom selection has B-spine disabled. Opt-in selections
+use dedicated Pen configs and distinct schema-31 component identities. Each
+reads the same deployed noisy physical field after the unchanged codec and
+adds a parallel fixed coarse/detail numerical view beside the raw lift:
+
+~~~text
+u_raw   = existing noisy lift of x_t
+u_spine = fixed-analysis/coarse-detail lift of x_t
+action += (u_raw + u_spine) * action_state_factor
+~~~
+
+The retained `fixed_bspline_coarse_detail_v1` comparison applies the shared
+cubic K=12 temporal split to all 18 physical fields. The preferred isolated
+candidate `fixed_bspline_arm_only_v1` applies it only to the arm-absolute and
+arm-delta groups (`11000` in the serialized action-group order); all six
+gripper fields reach the bottom only through the unchanged raw lift. The two
+implementations have distinct manifest bottom identities and component
+selections even though both remain in the schema-31 experiment family.
+
+The follow-up candidate `fixed_bspline_arm_coarse_context_v1` keeps the same
+arm-only fixed chart and `11000` mask but owns only the learned coarse
+projection `P(X_arm)W_c`; it has no learned detail lift or gripper input. The
+raw action lift remains the complete row-local path, so this candidate tests
+only the non-local arm context supplied by the spline. It is a fresh Schema31
+identity and is not a migration or a new default.
+
+The matched routing control `fixed_bspline_arm_private_reader_v1` uses that
+same coarse arm chart and mask, but keeps the chart out of the shared MMDiT
+action seed:
+
+~~~text
+raw physical field -> existing raw lift -> shared MMDiT -> terminal heads
+coarse arm chart  -> ArmPrivateBSpineReader -> arm-only physical correction
+~~~
+
+`ArmPrivateBSpineReader` is a non-affine LayerNorm followed by a bias-free
+projection to the first `2*arm_dim` physical channels. The coarse lifts remain
+zero-initialized (and reader construction restores the host RNG), so model
+construction and the initial output are baseline-preserving while the arm loss
+can open the new route. The correction is applied by
+`TerminalActionController` to every candidate and final physical read; it is
+never read by the shared MMDiT blocks, gripper state/command head, motion head,
+or gripper physical channels. This is an explicit arm-private comparison, not
+a hidden second codec or an arm/gripper stop-gradient claim.
+
+No B-spine experiment may change the codec, target, source noise, flow
+objective, loss weights, ODE nodes, W rebuild count or output ABI. The raw
+lift remains active. Component choice, action-group mask, basis digest and spec
+fingerprint are serialized in run context. Acceptance requires matched
+behavior evidence; schema 31 does not promote any implementation to the
+default. For the private-reader control, report the spline-owner and
+private-reader gradient probes separately so a shared optimizer-owner total
+cannot hide an arm/gripper routing difference.
+
+The canonical basis mathematics and standalone representation boundary live in
+[../../clearvla/action_representations/bspline/README.md](../../clearvla/action_representations/bspline/README.md).
+The first coarse/detail run's bounded early evidence is retained in
+[auxiliary/SCHEMA31_BSPINE_EARLY_AUDIT.md](auxiliary/SCHEMA31_BSPINE_EARLY_AUDIT.md).
+It is a historical snapshot; current candidate status belongs in the issue
+ledger and dated handoff, scoped to the selected component and checkpoint.
 
 ## Non-negotiable invariants
 
 1. Camera, spatial, local-M, global-K, N=49, interval, horizon, basis and type
-   axes remain real until a named consumer. A reduced axis cannot be recreated
-   with `expand` and called original evidence.
-2. Online evidence is ordinary autograd unless this contract names a no-grad
-   Teacher/audit scope. Nonzero activation gradients do not substitute for
+   axes stay real until a named consumer. Reduced evidence cannot be recreated
+   with expand and called original evidence.
+2. Online evidence keeps ordinary autograd unless this contract names a
+   no-grad Teacher or audit scope. Activation gradients do not substitute for
    parameter-owner VJP.
 3. Learned flow is a continuous source-relative prior, never a forced-nonzero
    target or route quota.
-4. S is the only intent owner. It cannot create W value/support or enter W as a
-   second hidden path.
-5. W owns the only future object field. ControlledTransition consumes policy
-   transition evidence; it does not produce `world1` and has no extra W bridge.
-6. Physical validity and camera support are producer-owned. The Schema28
-   camera-validity-times-support reduction is the named coordinate/transport
-   consumer; confidence and allocation share are not substitutes for it.
-7. P1 retains its high-resolution N=49 and 3x3 read. It cannot be replaced by a
-   K-object summary merely to save memory.
+4. S owns intent. It cannot manufacture W support/value or enter W through a
+   hidden second path.
+5. W is the only future-world producer. ControlledTransition consumes policy
+   transition evidence and cannot create another world.
+6. Physical validity and camera support are producer-owned. Confidence or
+   allocation share cannot silently replace them. Every S/coarse/W K read
+   receives that support; invalid rows are quarantined before normalization
+   and object-axis reduction, and an all-invalid row has a finite zero-output
+   fallback. Camera-role conditions must use the serialized declared role
+   order, remain jointly equivariant with that camera axis and cannot invent
+   value behind zero support.
+7. P1 retains N=49 and its real 3x3 detail read until factual selection is
+   complete.
 8. Semantic K and geometry K*C selection are independent and complementary.
-   They do not compete in a type softmax and physical interval selection has no
-   learned null.
-9. Neutral P2 effect is algebraically neutral:
-   `effect=0`, `interaction=0`, `protected_consequence=factual_base`.
-10. Bottom V120 seed, terminal layer contracts, CVAE/workspace, Evidence MMDiT,
-    capacity and execution remain present. Capacity is a continuous numerical
-    contract, not a claim of hardware rank reduction.
-11. Pen/RDT deployed gripper behavior comes from continuous physical
-    value/delta branches. CALVIN uses the explicit binary command-state head
-    and maps argmax to `{-1,+1}`; its legacy continuous gripper field remains
-    compatibility/audit-only. In CALVIN binary mode the six trailing future
-    gripper coordinates are replaced by exact zeros before every ODE-dependent
-    dynamic consumer, while current gripper state remains available through
-    observed state/action history. CALVIN's native arm rows are relative TCP
-    commands, not absolute poses: both six-dimensional branches of the fixed
-    18-D field encode the same command and decode as
-    `0.75 * branch0 + 0.25 * branch1`; temporal differencing, cumulative decode
-    and adjacent-command smoothness are forbidden for this outlet. Direct
-    branch consistency remains active. Pen/RDT retain the historical absolute
-    plus adjacent-delta arm chart exactly. Decoded events are evaluation
-    metrics, never a runtime gate. For the continuous gripper codec, Pen/CALVIN
-    use current action-state as the gripper boundary and RDT uses the previous
-    executed command; this same boundary owns row-zero delta, horizon-wide
-    `grip-anchor`, cumulative decode, loss, and evaluation.
-12. Future observation/action/state evidence may affect detached Teacher or
-    training targets only; replacing it cannot change deployment action.
-13. One optimizer owns every trainable parameter exactly once. Decoder-local
+   They do not compete in one type softmax, and physical interval selection has
+   no learned null.
+9. Neutral P2 is algebraically neutral: zero effect and interaction leave the
+   protected factual consequence unchanged.
+10. The V120 seed, terminal contracts, CVAE/workspace, Evidence MMDiT,
+    capacity and execution paths remain present.
+11. The shared 18-D value/adjacent-difference action field and cumulative
+    decode cannot be replaced for one outlet. Outlet-native conversions stay
+    at the adapter/finalizer boundary.
+12. Future observation/action/state can affect detached Teacher or targets
+    only; changing it cannot change deployed action.
+13. Every trainable parameter has exactly one optimizer owner. Decoder-local
     clipping precedes global clipping; finite post-clip values cannot hide a
     missing raw owner gradient.
-14. Formal runs fail closed on missing language mappings, source/config/
-    manifest mismatch, stale CandidateWorld identity and non-finite values.
+14. Formal runs fail closed on missing language mapping, identity mismatch,
+    stale CandidateWorld identity and non-finite values.
 15. Checkpoints, tensor caches, raw logs and full probe dumps never enter
     architecture-memory documents.
+16. Numerical step conditioning and semantic object binding are independent
+    contracts. `FlowStepContext` may enter the bottom flow, while raw language,
+    color/object pointers and role logits may not; object binding must be
+    resolved upstream and cross the seam only as a compiled physical condition.
 
 ## Typed boundary summary
 
 | Boundary | Required semantics |
 |---|---|
-| `ObjectFactSet` | K=4 physical objects plus explicit null; one exported content value; observable object/camera probability and log probability |
-| `ActionIntentDock` | public S context only; no typed fact re-entry |
-| `PhysicalActionCondition` | four absolute physical interval means plus current-anchored adjacent deltas, `[B,4,14]` |
-| `ObjectWorldBelief` | compact current G belief; no goal/S/Teacher/noisy-action field |
-| `CandidateWorld` | atomic action-condition identity plus one `FutureObjectDynamics` |
-| `FutureObjectDynamics` | semantic successor/delta and camera-resolved transport/covariance; copied current validity only |
-| `FactualPrecisionDock` | already-computed protected P1 detail; no new reader or compression |
-| `CompletedP1PolicyState` | static factual base separate from dynamic noisy-action/time residual |
-| `SelectedIntervalEvidence` | interval-retaining semantic/geometry values; no-null physical terminal |
-| `ControlledTransitionSource` | exact completed G3 rollout built once per observation |
+| OnlinePolicyInput | Causal RGB/DINO, state, executed history and language only |
+| FutureSupervision | Disjoint training-only future action/state/DINO evidence |
+| ObjectFactSet | K=4 physical objects plus explicit null and observable object/camera mass |
+| ActionIntentDock | Public S interval/history/K memory plus producer-owned K validity mask; no typed fact re-entry |
+| PhysicalActionCondition | Default four physical interval means plus current-anchored deltas |
+| PhysicalActionSequenceCondition | Opt-in complete 24-row source/value/delta condition with boundary, control-step time and chart identity; never a four-row compatibility view |
+| ObjectWorldBelief | Compact current G belief; no S/Teacher/noisy action |
+| CandidateWorld | One exact action condition atomically paired with FutureObjectDynamics |
+| FutureObjectDynamics | Semantic successor/delta and camera-resolved transport/covariance |
+| FactualPrecisionDock | Completed protected P1 detail; no new reader or compression |
+| CompletedP1PolicyState | Static factual base separate from dynamic action/time residual |
+| SelectedIntervalEvidence | Interval-retaining semantic/geometry values with no-null physical terminal |
+| ControlledTransitionSource | Exact completed G3 rollout, built once per observation |
 
-## Modular cut-point contract
+## Registered component hierarchy
 
-The accepted composition boundary for future source work is function-level,
-not the current `top.py` / `restored_bottom.py` file boundary. Implementation
-must land as one atomic source unit that moves the registered owners, rewires
-the complete static/dynamic/training/runtime paths and installs component
-selection together. A façade-only or half-migrated graph is not an accepted
-intermediate architecture.
+One experiment selects exactly one lazy implementation for every slot:
 
-The logical composition graph is:
-
-```text
-OutletActionAdapter
-  -> ConditioningStage
+~~~text
+ConditioningStage
   -> ObservationStage
   -> SharedRoleQueryBridge
   -> GroundingStage
@@ -310,428 +708,122 @@ OutletActionAdapter
   -> PolicyCompilerStage
   -> ControlledTransitionStage
   -> ExecutionBottomStage(TerminalActionController)
-  -> OutletActionAdapter.finalize
-```
+  -> OutletAdapter
+~~~
 
-The static and dynamic call planes are separate:
+Static observation work and per-ODE dynamic work are separate. Boundary
+containers pass existing references without detach, clone, hidden projection
+or reconstructed axes. WorldStage accepts only ObjectWorldBelief and
+the configured `PhysicalActionCondition` or
+`PhysicalActionSequenceCondition`. Language-to-object binding is owned above this seam:
+S/P2 may use language with the language-free ObjectFactSet and must compile the
+result into the existing physical action/consequence carriers. The dynamic
+bottom accepts only the prepared physical field, flow time, bottom-local
+FlowStepContext, shared action query, compiled physical plan, V120 seed and
+transition state; goal, RGB/DINO, ObjectFactSet, raw object pointers, color
+labels and task identity cannot cross it. A physicalized consequence may cross
+because it is the execution condition, not a second semantic binding route.
 
-```text
-one call per observation:
-  conditioning
-    -> observation/G1-G3
-    -> ObjectFactSet
-    -> S/coarse PhysicalActionCondition
-    -> action-tagged CandidateWorld
-    -> static FactualPrecisionDock
-    -> ControlledTransitionSource
+TerminalActionController owns every physical-velocity candidate read, not just
+the final head. OutletAdapter owns native dimensionality, normalizer-aware
+chart conversion, W projection, dynamic sanitization, finalization and metrics;
+it may coordinate these formulas but cannot leak outlet identity into the
+shared graph.
 
-one call per ODE node:
-  outlet-prepared physical field
-    -> shared action query + V120SeedContext
-    -> dynamic CompletedP1PolicyState
-    -> P2/P3 ObjectPolicyPlanDeltaBank
-    -> ControlledTransitionState
-    -> V120 execution bottom
-```
+Component selection and compatibility ABI are serialized before comparison.
+Legacy layout/key/order translation is checkpoint compatibility data; it is not
+a second registered owner or a runtime façade. Component boundaries never
+create a no-grad plane.
 
-The target slots and their current function sources are:
+## Loss, optimizer and diagnostics
 
-| Logical slot | Current source functions | Required public result |
-|---|---|---|
-| `ConditioningStage` | `ClearVLAMainlinePolicy.encode_online` goal/history masks and `HistoryActionProposal.forward` | conditioned online input, proposal state and the two keep masks |
-| `ObservationStage` | `RestoredV120ObservationCompiler.prepare` and `build_grounding_bank` | prepared V120 observation and lossless grounding bank |
-| `SharedRoleQueryBridge` | `RestoredV120EvidenceBottom.sample_role_table`, `grounding_canvas`, `clean_action_basis_tokens` and `action_and_context` | one shared role sample, G canvas, clean basis, action query and one `V120SeedContext` |
-| `GroundingStage` | observation `begin/advance/finalize_progressive_grounding`, `ObjectIntentDynamicsTop.run_progressive_grounding` and `grounder` | `ObservationEvidence`, `ObjectFactSet` and the exact completed G3 rollout |
-| `IntentStage` | the intent and coarse-action portion of `ObjectIntentDynamicsTop.build_online_context` | `ObjectIntentState`, `CoarseActionIntentState` and canonical `PhysicalActionCondition` |
-| `WorldStage` | `build_candidate_world` and `refine_deployment_world` | atomic `CandidateWorld(action_condition, dynamics)` |
-| `P1Stage` | `LateRawDetailPolicyReader.forward` and `RestoredV120EvidenceBottom.complete_p1_fact` | static `FactualPrecisionDock` and dynamic `CompletedP1PolicyState` |
-| `PolicyCompilerStage` | `ObjectIntentDynamicsTop.compile_policy` | `ObjectPolicyPlanDeltaBank` plus P2/P3 trace values |
-| `ControlledTransitionStage` | `ControlledTransitionDynamics.build_source` and `forward` | separate cached source and per-node transition state |
-| `ExecutionBottomStage` | `RestoredV120EvidenceBottom.forward` and `compile_evidence_view` | `BottomDecoderOutput`; no observation, world, Teacher or outlet identity input |
-| `TerminalActionController` | `EvidenceLatentMMDiTActionDecoder._read_output_heads` and every direct terminal `velocity_head` candidate read | physical velocity, motion state and optional outlet command state |
-| `OutletActionAdapter` | `PhysicalActionFieldCodec`, sampling finalization, outlet action terms and validation accumulation | canonical core field plus explicit deployed/native outlet result |
-| `TrainingTargetStage` | `teacher_supports`, `build_training_targets` and history-proposal target construction | training-only detached Teacher and named target bundle |
+The logged loss ledger is authoritative. Interpret weighted contributions and
+group totals before raw auxiliary magnitudes. The main groups are action,
+representation and execution.
 
-These boundary rules are non-negotiable:
+Pen/RDT continuous-gripper trajectory terms supervise the deployed continuous
+codec. CALVIN action-flow and decoded-action objectives are arm-only and its
+binary command uses ordinary horizon-weighted cross entropy by default. An
+explicit CALVIN-only `motion_event_v1` experiment may reallocate that same
+horizon supervision mass across rows using zero-centered relative-TCP motion
+and a bounded gripper-transition neighbourhood. It drops no rows, normalizes
+the combined row weights back to the original horizon mass, is serialized in
+the resolved objective config, and leaves Pen/RDT on exact unit frame weights.
+Diagnostics and matched interventions are audit-only unless source shows a
+positive objective weight.
 
-1. One experiment instantiates exactly one implementation per slot. Registries
-   are lazy; they must not construct unused alternatives, consume their RNG or
-   place inactive trainable heads in a `ModuleDict`.
-2. The shared role table is sampled once per observation and reused by static G
-   and every dynamic action-query call. The action query and
-   `V120SeedContext` are produced atomically by the same bridge.
-3. One completed G3 rollout tensor is passed by identity to static P1 and
-   `ControlledTransitionSource`. It remains `[B,4*C*8*8,H]`; neither consumer
-   may rebuild it from an object summary.
-4. `ObservationEvidence` retains the N=49 and literal/detail candidates until
-   static P1 completes. It may then be released from deployment cache, but it
-   cannot be compressed at the module boundary.
-5. `action_query`, `factual_base` and `policy_query_residual` stay separately
-   named until `P2QueryDock.combined()`. Boundary containers pass references
-   without `detach`, `clone` or a replacement projection.
-6. `WorldStage` accepts only `ObjectWorldBelief` and
-   `PhysicalActionCondition`. `CandidateWorld` keeps that exact condition
-   atomically paired with the corresponding dynamics through P2 and outer
-   refinement.
-7. The dynamic bottom boundary accepts only the prepared physical field, time,
-   shared action query, `ObjectPolicyPlanDeltaBank`, `V120SeedContext` and
-   `ControlledTransitionState`. Goal, RGB/DINO, `ObjectFactSet`,
-   `CandidateWorld`, Teacher and outlet/task identity do not cross it.
-8. `TerminalActionController` is logically replaceable but physically injected
-   into the V120 decoder because execution-candidate probes also consume its
-   velocity reader. Replacing only the final endpoint head is not a valid slot
-   implementation.
-9. Outlet-native dimensionality, command alphabet, normalization, target
-   encoding, finalization and validation stay in `OutletActionAdapter`.
-   The shared core sees only the declared canonical seven-dimensional action
-   and eighteen-dimensional physical field; outlet/task identity is not a
-   hidden S/W/P condition.
-10. Component boundaries never create a no-grad boundary. Teacher remains the
-    only future-capable detached plane, and every online component retains
-    ordinary end-to-end autograd.
-11. Component selection, compatibility ABI and implementation names are
-    serialized in the run context before component experiments can be compared.
-    A source digest change still forbids exact resume unless that exact source
-    identity or an explicit migration contract authorizes it.
-
-The atomic rewrite, legacy-to-modular key map and behavior-equivalence gates are
-maintained in `CURRENT_MAINLINE_REPAIR_PLAN.md`. The working source now uses
-only the registered component hierarchy. The former `top.*`, `bottom.*`,
-`action_codec.*`, `factual_reader.*` and `history_proposal.*` names exist only
-as explicit checkpoint/optimizer mapping data; dual registration and runtime
-compatibility façades are not part of the accepted graph.
-
-Local closure evidence on 2026-09-04 is exact: the topology-complete reduced
-dual-source gate compared 15,014 tensors / 10,443,735 shared elements with zero
-difference across initialization/RNG, static and six-time dynamic boundaries,
-raw and post-clip gradients, one optimizer step, sidecars and the two-pass
-five-update deployment lifecycle. The combined mainline,
-policy/runtime/structural, checkpoint/layout, AMP/data/interface/action-field,
-RDT preparation and standalone B-spline suite passes 284 tests with three
-environment-dependent tests skipped.
-The final registered state inventory remains 1,391 keys with digest
-`846b1edd7933b796882bcb5a8422816f768110fe9741282ba4435ac45927b7ca`.
-The separately owned B-spine source is now integrated into the modular tree and
-the local merge/identity gates below are closed. Real CUDA/BF16 and a real
-read-only production-checkpoint replay remain release gates; no new training is
-authorized from this source before those remote gates close.
-
-### Provisional Schema31 B-spine candidate
-
-Schema30 remains the accepted disabled-path baseline.  The opt-in Pen candidate
-uses manifest schema 31 with digest
-`a10eabe896acc214ea04338de7f85f568a4a9a13c0447212f96b15aecdf6edf6`,
-component selection `execution_bottom=v120_evidence_mmdit_bspine0_v1`, and
-config [`configs/mainline/object_intent_dynamics_323_pen_bspine0.json`](../../configs/mainline/object_intent_dynamics_323_pen_bspine0.json).
-The resolved path-independent config digest is
-`0a73c0a1f5c847227629fb7867834c8e1cba01ddf53bf4f3909fcaf16773fbfc`.
-It is an experiment identity, not an accepted replacement for Schema30.
-
-The only new calculation is a bottom-internal parallel numerical view of the
-same deployed noisy physical field:
-
-```text
-u_raw   = unchanged NativeTimePhysicalActionTokenLift(x_t)
-u_spine = BSpine0(x_t)
-action += (u_raw + u_spine) * action_state_factor
-```
-
-`BSpine0` is fixed at `T=24`, cubic degree 3 and `K=12`. Its production basis
-identity hashes the exact FP32 analysis/synthesis operators actually registered
-by the bottom, excluding the unused backend-dependent lossless-detail QR chart;
-that runtime-operator digest is
-`f4d169cdeab9606dfacb92abbbc71bc3dbb7a4abefb8ef5244bc411670caab34`,
-and its complete spec fingerprint is
-`a2234eb6c9f553c47e793e11c8734d8cfadfbaaf86c5b950dab8f672965a8c10`.
-Fixed analysis/synthesis run in FP32.  Independent zero-initialized, bias-free
-coarse/detail maps preserve the five physical-field roles and add 18,432
-trainable weights at hidden width 512; no knot, gain, normalizer, loss, clip,
-top carrier, ODE step, W rebuild or output ABI changes.
-
-The full Schema31 inventory is 168,435,611 parameters / 1,395 parameter
-tensors, 152,064,880 trainable parameters / 1,073 trainable tensors, 1,403
-state keys and 24 optimizer groups.  All ten new parameter tensors have the
-single `bottom_spine` owner at the existing bottom-decoder `0.7x` LR and normal
-decay. `spine_zero` is the evaluation-only model intervention and preserves
-the learned computation for diagnostics while zeroing only its action-stream
-contribution. Validation names its two uses separately:
-`spine_zero_refined_pass` holds the learned-proposal W cache fixed, while
-`spine_zero_full_lifecycle` applies it to proposal and refined passes so the
-intervened proposal owns the single W rebuild. Both reuse the primary initial
-physical noise; only the latter is complete deployment attribution.
-
-The disabled Schema30 graph is still certified against the immutable
-pre-modular capture at `atol=0`, `rtol=0`: 15,014 tensors / 10,443,735 values
-and 206,237 metadata paths have zero differences. The candidate source-tree
-digest recorded by the post-lifecycle report is
-`ad226fd56bcc7ec3eb1d19e08791e095a5526866d00ef3f043cfa6275b350ba9`;
-the checkout-newline-independent executable source-closure digest is
-`ababb7ce0a87973de273e5d69bda94d91339ad217b9ccd658f54ecf68cc64ddc`.
-Local B-spine gates cover fixed-basis rank/partition/endpoints, exact
-coarse-plus-detail closure, independent raw/coarse/detail JVP/VJP, complete
-loss-side owner gradients, CPU BF16, zero-init bit identity, matched learned
-fixed-cache and full-lifecycle `spine_zero`, one formal decoder call, twelve
-deployed calls, optimizer ownership and Schema31 checkpoint round trip with
-Schema30 exact-resume
-rejection.  Real Pen CUDA/BF16 VJP, smoke, runtime/memory and read-only
-checkpoint replay remain mandatory before the single fresh Pen run starts.
-
-### Feasibility audit (2026-09-04)
-
-This decision was checked against the live CPU source, rather than inferred from
-file names. A structural probe instantiated the baseline selection with seed 0,
-then attached the same already-constructed child modules under the proposed
-owners. The result was:
-
-```text
-baseline inventory:       168,417,179 parameters / 1,385 tensors
-trainable / optimizer:    152,046,448 / 1,063 parameters
-state keys / groups:      1,391 / 23
-state-key digest:         70a8a5be21de40c460de6cff899942d5331837700db289350a0b1920c133b053
-post-init RNG digest:     d3bcc995a57b40e359a6370a4dc3eea1638fa4a210f3082e41f6791a75513c21
-legacy-key collisions:    0
-mapped missing/unexpected: 0 / 0
-mapped values/storage:    equal / shared
-attachment RNG change:    none
-module/parameter aliases: 0 / 0
-```
-
-The same probe on the CALVIN binary selection materialized only its command
-head (1,389 parameter tensors, 1,395 state keys, 1,067 trainable parameters),
-which confirms that outlet selection can remain lazy rather than retaining
-inactive trainable alternatives. The current `encode_online` and `velocity`
-functions are straight-line orchestrators; their component-call order is
-stable and the deployment lifecycle test passes the expected two five-update
-passes, one W rebuild and twelve bottom calls. The focused policy/runtime/
-structural suite currently passes 149 tests on CPU. Reproduce it with:
-
-```powershell
-.venv\Scripts\python.exe -m pytest -q tests/test_mainline_policy.py tests/test_mainline_runtime.py tests/test_mainline_structural_contracts.py
-```
-
-This proves structural feasibility, not completed equivalence. Two implementation
-gates were exposed and are mandatory in the atomic source unit:
-
-1. A logical hierarchy changes the raw `model.parameters()` traversal order even
-   when every mapped tensor is identical (the proposed hierarchy had 1,385
-   positional differences). The rewrite must carry an explicit legacy parameter
-   order for optimizer construction, global norm/clipping and any diagnostic
-   reduction, or prove an exactly equivalent registered order. Matching only
-   optimizer group membership is insufficient.
-2. `EvidenceLatentMMDiTActionDecoder` still has seven direct candidate reads of
-   `velocity_head` (probe, differentiable candidate, prefix/idle and both
-   execution paths). They must all be routed through the injected terminal
-   controller; moving only `_read_output_heads` would leave a hidden old exit.
-
-The harness must also cover non-tensor sidecar state: execution warm-up/progress,
-evaluation interventions and non-persistent query/position buffers are not
-represented by the ordinary state-key map. Their setters, load behavior and
-runtime values are part of the equivalence surface.
-
-Therefore the answer is **feasible with a strict topology-preserving relocation**:
-the source can be rearranged in one atomic unit while preserving the same
-calculation DAG, operation order, tensor references, RNG draws and stateful
-execution lifecycle. The behavior gate must additionally compare the explicit
-parameter order, all seven terminal sites, raw gradients and the post-step
-optimizer result before the new hierarchy becomes authoritative.
-
-## Loss, gradient and optimizer ownership
-
-The logged loss ledger is authoritative. Raw auxiliary magnitudes do not imply
-optimization dominance; interpret `loss_contrib_*` and `loss_group_*` first.
-The main groups are action, representation and execution. On continuous
-Pen/RDT outlets, the retained `.03` gripper-trajectory budget supervises
-continuous transition/persistence on the deployed codec branches; it does not
-fund an event classifier. CALVIN's action-flow and decoded-action objectives
-are arm-only and supervise both direct command branches; their consistency
-term compares the branches, while the adjacent-command smooth-delta term is
-exactly zero because it would be an unintended acceleration target. CALVIN
-removes all continuous-gripper terms from the backward ledger and uses the
-explicit command CE at weight `.1`. When both command states occur in one
-batch, CE rows are reweighted so their exact horizon-weighted mass is equal
-while preserving the configured mean objective budget; a single-class batch
-remains unmodified.
-
-Diagnostics and matched interventions are audit-only unless the source shows
-an explicit positive objective weight. Every train window must keep the ledger
-closed, raw owner gradients finite and each named optimizer role present.
-
-Schema30 retains the Schema28 inventory:
-
-```text
-total parameters:        168,417,179
-trainable parameters:    152,046,448
-parameter tensors:       1,385
-trainable/optimizer:      1,063
-optimizer groups:        23
-state-key names:          1,391
-```
-
-## Data outlets
-
-### Pen core-behavior outlet
-
-```text
-raw HDF5:       /data/liang.zhang/dataset/grab_pen_single/grab_pen_single
-decoded cache:  /data/senwang/data/cache_336
-DINO cache:     /data/senwang/data/dinov2_cache_336
-T5 condition:   /data/senwang/checkpoint/grasp_pen_embed.pt
-split:          63 train / 5 val / 5 test episodes
-batch/workers:  8 / 4
-normalizer v120 fingerprint: 32a3a4d7f21f
-```
-
-This outlet answers core closure: far horizon, gripper, S/W/P, refinement and
-gradient health.
-
-### RDT-8 external-interface outlet
-
-```text
-raw root:       /data/rdt-ft-data
-model cameras:  high + right_wrist
-model action:   right arm 7-D projection from native 14-D
-T5 bank:        /data/senwang/data/rdt_ft_data/multitask_v1/t5_v1_1_xxl_32.pt
-train/val/test: 54,648 / 6,711 / 6,990 windows
-sampling:       eight-task balanced; one row per task in every B8 batch
-validation:     64 rows per task, 512 rows total
-```
-
-Task identity is used for sampling, validation and logging only; it is not a
-hidden model condition. This outlet validates the adapter and cross-task
-ecology. It does not claim native three-camera, depth or bimanual 14-D model
-consumption. Details live in
-[`auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md`](auxiliary/RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md).
-
-### Pen/RDT gripper boundary decision
-
-The compared Schema29 Pen and RDT-8 runs both came from source
-`d8a77a19cfbd7520ae790b3938e2d1fb3a8a7a6f`. The logged value
-`0.873665452` is RDT-8 epoch 4, task `grab_stick_into_bottle`, metric
-`validation_gripper_rmse_physical`; it is a 64x24 aggregate in the producer's
-source-native chart, not a state value or verified SI physical unit. Its
-normalized counterpart is `0.514941`.
-
-At epoch 4, Pen/RDT-8 gripper RMSE was `0.222692 / 0.336409` normalized and
-`0.147643 / 0.570762` source-native. The raw ratio `3.865825x` decomposes into
-normalizer scale `2.559052x` and normalized difficulty `1.510647x`. Data probes
-show Pen action gripper equals qpos gripper, while RDT action is a command whose
-qpos response has a different scale and about two control steps of lag. On the
-same probed rows, gripper-field RMS is `1.096491 / 1.149281` (train/val) with a
-qpos anchor, `1.051814 / 1.102704` when only row zero is repaired, and
-`0.645774 / 0.658893` when the previous-command boundary owns all 24 rows.
-Therefore partial row-zero rewriting is forbidden: encode, decode, loss, and
-evaluation must share the same profile-owned boundary.
-
-### Physical chart metadata
-
-`clearvla.data.physical_chart` records unit-bearing nominal references beside
-the numeric action/state profile (`action_unit`/`state_unit`, nominal absolute
-limit/span, and optional mechanical lower/upper bounds). It is metadata only:
-it does not clip, normalize, decode, condition the model or enter the existing
-profile digest.
-For the Pen chart, the six arm channels use `rad` with
-`nominal_abs_limit=pi`; their symmetric `[-pi, pi]` range therefore has a
-`full_scale=2*pi`. The gripper uses `rad` with a nominal `[0, 100 deg]`
-reference (`1.745329... rad`), so its absolute limit and span are both that
-value. These are nominal references, not a claim that every arm joint has the
-same mechanical limit. RDT and CALVIN channels remain explicitly
-`source_native` with unknown limits until source-side units are verified; the
-RDT qpos-to-command scale is a chart conversion, not a physical full scale.
-`ArrayNormalizer.minimum/maximum` remain observed train-split extrema, and the
-legacy gripper probe's `angle_max_deg` is diagnostic input; neither silently
-defines a physical full-scale contract.
+Every train window requires an exact ledger, finite raw owner gradients and
+one optimizer owner per parameter. Any compatibility ordering needed for an
+old checkpoint is explicit and tested; constructor history is not an
+architectural semantic.
 
 ## Identity and checkpoint contract
 
-- The manifest, resolved config, executable-source digest, dataset inventory,
-  normalizers, language artifact, optimizer ownership and RNG state are
-  serialized in `run_context.json`/checkpoint metadata.
-- Branch and run-directory names are descriptive only. The current branch name
-  still contains `schema29`; the manifest remains Schema30 with the recovery
-  ABI suffix.
-- Pre-recovery Schema29/Schema30 checkpoints and current-qpos-anchored RDT
-  checkpoints are rejected for exact resume/deployment by the component and
-  deployment ABI. RDT must start a fresh checkpoint after this repair. Smoke
-  checkpoints are gate artifacts, not formal initialization sources.
-- `validate_mainline_checkpoint.sh` is read-only: optimizer, scheduler and RNG
-  load are disabled and no checkpoint is written.
-- Formal output directories must be new and empty. Checkpoint writes are atomic;
-  do not overwrite an existing run to continue a different identity.
+- Manifest, resolved config, component selection, source provenance, dataset
+  inventory, normalizers, language artifact, optimizer ownership and random
+  continuation state are serialized in run context/checkpoint metadata.
+- The current dataset inventory is composite and must not be called a raw-file
+  checksum; identity separation remains an open repair-plan item.
+- Exact resume fails closed on incompatible architecture, component, data,
+  optimizer or continuation state. A migration requires an explicit tested
+  contract.
+- Validation replay is read-only: it does not load optimizer/scheduler/random
+  continuation state and writes no checkpoint.
+- Formal output directories are new and empty, and checkpoint writes are
+  atomic. Filesystem overwrite protection is separate from architecture
+  compatibility.
+- A smoke checkpoint is gate evidence, not a formal initialization source.
 
-## Historical release evidence (pre-recovery)
+## Release and audit rules
 
-The following gates passed for the historical Schema30 checkout before the
-local recovery overlay; they do not certify the dirty working tree:
+Interface closure requires focused tests, state/owner coverage, real
+CUDA/BF16 parameter-owner VJP, checkpoint round trip and bounded memory.
+Learned-behavior closure additionally requires a complete comparable curve and
+the matched intervention named by the current issue. Outlet claims require
+their native metric and, where applicable, a closed-loop benchmark.
 
-| Gate | Result |
-|---|---|
-| local regression/static | `223 passed, 2 CUDA-only skipped`; changed-file Ruff and compileall pass |
-| checkpoint compatibility | fresh save/load round-trip passes; Schema29 exact resume rejected |
-| real Pen B8 CUDA VJP | cache0/cache1 total parameter L2 `3.1326139 / 3.1326158`; velocity, gripper, motion and MMDiT owners retained |
-| Pen B8 smoke | `schema30_pen_b8_smoke_20260902_112950`; exact ledger, finite backward, atomic checkpoints, 4.228 GiB peak estimate |
-| RDT-8 smoke | `schema30_rdt8_smoke_20260902_113250`; exact ledger, 8/8 coverage, finite backward, 10.53 GiB peak estimate |
-| Pen checkpoint validation | `schema30_pen_checkpoint_validation_20260902_113954`; `source_delta_files=0`, read-only lifecycle |
-| RDT checkpoint validation | `schema30_rdt8_checkpoint_validation_20260902_114122`; `source_delta_files=0`, read-only lifecycle |
-
-The VJP gate exists because the first Schema29 run exposed a CUDA BF16 AMP
-weight-cache failure: pass0 no-grad casts severed formal parameter edges while
-forward values and activation gradients stayed finite. Commit `d8a77a1` closed
-that lifecycle defect. A finite total gradient or optimizer step never replaces
-the real parameter-owner VJP gate.
-
-These are release/interface results, not behavior results. Schema28 remains the
-completed behavior anchor. The recovery graph has since started fresh and has
-four complete epochs, but remains a midpoint candidate until E8.
-
-## Run and audit
-
-Canonical commands and the current remote environment are maintained in
-[`clearvla/mainline/README.md`](../../clearvla/mainline/README.md) and the live
-handoff. Formal runs use the XVLA Python environment on the server; non-
-interactive SSH must make that environment visible in `PATH`.
-
-Hard stops are: non-finite values, lineage/identity failure, an open loss
-ledger, formal parameter-owner VJP disappearance, checkpoint ABI violation or
-memory above the 22 GiB release boundary.
-
-Finite gradient/preclip threshold crossings are secondary telemetry, not a
-release gate. Their count, maximum, owner or clustering does not independently
-stop a run, rank a version or authorize clipping, normalization, gain or
-loss-weight changes. Retain them for retrospective correlation and escalate to
-a targeted numerical investigation only when the same event is reproducibly
-coupled to sustained failure to recover, optimizer/parameter damage, validation
-regression or another hard-stop failure. Judge and stop on that demonstrated
-failure, not on the `spike` label itself. Early event F1, small geometry RMS or
-capacity warmup likewise does not independently stop a run.
+Hard stops are non-finite values, identity/lineage failure, an open loss
+ledger, vanished formal parameter-owner VJP, checkpoint ABI violation or
+process memory above 22 GiB. Finite gradient-threshold crossings, early event
+F1, small geometry amplitude and capacity warm-up are telemetry unless tied
+reproducibly to a hard failure or behavior regression.
 
 ## Authoritative source map
 
-```text
-identity/config/interfaces:
+~~~text
+identity/config:
   clearvla/mainline/manifest.py
   clearvla/mainline/config.py
   clearvla/mainline/interfaces.py
+  clearvla/mainline/model/component_contracts.py
+
+composition:
+  clearvla/mainline/model/policy.py
+  clearvla/mainline/model/components.py
+
 observation/G:
   clearvla/mainline/model/restored_observation.py
   clearvla/mainline/model/observation_contract.py
   clearvla/mainline/model/grounding.py
+
 S/W/P:
   clearvla/mainline/model/intent.py
   clearvla/mainline/model/dynamics.py
-  clearvla/mainline/model/policy.py
   clearvla/mainline/model/v120_p1.py
   clearvla/mainline/model/compiler.py
-Teacher/transition/bottom:
-  clearvla/mainline/model/teacher.py
+
+action/transition/bottom:
+  clearvla/mainline/model/action_codec.py
   clearvla/mainline/model/transition.py
   clearvla/mainline/model/restored_bottom.py
+
 training/runtime:
   clearvla/mainline/training/
   clearvla/mainline/runtime/
   clearvla/mainline/train.py
-```
+~~~
 
 Historical replay provenance is indexed by
-[`auxiliary/R1_R2_CLOSURE_INDEX.md`](auxiliary/R1_R2_CLOSURE_INDEX.md). Open the
-long replay archive only for ancestry, an old log or the reason behind a past
-repair; never reconstruct the active graph from it.
+[archive/replay/README.md](archive/replay/README.md). Open it only for ancestry,
+an old log or the reason behind a past repair; never reconstruct the current
+graph from the ledger.

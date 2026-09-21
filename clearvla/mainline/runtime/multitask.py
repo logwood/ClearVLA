@@ -63,8 +63,8 @@ def _project(metrics: Mapping[str, float], *, samples: int) -> dict[str, float]:
         "validation_sample_count": float(samples),
         **{name: float(metrics[name]) for name in TASK_VALIDATION_METRICS},
     }
-    # CALVIN command metrics are optional so the existing continuous RDT
-    # multitask ABI does not gain new required fields.
+    # Binary command metrics are optional so existing continuous multitask
+    # ABIs do not gain new required fields.
     for name in (
         "validation_gripper_command_accuracy",
         "validation_gripper_command_predicted_positive_rate",
@@ -96,6 +96,7 @@ class TaskValidationAccumulators:
         arm_motion_threshold: float,
         gripper_output_mode: str = "continuous",
         arm_flow_mode: str = "legacy_independent",
+        gripper_open_direction: int = -1,
     ) -> "TaskValidationAccumulators":
         if not task_order or len(set(task_order)) != len(task_order):
             raise ValueError("multitask validation requires an ordered unique task registry")
@@ -109,6 +110,7 @@ class TaskValidationAccumulators:
                     arm_motion_threshold=arm_motion_threshold,
                     gripper_output_mode=gripper_output_mode,
                     arm_flow_mode=arm_flow_mode,
+                    gripper_open_direction=gripper_open_direction,
                 )
                 for _ in task_order
             ),

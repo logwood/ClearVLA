@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..gripper_contract import VALID_GRIPPER_OUTPUT_MODES
+
 
 @dataclass(frozen=True)
 class V362PolicyConfig:
@@ -80,19 +82,13 @@ class V362PolicyConfig:
             raise ValueError("gripper_field_dim must be >= 2")
         if str(self.gripper_field_mode) not in {"legacy_handcrafted", "parseval_temporal"}:
             raise ValueError("gripper_field_mode must be legacy_handcrafted or parseval_temporal")
-        if str(self.gripper_output_mode) not in {"continuous", "calvin_binary_command"}:
+        if str(self.gripper_output_mode) not in VALID_GRIPPER_OUTPUT_MODES:
             raise ValueError(
-                "gripper_output_mode must be continuous or calvin_binary_command"
+                "gripper_output_mode must be continuous, calvin_binary_command, "
+                "or maniskill_binary_command"
             )
-        if str(self.arm_flow_mode) not in {
-            "legacy_independent",
-            "manifold_native",
-            "relative_command_direct",
-        }:
-            raise ValueError(
-                "arm_flow_mode must be legacy_independent, manifold_native, or "
-                "relative_command_direct"
-            )
+        if str(self.arm_flow_mode) not in {"legacy_independent", "manifold_native"}:
+            raise ValueError("arm_flow_mode must be legacy_independent or manifold_native")
         if not 0.0 <= float(self.arm_noise_temporal_rho) < 1.0:
             raise ValueError("arm_noise_temporal_rho must be in [0,1)")
         if str(self.arm_source_mode) not in {"ar1", "boundary_multiscale"}:

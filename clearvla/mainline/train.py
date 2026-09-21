@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import random
+import shutil
 import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
@@ -13,6 +14,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+from clearvla.data.action_chart import resolve_action_state_profile
+from clearvla.data.window_boundaries import PREFIX_REGION, TAIL_REGION
 
 from .checkpoint import (
     CheckpointIdentity,
@@ -24,19 +28,30 @@ from .config import ExperimentConfig, load_config
 from .data.loading import MainlineDataBundle, load_mainline_data, to_training_batch
 from .interfaces import TrainingBatch
 from .model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
-from .model.types import PhysicalActionCondition
+from .model.types import PhysicalActionCondition, PhysicalActionSequenceCondition
 from .runtime.checkpoints import (
+    LIBERO_RELEASE_FIRST_REPAIR_MIGRATION,
+    LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION,
+    LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION,
+    P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+    P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+    WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION,
+    WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
+    InitializationState,
     load_checkpoint_exact,
+    load_checkpoint_for_initialization,
     load_checkpoint_for_validation,
     migrate_bottom_only,
     save_checkpoint,
 )
-from .runtime.deployment import build_deployment_abi
+from .runtime.deployment import build_deployment_abi, deployment_flow_schedule
 from .runtime.evaluation import (
     MatchedCoreAttributionAccumulator,
     MatchedP2InterventionAccumulator,
     ValidationAccumulator,
+    libero_gripper_sign_projection,
 )
+from .runtime.flow_schedule import DeploymentFlowSchedule
 from .runtime.identity import (
     dataset_identity,
     language_identity,
@@ -68,6 +83,8 @@ from .training.losses import sample_flow_matching
 from .training.optimizer import WarmupCosineSchedule, build_optimizer, role_lr_scale
 from .v120_core.bspine import BSPINE_DISABLED_IMPLEMENTATION
 
+BOUNDARY_VALIDATION_MAX_BATCHES = 4
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -86,13 +103,70 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dino-cache", type=Path)
     parser.add_argument("--t5-condition", type=Path)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        help=(
+            "Load model parameters only from a verified checkpoint, then start "
+            "a fresh optimizer/schedule/RNG training run."
+        ),
+    )
+    parser.add_argument(
+        "--init-data-contract-migration",
+        choices=(
+            LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION,
+            LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION,
+            LIBERO_RELEASE_FIRST_REPAIR_MIGRATION,
+        ),
+        help=(
+            "Explicitly admit one narrow LIBERO data-contract migration for "
+            "model-only initialization. Normalizers, model, objectives, outlet, "
+            "language and runtime semantics must still match."
+        ),
+    )
+    parser.add_argument(
+        "--init-model-contract-migration",
+        choices=(
+            P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
+            P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+            WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
+            WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION,
+        ),
+        help=(
+            "Explicitly admit one narrow model-component initialization. "
+            "Each admitted migration retains every existing model tensor, "
+            "adds only its declared exact-zero owner, and never restores "
+            "optimizer, schedule or RNG state."
+        ),
+    )
     parser.add_argument("--validate-checkpoint", type=Path)
+    parser.add_argument(
+        "--validation-flow-schedule",
+        type=Path,
+        help=(
+            "Explicit two-pass flow-schedule JSON for read-only checkpoint replay; "
+            "does not change the saved training config or enable exact resume."
+        ),
+    )
     parser.add_argument("--migrate-bottom", type=Path)
     parser.add_argument("--epochs", type=int)
+    parser.add_argument(
+        "--retain-checkpoint-epochs", type=int, nargs="+", default=[],
+        help="Keep an additional epoch-NNNN.pt at selected completed epoch boundaries.",
+    )
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--max-train-batches", type=int)
     parser.add_argument("--max-val-batches", type=int)
+    parser.add_argument(
+        "--information-batches-per-epoch",
+        type=int,
+        help=(
+            "Explicit information-sampler epoch length.  This is useful for "
+            "boundary-aware LIBERO runs that must cover the complete window "
+            "budget instead of the legacy strict-lane length."
+        ),
+    )
     parser.add_argument(
         "--gripper-event-threshold",
         type=float,
@@ -101,6 +175,59 @@ def _parser() -> argparse.ArgumentParser:
             "gripper-trajectory supervision and validation. Required by RDT."
         ),
     )
+    parser.add_argument(
+        "--sampling-gripper-event-scope",
+        choices=("window_any", "first_action", "disabled"),
+        help=(
+            "Choose whether the information sampler marks a window when any "
+            "of its 24 target rows has a gripper event or only when the first "
+            "row executed by receding-horizon deployment has one. Disabled "
+            "removes the dedicated LIBERO event lane without changing dense "
+            "continuous gripper supervision."
+        ),
+    )
+    parser.add_argument(
+        "--release-first-action-fraction",
+        type=float,
+        help=(
+            "LIBERO terminal-tail fraction reserved for windows whose first "
+            "executed row is an opening gripper transition."
+        ),
+    )
+    parser.add_argument(
+        "--gripper-first-step-release",
+        type=float,
+        help=(
+            "Continuous-gripper auxiliary loss weight for the immediately "
+            "executed opening row."
+        ),
+    )
+    parser.add_argument(
+        "--gripper-first-step-hold",
+        type=float,
+        help=(
+            "LIBERO/ManiSkill continuous-gripper auxiliary loss weight for "
+            "a no-event row zero; keeps the currently executed command held."
+        ),
+    )
+    parser.add_argument(
+        "--gripper-compatibility-weight",
+        type=float,
+        help=(
+            "Relative loss weight for the four non-deployed gripper field "
+            "coordinates; 1 preserves the legacy six-channel objective and "
+            "0 trains the deployed absolute/delta lane only."
+        ),
+    )
+    parser.add_argument(
+        "--phase-control-mode",
+        choices=("none", "stackcube_phase_v1"),
+        help="Enable target-only StackCube approach/transport phase supervision.",
+    )
+    parser.add_argument("--phase-arm-flow", type=float)
+    parser.add_argument("--phase-gripper-hold", type=float)
+    parser.add_argument("--phase-approach-arm-gain", type=float)
+    parser.add_argument("--phase-transport-arm-gain", type=float)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--allow-null-goal", action="store_true")
     return parser
@@ -116,6 +243,10 @@ def _device(value: str) -> torch.device:
 
 
 def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
+    if getattr(args, "validation_flow_schedule", None) is not None and (
+        args.validate_checkpoint is None or args.resume is not None
+    ):
+        raise ValueError("--validation-flow-schedule requires read-only --validate-checkpoint")
     data = config.data
     objectives = config.objectives
     optimizer = config.optimizer
@@ -134,6 +265,44 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         threshold = float(args.gripper_event_threshold)
         data = replace(data, sampling_gripper_event_threshold=threshold)
         objectives = replace(objectives, gripper_event_threshold=threshold)
+    if args.sampling_gripper_event_scope is not None:
+        data = replace(
+            data,
+            sampling_gripper_event_scope=str(args.sampling_gripper_event_scope),
+        )
+    if args.release_first_action_fraction is not None:
+        data = replace(
+            data,
+            release_first_action_fraction=float(args.release_first_action_fraction),
+        )
+    if args.gripper_first_step_release is not None:
+        objectives = replace(
+            objectives,
+            gripper_first_step_release=float(args.gripper_first_step_release),
+        )
+    if args.gripper_first_step_hold is not None:
+        objectives = replace(
+            objectives,
+            gripper_first_step_hold=float(args.gripper_first_step_hold),
+        )
+    if args.gripper_compatibility_weight is not None:
+        objectives = replace(
+            objectives,
+            gripper_compatibility_weight=float(args.gripper_compatibility_weight),
+        )
+    phase_updates = {}
+    if args.phase_control_mode is not None:
+        phase_updates["phase_control_mode"] = str(args.phase_control_mode)
+    if args.phase_arm_flow is not None:
+        phase_updates["phase_arm_flow"] = float(args.phase_arm_flow)
+    if args.phase_gripper_hold is not None:
+        phase_updates["phase_gripper_hold"] = float(args.phase_gripper_hold)
+    if args.phase_approach_arm_gain is not None:
+        phase_updates["phase_approach_arm_gain"] = float(args.phase_approach_arm_gain)
+    if args.phase_transport_arm_gain is not None:
+        phase_updates["phase_transport_arm_gain"] = float(args.phase_transport_arm_gain)
+    if phase_updates:
+        objectives = replace(objectives, **phase_updates)
     if args.num_workers is not None:
         data = replace(data, num_workers=int(args.num_workers))
     if args.epochs is not None:
@@ -144,6 +313,11 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         runtime = replace(runtime, max_train_batches=int(args.max_train_batches))
     if args.max_val_batches is not None:
         runtime = replace(runtime, max_val_batches=int(args.max_val_batches))
+    if args.information_batches_per_epoch is not None:
+        data = replace(
+            data,
+            information_batches_per_epoch=int(args.information_batches_per_epoch),
+        )
     if args.dtype is not None:
         runtime = replace(runtime, compute_dtype=str(args.dtype))
     if args.smoke:
@@ -176,13 +350,61 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         raise ValueError("--allow-null-goal is restricted to explicit smoke runs")
     checkpoint_modes = (
         args.resume is not None,
+        args.init_checkpoint is not None,
         args.validate_checkpoint is not None,
         args.migrate_bottom is not None,
     )
     if sum(checkpoint_modes) > 1:
         raise ValueError(
-            "exact resume, read-only validation and bottom-only migration are mutually exclusive"
+            "exact resume, model initialization, read-only validation and bottom-only migration "
+            "are mutually exclusive"
         )
+    if (
+        args.init_data_contract_migration is not None
+        and args.init_checkpoint is None
+    ):
+        raise ValueError(
+            "--init-data-contract-migration requires --init-checkpoint"
+        )
+    if (
+        args.init_model_contract_migration is not None
+        and args.init_checkpoint is None
+    ):
+        raise ValueError(
+            "--init-model-contract-migration requires --init-checkpoint"
+        )
+    if (
+        args.init_data_contract_migration is not None
+        and args.init_model_contract_migration is not None
+    ):
+        raise ValueError(
+            "data-contract and model-contract initialization migrations "
+            "cannot be combined"
+        )
+    return result
+
+
+def _validation_sampling_config(
+    config: ExperimentConfig,
+    schedule_path: Path | None,
+) -> ExperimentConfig:
+    """Apply only an explicitly recorded no-grad solver override after loading.
+
+    Checkpoint identity and source checks still use ``config`` unchanged. A
+    deployment replay must never masquerade as an exact training continuation.
+    """
+
+    if schedule_path is None:
+        return config
+    payload = json.loads(schedule_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError("validation flow schedule JSON must be a mapping")
+    selected = DeploymentFlowSchedule.from_dict(payload)
+    result = replace(
+        config,
+        runtime=replace(config.runtime, deployment_flow_schedule=selected.to_dict()),
+    )
+    result.validate()
     return result
 
 
@@ -204,6 +426,7 @@ class ValidationReport(Mapping[str, float]):
 
     metrics: dict[str, float]
     multitask: dict[str, object] | None = None
+    flow_schedule_identity: dict[str, object] | None = None
 
     def __getitem__(self, name: str) -> float:
         return self.metrics[name]
@@ -499,6 +722,8 @@ def _data_state(
         "normalizer_metadata": bundle.normalizer_metadata,
         "gripper_indices": list(bundle.gripper_indices),
         "sampling_gripper_event_threshold": bundle.gripper_event_threshold,
+        "sampling_gripper_event_scope": bundle.sampling_gripper_event_scope,
+        "release_first_action_fraction": bundle.release_first_action_fraction,
         "task_registry": bundle.task_registry_summary(),
         "action_normalizer": bundle.action_normalizer.to_dict(),
         "state_normalizer": bundle.state_normalizer.to_dict(),
@@ -799,22 +1024,32 @@ def _wrong_action_world_cache(
     primary_condition = primary_world.action_condition
     batch = primary_condition.batch
     shift = batch // 2 if batch >= 2 else 0
-    donor_interval_action = primary_condition.interval_action.roll(
-        shifts=shift,
-        dims=0,
-    )
-    donor_delta = (
-        donor_interval_action.detach().float()
-        - primary_condition.interval_action.detach().float()
-    )
+    if isinstance(primary_condition, PhysicalActionSequenceCondition):
+        donor_action = primary_condition.source_action.roll(shifts=shift, dims=0)
+        donor_delta = (
+            donor_action.detach().float()
+            - primary_condition.source_action.detach().float()
+        )
+        wrong_condition = model.outlet_adapter.world_condition_from_horizon_action(
+            donor_action,
+            cache.history.action_state,
+        )
+    else:
+        donor_action = primary_condition.interval_action.roll(
+            shifts=shift,
+            dims=0,
+        )
+        donor_delta = (
+            donor_action.detach().float()
+            - primary_condition.interval_action.detach().float()
+        )
+        # The current action anchor belongs to the receiving sample.  Only the
+        # four proposed interval actions are donated in the legacy ABI.
+        wrong_condition = PhysicalActionCondition.from_interval_action(
+            donor_action,
+            primary_condition.current_action,
+        )
     donor_valid = donor_delta.abs().amax(dim=(1, 2)) > 0.0
-    # The current action anchor belongs to the receiving sample.  Only the four
-    # proposed interval actions are donated; delta is reconstructed from that
-    # retained anchor by the canonical physical-action ABI.
-    wrong_condition = PhysicalActionCondition.from_interval_action(
-        donor_interval_action,
-        primary_condition.current_action,
-    )
     device = cache.history.state.device
     autocast_enabled = device.type in {"cuda", "cpu"} and dtype in {
         torch.bfloat16,
@@ -946,6 +1181,13 @@ def _validation_action_estimator_match(
         codec=model.outlet_adapter.codec,
         distribution=config.bottom.flow_time_distribution,
         generator=generator,
+        schedule=(
+            None
+            if config.runtime.deployment_flow_schedule is None
+            else DeploymentFlowSchedule.from_dict(
+                config.runtime.deployment_flow_schedule
+            ).refined
+        ),
     )
     source_noise = initial_physical_noise.to(
         device=flow_state.target_physical.device,
@@ -977,18 +1219,20 @@ def _validation_action_estimator_match(
             cache,
             noisy_action_field=noisy_physical,
             time=flow_state.time,
+            flow_step_context=flow_state.flow_step_context,
             collect_diagnostics=False,
         )
     clean_physical = noisy_physical + (1.0 - alpha) * (
         endpoint_output.bottom.physical_velocity.to(dtype=noisy_physical.dtype)
     )
-    estimator_action = model.outlet_adapter.decode(
+    estimator_output = model.outlet_adapter.finalize(
         clean_physical,
         cache.history.action_state,
         codec_gripper_boundary=cache.history.codec_gripper_boundary,
-    ).float()
-    estimator_condition = PhysicalActionCondition.from_horizon_action(
-        estimator_action.detach(),
+        command_logits=endpoint_output.bottom.gripper_command_logits,
+    )
+    estimator_condition = model.outlet_adapter.world_condition_from_horizon_action(
+        estimator_output.world_condition_action.detach().float(),
         cache.history.action_state,
     )
     with torch.autocast(
@@ -1021,31 +1265,72 @@ def _validation_action_estimator_match(
     estimator_dynamics = estimator_top.predicted_dynamics
     full_dynamics = refined_cache.top.predicted_dynamics
     scalar = full_fingerprint.new_tensor
+    if isinstance(full_condition, PhysicalActionSequenceCondition):
+        if not (
+            isinstance(coarse_condition, PhysicalActionSequenceCondition)
+            and isinstance(estimator_condition, PhysicalActionSequenceCondition)
+        ):
+            raise TypeError("validation estimator changed W action condition schema")
+        condition_metrics = {
+            "estimator_to_full_action_sequence_mse": (
+                estimator_condition.canonical_value.detach().float()
+                - full_condition.canonical_value.detach().float()
+            )
+            .square()
+            .mean(),
+            "estimator_to_full_action_sequence_delta_mse": (
+                estimator_condition.canonical_delta.detach().float()
+                - full_condition.canonical_delta.detach().float()
+            )
+            .square()
+            .mean(),
+            "coarse_to_full_action_sequence_mse": (
+                coarse_condition.canonical_value.detach().float()
+                - full_condition.canonical_value.detach().float()
+            )
+            .square()
+            .mean(),
+            "coarse_to_full_action_sequence_delta_mse": (
+                coarse_condition.canonical_delta.detach().float()
+                - full_condition.canonical_delta.detach().float()
+            )
+            .square()
+            .mean(),
+        }
+    else:
+        if not (
+            isinstance(coarse_condition, PhysicalActionCondition)
+            and isinstance(estimator_condition, PhysicalActionCondition)
+        ):
+            raise TypeError("validation estimator changed W action condition schema")
+        condition_metrics = {
+            "estimator_to_full_interval_action_mse": (
+                estimator_condition.interval_action.detach().float()
+                - full_condition.interval_action.detach().float()
+            )
+            .square()
+            .mean(),
+            "estimator_to_full_interval_delta_mse": (
+                estimator_condition.interval_delta.detach().float()
+                - full_condition.interval_delta.detach().float()
+            )
+            .square()
+            .mean(),
+            "coarse_to_full_interval_action_mse": (
+                coarse_condition.interval_action.detach().float()
+                - full_condition.interval_action.detach().float()
+            )
+            .square()
+            .mean(),
+            "coarse_to_full_interval_delta_mse": (
+                coarse_condition.interval_delta.detach().float()
+                - full_condition.interval_delta.detach().float()
+            )
+            .square()
+            .mean(),
+        }
     return {
-        "estimator_to_full_interval_action_mse": (
-            estimator_condition.interval_action.detach().float()
-            - full_condition.interval_action.detach().float()
-        )
-        .square()
-        .mean(),
-        "estimator_to_full_interval_delta_mse": (
-            estimator_condition.interval_delta.detach().float()
-            - full_condition.interval_delta.detach().float()
-        )
-        .square()
-        .mean(),
-        "coarse_to_full_interval_action_mse": (
-            coarse_condition.interval_action.detach().float()
-            - full_condition.interval_action.detach().float()
-        )
-        .square()
-        .mean(),
-        "coarse_to_full_interval_delta_mse": (
-            coarse_condition.interval_delta.detach().float()
-            - full_condition.interval_delta.detach().float()
-        )
-        .square()
-        .mean(),
+        **condition_metrics,
         "estimator_full_update_direction_cosine": direction_cosine,
         "estimator_full_update_direction_valid_fraction": direction_valid,
         "estimator_to_full_semantic_mse": (
@@ -1110,6 +1395,10 @@ def _validate(
     device: torch.device,
     dtype: torch.dtype,
 ) -> ValidationReport:
+    engine.model.configure_action_normalizer(bundle.action_normalizer)
+    gripper_open_direction = resolve_action_state_profile(
+        config.data.data_profile
+    ).gripper_open_direction
     deployment = ValidationAccumulator.from_action_normalizer(
         bundle.action_normalizer,
         device=device,
@@ -1117,6 +1406,22 @@ def _validate(
         arm_motion_threshold=config.objectives.arm_motion_threshold,
         gripper_output_mode=config.bottom.gripper_output_mode,
         arm_flow_mode=config.bottom.arm_flow_mode,
+        gripper_open_direction=gripper_open_direction,
+    )
+    libero_gripper_probes = (
+        {
+            name: ValidationAccumulator.from_action_normalizer(
+                bundle.action_normalizer,
+                device=device,
+                gripper_event_threshold=config.objectives.gripper_event_threshold,
+                arm_motion_threshold=config.objectives.arm_motion_threshold,
+                gripper_output_mode="continuous",
+                arm_flow_mode=config.bottom.arm_flow_mode,
+            )
+            for name in ("sign_projected", "absolute_sign_projected")
+        }
+        if config.data.data_profile == "libero_relative_7d_v1"
+        else None
     )
     is_multitask = bool(getattr(bundle, "is_multitask", False))
     task_deployment = (
@@ -1128,6 +1433,7 @@ def _validate(
             arm_motion_threshold=config.objectives.arm_motion_threshold,
             gripper_output_mode=config.bottom.gripper_output_mode,
             arm_flow_mode=config.bottom.arm_flow_mode,
+            gripper_open_direction=gripper_open_direction,
         )
         if is_multitask
         else None
@@ -1140,6 +1446,7 @@ def _validate(
         arm_motion_threshold=config.objectives.arm_motion_threshold,
         gripper_output_mode=config.bottom.gripper_output_mode,
         arm_flow_mode=config.bottom.arm_flow_mode,
+        gripper_open_direction=gripper_open_direction,
     )
     core_attribution = MatchedCoreAttributionAccumulator.from_action_normalizer(
         bundle.action_normalizer,
@@ -1148,6 +1455,7 @@ def _validate(
         arm_motion_threshold=config.objectives.arm_motion_threshold,
         gripper_output_mode=config.bottom.gripper_output_mode,
         arm_flow_mode=config.bottom.arm_flow_mode,
+        gripper_open_direction=gripper_open_direction,
     )
     estimator_matches = DeviceMetricAccumulator()
     proposal_ablations = DeviceMetricAccumulator()
@@ -1280,6 +1588,26 @@ def _validate(
             gripper_command=prediction.gripper_command,
             gripper_output_mode=config.bottom.gripper_output_mode,
         )
+        if libero_gripper_probes is not None:
+            if config.bottom.gripper_output_mode != "continuous":
+                raise ValueError("LIBERO sign probes require the continuous outlet")
+            if deployment.action_offset is None or deployment.action_scale is None:
+                raise RuntimeError("LIBERO sign probes require the action normalizer")
+            probe_actions = libero_gripper_sign_projection(
+                prediction.action,
+                prediction.physical_field,
+                batch.online.history.codec_gripper_boundary,
+                action_offset=deployment.action_offset,
+                action_scale=deployment.action_scale,
+            )
+            for name, probe_action in probe_actions.items():
+                libero_gripper_probes[name].update(
+                    probe_action,
+                    batch,
+                    motion_logits=prediction.motion_logits,
+                    motion_target=motion_target,
+                    gripper_output_mode="continuous",
+                )
         if task_deployment is not None:
             if validation_task_indices is None:
                 raise RuntimeError("multitask validation task rows were not resolved")
@@ -1619,6 +1947,43 @@ def _validate(
                 weight=batch.online.batch,
             )
     result = {**losses.materialize(), **deployment.means()}
+    if libero_gripper_probes is not None:
+        probe_metric_names = (
+            "validation_action_rmse_normalized",
+            "validation_action_rmse_source_native",
+            "validation_first_rmse_normalized",
+            "validation_first_rmse_source_native",
+            "validation_first8_rmse_normalized",
+            "validation_first8_rmse_source_native",
+            "validation_tail_rmse_normalized",
+            "validation_tail_rmse_source_native",
+            "validation_gripper_rmse_normalized",
+            "validation_gripper_rmse_source_native",
+            "validation_gripper_band_1_4_rmse_source_native",
+            "validation_gripper_band_5_12_rmse_source_native",
+            "validation_gripper_band_13_24_rmse_source_native",
+            "validation_decoded_gripper_event_precision",
+            "validation_decoded_gripper_event_recall",
+            "validation_decoded_gripper_event_f1",
+            "validation_decoded_gripper_events_predicted",
+            "validation_decoded_gripper_events_target",
+            "validation_decoded_gripper_event_ratio",
+            "validation_decoded_gripper_open_f1",
+            "validation_decoded_gripper_close_f1",
+            "validation_decoded_gripper_first_open_precision",
+            "validation_decoded_gripper_first_open_recall",
+            "validation_decoded_gripper_first_open_f1",
+            "validation_decoded_gripper_first_open_predicted",
+            "validation_decoded_gripper_first_open_target",
+            "validation_decoded_gripper_timing_mae_steps",
+        )
+        for name, accumulator in libero_gripper_probes.items():
+            probe_metrics = accumulator.means()
+            for metric_name in probe_metric_names:
+                result[
+                    "validation_libero_gripper_"
+                    f"{name}_{metric_name.removeprefix('validation_')}"
+                ] = probe_metrics[metric_name]
     if p2_intervention_batches:
         result.update(p2_interventions.means())
     if core_attribution_batches:
@@ -1659,11 +2024,13 @@ def _validate(
     )
     if estimator_match_batches:
         rows = estimator_matches.materialize()
+        if config.top.world_action_condition_mode == "sequence_prefix_v1":
+            action_semantics = ("action_sequence", "action_sequence_delta")
+        else:
+            action_semantics = ("interval_action", "interval_delta")
         rms_rows = (
-            "estimator_to_full_interval_action",
-            "estimator_to_full_interval_delta",
-            "coarse_to_full_interval_action",
-            "coarse_to_full_interval_delta",
+            *(f"estimator_to_full_{name}" for name in action_semantics),
+            *(f"coarse_to_full_{name}" for name in action_semantics),
             "estimator_to_full_semantic",
             "coarse_to_full_semantic",
             "estimator_to_full_transport",
@@ -1673,7 +2040,7 @@ def _validate(
             result[f"validation_action_{stem}_rms"] = math.sqrt(
                 max(rows[f"{stem}_mse"], 0.0)
             )
-        for semantic in ("interval_action", "interval_delta", "semantic", "transport"):
+        for semantic in (*action_semantics, "semantic", "transport"):
             estimator_rms = result[
                 f"validation_action_estimator_to_full_{semantic}_rms"
             ]
@@ -1765,14 +2132,118 @@ def _validate(
                                 rows[f"{surface}_action_delta_mse_{chart}"] ** 0.5
                             )
     multitask = None if task_deployment is None else task_deployment.report(result)
-    return ValidationReport(metrics=result, multitask=multitask)
+    return ValidationReport(
+        metrics=result,
+        multitask=multitask,
+        flow_schedule_identity=deployment_flow_schedule(config).identity,
+    )
+
+
+@torch.no_grad()
+def _validate_boundary_panel(
+    *,
+    region: str,
+    engine: MainlineTrainingEngine,
+    loader,
+    bundle: MainlineDataBundle,
+    config: ExperimentConfig,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict[str, float]:
+    """Measure one causal boundary region through the deployment sampler only.
+
+    Unlike the primary strict validation, this panel deliberately omits the
+    teacher/loss forward and every causal ablation.  It asks the narrow closed-
+    loop question relevant to reset prefixes and terminal tails: given only
+    legal online evidence, what 24-row action trajectory does deployment
+    sample?  Its names are isolated so it cannot affect checkpoint selection.
+    """
+
+    if region not in {PREFIX_REGION, TAIL_REGION}:
+        raise ValueError(f"unknown boundary validation region {region!r}")
+    if config.data.data_profile != "libero_relative_7d_v1":
+        raise ValueError("boundary validation panels are LIBERO-only")
+    engine.model.configure_action_normalizer(bundle.action_normalizer)
+    deployment = ValidationAccumulator.from_action_normalizer(
+        bundle.action_normalizer,
+        device=device,
+        gripper_event_threshold=config.objectives.gripper_event_threshold,
+        arm_motion_threshold=config.objectives.arm_motion_threshold,
+        gripper_output_mode=config.bottom.gripper_output_mode,
+        arm_flow_mode=config.bottom.arm_flow_mode,
+        gripper_open_direction=resolve_action_state_profile(
+            config.data.data_profile
+        ).gripper_open_direction,
+    )
+    completed_batches = 0
+    seed_offset = 61_003 if region == PREFIX_REGION else 71_003
+    for batch_index, raw_batch in enumerate(loader, start=1):
+        batch = to_training_batch(
+            raw_batch,
+            goal=bundle.goal,
+            config=config,
+            device=device,
+        )
+        encoded = engine.encode_eval(batch, collect_diagnostics=False)
+        cache = encoded.cache
+        del encoded
+        prediction, refined_cache = sample_refined_cached_action_with_cache(
+            engine.model,
+            cache,
+            config,
+            collect_diagnostics=False,
+            dtype=dtype,
+            generator=_owned_generator(device, seed_offset + batch_index),
+        )
+        motion_target = (
+            engine.model.outlet_adapter.arm_motion_magnitude(
+                batch.action_target.normalized,
+                batch.online.history.action_state,
+            )
+            >= float(config.objectives.arm_motion_threshold)
+        )
+        deployment.update(
+            prediction.action,
+            batch,
+            motion_logits=prediction.motion_logits,
+            motion_target=motion_target,
+            physical_field=prediction.physical_field,
+            gripper_decode_delta_blend=(
+                engine.model.outlet_adapter.decode_delta_blend
+            ),
+            gripper_command_logits=prediction.gripper_command_logits,
+            gripper_command=prediction.gripper_command,
+            gripper_output_mode=config.bottom.gripper_output_mode,
+        )
+        completed_batches += 1
+        del cache, refined_cache, prediction, batch
+    if completed_batches <= 0:
+        raise ValueError(f"boundary validation panel {region!r} consumed no batches")
+    result: dict[str, float] = {}
+    for name, value in deployment.means().items():
+        if not name.startswith("validation_"):
+            raise AssertionError("validation accumulator emitted an unscoped metric")
+        result[
+            f"validation_boundary_{region}_{name.removeprefix('validation_')}"
+        ] = float(value)
+    result[f"validation_boundary_{region}_batches"] = float(completed_batches)
+    return result
 
 
 def main() -> None:
     args = _parser().parse_args()
     validation_checkpoint = args.validate_checkpoint
     validation_checkpoint_resolved: str | None = None
+    initialization_checkpoint_resolved: str | None = None
     config = _overrides(load_config(args.config), args)
+    retained_epochs = set(args.retain_checkpoint_epochs)
+    if any(epoch < 1 or epoch > config.optimizer.epochs for epoch in retained_epochs):
+        raise ValueError("retained checkpoint epochs must lie within the training schedule")
+    if retained_epochs and args.validate_checkpoint is not None:
+        raise ValueError("checkpoint retention is only available for training")
+    validation_config = _validation_sampling_config(
+        config, args.validation_flow_schedule
+    )
     _seed(config.data.seed)
     device = _device(args.device)
     dtype = resolve_compute_dtype(config)
@@ -1798,8 +2269,26 @@ def main() -> None:
         task_panel_max_batches=(
             config.runtime.max_val_batches if bundle.is_multitask else None
         ),
+        coverage_panel_max_batches=(
+            config.runtime.max_val_batches
+            if config.runtime.validation_panel == "evenly_spaced" and not bundle.is_multitask
+            else None
+        ),
     )
+    boundary_loaders = {
+        region: bundle.loader(
+            f"val_{region}",
+            batch_size=config.optimizer.batch_size,
+            workers=config.data.num_workers,
+            device=device,
+            shuffle=False,
+            coverage_panel_max_batches=BOUNDARY_VALIDATION_MAX_BATCHES,
+        )
+        for region in (PREFIX_REGION, TAIL_REGION)
+        if f"val_{region}" in bundle.datasets
+    }
     model = ClearVLAMainlinePolicy(config).to(device)
+    model.configure_action_normalizer(bundle.action_normalizer)
     optimizer, ownership = build_optimizer(model, config)
     steps_per_epoch = _limit(len(train_loader), config.runtime.max_train_batches)
     schedule = WarmupCosineSchedule(
@@ -1829,6 +2318,7 @@ def main() -> None:
     start_epoch = 1
     best_metric: float | None = None
     validation_state = None
+    initialization_state: InitializationState | None = None
     if args.resume is not None:
         restored = load_checkpoint_exact(
             args.resume,
@@ -1850,6 +2340,29 @@ def main() -> None:
             output_dir,
             checkpoint_epoch=restored.epoch,
             checkpoint_step=restored.global_step,
+        )
+    elif args.init_checkpoint is not None:
+        initialization_state = load_checkpoint_for_initialization(
+            args.init_checkpoint,
+            model=model,
+            config=config,
+            identity=identity,
+            data_contract_migration=args.init_data_contract_migration,
+            model_contract_migration=args.init_model_contract_migration,
+        )
+        initialization_checkpoint_resolved = str(Path(args.init_checkpoint).resolve())
+        # A model-only initialization intentionally starts all continuation
+        # state from zero.  The source checkpoint's counters are recorded in
+        # run_context.json, but never fed into the fresh schedule or RNG.
+        engine.global_step = 0
+        best_metric = None
+        print(
+            "[mainline-initialization] "
+            f"checkpoint={initialization_checkpoint_resolved} "
+            f"checkpoint_epoch={initialization_state.epoch:03d} "
+            f"checkpoint_step={initialization_state.global_step} "
+            "optimizer_load=disabled schedule_load=disabled rng_load=disabled",
+            flush=True,
         )
     elif validation_checkpoint is not None:
         validation_state = load_checkpoint_for_validation(
@@ -1877,6 +2390,7 @@ def main() -> None:
         )
     context = {
         "config": config.as_dict(),
+        "deployment_flow_schedule": deployment_flow_schedule(config).identity,
         "identity": identity.as_dict(),
         "component_selection": model.selection.as_dict(),
         "component_abi_revision": model.selection.abi_revision,
@@ -1892,6 +2406,9 @@ def main() -> None:
             "camera_keys": config.data.camera_key_map(),
             "gripper_indices": list(bundle.gripper_indices),
             "sampling_gripper_event_threshold": bundle.gripper_event_threshold,
+            "sampling_gripper_event_scope": bundle.sampling_gripper_event_scope,
+            "information_batches_per_epoch": bundle.information_batches_per_epoch,
+            "release_first_action_fraction": bundle.release_first_action_fraction,
             "task_registry": bundle.task_registry_summary(),
         },
         "skipped": list(bundle.skipped),
@@ -1901,6 +2418,19 @@ def main() -> None:
         "validation_panel": getattr(
             getattr(val_loader, "batch_sampler", None), "summary", None
         ),
+        "window_boundaries": {
+            "training_contract": bundle.window_boundary_contract,
+            "datasets": {
+                name: dataset.boundary_summary()
+                for name, dataset in bundle.datasets.items()
+            },
+            "deployment_validation_panels": {
+                region: getattr(
+                    getattr(loader, "batch_sampler", None), "summary", None
+                )
+                for region, loader in boundary_loaders.items()
+            },
+        },
         "normalizer_fingerprints": {
             "action_v120": v120_normalizer_fingerprint(bundle.action_normalizer),
             "state_v120": v120_normalizer_fingerprint(bundle.state_normalizer),
@@ -1916,9 +2446,45 @@ def main() -> None:
             ),
         },
         "execution_mode": (
-            "validation_only" if validation_state is not None else "training"
+            "validation_only"
+            if validation_state is not None
+            else "training_model_initialized"
+            if initialization_state is not None
+            else "training"
         ),
+        "retained_checkpoint_epochs": sorted(retained_epochs),
     }
+    if initialization_state is not None:
+        if initialization_checkpoint_resolved is None:
+            raise RuntimeError("model initialization checkpoint provenance was not resolved")
+        context["initialization_checkpoint"] = {
+            "path": initialization_checkpoint_resolved,
+            "epoch": initialization_state.epoch,
+            "global_step": initialization_state.global_step,
+            "best_metric": initialization_state.best_metric,
+            "saved_source_digest": initialization_state.saved_source_digest,
+            "current_source_digest": initialization_state.current_source_digest,
+            "changed_source_files": list(initialization_state.changed_source_files),
+            "data_contract_migration": initialization_state.data_contract_migration,
+            "model_contract_migration": initialization_state.model_contract_migration,
+            "saved_window_boundary_contract": (
+                initialization_state.saved_window_boundary_contract
+            ),
+            "current_window_boundary_contract": (
+                initialization_state.current_window_boundary_contract
+            ),
+            "saved_dataset_identity": initialization_state.saved_dataset_identity,
+            "current_dataset_identity": initialization_state.current_dataset_identity,
+            "normalizer_identity_equal": (
+                initialization_state.normalizer_identity_equal
+            ),
+            "optimizer_loaded": False,
+            "schedule_loaded": False,
+            "rng_loaded": False,
+            "data_loader_state_loaded": False,
+            "fresh_global_step": engine.global_step,
+            "fresh_best_metric": best_metric,
+        }
     if validation_state is not None:
         if validation_checkpoint_resolved is None:
             raise RuntimeError("validation checkpoint provenance was not resolved")
@@ -1935,6 +2501,12 @@ def main() -> None:
             "rng_loaded": False,
             "checkpoint_writes_enabled": False,
         }
+        context["validation_flow_schedule"] = deployment_flow_schedule(
+            validation_config
+        ).identity
+        context["validation_flow_schedule_override"] = (
+            args.validation_flow_schedule is not None
+        )
     # Preflight uses the deterministic validation sampler and separate RNGs;
     # it must not consume formal training shuffle, condition-dropout or flow
     # randomness.
@@ -1976,11 +2548,24 @@ def main() -> None:
             engine=engine,
             loader=val_loader,
             bundle=bundle,
-            config=config,
+            config=validation_config,
             device=device,
             dtype=dtype,
         )
-        validation = archival_metrics(validation_report.metrics)
+        validation_metrics = dict(validation_report.metrics)
+        for region, boundary_loader in boundary_loaders.items():
+            validation_metrics.update(
+                _validate_boundary_panel(
+                    region=region,
+                    engine=engine,
+                    loader=boundary_loader,
+                    bundle=bundle,
+                    config=validation_config,
+                    device=device,
+                    dtype=dtype,
+                )
+            )
+        validation = archival_metrics(validation_metrics)
         runtime = archival_metrics(
             {
                 "runtime_validation_seconds": time.perf_counter() - validation_started,
@@ -1996,6 +2581,7 @@ def main() -> None:
             train={},
             validation=validation,
             multitask_validation=validation_report.multitask,
+            deployment_flow_schedule=validation_report.flow_schedule_identity,
             runtime=runtime,
         )
         planned_batches = _limit(len(val_loader), config.runtime.max_val_batches)
@@ -2184,7 +2770,20 @@ def main() -> None:
             device=device,
             dtype=dtype,
         )
-        validation = archival_metrics(validation_report.metrics)
+        validation_metrics = dict(validation_report.metrics)
+        for region, boundary_loader in boundary_loaders.items():
+            validation_metrics.update(
+                _validate_boundary_panel(
+                    region=region,
+                    engine=engine,
+                    loader=boundary_loader,
+                    bundle=bundle,
+                    config=config,
+                    device=device,
+                    dtype=dtype,
+                )
+            )
+        validation = archival_metrics(validation_metrics)
         # Capture the peak after validation as well: a production memory claim
         # covers the complete train/eval epoch, not only the backward path.
         train_values.update(_cuda_memory_metrics(device))
@@ -2196,6 +2795,7 @@ def main() -> None:
             train_task_mix=train_task_mix,
             validation=validation,
             multitask_validation=validation_report.multitask,
+            deployment_flow_schedule=validation_report.flow_schedule_identity,
         )
         runtime_names = (
             "runtime_seconds_per_batch",
@@ -2275,6 +2875,13 @@ def main() -> None:
                     "train_condition": train_condition_generator,
                 },
             )
+        if epoch in retained_epochs:
+            # Copy the committed checkpoint bytes: no extra RNG/scheduler step
+            # and no hard link that a later latest.pt overwrite could mutate.
+            retained = checkpoint_dir / f"epoch-{epoch:04d}.pt"
+            temporary = retained.with_suffix(".pt.tmp")
+            shutil.copyfile(checkpoint_dir / "latest.pt", temporary)
+            temporary.replace(retained)
 
 
 if __name__ == "__main__":

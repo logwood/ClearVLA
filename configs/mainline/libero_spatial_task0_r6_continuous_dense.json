@@ -1,0 +1,49 @@
+{
+  "data": {
+    "raw_hdf5_root": "/data/senwang/data/libero/converted/libero_spatial_task0_full_v1_20260910_terminal_suffix_v2",
+    "hdf5_glob": "*.hdf5",
+    "decoded_cache": "/data/senwang/data/libero/caches/libero_spatial_task0_full_v1_20260910_terminal_suffix_v2_retarget_demo01_pm3cm_v1/decoded_336",
+    "dino_cache": "/data/senwang/data/libero/caches/libero_spatial_task0_full_v1_20260910_terminal_suffix_v2_retarget_demo01_pm3cm_v1/dinov2_base_336",
+    "t5_condition": "/data/senwang/data/libero/language/libero_spatial_task0_full_v1_20260908_t5_xxl_bank.pt",
+    "output_dir": "/data/senwang/data/libero/runs/clearvla_libero_spatial_task0_r6_continuous_dense_20260915",
+    "camera_names": ["top", "wrist"],
+    "data_profile": "libero_relative_7d_v1",
+    "action_key": "action",
+    "action_state_key": "action_state",
+    "state_key": "state",
+    "split_mode": "episode-manifest",
+    "split_manifest": "/data/senwang/data/libero/converted/libero_spatial_task0_full_v1_20260910_terminal_suffix_v2/splits.json",
+    "train_episodes": 0,
+    "val_episodes": 0,
+    "test_episodes": 0,
+    "num_workers": 4,
+    "seed": 0,
+    "normalizer": "zscore",
+    "sampling_gripper_event_threshold": 0.1,
+    "sampling_gripper_event_scope": "disabled",
+    "information_uniform_fraction": 0.5,
+    "information_event_fraction": 0.0,
+    "information_motion_quantile": 0.7,
+    "information_batches_per_epoch": 562,
+    "window_boundary_contract": "causal_prefix_terminal_suffix_v2",
+    "libero_retarget_overlay_root": "/data/senwang/data/libero/retarget_overlays/libero_spatial_task0_demo01_pm3cm_v1",
+    "libero_retarget_overlay_manifest": "/data/senwang/data/libero/retarget_overlays/libero_spatial_task0_demo01_pm3cm_v1/overlay_manifest.json"
+  },
+  "bottom": {
+    "arm_flow_mode": "relative_command_adapter",
+    "gripper_output_mode": "continuous"
+  },
+  "objectives": {
+    "gripper_trajectory": 0.0
+  },
+  "optimizer": {
+    "epochs": 8,
+    "batch_size": 8,
+    "warmup_steps": 200
+  },
+  "runtime": {
+    "max_train_batches": 0,
+    "max_val_batches": 0,
+    "log_every": 20
+  }
+}

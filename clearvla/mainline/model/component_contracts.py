@@ -14,9 +14,16 @@ from typing import TYPE_CHECKING, Mapping, Protocol
 
 from torch import Tensor, nn
 
+from ..gripper_contract import (
+    MANISKILL_BINARY_GRIPPER_OUTPUT_MODE,
+    MANISKILL_BINARY_GRIPPER_SELECTION,
+    is_binary_gripper_mode,
+)
 from ..v120_core.bspine import (
     BSPINE0_IMPLEMENTATION,
+    BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
     BSPINE_ARM_ONLY_IMPLEMENTATION,
+    BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
     BSPINE_DISABLED_IMPLEMENTATION,
 )
 from .action_contract import V120SeedContext
@@ -26,7 +33,9 @@ from .types import (
     CompletedP1PolicyState,
     ControlledTransitionState,
     FactualPrecisionDock,
+    FlowStepContext,
     ObjectFactSet,
+    ObjectIntentState,
 )
 
 if TYPE_CHECKING:
@@ -37,6 +46,8 @@ COMPONENT_ABI_REVISION = "mainline-modular-v1"
 BASELINE_EXECUTION_BOTTOM = "v120_evidence_mmdit_v1"
 BSPINE0_EXECUTION_BOTTOM = "v120_evidence_mmdit_bspine0_v1"
 BSPINE_ARM_ONLY_EXECUTION_BOTTOM = "v120_evidence_mmdit_bspine_arm_only_v1"
+BSPINE_ARM_COARSE_CONTEXT_EXECUTION_BOTTOM = "v120_evidence_mmdit_bspine_arm_coarse_context_v1"
+BSPINE_ARM_PRIVATE_READER_EXECUTION_BOTTOM = "v120_evidence_mmdit_bspine_arm_private_reader_v1"
 
 
 def _execution_bottom_selection(config: "ExperimentConfig") -> str:
@@ -47,6 +58,10 @@ def _execution_bottom_selection(config: "ExperimentConfig") -> str:
         return BSPINE0_EXECUTION_BOTTOM
     if implementation == BSPINE_ARM_ONLY_IMPLEMENTATION:
         return BSPINE_ARM_ONLY_EXECUTION_BOTTOM
+    if implementation == BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION:
+        return BSPINE_ARM_COARSE_CONTEXT_EXECUTION_BOTTOM
+    if implementation == BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION:
+        return BSPINE_ARM_PRIVATE_READER_EXECUTION_BOTTOM
     raise ValueError(f"unsupported B-spine implementation: {implementation!r}")
 
 
@@ -78,6 +93,19 @@ class ComponentSelection:
         if profile == "calvin_relative_7d_v1":
             terminal = "calvin_binary_command_v1"
             outlet = "calvin_7d_binary_v1"
+        elif profile == "libero_relative_7d_v1":
+            terminal = "continuous_physical_v1"
+            outlet = "libero_7d_continuous_v1"
+        elif profile == "maniskill_pd_ee_delta_pose_7d_v1":
+            terminal = "continuous_physical_v1"
+            outlet = "maniskill_7d_continuous_v1"
+        elif profile == "maniskill_pd_ee_delta_pose_7d_v2":
+            if output_mode == MANISKILL_BINARY_GRIPPER_OUTPUT_MODE:
+                terminal = "maniskill_binary_command_v1"
+                outlet = MANISKILL_BINARY_GRIPPER_SELECTION
+            else:
+                terminal = "continuous_physical_v1"
+                outlet = "maniskill_7d_continuous_v2"
         elif profile == "rdt_right_arm_action_chart_v1":
             terminal = "continuous_physical_v1"
             outlet = "rdt_right_arm_7d_v1"
@@ -90,8 +118,8 @@ class ComponentSelection:
             outlet_adapter=outlet,
         )
         selection.validate(config)
-        if (output_mode == "calvin_binary_command") != (
-            selection.terminal_controller == "calvin_binary_command_v1"
+        if is_binary_gripper_mode(output_mode) != selection.terminal_controller.endswith(
+            "binary_command_v1"
         ):
             raise ValueError("terminal selection does not match the configured outlet")
         return selection
@@ -130,11 +158,33 @@ class ComponentSelection:
         cls, config: "ExperimentConfig"
     ) -> "ComponentSelection":
         profile = str(config.data.data_profile)
+        output_mode = str(config.bottom.gripper_output_mode)
         if profile == "calvin_relative_7d_v1":
             return cls(
                 execution_bottom=_execution_bottom_selection(config),
                 terminal_controller="calvin_binary_command_v1",
                 outlet_adapter="calvin_7d_binary_v1",
+            )
+        if profile == "libero_relative_7d_v1":
+            return cls(
+                execution_bottom=_execution_bottom_selection(config),
+                outlet_adapter="libero_7d_continuous_v1",
+            )
+        if profile == "maniskill_pd_ee_delta_pose_7d_v1":
+            return cls(
+                execution_bottom=_execution_bottom_selection(config),
+                outlet_adapter="maniskill_7d_continuous_v1",
+            )
+        if profile == "maniskill_pd_ee_delta_pose_7d_v2":
+            if output_mode == MANISKILL_BINARY_GRIPPER_OUTPUT_MODE:
+                return cls(
+                    execution_bottom=_execution_bottom_selection(config),
+                    terminal_controller="maniskill_binary_command_v1",
+                    outlet_adapter=MANISKILL_BINARY_GRIPPER_SELECTION,
+                )
+            return cls(
+                execution_bottom=_execution_bottom_selection(config),
+                outlet_adapter="maniskill_7d_continuous_v2",
             )
         if profile == "rdt_right_arm_action_chart_v1":
             return cls(
@@ -248,13 +298,16 @@ class ExecutionBottomStageContract(Protocol):
     def step(
         self,
         *,
-        model_field: Tensor,
+        noisy_action_field: Tensor,
         time: Tensor,
+        flow_step_context: FlowStepContext | None,
         action_query: Tensor,
         plan: ObjectPolicyPlanDeltaBank,
+        intent: ObjectIntentState,
         seed: V120SeedContext,
         transition: ControlledTransitionState,
         execution_mode: str,
+        deployment_fastpath: bool,
         require_execution_supervision: bool,
         collect_diagnostics: bool,
     ): ...
@@ -388,6 +441,8 @@ def map_legacy_state_dict(
 
 __all__ = [
     "BSPINE_ARM_ONLY_EXECUTION_BOTTOM",
+    "BSPINE_ARM_COARSE_CONTEXT_EXECUTION_BOTTOM",
+    "BSPINE_ARM_PRIVATE_READER_EXECUTION_BOTTOM",
     "COMPONENT_ABI_REVISION",
     "ComponentSelection",
     "DynamicQueryBundle",

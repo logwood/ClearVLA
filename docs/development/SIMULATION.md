@@ -35,6 +35,17 @@ expert data.
 
 ## Data contract
 
+An opt-in [residual SAC pilot](../../clearvla/rl/README.md) now has its own
+ManiSkill base profile, reward/replay learner and preparation gates. Its reward
+may supervise the external learner but never enters the online observation.
+It is not enabled by ordinary simulator/evaluator or mainline training commands.
+New StackCube base preparation uses the v2 profile: causal reset history,
+48 real tail steps, source-center bounds including immediate release, and the
+fixed-down-reference causal rotation chart. The residual runner selects this
+chart explicitly; generic simulator rollout requires
+`--maniskill-state-chart fixed_down_causal_rotvec_v2` for a v2 checkpoint and
+rejects mismatched state semantics. Legacy runs remain in their own namespace.
+
 ManiSkill uses normalized `pd_ee_delta_pose` actions:
 
 - state: TCP xyz, rotation-vector orientation, finger opening;
@@ -52,6 +63,32 @@ policy centers through `terminal-24` are followed by 24 absorbing frames
 (terminal RGB/state repeat, arm command zero, gripper command held). Synthetic
 rows are excluded from normalizer fitting, and source-trajectory split identity
 is preserved.
+
+LIBERO has a separate outlet chart.  Its converter admits native seven-column
+normalized `OSC_POSE` actions, EEF xyz/axis-angle plus opening-width state, and
+writes `action_state[0] = 0` followed by the previous executed action.  The
+official filename-derived `Task.language` is the policy instruction; a BDDL
+`:language` declaration is retained only as simulator provenance.  Conversion
+requires the official BDDL task inventory so this mapping is verified rather
+than inferred from HDF5 metadata alone.  It audits every episode in a staging
+root before an atomic publish, so a malformed task cannot leave a partial
+converted root.  The evaluator applies fixed init states, ignores success/done
+during the five zero-action physics warmup, then
+executes only the first row of each 24-row policy chunk after `[-1,1]` clipping;
+that clipped row is fed back as the next action-state.  These checks establish
+edge protocol closure, not a learned LIBERO score.  Fixed states are consumed
+in the official first-N order and are never silently recycled.  Evaluate
+`libero_90` and `libero_10` separately: `libero_100` is their archive union,
+not an official evaluator suite.  A result is marked `official_protocol` only
+for a formal checkpoint bridge over every suite task with 20 fixed states, 600
+policy-action steps, the five-step warmup, seed 10000 and 128-pixel camera
+inputs; a smoke-zero run is always marked non-official even when its counts
+match.  The result identity hashes each used first-N init-state matrix and BDDL
+file and records `image_side`; changing any of them is not a valid resume.
+The bridge endpoint is operational provenance and may move when the immutable
+checkpoint/graph/profile/normalizer identity is unchanged.  Per-task atomic
+files remain `complete: false`; only the final bridge-identity check publishes
+`complete: true`, so an interrupted aggregate cannot be mistaken for a score.
 
 ## Remote setup
 
@@ -73,6 +110,31 @@ bash scripts/smoke_remote_benchmarks.sh calvin libero
 Keep CALVIN/LIBERO evaluator environments separate from the Python 3.12
 ClearVLA converter environment. On Windows, use the Linux host for these
 legacy MuJoCo evaluators.
+
+### CALVIN inline evaluation video
+
+Formal and targeted CALVIN evaluation can record the observations from the
+same scored environment execution. Recording is off by default and does not
+replay actions or invoke the policy a second time:
+
+```bash
+PYTHONPATH=/home/sen.wang/workspace/robotics/clear/clearvla_sim_mainline \
+MUJOCO_GL=egl PYOPENGL_PLATFORM=egl QT_QPA_PLATFORM=offscreen \
+/home/sen.wang/.venvs/clearvla-calvin/bin/python \
+  -m clearvla.benchmarks.calvin_eval \
+  --dataset-root /data/senwang/data/calvin/raw/task_ABC_D \
+  --output-dir /data/senwang/data/calvin/rollouts/FORMAL_RUN \
+  --endpoint http://127.0.0.1:18772 \
+  --num-sequences 16 --max-subtask-steps 180 --execute-rows 4 \
+  --record-video --video-fps 12 --video-sequences 16
+```
+
+Unless `--video-dir` is provided, each completed official sequence is flushed
+immediately as `OUTPUT_DIR/videos/sequence_NNNN.mp4` with a matching JSON task
+report. `--video-sequences N` limits recording to the first N evaluated
+sequences; omit it to record all of them. An interrupted current sequence keeps
+a `.partial` artifact, while videos from earlier completed sequences remain
+usable.
 
 ## Minimal smoke and import commands
 

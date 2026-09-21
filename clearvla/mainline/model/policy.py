@@ -41,9 +41,12 @@ from .transition import ControlledTransitionDynamics
 from .types import (
     ControlledTransitionSource,
     FactualPrecisionDock,
+    FlowStepContext,
     HistoryActionProposalState,
     ObjectTopTrainingTargets,
     PhysicalActionCondition,
+    PhysicalActionSequenceCondition,
+    WorldActionCondition,
 )
 from .v120_p1 import LateRawDetailPolicyReader
 
@@ -77,6 +80,37 @@ def _temporary_source_legacy_name(name: str) -> str:
     return name
 
 
+def _validate_configured_world_action_condition(
+    condition: WorldActionCondition,
+    config: ExperimentConfig,
+) -> None:
+    """Bind a cached W action tag to the serialized experiment mode.
+
+    This validator deliberately uses config-only metadata so cache containers
+    can reject a schema/profile swap before they reach any module.  The policy
+    additionally asks its concrete outlet adapter to verify the chart and
+    normalizer identity at every real consumption boundary.
+    """
+
+    condition.validate(action_dim=config.dimensions.action_dim)
+    mode = config.top.world_action_condition_mode
+    if mode == "interval_mean_v1":
+        if not isinstance(condition, PhysicalActionCondition):
+            raise TypeError(
+                "interval-mean policy cache rejected a sequence action condition"
+            )
+        return
+    if mode != "sequence_prefix_v1":
+        raise ValueError("unknown configured W action condition mode")
+    if not isinstance(condition, PhysicalActionSequenceCondition):
+        raise TypeError(
+            "sequence-prefix policy cache rejected an interval action condition"
+        )
+    expected_profile = ComponentSelection.from_config(config).outlet_adapter
+    if condition.outlet_profile != expected_profile:
+        raise ValueError("policy cache action condition outlet profile changed")
+
+
 @dataclass(frozen=True)
 class OnlinePolicyCache:
     """Current-only state reused by every deployment ODE step."""
@@ -95,6 +129,7 @@ class OnlinePolicyCache:
             hidden=config.dimensions.hidden_size,
             horizon=config.dimensions.action_horizon,
         )
+        _validate_configured_world_action_condition(self.top.action_condition, config)
         self.factual_dock.validate(
             horizon=config.dimensions.action_horizon,
             basis=config.dimensions.action_basis_tokens,
@@ -127,6 +162,7 @@ class OnlineTrainingState:
             hidden=config.dimensions.hidden_size,
             horizon=config.dimensions.action_horizon,
         )
+        _validate_configured_world_action_condition(self.top.action_condition, config)
         self.history_proposal.validate(
             horizon=config.dimensions.action_horizon,
             hidden=config.dimensions.hidden_size,
@@ -168,7 +204,6 @@ class ClearVLAMainlinePolicy(nn.Module):
             horizon=dims.action_horizon,
             gripper_field_dim=config.bottom.gripper_field_dim,
             decode_delta_blend=config.bottom.physical_decode_delta_blend,
-            arm_flow_mode=config.bottom.arm_flow_mode,
         )
         raw_top = ObjectIntentDynamicsTop(
             hidden=dims.hidden_size,
@@ -187,6 +222,11 @@ class ClearVLAMainlinePolicy(nn.Module):
             role_host_depth=top.role_host_depth,
             role_host_expansion=top.role_host_ffn_expansion,
             role_host_dropout=top.role_host_dropout,
+            interval_object_query_mode=top.interval_object_query_mode,
+            camera_names=config.data.camera_names,
+            world_camera_condition_mode=top.world_camera_condition_mode,
+            world_action_condition_mode=top.world_action_condition_mode,
+            p2_spatial_intent_mode=top.p2_spatial_intent_mode,
             core_config=raw_observation.v120_config,
         )
         raw_history_proposal = HistoryActionProposal(
@@ -250,7 +290,11 @@ class ClearVLAMainlinePolicy(nn.Module):
                 old_parameter_objects.append((logical, parameter))
 
         observation = ObservationStage(raw_observation)
-        codec = OutletAdapter(raw_codec, selection=selection.outlet_adapter)
+        codec = OutletAdapter(
+            raw_codec,
+            selection=selection.outlet_adapter,
+            world_action_condition_mode=top.world_action_condition_mode,
+        )
         # Move every top child without constructing a second parameterized
         # implementation.  Direct parameters are detached from the temporary
         # owner in the same way as modules.
@@ -378,6 +422,11 @@ class ClearVLAMainlinePolicy(nn.Module):
 
         return self.execution_bottom.set_training_step(global_step)
 
+    def configure_action_normalizer(self, normalizer: object) -> None:
+        """Attach the data/checkpoint-owned outlet chart sidecar."""
+
+        self.outlet_adapter.configure_action_normalizer(normalizer)
+
     def encode_online(
         self,
         policy_input: OnlinePolicyInput,
@@ -454,11 +503,15 @@ class ClearVLAMainlinePolicy(nn.Module):
             collect_diagnostics=collect_diagnostics,
         )
         action_intent = intent.action_dock()
-        coarse = self.intent.propose_action(action_intent)
-        action_condition = PhysicalActionCondition.from_interval_action(
+        coarse = self.intent.propose_action(
+            action_intent,
+            collect_diagnostics=collect_diagnostics,
+        )
+        action_condition = self.outlet_adapter.world_condition_from_action_prediction(
             coarse.action_prediction,
             conditioned_policy_input.history.action_state,
         )
+        self.outlet_adapter.validate_world_condition(action_condition)
         world, world_metrics = self.world.materialize(
             belief=facts,
             action_condition=action_condition,
@@ -493,7 +546,16 @@ class ClearVLAMainlinePolicy(nn.Module):
                         (), dtype=torch.float32
                     ),
                     "object_action_world_initial_tag_identity_error": (
-                        action_condition.interval_action.detach().float()
+                        (
+                            action_condition.source_action
+                            if isinstance(
+                                action_condition,
+                                PhysicalActionSequenceCondition,
+                            )
+                            else action_condition.source_interval_action
+                        )
+                        .detach()
+                        .float()
                         - coarse.action_prediction.detach().float()
                     )
                     .abs()
@@ -533,6 +595,11 @@ class ClearVLAMainlinePolicy(nn.Module):
                 context.intent.public_interval_carrier,
                 gradient_metrics,
                 "gradient_tensor_s_public_interval_carrier_rms",
+            )
+            register_gradient_rms_metric(
+                context.intent.object_tokens,
+                gradient_metrics,
+                "gradient_tensor_s_public_object_memory_rms",
             )
             register_gradient_rms_metric(
                 context.intent.typed_common_value,
@@ -583,6 +650,9 @@ class ClearVLAMainlinePolicy(nn.Module):
         )
         cache.validate(self.config)
         training_state.validate(self.config)
+        self.outlet_adapter.validate_world_condition(
+            training_state.top.action_condition
+        )
         if not collect_diagnostics:
             return cache, training_state, {}
         return cache, training_state, {
@@ -612,6 +682,9 @@ class ClearVLAMainlinePolicy(nn.Module):
         """Run Teacher-G on a type that the online graph cannot accept."""
 
         training_state.validate(self.config)
+        self.outlet_adapter.validate_world_condition(
+            training_state.top.action_condition
+        )
         future.validate(self.config)
         if training_state.top.facts.batch != future.batch:
             raise ValueError("online cache and future supervision batch do not align")
@@ -652,6 +725,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         *,
         noisy_action_field: Tensor,
         time: Tensor,
+        flow_step_context: FlowStepContext | None = None,
         execution_mode: str = "learned",
         deployment_fastpath: bool = False,
         require_execution_supervision: bool = False,
@@ -660,13 +734,25 @@ class ClearVLAMainlinePolicy(nn.Module):
         """Run only the ODE-dependent P2/P3 and action bottom."""
 
         cache.validate(self.config)
-        # CALVIN's legacy continuous gripper field is shape/audit
-        # compatibility only.  During training it contains a future-target
+        self.outlet_adapter.validate_world_condition(cache.top.action_condition)
+        if flow_step_context is not None:
+            flow_step_context.validate(
+                batch=int(noisy_action_field.shape[0]),
+                device=noisy_action_field.device,
+                time=time,
+                # The sampler/training bridge constructs this context from a
+                # host-validated schedule.  Keep the public shape/device seam
+                # checked here, but do not perform tensor-to-Python finite or
+                # range checks at every ODE node.
+                strict=False,
+            )
+        # A binary outlet's legacy continuous gripper field is shape/audit
+        # compatibility only. During training it contains a future-target
         # mixture, while its zero deployment velocity leaves it as source
-        # noise.  Sanitize it once before *any* dynamic consumer so neither
-        # the command head nor an indirect P/transition/bottom route can learn
-        # that unavailable shortcut.  Continuous Pen/RDT calls retain the
-        # original tensor object and values.
+        # noise. Sanitize it once before *any* dynamic consumer so neither the
+        # command head nor an indirect P/transition/bottom route can learn that
+        # unavailable shortcut. Continuous outlets retain the original tensor
+        # object and values.
         model_action_field = self.outlet_adapter.prepare_model_input(
             noisy_action_field
         )
@@ -706,6 +792,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         bottom_core, bottom_metrics = self.execution_bottom.step(
             noisy_action_field=model_action_field,
             time=time,
+            flow_step_context=flow_step_context,
             action_query=action_query,
             plan=compiled.plan,
             intent=cache.top.intent,

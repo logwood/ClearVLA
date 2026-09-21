@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -11,29 +11,50 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
 
+from clearvla.benchmarks.calvin_raw import (
+    CalvinRawReader,
+    virtualize_calvin_cached_prefix,
+)
 from clearvla.data.action_chart import project_episodes, resolve_action_state_profile
 from clearvla.data.hdf5_episode import (
+    LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING,
+    RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING,
     LoadedEpisode,
     load_episodes,
     load_hdf5_instruction,
     resolve_too_short_episode_exclusions,
+)
+from clearvla.data.libero_retarget import (
+    LIBERO_RETARGET_NORMALIZER_POLICY,
+    load_libero_retarget_overlay_contract,
+    merge_libero_retarget_training_overlay,
 )
 from clearvla.data.multitask_selection import (
     RDT_MULTITASK_INTERNAL_SPLITS,
     load_rdt_multitask_selection_manifest,
 )
 from clearvla.data.samplers import (
+    BoundaryAwareInformationBatchSampler,
+    EvenlySpacedPanelBatchSampler,
     InformationBalancedBatchSampler,
     InformationBalancedSamplerConfig,
     TaskBalancedInformationBatchSampler,
     TaskStratifiedBatchSampler,
 )
+from ..gripper_contract import is_binary_gripper_mode
 from clearvla.data.split import (
     RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH,
     load_episode_split_manifest,
     load_episode_split_manifest_inventory,
     load_rdt_split_manifest,
     resolve_episode_ids,
+)
+from clearvla.data.window_boundaries import (
+    CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    CAUSAL_PREFIX_V1,
+    PREFIX_REGION,
+    STRICT_COMPLETE_V1,
+    TAIL_REGION,
 )
 from clearvla.vision.decoded_image_store import DecodedImageStore
 from clearvla.vision.online_store import OnlineVisualStore
@@ -119,7 +140,13 @@ class MainlineDataBundle:
     information_event_fraction: float
     information_motion_quantile: float
     gripper_event_threshold: float | None
+    information_batches_per_epoch: int | None = None
+    sampling_arm_motion: str = "adjacent_action_delta"
+    sampling_gripper_event_scope: str = "window_any"
+    release_first_action_fraction: float = 0.0
     gripper_indices: tuple[int, ...] = (-1,)
+    gripper_open_direction: int = -1
+    window_boundary_contract: str = STRICT_COMPLETE_V1
     task_order: tuple[str, ...] = ()
     episode_task_indices: tuple[int, ...] = ()
     data_profile_metadata: dict[str, object] = field(default_factory=dict)
@@ -198,6 +225,7 @@ class MainlineDataBundle:
         shuffle: bool | None = None,
         generator: torch.Generator | None = None,
         task_panel_max_batches: int | None = None,
+        coverage_panel_max_batches: int | None = None,
     ) -> DataLoader:
         if split not in self.datasets:
             raise KeyError(f"unknown data split {split!r}")
@@ -237,18 +265,57 @@ class MainlineDataBundle:
                     "use a deterministic unshuffled loader-only smoke or configure an "
                     "explicit source-chart threshold before training"
                 )
+            signal_kwargs = {
+                "gripper_indices": self.gripper_indices,
+                "event_threshold": self.gripper_event_threshold,
+                "arm_motion": self.sampling_arm_motion,
+            }
+            # Keep lightweight test/dataset doubles compatible with the
+            # historical method while making the non-default experiment
+            # explicit on the real cached-token dataset.
+            if self.sampling_gripper_event_scope != "window_any":
+                signal_kwargs["event_scope"] = self.sampling_gripper_event_scope
             motion_score, is_event = dataset.training_information_signals(
-                gripper_indices=self.gripper_indices,
-                event_threshold=self.gripper_event_threshold,
+                **signal_kwargs
             )
+            release_first_events = None
+            if self.release_first_action_fraction > 0.0:
+                release_signal = getattr(
+                    dataset, "training_release_first_signals", None
+                )
+                if not callable(release_signal):
+                    raise TypeError(
+                        "release-first sampling requires a dataset-owned "
+                        "training_release_first_signals implementation"
+                    )
+                release_first_events = release_signal(
+                    gripper_indices=self.gripper_indices,
+                    event_threshold=self.gripper_event_threshold,
+                    open_direction=self.gripper_open_direction,
+                )
             sampler_config = InformationBalancedSamplerConfig(
                 batch_size=batch_size,
                 uniform_fraction=self.information_uniform_fraction,
                 event_fraction=self.information_event_fraction,
                 motion_quantile=self.information_motion_quantile,
+                batches_per_epoch=self.information_batches_per_epoch,
                 seed=self.sampling_seed,
+                event_scope=self.sampling_gripper_event_scope,
             )
-            if self.is_multitask:
+            if self.window_boundary_contract in {
+                CAUSAL_PREFIX_V1,
+                CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+            }:
+                sampler = BoundaryAwareInformationBatchSampler(
+                    motion_score,
+                    is_event,
+                    dataset.boundary_regions,
+                    contract=self.window_boundary_contract,
+                    config=sampler_config,
+                    release_first_events=release_first_events,
+                    release_first_fraction=self.release_first_action_fraction,
+                )
+            elif self.is_multitask:
                 sampler = TaskBalancedInformationBatchSampler(
                     motion_score,
                     is_event,
@@ -282,6 +349,17 @@ class MainlineDataBundle:
                 batch_size=batch_size,
             )
             return DataLoader(dataset, batch_sampler=sampler, **common)
+        if (
+            not do_shuffle
+            and coverage_panel_max_batches is not None
+            and int(coverage_panel_max_batches) > 0
+        ):
+            sampler = EvenlySpacedPanelBatchSampler(
+                len(dataset),
+                batch_size=batch_size,
+                max_batches=int(coverage_panel_max_batches),
+            )
+            return DataLoader(dataset, batch_sampler=sampler, **common)
         return DataLoader(
             dataset,
             batch_size=batch_size,
@@ -301,12 +379,67 @@ def _normalizers(
     action_rows: list[np.ndarray] = []
     state_rows: list[np.ndarray] = []
     for index in train_ids:
-        action = episodes[index].actions_raw
-        state = episodes[index].states_raw
+        episode = episodes[index]
+        action = episode.actions_raw
+        state = episode.states_raw
         if action is None or state is None:
             raise ValueError("mainline normalization requires state and action arrays")
-        action_rows.append(action)
-        state_rows.append(state)
+        # Synthetic absorbing rows exist only to close a fixed 48-frame
+        # Teacher horizon around a shorter terminal task.  They must never
+        # change the physical source chart fitted from real demonstrations.
+        if episode.state_normalizer_reference_raw is not None:
+            # Causal LIBERO conversion changes observation time alignment but
+            # model-only E8 initialization must retain the exact E8 affine
+            # chart.  This numeric-only reference is copied from the audited
+            # legacy real rows by the converter and is never sampled as model
+            # evidence.
+            reference = episode.state_normalizer_reference_raw
+            if episode.terminal_state_index is None:
+                action_rows.append(action)
+            elif (
+                episode.terminal_padding_mode
+                == LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING
+                and episode.source_action_count is not None
+            ):
+                action_rows.append(action[: int(episode.source_action_count)])
+            else:
+                raise ValueError(
+                    "a state normalizer reference is valid only for causal LIBERO data"
+                )
+            state_rows.append(reference)
+        elif episode.terminal_state_index is None:
+            action_rows.append(action)
+            state_rows.append(state)
+        elif (
+            episode.terminal_padding_mode
+            == LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING
+        ):
+            if episode.source_action_count is None:
+                raise ValueError(
+                    "LIBERO terminal replay is missing source_action_count"
+                )
+            source_count = int(episode.source_action_count)
+            if int(episode.terminal_state_index) != source_count:
+                raise ValueError(
+                    "LIBERO terminal replay source/terminal indices disagree"
+                )
+            # The replayed terminal observation is genuine simulator evidence,
+            # but it was not part of the E8 source chart.  Fit both affine
+            # normalizers from exactly the original T pre-action rows so Test B
+            # remains numerically comparable to E8 and Test A.
+            action_rows.append(action[:source_count])
+            state_rows.append(state[:source_count])
+        elif (
+            episode.terminal_padding_mode
+            == RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING
+        ):
+            terminal = int(episode.terminal_state_index)
+            action_rows.append(action[:terminal])
+            state_rows.append(state[: terminal + 1])
+        else:
+            raise ValueError(
+                "an episode with terminal_state_index has an unknown padding contract"
+            )
     actions = ArrayNormalizer.fit_zscore(action_rows)
     states = ArrayNormalizer.fit_zscore(state_rows)
     return actions, states
@@ -318,19 +451,29 @@ def _cpu_task_registry(
     split_metadata: Mapping[str, object],
 ) -> tuple[tuple[str, ...], tuple[int, ...]]:
     selection = split_metadata.get("task_selection")
+    # RDT selection manifests nest their registry under ``task_selection``;
+    # CALVIN's trajectory manifest carries the same immutable registry at the
+    # top level.  Both are CPU-only bookkeeping and never enter model
+    # conditioning.
     if selection is None:
-        return (), ()
-    if not isinstance(selection, Mapping):
-        raise TypeError("task selection metadata must be a mapping")
-    raw_order = selection.get("task_order")
+        raw_order = split_metadata.get("task_order")
+    else:
+        if not isinstance(selection, Mapping):
+            raise TypeError("task selection metadata must be a mapping")
+        raw_order = selection.get("task_order")
     if not isinstance(raw_order, list):
-        raise TypeError("task selection metadata has no ordered task registry")
+        return (), ()
     task_order = tuple(str(value) for value in raw_order)
     if not task_order or len(set(task_order)) != len(task_order):
         raise ValueError("task selection order must be non-empty and unique")
     lookup = {name: index for index, name in enumerate(task_order)}
     episode_task_indices = tuple(lookup.get(str(episode.task_id), -1) for episode in episodes)
-    for split in RDT_MULTITASK_INTERNAL_SPLITS:
+    required_splits = (
+        RDT_MULTITASK_INTERNAL_SPLITS
+        if selection is not None
+        else ("train", "val", "test")
+    )
+    for split in required_splits:
         if split not in split_ids:
             raise ValueError(f"task selection is missing internal split {split!r}")
         missing = [
@@ -369,7 +512,7 @@ def _load_mainline_data(
     obs = config.observation
     cameras = tuple(data.camera_names)
     profile = resolve_action_state_profile(data.data_profile)
-    dataset_config = ObservedStateDatasetConfig(
+    strict_dataset_config = ObservedStateDatasetConfig(
         world_horizon=48,
         policy_horizon=dims.action_horizon,
         support_stride=4,
@@ -377,10 +520,22 @@ def _load_mainline_data(
         visual_history_offsets=(-2 * obs.flow_reference_frames, -obs.flow_reference_frames, 0),
         executed_action_offsets=(-24, -16, -12, -8, -6, -4, -2, -1),
         stride=data.stride,
+        causal_reset_padding=profile.name == "maniskill_pd_ee_delta_pose_7d_v2",
+        window_boundary_contract=STRICT_COMPLETE_V1,
     )
-    dataset_config.validate()
+    strict_dataset_config.validate()
+    train_dataset_config = (
+        strict_dataset_config
+        if data.window_boundary_contract == STRICT_COMPLETE_V1
+        else replace(
+            strict_dataset_config,
+            causal_reset_padding=True,
+            window_boundary_contract=data.window_boundary_contract,
+        )
+    )
+    train_dataset_config.validate()
     if data.split_mode in {"manifest", "episode-manifest"}:
-        min_length = dataset_config.minimum_episode_length
+        min_length = strict_dataset_config.minimum_episode_length
         if data.split_mode == "manifest" and min_length != RDT_TYPED_WINDOW_MIN_EPISODE_LENGTH:
             raise AssertionError(
                 "RDT manifest minimum length no longer matches the typed window ABI"
@@ -390,16 +545,38 @@ def _load_mainline_data(
         # inventory and 63/5/5 membership are not changed by the RDT adapter.
         min_length = 48 + 8 + 2
     raw_root = Path(data.raw_hdf5_root)
+    maniskill_audit = None
+    if profile.name in {"maniskill_pd_ee_delta_pose_7d_v1", "maniskill_pd_ee_delta_pose_7d_v2"}:
+        from clearvla.simulation.admission import audit_stackcube_experts
+
+        if data.action_state_key != "action_state" or data.state_key != "state":
+            raise ValueError("ManiSkill requires explicit state/action_state dataset keys")
+        maniskill_audit = audit_stackcube_experts(
+            raw_root,
+            minimum_length=strict_dataset_config.minimum_episode_length,
+            profile=profile.name,
+            require_binary_gripper=is_binary_gripper_mode(
+                config.bottom.gripper_output_mode
+            ),
+        )
     episode_inventory = None
+    manifest_payload: dict[str, object] | None = None
     if data.split_mode == "episode-manifest":
         _manifest_path, _manifest_payload, episode_inventory = (
             load_episode_split_manifest_inventory(data.split_manifest)
         )
+        manifest_payload = _manifest_payload
+    # The old converter-v1 CALVIN prefix ends at the annotation terminal and
+    # therefore is shorter than the typed 48-frame window.  Raw-overlay mode
+    # appends the official absorbing suffix in memory, so only require a
+    # non-empty physical prefix during HDF5 discovery.  The virtualized
+    # episode is checked against the normal typed-window bounds below.
+    load_min_length = 1 if data.calvin_raw_source.strip() else min_length
     episodes, skipped = load_episodes(
         raw_root,
         data.hdf5_glob,
         cameras=cameras,
-        min_length=min_length,
+        min_length=load_min_length,
         action_key=data.action_key,
         action_state_key=data.action_state_key or None,
         state_key=data.state_key,
@@ -416,6 +593,58 @@ def _load_mainline_data(
                 f"observed examples={observed[:12]}"
             )
         episodes = filtered
+    overlay_report: dict[str, object] | None = None
+    raw_reader_report: dict[str, object] | None = None
+    if data.calvin_raw_source.strip():
+        if profile.name != "calvin_relative_7d_v1":
+            raise ValueError("CALVIN raw overlay requires calvin_relative_7d_v1")
+        if data.split_mode != "episode-manifest" or manifest_payload is None:
+            raise ValueError("CALVIN raw overlay requires an episode split manifest")
+        raw_source = Path(data.calvin_raw_source)
+        manifest_source = str(manifest_payload.get("raw_source", "")).strip()
+        if manifest_source and Path(manifest_source).resolve() != raw_source.resolve():
+            raise ValueError(
+                "CALVIN split manifest raw_source differs from data.calvin_raw_source"
+            )
+        manifest_splits = manifest_payload.get("splits")
+        if not isinstance(manifest_splits, Mapping):
+            raise ValueError("CALVIN raw overlay manifest has no train/val/test splits")
+        raw_episode_map = manifest_payload.get("raw_episode_map")
+        if raw_episode_map is not None and not isinstance(raw_episode_map, Mapping):
+            raise ValueError("CALVIN raw overlay manifest raw_episode_map must be a mapping")
+        split_seed = int(manifest_payload.get("split_seed", data.seed))
+        val_fraction = float(
+            manifest_payload.get("train_validation_fraction", 0.1)
+        )
+        raw_reader = CalvinRawReader(
+            raw_source,
+            val_fraction=val_fraction,
+            split_seed=split_seed,
+            task_filter=data.task_filter or None,
+        )
+        episodes, overlay_report = virtualize_calvin_cached_prefix(
+            episodes,
+            raw_reader,
+            expected_splits=manifest_splits,
+            raw_episode_map=raw_episode_map,
+        )
+        raw_reader_report = raw_reader.report()
+    if profile.name == "calvin_relative_7d_v1":
+        invalid_terminal_contract = [
+            episode.episode_id
+            for episode in episodes
+            if (
+                episode.terminal_state_index is None
+                or episode.terminal_padding_mode
+                != RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING
+            )
+        ]
+        if invalid_terminal_contract:
+            raise ValueError(
+                "CALVIN training requires converter-v2 absorbing terminal padding; "
+                "old converted episodes omit the success tail from direct policy "
+                f"supervision: {invalid_terminal_contract[:8]}"
+            )
     episode_names = [episode.episode_id for episode in episodes]
     if data.split_mode == "manifest":
         excluded_too_short = resolve_too_short_episode_exclusions(
@@ -469,6 +698,97 @@ def _load_mainline_data(
             "schema": "clearvla-ordered-counts-split-v1",
             "split_counts": {name: len(values) for name, values in split_ids.items()},
         }
+    if overlay_report is not None:
+        # The split manifest is the immutable membership contract; the report
+        # below records what was actually overlaid and keeps raw eligibility
+        # versus cached-prefix coverage explicit in the run context.
+        split_metadata = {
+            **split_metadata,
+            "calvin_raw_overlay": overlay_report,
+            "calvin_raw_reader": raw_reader_report,
+            "calvin_overlay_active": True,
+        }
+    elif data.calvin_raw_source.strip():
+        raise AssertionError("CALVIN raw overlay source was configured but not applied")
+
+    # The immutable base split exclusively owns both affine normalizers.  Fit
+    # them before loading a retarget HDF5 so an implementation reorder cannot
+    # silently let synthetic translations redefine the action/state chart.
+    episodes = project_episodes(episodes, profile)
+    base_train_ids = tuple(int(value) for value in split_ids["train"])
+    action_normalizer, state_normalizer = _normalizers(
+        episodes,
+        base_train_ids,
+        mode=data.normalizer,
+    )
+    normalizer_metadata: dict[str, object] = {
+        "source": "fresh_train_only_fit",
+        "train_episode_count": len(base_train_ids),
+    }
+    if data.normalizer_artifact:
+        selection_metadata = split_metadata.get("task_selection")
+        if not isinstance(selection_metadata, dict):
+            raise ValueError("a shared normalizer artifact requires task selection metadata")
+        action_normalizer, state_normalizer, normalizer_metadata = load_shared_normalizers(
+            data.normalizer_artifact,
+            expected_selection_sha256=str(selection_metadata.get("selection_sha256", "")),
+            expected_profile_sha256=profile.digest(),
+            expected_train_episode_ids=[
+                episodes[index].episode_id for index in base_train_ids
+            ],
+            computed_action=action_normalizer,
+            computed_state=state_normalizer,
+        )
+
+    if data.libero_retarget_overlay_root.strip():
+        contract = load_libero_retarget_overlay_contract(
+            data.libero_retarget_overlay_root,
+            data.libero_retarget_overlay_manifest,
+            base_split_manifest=data.split_manifest,
+            base_causal_root=raw_root,
+            base_train_episode_ids=[
+                episodes[index].episode_id for index in base_train_ids
+            ],
+        )
+        overlay_episodes, overlay_skipped = load_episodes(
+            contract.root,
+            "*.hdf5",
+            cameras=cameras,
+            min_length=strict_dataset_config.minimum_episode_length,
+            action_key=data.action_key,
+            action_state_key=data.action_state_key or None,
+            state_key=data.state_key,
+            camera_key_overrides=data.camera_key_map(),
+            episode_names=contract.episode_ids,
+        )
+        if overlay_skipped:
+            raise RuntimeError(
+                "LIBERO retarget overlay contains unusable HDF5 episodes: "
+                f"{overlay_skipped[:3]}"
+            )
+        merge = merge_libero_retarget_training_overlay(
+            episodes,
+            split_ids,
+            project_episodes(overlay_episodes, profile),
+            contract,
+        )
+        episodes = list(merge.episodes)
+        split_ids = {name: list(values) for name, values in merge.splits.items()}
+        split_metadata = {
+            **split_metadata,
+            "libero_retarget_overlay_active": True,
+            "libero_retarget_overlay": merge.metadata,
+        }
+        normalizer_metadata = {
+            **normalizer_metadata,
+            "libero_retarget_overlay_excluded": True,
+            "libero_retarget_overlay_episode_count": len(
+                merge.overlay_episode_indices
+            ),
+            "libero_retarget_normalizer_policy": LIBERO_RETARGET_NORMALIZER_POLICY,
+            "effective_train_episode_count": len(split_ids["train"]),
+        }
+
     if materialized_splits is None:
         materialized_names = (
             RDT_MULTITASK_INTERNAL_SPLITS if data.task_selection_manifest else tuple(split_ids)
@@ -489,34 +809,14 @@ def _load_mainline_data(
     required_token_episode_ids = sorted(
         {index for ids in dataset_episode_ids.values() for index in ids}
     )
-    episodes = project_episodes(episodes, profile)
-    action_normalizer, state_normalizer = _normalizers(
-        episodes,
-        split_ids["train"],
-        mode=data.normalizer,
-    )
-    normalizer_metadata: dict[str, object] = {
-        "source": "fresh_train_only_fit",
-        "train_episode_count": len(split_ids["train"]),
-    }
-    if data.normalizer_artifact:
-        selection_metadata = split_metadata.get("task_selection")
-        if not isinstance(selection_metadata, dict):
-            raise ValueError("a shared normalizer artifact requires task selection metadata")
-        action_normalizer, state_normalizer, normalizer_metadata = load_shared_normalizers(
-            data.normalizer_artifact,
-            expected_selection_sha256=str(selection_metadata.get("selection_sha256", "")),
-            expected_profile_sha256=profile.digest(),
-            expected_train_episode_ids=[episodes[index].episode_id for index in split_ids["train"]],
-            computed_action=action_normalizer,
-            computed_state=state_normalizer,
-        )
     preprocessing = PreprocessConfig(resize_hw=(data.cache_side, data.cache_side), crop_hw=None)
     if data.image_store_mode == "decoded-cache":
         image_store: DecodedImageStore | OnlineVisualStore = DecodedImageStore(
             Path(data.decoded_cache),
             camera_names=cameras,
             preprocessing=preprocessing,
+            read_backend=data.visual_cache_read_backend,
+            max_open_arrays=data.visual_pread_max_open_files,
         )
     else:
         image_store = OnlineVisualStore(
@@ -532,6 +832,8 @@ def _load_mainline_data(
         preprocessing=preprocessing,
         dinov2_model=data.dinov2_model,
         required_episode_indices=required_token_episode_ids,
+        read_backend=data.visual_cache_read_backend,
+        max_open_arrays=data.visual_pread_max_open_files,
     )
     if token_store.token_dim != dims.visual_token_dim:
         raise ValueError(
@@ -544,7 +846,14 @@ def _load_mainline_data(
             f"native chart expects {dims.patches_per_camera}"
         )
     datasets: dict[str, CachedTokenPolicyWindowDataset] = {}
-    for name, ids in dataset_episode_ids.items():
+
+    def materialize_dataset(
+        name: str,
+        ids: list[int],
+        *,
+        selected_config: ObservedStateDatasetConfig,
+        allowed_regions: tuple[str, ...] | None = None,
+    ) -> None:
         base = ObservedStateWindowDataset(
             episodes,
             ids,
@@ -552,13 +861,43 @@ def _load_mainline_data(
             camera_names=cameras,
             state_normalizer=state_normalizer,
             action_normalizer=action_normalizer,
-            config=dataset_config,
+            config=selected_config,
             gripper_transition_boundary=profile.gripper_transition_boundary,
+            allowed_boundary_regions=allowed_regions,
         )
         datasets[name] = CachedTokenPolicyWindowDataset(
             base,
             token_store=token_store,
         )
+
+    for name, ids in dataset_episode_ids.items():
+        materialize_dataset(
+            name,
+            ids,
+            selected_config=(
+                train_dataset_config if name == "train" else strict_dataset_config
+            ),
+        )
+    # Keep the primary validation/test surfaces strict and therefore directly
+    # comparable with E8.  Boundary rows get separate, deployment-only panels;
+    # they can never select the best checkpoint or dilute the strict metric.
+    if "val" in dataset_episode_ids and data.window_boundary_contract in {
+        CAUSAL_PREFIX_V1,
+        CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    }:
+        materialize_dataset(
+            "val_prefix",
+            dataset_episode_ids["val"],
+            selected_config=train_dataset_config,
+            allowed_regions=(PREFIX_REGION,),
+        )
+        if data.window_boundary_contract == CAUSAL_PREFIX_TERMINAL_SUFFIX_V2:
+            materialize_dataset(
+                "val_tail",
+                dataset_episode_ids["val"],
+                selected_config=train_dataset_config,
+                allowed_regions=(TAIL_REGION,),
+            )
     goal_bank = load_t5_condition_bank(
         data.t5_condition,
         max_tokens=dims.goal_max_tokens,
@@ -616,18 +955,35 @@ def _load_mainline_data(
         information_uniform_fraction=data.information_uniform_fraction,
         information_event_fraction=data.information_event_fraction,
         information_motion_quantile=data.information_motion_quantile,
+        information_batches_per_epoch=data.information_batches_per_epoch,
         gripper_event_threshold=(
             config.objectives.gripper_event_threshold
             if profile.name == "identity_7d_pen" and data.sampling_gripper_event_threshold is None
             else data.sampling_gripper_event_threshold
         ),
+        sampling_arm_motion=profile.sampling_arm_motion,
+        sampling_gripper_event_scope=data.sampling_gripper_event_scope,
+        release_first_action_fraction=data.release_first_action_fraction,
         gripper_indices=profile.gripper_indices,
+        gripper_open_direction=profile.gripper_open_direction,
+        window_boundary_contract=data.window_boundary_contract,
         task_order=task_order,
         episode_task_indices=episode_task_indices,
         data_profile_metadata={
             **profile.as_dict(),
             "sha256": profile.digest(),
             "gripper_transition_boundary": profile.gripper_transition_boundary,
+            "gripper_open_direction": profile.gripper_open_direction,
+            **({"simulator_environment": maniskill_audit["environment"],
+                "expert_reset_seeds": maniskill_audit["reset_seeds"],
+                "expert_admission": maniskill_audit["expert_admission"]}
+               if maniskill_audit is not None else {}),
+            **(
+                {"sampling_arm_motion": profile.sampling_arm_motion}
+                if profile.sampling_arm_motion != "adjacent_action_delta"
+                else {}
+            ),
+            "sampling_gripper_event_scope": data.sampling_gripper_event_scope,
             # Physical units/ranges are metadata-only.  They deliberately do
             # not enter the numeric action-profile digest or alter z-score
             # normalization, projection, decoding, or model conditioning.

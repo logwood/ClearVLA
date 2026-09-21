@@ -44,3 +44,10 @@ checkpoints/
 outputs/
 wandb/
 /new_logs/
+# Local/generated audit and presentation artifacts
+/.codex_tmp/
+/.pytest-audit-tmp/
+/.pytest-training-snapshot/
+/artifacts/
+/mysh-draft/
+*.bundle

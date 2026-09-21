@@ -28,9 +28,14 @@ from ..config import ExperimentConfig
 from ..interfaces import ObservableHistory
 from ..v120_core.bspine import (
     BSPINE0_IMPLEMENTATION,
+    BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
     BSPINE_ARM_ONLY_IMPLEMENTATION,
+    BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
     BSPINE_DISABLED_IMPLEMENTATION,
+    ArmCoarseContextBSpine,
     ArmOnlyBSpine,
+    ArmPrivateBSpineReader,
+    ArmPrivateReaderBSpine,
     BSpine0,
 )
 from ..v120_core.layer_contracts import LayerContractAdapterHeads
@@ -49,6 +54,7 @@ from .compiler import ObjectPolicyPlanDeltaBank
 from .types import (
     CompletedP1PolicyState,
     ControlledTransitionState,
+    FlowStepContext,
     ObjectIntentState,
 )
 
@@ -78,9 +84,12 @@ def _build_decoder_config(config: ExperimentConfig):
         action_basis_tokens=dims.action_basis_tokens,
         gripper_field_dim=bottom.gripper_field_dim,
         gripper_output_mode=bottom.gripper_output_mode,
-        arm_flow_mode=bottom.arm_flow_mode,
+        # Relative-command meaning is owned by OutletAdapter. The restored
+        # execution network always keeps V120's two-branch chart.
+        arm_flow_mode="legacy_independent",
         physical_decode_delta_blend=bottom.physical_decode_delta_blend,
         dropout=bottom.dropout,
+        latent_cvae_ffn_expansion=bottom.ffn_expansion,
         latent_cvae_mmdit_depth=bottom.evidence_depth,
         latent_cvae_mmdit_operator_rank=bottom.operator_rank,
         latent_cvae_mmdit_operator_groups=bottom.operator_groups,
@@ -201,6 +210,44 @@ class RestoredV120EvidenceBottom(nn.Module):
                     expected_basis_digest=bottom.bspine_basis_digest,
                     expected_spec_fingerprint=bottom.bspine_spec_fingerprint,
                 )
+            )
+        elif (
+            bottom.bspine_implementation
+            == BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION
+        ):
+            self.decoder.install_spine(
+                ArmCoarseContextBSpine(
+                    horizon=dims.action_horizon,
+                    hidden_size=dims.hidden_size,
+                    arm_dim=dims.action_dim - 1,
+                    gripper_field_dim=bottom.gripper_field_dim,
+                    degree=bottom.bspine_degree,
+                    control_points=bottom.bspine_control_points,
+                    expected_action_group_mask=bottom.bspine_action_group_mask,
+                    expected_basis_digest=bottom.bspine_basis_digest,
+                    expected_spec_fingerprint=bottom.bspine_spec_fingerprint,
+                )
+            )
+        elif (
+            bottom.bspine_implementation
+            == BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION
+        ):
+            self.decoder.install_spine(
+                ArmPrivateReaderBSpine(
+                    horizon=dims.action_horizon,
+                    hidden_size=dims.hidden_size,
+                    arm_dim=dims.action_dim - 1,
+                    gripper_field_dim=bottom.gripper_field_dim,
+                    degree=bottom.bspine_degree,
+                    control_points=bottom.bspine_control_points,
+                    expected_action_group_mask=bottom.bspine_action_group_mask,
+                    expected_basis_digest=bottom.bspine_basis_digest,
+                    expected_spec_fingerprint=bottom.bspine_spec_fingerprint,
+                ),
+                arm_private_reader=ArmPrivateBSpineReader(
+                    hidden_size=dims.hidden_size,
+                    arm_dim=dims.action_dim - 1,
+                ),
             )
         elif bottom.bspine_implementation != BSPINE_DISABLED_IMPLEMENTATION:
             # ``config.validate`` normally owns this error; retain a local
@@ -615,6 +662,7 @@ class RestoredV120EvidenceBottom(nn.Module):
         *,
         noisy_action_field: Tensor,
         time: Tensor,
+        flow_step_context: FlowStepContext | None = None,
         action_query: Tensor,
         plan: ObjectPolicyPlanDeltaBank,
         intent: ObjectIntentState,
@@ -632,6 +680,16 @@ class RestoredV120EvidenceBottom(nn.Module):
         )
         if tuple(action_query.shape) != expected_query:
             raise ValueError("bottom and P2/P3 must share one action query")
+        if flow_step_context is not None:
+            flow_step_context.validate(
+                batch=int(noisy_action_field.shape[0]),
+                device=noisy_action_field.device,
+                time=time,
+                # The schedule is host-validated before entering the ODE;
+                # keep this per-node seam shape/device-only to avoid a hidden
+                # tensor-to-host synchronisation in the restored bottom.
+                strict=False,
+            )
         plan.validate()
         intent.validate(horizon=self.horizon, hidden=self.hidden)
         transition.validate(hidden=self.hidden)
@@ -657,6 +715,7 @@ class RestoredV120EvidenceBottom(nn.Module):
             raw = self.decoder(
                 noisy_physical=noisy_action_field,
                 time=time,
+                flow_step_context=flow_step_context,
                 trajectory_tokens=trajectory,
                 trajectory_workspace_tokens=trajectory,
                 policy_action_tokens=None,

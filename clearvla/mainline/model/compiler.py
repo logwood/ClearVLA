@@ -219,6 +219,7 @@ class ObjectFutureEffectReader(nn.Module):
         "geometry_value_all_zero",
         "geometry_address_neutral",
         "geometry_value_and_address_zero",
+        "target_address_neutral",
     )
     _GEOMETRY_VALUE_ZERO_MODES = frozenset(
         ("geometry_value_all_zero", "geometry_value_and_address_zero")
@@ -226,10 +227,24 @@ class ObjectFutureEffectReader(nn.Module):
     _GEOMETRY_ADDRESS_NEUTRAL_MODES = frozenset(
         ("geometry_address_neutral", "geometry_value_and_address_zero")
     )
+    _TARGET_ADDRESS_NEUTRAL_MODES = frozenset(("target_address_neutral",))
 
-    def __init__(self, *, hidden: int, content_dim: int, route_dim: int) -> None:
+    def __init__(
+        self,
+        *,
+        hidden: int,
+        content_dim: int,
+        route_dim: int,
+        spatial_intent_mode: str = "post_pool_only",
+    ) -> None:
         super().__init__()
+        if spatial_intent_mode not in {
+            "post_pool_only",
+            "shared_target_prior_v1",
+        }:
+            raise ValueError("unknown P2 spatial intent mode")
         self.hidden = int(hidden)
+        self.spatial_intent_mode = str(spatial_intent_mode)
         self.source_query = nn.ModuleList(
             nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
         )
@@ -439,6 +454,14 @@ class ObjectFutureEffectReader(nn.Module):
             3,
         ):
             raise ValueError("P2 typed residual S metadata lost I/K/type")
+        if tuple(intent.target_object_address_logit.shape) != (
+            batch,
+            intervals,
+            objects,
+        ):
+            raise ValueError("P2 target object address lost I/K identity")
+        if intent.target_object_address_logit.dtype != torch.float32:
+            raise TypeError("P2 target object address must remain FP32")
 
         temperature = self._temperatures().to(device=action_query.device)
         object_measure = dynamics.chart_availability[..., 0].float().clamp(0.0, 1.0)
@@ -550,6 +573,27 @@ class ObjectFutureEffectReader(nn.Module):
                 geometry_address_correction_primary
             )
 
+        target_address_primary = intent.target_object_address_logit.float()
+        if self.spatial_intent_mode == "shared_target_prior_v1":
+            invalid_supported_target = semantic_interval_support & ~torch.isfinite(
+                target_address_primary
+            )
+            if bool(invalid_supported_target.any().item()):
+                raise ValueError(
+                    "P2 target object address contains non-finite values on supported K"
+                )
+            target_address_condition = torch.where(
+                semantic_interval_support,
+                target_address_primary,
+                torch.zeros_like(target_address_primary),
+            )
+        else:
+            target_address_condition = torch.zeros_like(target_address_primary)
+        if self._eval_intervention in self._TARGET_ADDRESS_NEUTRAL_MODES:
+            if self.training:
+                raise ValueError("P2 interventions are evaluation-only")
+            target_address_condition = torch.zeros_like(target_address_primary)
+
         common_fields = (
             dynamics.semantic_common,
             dynamics.transport_common,
@@ -591,6 +635,12 @@ class ObjectFutureEffectReader(nn.Module):
                 gradient_metrics,
                 "gradient_tensor_p2_geometry_address_correction_rms",
             )
+            if self.spatial_intent_mode == "shared_target_prior_v1":
+                register_gradient_rms_metric(
+                    target_address_condition,
+                    gradient_metrics,
+                    "gradient_tensor_p2_target_object_address_logit_rms",
+                )
 
         for type_index in range(len(self.TYPE_NAMES)):
             query = spatial_query_by_type.select(3, type_index)
@@ -617,7 +667,9 @@ class ObjectFutureEffectReader(nn.Module):
                 log_measure = semantic_log_measure[:, None].expand_as(support)
                 candidate_logit = temperature[0] * source_score + log_measure[
                     :, None, None
-                ] + geometry_address_correction
+                ] + geometry_address_correction + target_address_condition[
+                    :, None, None
+                ]
                 candidate_support = support[:, None, None].expand_as(candidate_logit)
                 candidate_typed = typed_candidate
             else:
@@ -634,6 +686,7 @@ class ObjectFutureEffectReader(nn.Module):
                     temperature[0] * source_score
                     + temperature[2] * coordinate_score
                     + log_measure[:, None, None]
+                    + target_address_condition[:, None, None, :, :, None]
                 )
                 candidate_support = support[:, None, None].expand_as(candidate_logit)
                 candidate_typed = typed_candidate[..., None, :].expand_as(source_key)
@@ -729,6 +782,22 @@ class ObjectFutureEffectReader(nn.Module):
                 ).sum(dim=-1)
                 / legal_k_count.detach().squeeze(-1).clamp_min(1.0)
             )
+            .abs()
+            .amax(),
+            "object_p2_target_address_mode_enabled": action_query.new_tensor(
+                float(self.spatial_intent_mode == "shared_target_prior_v1"),
+                dtype=torch.float32,
+            ),
+            "object_p2_target_address_logit_rms": target_address_primary.detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_target_address_active_rms": target_address_condition.detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_target_address_k_center_error": target_address_primary.detach()
+            .sum(dim=-1)
             .abs()
             .amax(),
             "object_p2_spatial_posterior_entropy": torch.stack(

@@ -15,6 +15,18 @@ import torch
 from torch.utils.data import Dataset
 
 from clearvla.data.hdf5_episode import LoadedEpisode
+from clearvla.data.hdf5_episode import LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING
+from clearvla.data.window_boundaries import (
+    BOUNDARY_REGION_TO_INDEX,
+    BOUNDARY_REGIONS,
+    CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    CAUSAL_PREFIX_V1,
+    STRICT_COMPLETE_V1,
+    WindowBoundaryMetadata,
+    WindowBoundaryPlan,
+    policy_action_union_coverage,
+    resolve_window_boundary_plan,
+)
 from clearvla.vision.decoded_image_store import DecodedImageStore
 from clearvla.vision.online_store import OnlineVisualStore
 
@@ -34,8 +46,24 @@ class ObservedStateDatasetConfig:
     image_offset: int = 0
     action_offset: int = 0
     stride: int = 1
+    causal_reset_padding: bool = False
+    window_boundary_contract: str = STRICT_COMPLETE_V1
 
     def validate(self) -> None:
+        if type(self.causal_reset_padding) is not bool:
+            raise ValueError("causal_reset_padding must be boolean")
+        if self.causal_reset_padding and (self.state_offset or self.image_offset or self.action_offset):
+            raise ValueError("reset padding requires aligned zero offsets")
+        if self.window_boundary_contract not in {
+            STRICT_COMPLETE_V1,
+            CAUSAL_PREFIX_V1,
+            CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+        }:
+            raise ValueError(
+                f"unknown window boundary contract {self.window_boundary_contract!r}"
+            )
+        if self.window_boundary_contract != STRICT_COMPLETE_V1 and not self.causal_reset_padding:
+            raise ValueError("causal boundary contracts require reset-prefix padding")
         if (
             min(
                 self.world_horizon,
@@ -81,13 +109,15 @@ class ObservedStateDatasetConfig:
             self.world_horizon + self.state_offset,
             max(self.future_offsets) + self.image_offset,
         )
-        return max(0, -int(min_relative)) + int(max_relative) + 1
+        prefix = 0 if self.causal_reset_padding else max(0, -int(min_relative))
+        return prefix + int(max_relative) + 1
 
 
 @dataclass(frozen=True)
 class ObservedWindowRef:
     episode_idx: int
     center: int
+    boundary_region: str = "strict"
 
 
 def _camera_stack(frames: Mapping[str, torch.Tensor], names: Sequence[str]) -> torch.Tensor:
@@ -108,6 +138,7 @@ class ObservedStateWindowDataset(Dataset):
         action_normalizer: ArrayNormalizer,
         config: ObservedStateDatasetConfig,
         gripper_transition_boundary: str = "current_action_state",
+        allowed_boundary_regions: tuple[str, ...] | None = None,
     ) -> None:
         super().__init__()
         config.validate()
@@ -126,7 +157,18 @@ class ObservedStateWindowDataset(Dataset):
                 "gripper transition boundary must be current_action_state or previous_command"
             )
         self.gripper_transition_boundary = str(gripper_transition_boundary)
+        if allowed_boundary_regions is not None:
+            selected_regions = tuple(str(value) for value in allowed_boundary_regions)
+            if not selected_regions or len(set(selected_regions)) != len(selected_regions):
+                raise ValueError("allowed boundary regions must be non-empty and unique")
+            unknown_regions = sorted(set(selected_regions) - set(BOUNDARY_REGIONS))
+            if unknown_regions:
+                raise ValueError(f"unknown allowed boundary regions: {unknown_regions}")
+            self.allowed_boundary_regions = selected_regions
+        else:
+            self.allowed_boundary_regions = None
         self.refs: list[ObservedWindowRef] = []
+        self.boundary_plans: dict[int, WindowBoundaryPlan] = {}
 
         min_rel = min(
             min(config.visual_history_offsets) + config.image_offset,
@@ -141,19 +183,80 @@ class ObservedStateWindowDataset(Dataset):
         for episode_idx in self.episode_ids:
             episode = episodes[episode_idx]
             image_store.validate_episode(episode)
-            low = max(0, -int(min_rel))
-            high = int(episode.length - 1 - max_rel)
-            # External benchmark converters may retain context around an
-            # annotated segment but only centers whose complete future lies in
-            # that segment are legal supervision rows.  Keep the bounds in
-            # the episode metadata so the cache namespace remains unchanged.
-            if episode.valid_center_start is not None and episode.valid_center_end is not None:
-                low = max(low, int(episode.valid_center_start))
-                high = min(high, int(episode.valid_center_end))
-            for center in range(low, high + 1, config.stride):
-                self.refs.append(ObservedWindowRef(episode_idx, center))
+            complete_history_start = max(0, -int(min_rel))
+            strict_computed_start = (
+                complete_history_start
+                if config.window_boundary_contract != STRICT_COMPLETE_V1
+                else 0
+                if config.causal_reset_padding
+                else complete_history_start
+            )
+            plan = resolve_window_boundary_plan(
+                WindowBoundaryMetadata(
+                    length=episode.length,
+                    valid_center_start=episode.valid_center_start,
+                    valid_center_end=episode.valid_center_end,
+                    strict_valid_center_start=episode.strict_valid_center_start,
+                    strict_valid_center_end=episode.strict_valid_center_end,
+                    terminal_state_index=episode.terminal_state_index,
+                    source_action_count=episode.source_action_count,
+                    terminal_padding_mode=episode.terminal_padding_mode,
+                ),
+                contract=config.window_boundary_contract,
+                strict_computed_start=strict_computed_start,
+                complete_future_end=int(episode.length - 1 - max_rel),
+                expected_terminal_padding_mode=(
+                    LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING
+                    if config.window_boundary_contract
+                    == CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+                    else None
+                ),
+            )
+            self.boundary_plans[episode_idx] = plan
+            for center, region in plan.iter_centers(
+                stride=config.stride,
+                allowed_regions=self.allowed_boundary_regions,
+            ):
+                self.refs.append(ObservedWindowRef(episode_idx, center, region))
         if not self.refs:
             raise ValueError("mainline dataset has no valid 48-frame windows")
+
+    @property
+    def boundary_regions(self) -> np.ndarray:
+        return np.asarray([ref.boundary_region for ref in self.refs], dtype=object)
+
+    def boundary_summary(self) -> dict[str, object]:
+        region_counts = {name: 0 for name in BOUNDARY_REGIONS}
+        centers_by_episode: dict[int, list[int]] = {
+            int(index): [] for index in self.episode_ids
+        }
+        source_action_counts: dict[int, int] = {}
+        for episode_idx in self.episode_ids:
+            plan = self.boundary_plans[int(episode_idx)]
+            source_action_counts[int(episode_idx)] = int(
+                getattr(plan, "source_action_count")
+            )
+        for ref in self.refs:
+            region_counts[ref.boundary_region] += 1
+            centers_by_episode[int(ref.episode_idx)].append(int(ref.center))
+        coverage = policy_action_union_coverage(
+            centers_by_episode,
+            source_action_counts=source_action_counts,
+            policy_horizon=self.config.policy_horizon,
+            action_offset=self.config.action_offset,
+        )
+        return {
+            "schema": "clearvla-window-boundary-summary-v1",
+            "contract": self.config.window_boundary_contract,
+            "allowed_regions": (
+                list(BOUNDARY_REGIONS)
+                if self.allowed_boundary_regions is None
+                else list(self.allowed_boundary_regions)
+            ),
+            "windows": len(self.refs),
+            "region_window_counts": region_counts,
+            **coverage,
+        }
 
     def _gripper_transition_boundary_raw(
         self,
@@ -179,8 +282,11 @@ class ObservedStateWindowDataset(Dataset):
         else:
             previous_index = int(action_start) - 1
             if previous_index < 0:
-                raise IndexError("previous-command gripper boundary precedes the episode")
-            value = actions_raw[previous_index]
+                if not self.config.causal_reset_padding or action_start != 0:
+                    raise IndexError("previous-command gripper boundary precedes the episode")
+                value = action_states_raw[0]
+            else:
+                value = actions_raw[previous_index]
         result = np.asarray(value, dtype=np.float32)
         if result.ndim != 1 or not np.isfinite(result).all():
             raise ValueError("gripper transition boundary must be one finite action row")
@@ -194,8 +300,10 @@ class ObservedStateWindowDataset(Dataset):
         *,
         gripper_indices: Sequence[int],
         event_threshold: float,
+        arm_motion: str = "adjacent_action_delta",
+        event_scope: str = "window_any",
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Precompute the formal sampling strata without image/cache reads."""
+        """Precompute source-semantic sampling strata without image/cache reads."""
 
         motion = np.empty((len(self.refs),), dtype=np.float32)
         event = np.zeros((len(self.refs),), dtype=bool)
@@ -213,6 +321,30 @@ class ObservedStateWindowDataset(Dataset):
             raise ValueError("gripper indices must be non-empty and unique")
         if float(event_threshold) < 0.0:
             raise ValueError("event_threshold must be non-negative")
+        if arm_motion not in {
+            "adjacent_action_delta",
+            "relative_command_magnitude",
+        }:
+            raise ValueError(
+                "arm_motion must be adjacent_action_delta or "
+                "relative_command_magnitude"
+            )
+        if event_scope not in {"window_any", "first_action", "disabled"}:
+            raise ValueError(
+                "event_scope must be window_any, first_action or disabled"
+            )
+        arm_indices = tuple(
+            index for index in range(action_dim) if index not in set(grip_indices)
+        )
+        if not arm_indices:
+            raise ValueError("sampling motion requires at least one arm coordinate")
+        normalized_zero = (
+            self.action_normalizer.encode(
+                np.zeros((1, action_dim), dtype=np.float32)
+            )[0]
+            if arm_motion == "relative_command_magnitude"
+            else None
+        )
         for index, ref in enumerate(self.refs):
             episode = self.episodes[ref.episode_idx]
             states_raw = episode.states_raw
@@ -242,11 +374,91 @@ class ObservedStateWindowDataset(Dataset):
             first_boundary[grip_indices] = gripper_boundary[grip_indices]
             boundary = np.concatenate((first_boundary[None], action[:-1]), axis=0)
             delta = action - boundary
-            motion[index] = float(np.sqrt(np.mean(np.square(delta), dtype=np.float64)))
+            if arm_motion == "relative_command_magnitude":
+                # CALVIN rel_actions already describe per-step TCP motion.
+                # Subtract the normalized representation of raw zero before
+                # scoring so a non-zero z-score mean cannot become fake motion.
+                assert normalized_zero is not None
+                centered_arm = action[:, arm_indices] - normalized_zero[None, arm_indices]
+                motion[index] = float(
+                    np.sqrt(np.mean(np.square(centered_arm), dtype=np.float64))
+                )
+            else:
+                # Preserve the historical Pen/RDT formula bit-for-bit.
+                motion[index] = float(
+                    np.sqrt(np.mean(np.square(delta), dtype=np.float64))
+                )
             raw_boundary = np.concatenate((gripper_boundary_raw[None], action_raw[:-1]), axis=0)
             gripper_delta = action_raw[:, grip_indices] - raw_boundary[:, grip_indices]
-            event[index] = bool(np.any(np.abs(gripper_delta) >= float(event_threshold)))
+            if event_scope == "disabled":
+                # LIBERO's continuous gripper remains part of every dense 7-D
+                # action target.  This switch disables only the sampler's
+                # dedicated event lane; it does not mask or drop supervision.
+                event[index] = False
+            elif event_scope == "first_action":
+                event[index] = bool(
+                    np.any(np.abs(gripper_delta[0]) >= float(event_threshold))
+                )
+            else:
+                event[index] = bool(np.any(np.abs(gripper_delta) >= float(event_threshold)))
         return motion, event
+
+    def training_release_first_signals(
+        self,
+        *,
+        gripper_indices: Sequence[int],
+        event_threshold: float,
+        open_direction: int = -1,
+    ) -> np.ndarray:
+        """Mark windows whose first target row opens the gripper.
+
+        This is a sampler-only signal.  It is intentionally computed from the
+        same previous-command boundary used by ``__getitem__`` and never
+        enters model inputs or the action normalizer.  LIBERO/robosuite uses
+        a negative command delta for opening, hence the default direction.
+        Keeping this directional lane separate from the historical
+        ``window_any`` event flag prevents close events from consuming the
+        release quota in the terminal tail.
+        """
+
+        if int(open_direction) not in {-1, 1}:
+            raise ValueError("open_direction must be -1 or +1")
+        if float(event_threshold) < 0.0:
+            raise ValueError("event_threshold must be non-negative")
+        action_dim = int(self.action_normalizer.minimum.shape[-1])
+        grip_indices: list[int] = []
+        for value in gripper_indices:
+            index = int(value)
+            if index < 0:
+                index += action_dim
+            if not 0 <= index < action_dim:
+                raise ValueError("gripper index is outside the action normalizer dimension")
+            grip_indices.append(index)
+        if not grip_indices or len(set(grip_indices)) != len(grip_indices):
+            raise ValueError("gripper indices must be non-empty and unique")
+        result = np.zeros((len(self.refs),), dtype=bool)
+        for index, ref in enumerate(self.refs):
+            episode = self.episodes[ref.episode_idx]
+            actions_raw = episode.actions_raw
+            action_states_raw = episode.action_states_raw
+            if actions_raw is None or action_states_raw is None:
+                raise ValueError("mainline policy episodes require action-state and action arrays")
+            action_start = int(ref.center + self.config.action_offset)
+            if action_start < 0 or action_start >= int(actions_raw.shape[0]):
+                raise IndexError("release-first target row is outside the episode")
+            boundary = self._gripper_transition_boundary_raw(
+                episode,
+                state_index=int(ref.center + self.config.state_offset),
+                action_start=action_start,
+            )
+            delta = (
+                np.asarray(actions_raw[action_start, grip_indices], dtype=np.float32)
+                - np.asarray(boundary[grip_indices], dtype=np.float32)
+            )
+            result[index] = bool(
+                np.any(float(open_direction) * delta >= float(event_threshold))
+            )
+        return result
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         ref = self.refs[int(index)]
@@ -284,8 +496,17 @@ class ObservedStateWindowDataset(Dataset):
             [center + cfg.image_offset + offset for offset in cfg.future_offsets],
             dtype=np.int64,
         )
+        if cfg.causal_reset_padding:
+            # Only pre-episode history is padded, exactly like CausalHistory.
+            # Never use action[0] as an unexecuted previous command.
+            history_state_indices = np.maximum(history_state_indices, 0)
+            history_image_indices = np.maximum(history_image_indices, 0)
         history_state_raw = np.asarray(states_raw[history_state_indices], dtype=np.float32)
-        executed_action_raw = np.asarray(actions_raw[executed_indices], dtype=np.float32)
+        if cfg.causal_reset_padding:
+            executed_action_raw = np.asarray(actions_raw[np.maximum(executed_indices, 0)], dtype=np.float32).copy()
+            executed_action_raw[executed_indices < 0] = action_states_raw[0]
+        else:
+            executed_action_raw = np.asarray(actions_raw[executed_indices], dtype=np.float32)
         future_action_raw = np.asarray(
             actions_raw[action_start : action_start + cfg.world_horizon],
             dtype=np.float32,
@@ -314,6 +535,10 @@ class ObservedStateWindowDataset(Dataset):
         return {
             "sample_index": torch.tensor(int(index), dtype=torch.long),
             "episode_idx": torch.tensor(ref.episode_idx, dtype=torch.long),
+            "center_index": torch.tensor(center, dtype=torch.long),
+            "boundary_region": torch.tensor(
+                BOUNDARY_REGION_TO_INDEX[ref.boundary_region], dtype=torch.long
+            ),
             "frame_progress": torch.tensor(
                 float(center + cfg.image_offset) / float(max(int(episode.length) - 1, 1)),
                 dtype=torch.float32,
@@ -362,15 +587,39 @@ class CachedTokenPolicyWindowDataset(Dataset):
     def __len__(self) -> int:
         return len(self.base)
 
+    @property
+    def boundary_regions(self) -> np.ndarray:
+        return self.base.boundary_regions
+
+    def boundary_summary(self) -> dict[str, object]:
+        return self.base.boundary_summary()
+
     def training_information_signals(
         self,
         *,
         gripper_indices: Sequence[int],
         event_threshold: float,
+        arm_motion: str = "adjacent_action_delta",
+        event_scope: str = "window_any",
     ) -> tuple[np.ndarray, np.ndarray]:
         return self.base.training_information_signals(
             gripper_indices=gripper_indices,
             event_threshold=event_threshold,
+            arm_motion=arm_motion,
+            event_scope=event_scope,
+        )
+
+    def training_release_first_signals(
+        self,
+        *,
+        gripper_indices: Sequence[int],
+        event_threshold: float,
+        open_direction: int = -1,
+    ) -> np.ndarray:
+        return self.base.training_release_first_signals(
+            gripper_indices=gripper_indices,
+            event_threshold=event_threshold,
+            open_direction=open_direction,
         )
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:

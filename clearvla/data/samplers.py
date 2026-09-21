@@ -7,6 +7,14 @@ from typing import Iterator, Sequence
 import numpy as np
 from torch.utils.data import Sampler
 
+from .window_boundaries import (
+    CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+    CAUSAL_PREFIX_V1,
+    PREFIX_REGION,
+    STRICT_REGION,
+    TAIL_REGION,
+)
+
 
 @dataclass(frozen=True)
 class EventBalancedSamplerConfig:
@@ -84,6 +92,7 @@ class InformationBalancedSamplerConfig:
     batches_per_epoch: int | None = None
     seed: int = 0
     drop_last: bool = False
+    event_scope: str = "window_any"
 
     def validate(self) -> None:
         if self.batch_size <= 0:
@@ -98,6 +107,12 @@ class InformationBalancedSamplerConfig:
             raise ValueError("motion_quantile must be in [0,1]")
         if self.batches_per_epoch is not None and self.batches_per_epoch <= 0:
             raise ValueError("batches_per_epoch must be positive when set")
+        if self.event_scope not in {"window_any", "first_action", "disabled"}:
+            raise ValueError(
+                "event_scope must be window_any, first_action or disabled"
+            )
+        if self.event_scope == "disabled" and self.event_fraction != 0.0:
+            raise ValueError("disabled event_scope requires event_fraction=0")
 
 
 class InformationBalancedBatchSampler(Sampler[list[int]]):
@@ -150,11 +165,15 @@ class InformationBalancedBatchSampler(Sampler[list[int]]):
         return math.ceil(len(self.all_indices) / self.config.batch_size)
 
     @property
-    def summary(self) -> dict[str, float | int]:
+    def summary(self) -> dict[str, float | int | str]:
+        uniform = min(max(int(round(self.config.batch_size * self.config.uniform_fraction)), 1), self.config.batch_size)
+        event_target = min(self.config.batch_size * self.config.event_fraction, self.config.batch_size - uniform)
+        scheduled = math.floor(len(self) * event_target + 1e-10) if self.informative else 0
         return {
             "windows": int(len(self.all_indices)),
             "motion_windows": int(len(self.motion_indices)),
             "event_windows": int(len(self.event_indices)),
+            "event_scope": self.config.event_scope,
             "motion_threshold": float(
                 np.quantile(self.motion_score, self.config.motion_quantile)
             ),
@@ -164,6 +183,9 @@ class InformationBalancedBatchSampler(Sampler[list[int]]):
                 1.0 - self.config.uniform_fraction - self.config.event_fraction
             ),
             "fallback_uniform": int(not self.informative),
+            "event_rows_per_epoch_scheduled": scheduled,
+            "effective_dedicated_event_fraction": scheduled / max(len(self) * self.config.batch_size, 1),
+            "event_fractional_carry": int(event_target != int(event_target)),
         }
 
     @staticmethod
@@ -217,12 +239,15 @@ class InformationBalancedBatchSampler(Sampler[list[int]]):
             return
 
         uniform_count = int(round(self.config.batch_size * self.config.uniform_fraction))
-        event_count = int(round(self.config.batch_size * self.config.event_fraction))
         uniform_count = min(max(uniform_count, 1), self.config.batch_size)
-        event_count = min(max(event_count, 0), self.config.batch_size - uniform_count)
-        motion_count = self.config.batch_size - uniform_count - event_count
+        event_target = min(self.config.batch_size * self.config.event_fraction, self.config.batch_size - uniform_count)
         cursor = 0
-        for _ in range(len(self)):
+        for batch_index in range(len(self)):
+            # Carry fractional event mass across batches. B4/default alternates
+            # 0/1 instead of round(0.5)==0 forever; integral B8 stays bit-exact.
+            event_count = (math.floor((batch_index + 1) * event_target + 1e-10)
+                           - math.floor(batch_index * event_target + 1e-10))
+            motion_count = self.config.batch_size - uniform_count - event_count
             if cursor + uniform_count > len(permutation):
                 rng.shuffle(permutation)
                 cursor = 0
@@ -246,6 +271,294 @@ class InformationBalancedBatchSampler(Sampler[list[int]]):
                 self.all_indices,
             )
             batch.extend(motion_rows)
+            rng.shuffle(batch)
+            yield batch
+
+
+class BoundaryAwareInformationBatchSampler(Sampler[list[int]]):
+    """Reserve exact prefix/tail slots around an information-balanced strict lane.
+
+    The epoch length is deliberately anchored to the historical strict-window
+    count divided by the *full* batch size.  Adding boundary supervision thus
+    changes neither optimizer steps per epoch nor schedule duration.  The
+    remaining strict slots retain the existing information sampler, while
+    prefix and tail pools traverse independent shuffled cycles.
+    """
+
+    def __init__(
+        self,
+        motion_score: np.ndarray,
+        is_event: np.ndarray,
+        boundary_region: Sequence[str],
+        *,
+        contract: str,
+        config: InformationBalancedSamplerConfig,
+        release_first_events: np.ndarray | None = None,
+        release_first_fraction: float = 0.0,
+    ) -> None:
+        config.validate()
+        score = np.asarray(motion_score, dtype=np.float64)
+        events = np.asarray(is_event, dtype=bool)
+        regions = np.asarray(tuple(str(value) for value in boundary_region), dtype=object)
+        if score.ndim != 1 or not len(score) or events.shape != score.shape:
+            raise ValueError("boundary sampler motion/event vectors must align")
+        if regions.shape != score.shape:
+            raise ValueError("boundary sampler regions must align with dataset windows")
+        if not np.isfinite(score).all() or (score < 0.0).any():
+            raise ValueError("boundary sampler motion scores must be finite and non-negative")
+        release_fraction = float(release_first_fraction)
+        if not np.isfinite(release_fraction) or not 0.0 <= release_fraction <= 1.0:
+            raise ValueError("release_first_fraction must be finite and in [0,1]")
+        if release_first_events is None:
+            release_flags = np.zeros((len(score),), dtype=bool)
+        else:
+            release_flags = np.asarray(release_first_events, dtype=bool)
+            if release_flags.shape != score.shape:
+                raise ValueError(
+                    "release-first event flags must align with boundary sampler windows"
+                )
+        selected_contract = str(contract)
+        if selected_contract == CAUSAL_PREFIX_V1:
+            quotas = {PREFIX_REGION: 1, TAIL_REGION: 0, STRICT_REGION: 7}
+        elif selected_contract == CAUSAL_PREFIX_TERMINAL_SUFFIX_V2:
+            quotas = {PREFIX_REGION: 1, TAIL_REGION: 1, STRICT_REGION: 6}
+        else:
+            raise ValueError(
+                "boundary-aware sampling requires a causal LIBERO boundary contract"
+            )
+        if config.batch_size != 8 or sum(quotas.values()) != config.batch_size:
+            raise ValueError("controlled LIBERO boundary sampling requires B8")
+        pools = {
+            name: np.flatnonzero(regions == name).astype(np.int64, copy=False)
+            for name in (PREFIX_REGION, STRICT_REGION, TAIL_REGION)
+        }
+        for name, quota in quotas.items():
+            if quota and len(pools[name]) < quota:
+                raise ValueError(
+                    f"boundary sampler region {name!r} has {len(pools[name])} rows, "
+                    f"fewer than its per-batch quota {quota}"
+                )
+        strict_pool = pools[STRICT_REGION]
+        # The historical boundary sampler used the strict-window count as its
+        # epoch length.  That is intentionally retained when no override is
+        # present so old runs replay identically.  A formal full-coverage run
+        # may explicitly request the complete dataset-window budget; this is
+        # a sampling control, not an implicit change to the boundary quotas.
+        if config.batches_per_epoch is None:
+            batches = math.ceil(len(strict_pool) / config.batch_size)
+            epoch_length_reference = "ceil(strict_window_count/full_batch_size)"
+        else:
+            batches = int(config.batches_per_epoch)
+            epoch_length_reference = "explicit_configured_batches_per_epoch"
+        if batches <= 0:
+            raise ValueError("boundary sampler has no strict baseline windows")
+        strict_config = InformationBalancedSamplerConfig(
+            batch_size=quotas[STRICT_REGION],
+            uniform_fraction=config.uniform_fraction,
+            event_fraction=config.event_fraction,
+            motion_quantile=config.motion_quantile,
+            batches_per_epoch=batches,
+            seed=config.seed,
+            drop_last=False,
+            event_scope=config.event_scope,
+        )
+        self.contract = selected_contract
+        self.config = config
+        self.quotas = quotas
+        self.pools = pools
+        self.release_first_fraction = release_fraction
+        self.release_first_pool = np.intersect1d(
+            pools[TAIL_REGION],
+            np.flatnonzero(release_flags).astype(np.int64, copy=False),
+            assume_unique=True,
+        )
+        self.non_release_tail_pool = np.setdiff1d(
+            pools[TAIL_REGION],
+            self.release_first_pool,
+            assume_unique=True,
+        )
+        self.strict_sampler = InformationBalancedBatchSampler(
+            score[strict_pool],
+            events[strict_pool],
+            strict_config,
+        )
+        self.epoch = 0
+        self.batches_per_epoch = int(batches)
+        self.epoch_length_reference = epoch_length_reference
+
+    def set_epoch(self, epoch: int) -> None:
+        if epoch < 0:
+            raise ValueError("epoch must be non-negative")
+        self.epoch = int(epoch)
+        self.strict_sampler.set_epoch(epoch)
+
+    def __len__(self) -> int:
+        return self.batches_per_epoch
+
+    @property
+    def summary(self) -> dict[str, object]:
+        release_target = self.quotas[TAIL_REGION] * self.release_first_fraction
+        release_scheduled = (
+            math.floor(len(self) * release_target + 1e-10)
+            if len(self.release_first_pool)
+            else 0
+        )
+        return {
+            "schema": "clearvla-boundary-aware-information-sampler-v2",
+            "contract": self.contract,
+            "batch_size": int(self.config.batch_size),
+            "batches_per_epoch": len(self),
+            "epoch_length_reference": self.epoch_length_reference,
+            "region_window_counts": {
+                name: int(len(pool)) for name, pool in self.pools.items()
+            },
+            "region_quota_per_batch": dict(self.quotas),
+            "region_rows_per_epoch": {
+                name: int(quota * len(self)) for name, quota in self.quotas.items()
+            },
+            "release_first_action_fraction": float(self.release_first_fraction),
+            "release_first_action_windows": int(len(self.release_first_pool)),
+            "release_first_action_rows_per_epoch_scheduled": int(release_scheduled),
+            "release_first_action_lane": (
+                "terminal_tail_quota"
+                if self.release_first_fraction > 0.0 and len(self.release_first_pool)
+                else "disabled_or_empty"
+            ),
+            "strict_information_sampling": self.strict_sampler.summary,
+            "prefix_tail_cycle_replacement": "only_after_full_region_cycle",
+            "within_batch_duplicates": False,
+        }
+
+    @staticmethod
+    def _draw_cycle(
+        rng: np.random.Generator,
+        pool: np.ndarray,
+        permutation: np.ndarray,
+        cursor: int,
+        count: int,
+    ) -> tuple[list[int], np.ndarray, int]:
+        if count <= 0:
+            return [], permutation, cursor
+        if len(pool) < count:
+            raise ValueError("boundary region pool is smaller than its batch quota")
+        if cursor + count > len(permutation):
+            permutation = pool.copy()
+            rng.shuffle(permutation)
+            cursor = 0
+        rows = [int(value) for value in permutation[cursor : cursor + count]]
+        return rows, permutation, cursor + count
+
+    def __iter__(self) -> Iterator[list[int]]:
+        rng = np.random.default_rng(self.config.seed + self.epoch * 1_000_003 + 79_019)
+        permutations = {
+            name: pool.copy() for name, pool in self.pools.items()
+        }
+        cursors = {name: 0 for name in self.pools}
+        for values in permutations.values():
+            rng.shuffle(values)
+
+        release_permutation = self.release_first_pool.copy()
+        release_cursor = 0
+        non_release_tail_permutation = self.non_release_tail_pool.copy()
+        non_release_tail_cursor = 0
+        if len(release_permutation):
+            rng.shuffle(release_permutation)
+        if len(non_release_tail_permutation):
+            rng.shuffle(non_release_tail_permutation)
+
+        strict_pool = self.pools[STRICT_REGION]
+        if self.strict_sampler.informative:
+            strict_batches: Iterator[list[int]] = iter(self.strict_sampler)
+        else:
+            # The ordinary sampler intentionally emits one exact traversal when
+            # all scores are indistinguishable.  This controlled wrapper still
+            # needs the fixed historical number of batches, so cycle the
+            # strict pool explicitly in that degenerate case.
+            strict_batches = iter(())
+        release_target = self.quotas[TAIL_REGION] * self.release_first_fraction
+        for _batch_index in range(len(self)):
+            if self.strict_sampler.informative:
+                strict_local = next(strict_batches)
+                strict_rows = [int(strict_pool[index]) for index in strict_local]
+            else:
+                strict_rows, permutations[STRICT_REGION], cursors[STRICT_REGION] = (
+                    self._draw_cycle(
+                        rng,
+                        strict_pool,
+                        permutations[STRICT_REGION],
+                        cursors[STRICT_REGION],
+                        self.quotas[STRICT_REGION],
+                    )
+                )
+            batch = list(strict_rows)
+            # Prefix remains a plain causal-reset cycle.  For the terminal
+            # tail, optionally spend a deterministic fraction of the quota on
+            # a directional opening transition—the exact row receding-horizon
+            # deployment executes next.  The fallback preserves the ordinary
+            # tail cycle when a split has no release rows.
+            prefix_rows, permutations[PREFIX_REGION], cursors[PREFIX_REGION] = (
+                self._draw_cycle(
+                    rng,
+                    self.pools[PREFIX_REGION],
+                    permutations[PREFIX_REGION],
+                    cursors[PREFIX_REGION],
+                    self.quotas[PREFIX_REGION],
+                )
+            )
+            batch.extend(prefix_rows)
+            release_count = (
+                math.floor((_batch_index + 1) * release_target + 1e-10)
+                - math.floor(_batch_index * release_target + 1e-10)
+            )
+            if not len(self.release_first_pool):
+                release_count = 0
+            tail_count = self.quotas[TAIL_REGION] - release_count
+            tail_rows: list[int] = []
+            if release_count:
+                tail_rows, release_permutation, release_cursor = self._draw_cycle(
+                    rng,
+                    self.release_first_pool,
+                    release_permutation,
+                    release_cursor,
+                    release_count,
+                )
+            if tail_count:
+                normal_pool = (
+                    self.non_release_tail_pool
+                    if release_count and len(self.non_release_tail_pool) >= tail_count
+                    else self.pools[TAIL_REGION]
+                )
+                normal_permutation = (
+                    non_release_tail_permutation
+                    if normal_pool is self.non_release_tail_pool
+                    else permutations[TAIL_REGION]
+                )
+                normal_cursor = (
+                    non_release_tail_cursor
+                    if normal_pool is self.non_release_tail_pool
+                    else cursors[TAIL_REGION]
+                )
+                normal_rows, normal_permutation, normal_cursor = self._draw_cycle(
+                    rng,
+                    normal_pool,
+                    normal_permutation,
+                    normal_cursor,
+                    tail_count,
+                )
+                tail_rows.extend(normal_rows)
+                if normal_pool is self.non_release_tail_pool:
+                    non_release_tail_permutation, non_release_tail_cursor = (
+                        normal_permutation,
+                        normal_cursor,
+                    )
+                else:
+                    permutations[TAIL_REGION], cursors[TAIL_REGION] = (
+                        normal_permutation,
+                        normal_cursor,
+                    )
+            batch.extend(tail_rows)
+            if len(batch) != self.config.batch_size or len(set(batch)) != len(batch):
+                raise AssertionError("boundary-aware sampler violated its B8 quota/uniqueness")
             rng.shuffle(batch)
             yield batch
 
@@ -507,6 +820,51 @@ class TaskStratifiedBatchSampler(Sampler[list[int]]):
             },
             "batch_size": self.batch_size,
             "batches": len(self),
+        }
+
+    def __iter__(self) -> Iterator[list[int]]:
+        for start in range(0, len(self.order), self.batch_size):
+            yield list(self.order[start : start + self.batch_size])
+
+
+class EvenlySpacedPanelBatchSampler(Sampler[list[int]]):
+    """Bound one read-only panel while covering its complete ordered pool.
+
+    Prefix and terminal-tail validation pools are short but still expensive at
+    deploy-time ODE sampling.  Selecting evenly spaced rows avoids measuring
+    only the first validation episode while keeping the panel to a fixed,
+    explicitly serialized number of batches.
+    """
+
+    def __init__(self, length: int, *, batch_size: int, max_batches: int) -> None:
+        if int(length) <= 0 or int(batch_size) <= 0 or int(max_batches) <= 0:
+            raise ValueError("panel length, batch size and max batches must be positive")
+        self.source_rows = int(length)
+        self.batch_size = int(batch_size)
+        self.max_batches = int(max_batches)
+        selected_count = min(self.source_rows, self.batch_size * self.max_batches)
+        positions = np.linspace(
+            0,
+            self.source_rows - 1,
+            num=selected_count,
+            dtype=np.int64,
+        )
+        if len(np.unique(positions)) != selected_count:
+            raise AssertionError("evenly spaced panel selection produced duplicates")
+        self.order = tuple(int(value) for value in positions)
+
+    def __len__(self) -> int:
+        return math.ceil(len(self.order) / self.batch_size)
+
+    @property
+    def summary(self) -> dict[str, object]:
+        return {
+            "schema": "clearvla-evenly-spaced-validation-panel-v1",
+            "source_rows": self.source_rows,
+            "selected_rows": len(self.order),
+            "batch_size": self.batch_size,
+            "batches": len(self),
+            "selection": "inclusive_linspace_over_ordered_dataset",
         }
 
     def __iter__(self) -> Iterator[list[int]]:

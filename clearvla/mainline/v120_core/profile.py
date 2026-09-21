@@ -153,7 +153,10 @@ def build_v120_visual_config(mainline_config: Any) -> V39PolicyConfig:
         target_future_count=int(dims.future_supports),
         action_basis_tokens=int(dims.action_basis_tokens),
         goal_language_dim=int(dims.goal_token_dim),
-        arm_flow_mode=str(mainline_config.bottom.arm_flow_mode),
+        # Outlet source semantics must never replace the restored V120 core
+        # representation.  Every mainline outlet enters the same established
+        # value/adjacent-difference arm field.
+        arm_flow_mode="legacy_independent",
         gripper_output_mode=str(mainline_config.bottom.gripper_output_mode),
         gripper_field_dim=int(mainline_config.bottom.gripper_field_dim),
         physical_decode_delta_blend=float(

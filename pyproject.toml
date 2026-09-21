@@ -17,10 +17,19 @@ analysis = [
 ]
 reference-models = [
   "diffusers>=0.30,<1",
+  "sentencepiece>=0.2,<1",
   "transformers>=4.45,<5",
 ]
 vision = [
   "opencv-python-headless>=4.9,<5",
+]
+simulation = [
+  "gymnasium>=1.2,<2",
+  "mujoco>=3.12,<4",
+]
+simulation-maniskill = [
+  "gymnasium>=1.2,<2",
+  "mani-skill==3.0.1",
 ]
 
 [dependency-groups]

@@ -1,0 +1,13 @@
+{
+  "data": {
+    "output_dir": "runs/schema31_pen_bspine_arm_private_reader"
+  },
+  "bottom": {
+    "bspine_implementation": "fixed_bspline_arm_private_reader_v1",
+    "bspine_degree": 3,
+    "bspine_control_points": 12,
+    "bspine_basis_digest": "f4d169cdeab9606dfacb92abbbc71bc3dbb7a4abefb8ef5244bc411670caab34",
+    "bspine_spec_fingerprint": "bac76409d2f430da47930d4d851457de011bcf6809ad968590748ab8565026f7",
+    "bspine_action_group_mask": "11000"
+  }
+}

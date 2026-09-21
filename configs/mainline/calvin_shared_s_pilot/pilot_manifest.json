@@ -1,0 +1,35 @@
+{
+  "arms": [
+    "goal_history",
+    "history_only"
+  ],
+  "epochs": 5,
+  "expected_dataset": {
+    "action_normalizer_sha256": "238bf579046d39a34fd05234d333de52309cf605caae65d7d3cbdbfaeba5ed39",
+    "decoded_cache_identity": "a901d4ea861a0c8172d35ccecc8527febda8c901122f0dcb0851215cab7b0d5f",
+    "dino_cache_identity": "f0d595010d469ab35656542d8217fd8e687f233cbd281aca954b0726ac2c91f2",
+    "hdf5_glob": "*.hdf5",
+    "inventory_sha256": "4861ceb7c0215a79abdcb79862c495cda80707d0a0af56c48b9d2ff871f3daf5",
+    "raw_root": "/data/senwang/data/calvin/converted/abc_d_full",
+    "state_normalizer_sha256": "a31d7a6326854618ffb99685036c2060b6ec84146a1a6545ee139cb48c103678"
+  },
+  "expected_normalizers": {
+    "action_sha256": "238bf579046d39a34fd05234d333de52309cf605caae65d7d3cbdbfaeba5ed39",
+    "action_v120": "362c306c1a4d",
+    "state_sha256": "a31d7a6326854618ffb99685036c2060b6ec84146a1a6545ee139cb48c103678",
+    "state_v120": "7302f77e6831"
+  },
+  "expected_retained_steps": [
+    2000,
+    5000
+  ],
+  "factor": "goal innovation in S interval K query only",
+  "interpretation": "Fresh initialization with the current shared codec; not an exact resume or a controlled comparison with legacy V1/V2. Training reshuffles at each 1000-step short epoch. The same 64 evenly spaced validation batches are used for both arms.",
+  "retain_checkpoint_epochs": [
+    2,
+    5
+  ],
+  "schema": "clearvla-calvin-shared-s-pilot-v1",
+  "source_reference_commit": "635213d1b489c0ba14ebcf52c319cb333753b2b8",
+  "steps_per_short_epoch": 1000
+}

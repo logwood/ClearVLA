@@ -120,10 +120,24 @@ def _import_target(source_root: Path) -> dict[str, ModuleType]:
     return {key: importlib.import_module(name) for key, name in names.items()}
 
 
-def build_reduced_equivalence_config(modules: Mapping[str, ModuleType]) -> Any:
+def build_reduced_equivalence_config(
+    modules: Mapping[str, ModuleType],
+    *,
+    source_root: Path | None = None,
+    outlet_profile: str = "pen",
+) -> Any:
     """Return a small config with the exact production parameter-key topology."""
 
-    base = modules["config"].ExperimentConfig()
+    if outlet_profile == "pen":
+        base = modules["config"].ExperimentConfig()
+    elif outlet_profile == "rdt8":
+        if source_root is None:
+            raise ValueError("RDT-8 equivalence requires the target source root")
+        base = modules["config"].load_config(
+            source_root.resolve() / "configs/mainline/rdt_multitask8_data_v1.json"
+        )
+    else:
+        raise ValueError(f"unsupported equivalence outlet profile: {outlet_profile!r}")
     config = replace(
         base,
         dimensions=replace(
@@ -878,13 +892,18 @@ def capture(
     output_dir: Path,
     layout: str,
     seed: int = DEFAULT_SEED,
+    outlet_profile: str = "pen",
 ) -> None:
     if layout not in {"legacy", "modular"}:
         raise ValueError("layout must be legacy or modular")
     GOLDEN._configure_determinism(seed)
     payload = _load_fixture(fixture_path)
     modules = _import_target(source_root)
-    config = build_reduced_equivalence_config(modules)
+    config = build_reduced_equivalence_config(
+        modules,
+        source_root=source_root,
+        outlet_profile=outlet_profile,
+    )
     batch = _training_batch(modules, config, payload)
     _seed_all(_phase_seed(seed, "model-init"))
     init_rng_before = _torch_state()
@@ -942,7 +961,8 @@ def capture(
     _capture_sidecars(builder, model, layout=layout)
     builder.add("behavior/identity_relations", identities.rows)
     metadata = {
-        "variant": CAPTURE_PROFILE,
+        "variant": f"{CAPTURE_PROFILE}:{outlet_profile}",
+        "outlet_profile": outlet_profile,
         "seed": int(seed),
         "fixture_sha256": _file_sha256(fixture_path),
         "time_points": list(TIME_POINTS),
@@ -991,6 +1011,11 @@ def _parser() -> argparse.ArgumentParser:
     capture_parser.add_argument("--fixture", type=Path, required=True)
     capture_parser.add_argument("--output-dir", type=Path, required=True)
     capture_parser.add_argument("--layout", choices=("legacy", "modular"), required=True)
+    capture_parser.add_argument(
+        "--outlet-profile",
+        choices=("pen", "rdt8"),
+        default="pen",
+    )
     capture_parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     compare_parser = subparsers.add_parser("compare", help="compare two captures exactly")
     compare_parser.add_argument("--baseline", type=Path, required=True)
@@ -1012,6 +1037,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=args.output_dir,
             layout=args.layout,
             seed=args.seed,
+            outlet_profile=args.outlet_profile,
         )
         return 0
     if args.command == "compare":

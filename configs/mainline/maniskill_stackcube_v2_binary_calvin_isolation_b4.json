@@ -1,0 +1,32 @@
+{
+  "bottom": {
+    "arm_flow_mode": "relative_command_adapter",
+    "gripper_output_mode": "maniskill_binary_command"
+  },
+  "data": {
+    "action_state_key": "action_state",
+    "data_profile": "maniskill_pd_ee_delta_pose_7d_v2",
+    "decoded_cache": "/data/senwang/data/clearvla_sim/stackcube_bc_20260910_v2/caches/decoded_336",
+    "dino_cache": "/data/senwang/data/clearvla_sim/stackcube_bc_20260910_v2/caches/dinov2_base_336",
+    "hdf5_glob": "*.hdf5",
+    "output_dir": "/data/senwang/clearvla/experiments/maniskill/20260915-stackcube-v2-binary-calvin-isolation-b4",
+    "raw_hdf5_root": "/data/senwang/data/clearvla_sim/stackcube_bc_20260910_v2/experts",
+    "sampling_gripper_event_threshold": 0.1,
+    "seed": 0,
+    "split_manifest": "/data/senwang/data/clearvla_sim/stackcube_bc_20260910_v2/prepared/splits.json",
+    "split_mode": "episode-manifest",
+    "state_key": "state",
+    "t5_condition": "/data/senwang/data/clearvla_sim/stackcube_bc_20260910_v2/language/t5_xxl.pt",
+    "test_episodes": 0,
+    "train_episodes": 0,
+    "val_episodes": 0
+  },
+  "objectives": {
+    "gripper_command": 0.1,
+    "gripper_event_threshold": 0.1
+  },
+  "optimizer": {
+    "batch_size": 4,
+    "epochs": 8
+  }
+}

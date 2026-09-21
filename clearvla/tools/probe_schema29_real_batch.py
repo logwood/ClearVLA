@@ -38,7 +38,6 @@ from clearvla.mainline.data.loading import load_mainline_data, to_training_batch
 from clearvla.mainline.interfaces import TrainingBatch
 from clearvla.mainline.manifest import ARCHITECTURE_MANIFEST
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy, PolicyStepOutput
-from clearvla.mainline.model.types import PhysicalActionCondition
 from clearvla.mainline.runtime.identity import v120_normalizer_fingerprint
 from clearvla.mainline.runtime.numerics import resolve_compute_dtype
 from clearvla.mainline.training.losses import (
@@ -52,6 +51,7 @@ REPORT_SCHEMA = "clearvla-schema29-real-batch-gradient-ab-v2"
 _ACTION_CONTRIBUTIONS = (
     "action_flow",
     "decoded_action",
+    "gripper_command",
     "gripper_trajectory",
     "motion",
     "smooth_delta",
@@ -243,6 +243,22 @@ def _named_owner_parameters(
             )
         ),
     }
+    command_head = (
+        model.execution_bottom.decoder.terminal_controller.optional_command_head
+    )
+    if model.outlet_adapter.is_binary_command != (command_head is not None):
+        raise RuntimeError(
+            "outlet binary-command selection and command-head ownership disagree"
+        )
+    if command_head is not None:
+        command_parameter_ids = {
+            id(parameter) for parameter in command_head.parameters()
+        }
+        owners["command_head"] = tuple(
+            (name, parameter)
+            for name, parameter in named
+            if id(parameter) in command_parameter_ids
+        )
     if any(not values for values in owners.values()):
         raise RuntimeError("active bottom head parameter ownership is incomplete")
     ids = [id(parameter) for values in owners.values() for _, parameter in values]
@@ -349,14 +365,15 @@ def _vjp_report(
         name: tuple(parameter for _, parameter in values)
         for name, values in owners.items()
     }
+    owner_order = tuple(owner_parameters)
     ordered_parameters = tuple(
         parameter
-        for name in ("velocity_output", "gripper_gate", "motion_head")
+        for name in owner_order
         for parameter in owner_parameters[name]
     )
     owner_slices: dict[str, slice] = {}
     start = 0
-    for name in ("velocity_output", "gripper_gate", "motion_head"):
+    for name in owner_order:
         end = start + len(owner_parameters[name])
         owner_slices[name] = slice(start, end)
         start = end
@@ -378,17 +395,8 @@ def _vjp_report(
             )
         else:
             gradients = tuple(None for _ in targets)
-        rows[name] = {
+        row = {
             "loss_value": float(loss.detach().float()),
-            "velocity_output_parameter_gradient_l2": _gradient_l2(
-                gradients[owner_slices["velocity_output"]]
-            ),
-            "gripper_gate_parameter_gradient_l2": _gradient_l2(
-                gradients[owner_slices["gripper_gate"]]
-            ),
-            "motion_head_parameter_gradient_l2": _gradient_l2(
-                gradients[owner_slices["motion_head"]]
-            ),
             "physical_velocity_gradient_rms": _gradient_rms(
                 gradients[activation_start]
             ),
@@ -396,6 +404,15 @@ def _vjp_report(
                 gradients[activation_start + 1]
             ),
         }
+        row.update(
+            {
+                f"{owner_name}_parameter_gradient_l2": _gradient_l2(
+                    gradients[owner_slices[owner_name]]
+                )
+                for owner_name in owner_order
+            }
+        )
+        rows[name] = row
 
     total_name, total_loss = surfaces[-1]
     if total_loss.ndim != 0:
@@ -431,17 +448,8 @@ def _vjp_report(
             (parameter_gradients[index] for index in indices),
         )
 
-    rows[total_name] = {
+    total_row = {
         "loss_value": float(total_loss.detach().float()),
-        "velocity_output_parameter_gradient_l2": float(
-            selected_stats(owners["velocity_output"])["gradient_l2"]
-        ),
-        "gripper_gate_parameter_gradient_l2": float(
-            selected_stats(owners["gripper_gate"])["gradient_l2"]
-        ),
-        "motion_head_parameter_gradient_l2": float(
-            selected_stats(owners["motion_head"])["gradient_l2"]
-        ),
         "physical_velocity_gradient_rms": _gradient_rms(
             activation_gradients[0]
         ),
@@ -449,6 +457,15 @@ def _vjp_report(
             activation_gradients[1]
         ),
     }
+    total_row.update(
+        {
+            f"{owner_name}_parameter_gradient_l2": float(
+                selected_stats(owners[owner_name])["gradient_l2"]
+            )
+            for owner_name in owner_order
+        }
+    )
+    rows[total_name] = total_row
     role_names = sorted({parameter_role(name) for name, _ in trainable_parameters})
     role_stats = {
         role: selected_stats(
@@ -839,14 +856,18 @@ def run_schema29_real_batch_probe(
                                 dtype=flow_state.noisy_physical.dtype
                             )
                         )
-                        pass0_clean_action = model.outlet_adapter.decode(
+                        pass0_outlet = model.outlet_adapter.finalize(
                             pass0_clean_physical,
                             cache0.history.action_state,
                             codec_gripper_boundary=cache0.history.codec_gripper_boundary,
-                        ).detach()
-                        pass0_condition = PhysicalActionCondition.from_horizon_action(
-                            pass0_clean_action,
-                            cache0.history.action_state.detach(),
+                            command_logits=pass0_output.bottom.gripper_command_logits,
+                        )
+                        pass0_clean_action = pass0_outlet.deployed_action.detach()
+                        pass0_condition = (
+                            model.outlet_adapter.world_condition_from_horizon_action(
+                                pass0_outlet.world_condition_action.detach(),
+                                cache0.history.action_state.detach(),
+                            )
                         )
                         pass0_velocity_dtype = str(
                             pass0_output.bottom.physical_velocity.dtype
@@ -937,6 +958,47 @@ def run_schema29_real_batch_probe(
         float(motion0["motion_head_parameter_gradient_l2"]),
         float(motion1["motion_head_parameter_gradient_l2"]),
     )
+    binary_gripper_contract: dict[str, object] = {
+        "enabled": model.outlet_adapter.is_binary_command,
+        "command_head_present": "command_head" in owners,
+    }
+    if model.outlet_adapter.is_binary_command:
+        command0 = report0["losses_and_vjps"]["contrib_gripper_command"]
+        command1 = report1["losses_and_vjps"]["contrib_gripper_command"]
+        if not isinstance(command0, Mapping) or not isinstance(command1, Mapping):
+            raise RuntimeError("gripper-command VJP report is malformed")
+        command_gradients = (
+            float(command0["command_head_parameter_gradient_l2"]),
+            float(command1["command_head_parameter_gradient_l2"]),
+        )
+        if any(not np.isfinite(value) or value <= 0.0 for value in command_gradients):
+            raise RuntimeError(
+                "CALVIN gripper-command loss lost its finite nonzero command-head VJP"
+            )
+        compatibility_gradients = (
+            float(action_flow0["gripper_gate_parameter_gradient_l2"]),
+            float(action_flow1["gripper_gate_parameter_gradient_l2"]),
+        )
+        binary_gripper_contract.update(
+            {
+                "command_loss_to_command_head": _relative_decision(
+                    *command_gradients
+                ),
+                "command_head_gradient_l2": {
+                    "cache0_single": command_gradients[0],
+                    "cache1_self_conditioned": command_gradients[1],
+                },
+                "action_flow_to_compatibility_gripper_gate": {
+                    "cache0_single": compatibility_gradients[0],
+                    "cache1_self_conditioned": compatibility_gradients[1],
+                    "classification": (
+                        "expected_zero_binary_compatibility_path"
+                        if compatibility_gradients == (0.0, 0.0)
+                        else "nonzero_requires_interpretation"
+                    ),
+                },
+            }
+        )
     if report0["dtypes"] != report1["dtypes"]:
         raise RuntimeError("cache0/cache1 formal boundaries changed dtype")
     total_owner0 = report0["total_owner_vjps"]
@@ -1016,6 +1078,7 @@ def run_schema29_real_batch_probe(
         "relative_decision": {
             "action_flow_to_velocity_output_layers": velocity_decision,
             "motion_loss_to_motion_head": motion_decision,
+            "binary_gripper_contract": binary_gripper_contract,
             "total_loss_owners": total_owner_decisions,
             "scope": (
                 "relative first-batch attribution only; this does not claim "
@@ -1109,6 +1172,7 @@ def main() -> None:
         shuffle=False,
     )
     model = ClearVLAMainlinePolicy(config).to(device)
+    model.configure_action_normalizer(bundle.action_normalizer)
     raw_batch = next(iter(train_loader))
     batch = to_training_batch(
         raw_batch,

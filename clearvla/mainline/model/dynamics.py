@@ -20,6 +20,8 @@ from .types import (
     ObjectFactSet,
     ObjectWorldBelief,
     PhysicalActionCondition,
+    PhysicalActionSequenceCondition,
+    WorldActionCondition,
 )
 
 
@@ -79,6 +81,7 @@ class _ObjectIntervalBlock(nn.Module):
         causal_interval: bool,
         typed: Literal[False] = False,
         collect_diagnostics: bool = False,
+        object_support: Tensor | None = None,
     ) -> Tensor: ...
 
     @overload
@@ -89,6 +92,7 @@ class _ObjectIntervalBlock(nn.Module):
         causal_interval: bool,
         typed: Literal[True],
         collect_diagnostics: bool = False,
+        object_support: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]: ...
 
     def forward(
@@ -98,19 +102,56 @@ class _ObjectIntervalBlock(nn.Module):
         causal_interval: bool,
         typed: bool = False,
         collect_diagnostics: bool = False,
+        object_support: Tensor | None = None,
     ) -> Tensor | tuple[Tensor, dict[str, Tensor]]:
         if typed:
             return self.forward_typed(
                 value,
                 causal_interval=causal_interval,
                 collect_diagnostics=collect_diagnostics,
+                object_support=object_support,
             )
         batch, intervals, objects, hidden = value.shape
+        support: Tensor | None = None
+        key_padding_mask: Tensor | None = None
+        if object_support is not None:
+            if object_support.ndim != 2 or tuple(object_support.shape) != (
+                batch,
+                objects,
+            ):
+                raise ValueError("W object support must be [B,K]")
+            support = object_support.to(device=value.device, dtype=torch.bool)
+            # Quarantine invalid K rows before normalization and before the
+            # object-axis reduction.  A dummy zero key is unmasked for an
+            # all-invalid batch row because PyTorch MHA otherwise returns NaN.
+            value = torch.where(
+                support[:, None, :, None],
+                value,
+                torch.zeros_like(value),
+            )
+            key_padding_mask = (~support)[:, None, :].expand(
+                -1, intervals, -1
+            ).reshape(batch * intervals, objects)
+            all_invalid = (~support.any(dim=-1)).repeat_interleave(intervals)
+            key_padding_mask = key_padding_mask.clone()
+            key_padding_mask[:, 0] = key_padding_mask[:, 0] & ~all_invalid
         object_view = value.reshape(batch * intervals, objects, hidden)
         normalized = self.object_norm(object_view)
-        update, _ = self.object_attention(normalized, normalized, normalized, need_weights=False)
+        update, _ = self.object_attention(
+            normalized,
+            normalized,
+            normalized,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
         update, _ = smooth_rms_contract(update, 0.35)
         value = value + update.reshape_as(value)
+        if support is not None:
+            value = torch.where(
+                support[:, None, :, None],
+                value,
+                torch.zeros_like(value),
+            )
         interval_view = value.transpose(1, 2).reshape(batch * objects, intervals, hidden)
         normalized = self.interval_norm(interval_view)
         mask = (
@@ -131,7 +172,14 @@ class _ObjectIntervalBlock(nn.Module):
         update, _ = smooth_rms_contract(update, 0.35)
         value = value + update.reshape(batch, objects, intervals, hidden).transpose(1, 2)
         ffn, _ = smooth_rms_contract(self.ffn(value), 0.35)
-        return value + ffn
+        value = value + ffn
+        if support is not None:
+            value = torch.where(
+                support[:, None, :, None],
+                value,
+                torch.zeros_like(value),
+            )
+        return value
 
     @staticmethod
     def _normalization_statistics(
@@ -173,10 +221,31 @@ class _ObjectIntervalBlock(nn.Module):
         *,
         causal_interval: bool,
         collect_diagnostics: bool,
+        object_support: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Run one typed W block without changing the generic W operator."""
 
         batch, intervals, objects, hidden = value.shape
+        support: Tensor | None = None
+        key_padding_mask: Tensor | None = None
+        if object_support is not None:
+            if object_support.ndim != 2 or tuple(object_support.shape) != (
+                batch,
+                objects,
+            ):
+                raise ValueError("W object support must be [B,K]")
+            support = object_support.to(device=value.device, dtype=torch.bool)
+            value = torch.where(
+                support[:, None, :, None],
+                value,
+                torch.zeros_like(value),
+            )
+            key_padding_mask = (~support)[:, None, :].expand(
+                -1, intervals, -1
+            ).reshape(batch * intervals, objects)
+            all_invalid = (~support.any(dim=-1)).repeat_interleave(intervals)
+            key_padding_mask = key_padding_mask.clone()
+            key_padding_mask[:, 0] = key_padding_mask[:, 0] & ~all_invalid
         statistics: list[tuple[Tensor, Tensor, Tensor]] = []
 
         object_view = value.reshape(batch * intervals, objects, hidden)
@@ -195,10 +264,17 @@ class _ObjectIntervalBlock(nn.Module):
             normalized,
             normalized,
             normalized,
+            key_padding_mask=key_padding_mask,
             need_weights=False,
         )
         update, _ = smooth_rms_contract(update, 0.35)
         value = value + update.reshape_as(value)
+        if support is not None:
+            value = torch.where(
+                support[:, None, :, None],
+                value,
+                torch.zeros_like(value),
+            )
 
         interval_view = value.transpose(1, 2).reshape(
             batch * objects, intervals, hidden
@@ -252,7 +328,14 @@ class _ObjectIntervalBlock(nn.Module):
             )
         ffn = self.ffn[3](self.ffn[2](self.ffn[1](normalized)))
         ffn, _ = smooth_rms_contract(ffn, 0.35)
-        return value + ffn, self._merge_normalization_statistics(
+        value = value + ffn
+        if support is not None:
+            value = torch.where(
+                support[:, None, :, None],
+                value,
+                torch.zeros_like(value),
+            )
+        return value, self._merge_normalization_statistics(
             tuple(statistics)
         )
 
@@ -261,6 +344,65 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     """W1 owns common/near; W2 reads W1 and writes far only."""
 
     TYPE_NAMES = ("semantic", "appearance", "geometry")
+    CAMERA_CONDITION_MODES = ("motion_prior_only", "coordinate_role_v1")
+    ACTION_CONDITION_MODES = ("interval_mean_v1", "sequence_prefix_v1")
+    SEQUENCE_PREFIX_ENDPOINTS = (8, 16, 24, 24)
+
+    @staticmethod
+    def _safe_object_validity(
+        facts: ObjectFactSet | ObjectWorldBelief,
+    ) -> Tensor:
+        """Return finite producer-owned object support in FP32."""
+
+        return torch.nan_to_num(
+            facts.validity.float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _supported_object_values(
+        value: Tensor,
+        validity: Tensor,
+        *,
+        object_dim: int = 1,
+    ) -> Tensor:
+        """Mask raw object rows before projections/normalization."""
+
+        support = validity[..., 0] > 0.0
+        axis = int(object_dim)
+        if axis < 0:
+            axis += value.ndim
+        if not 0 <= axis < value.ndim:
+            raise ValueError("W object support axis is out of range")
+        if support.ndim != 2:
+            raise ValueError("W object validity must be [B,K,1]")
+        shape = [1] * value.ndim
+        shape[0] = int(support.shape[0])
+        shape[axis] = int(support.shape[1])
+        mask = support.reshape(shape)
+        return torch.where(mask, value, torch.zeros_like(value))
+
+    @staticmethod
+    def _safe_camera_validity(
+        facts: ObjectFactSet | ObjectWorldBelief,
+        *,
+        dtype: torch.dtype = torch.float32,
+    ) -> Tensor:
+        """Return finite producer-owned camera validity.
+
+        Object validity is applied at the field boundary separately.  Keeping
+        the camera lane independent preserves its established fractional
+        scaling contract (for example, a half-valid camera remains exactly a
+        half-strength geometry carrier even when the object read is supplied
+        by a diagnostic fixture).
+        """
+
+        camera = torch.nan_to_num(
+            facts.camera_validity.to(dtype=dtype),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp(0.0, 1.0)
+        return camera
 
     def __init__(
         self,
@@ -271,6 +413,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         action_dim: int = 7,
         heads: int,
         normalization_floor: float = 0.25,
+        camera_names: tuple[str, ...] | None = None,
+        camera_condition_mode: str = "motion_prior_only",
+        action_condition_mode: str = "interval_mean_v1",
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -278,6 +423,28 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.normalization_floor = float(normalization_floor)
         if self.normalization_floor <= 0.0:
             raise ValueError("W typed normalization floor must be positive")
+        self.camera_condition_mode = str(camera_condition_mode)
+        if self.camera_condition_mode not in self.CAMERA_CONDITION_MODES:
+            raise ValueError(
+                "W camera condition mode must be motion_prior_only or "
+                "coordinate_role_v1"
+            )
+        self.camera_names = tuple(str(name) for name in (camera_names or ()))
+        if self.camera_condition_mode == "coordinate_role_v1":
+            if not self.camera_names or len(set(self.camera_names)) != len(
+                self.camera_names
+            ):
+                raise ValueError(
+                    "coordinate_role_v1 requires non-empty unique camera names"
+                )
+            if any(not name for name in self.camera_names):
+                raise ValueError("W camera role names must be non-empty")
+        self.action_condition_mode = str(action_condition_mode)
+        if self.action_condition_mode not in self.ACTION_CONDITION_MODES:
+            raise ValueError(
+                "W action condition mode must be interval_mean_v1 or "
+                "sequence_prefix_v1"
+            )
         self.object_content = nn.Linear(content_dim, hidden, bias=False)
         self.object_semantic = nn.Linear(route_dim, hidden, bias=False)
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
@@ -311,6 +478,23 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             )
         finally:
             torch.set_rng_state(retained_rng_state)
+        # The sequence mode reuses the trained physical row projection above.
+        # Only temporal order/time encoding is new.  A private generator keeps
+        # these opt-in draws from shifting any retained parameter initialization.
+        self.sequence_time_condition: nn.Linear | None = None
+        self.sequence_action_recurrence: nn.GRUCell | None = None
+        if self.action_condition_mode == "sequence_prefix_v1":
+            retained_rng_state = torch.get_rng_state()
+            sequence_generator = torch.Generator(device="cpu")
+            sequence_generator.manual_seed(
+                (int(torch.initial_seed()) ^ 0x535145513234) % (2**63 - 1)
+            )
+            try:
+                torch.set_rng_state(sequence_generator.get_state())
+                self.sequence_time_condition = nn.Linear(1, hidden, bias=False)
+                self.sequence_action_recurrence = nn.GRUCell(hidden, hidden)
+            finally:
+                torch.set_rng_state(retained_rng_state)
         self.interval_identity = nn.Parameter(torch.randn(1, 4, 1, hidden) * 0.02)
         self.w1 = _ObjectIntervalBlock(
             hidden,
@@ -354,6 +538,39 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     dtype=self.covariance_head.bias.dtype,
                 )
             )
+        # This opt-in branch is a component initialization, not an exact
+        # resume from a motion-prior-only checkpoint.  Preserve the inherited
+        # construction RNG and initialize the new condition to an exact
+        # identity so the first forward matches the accepted W graph.
+        self.camera_coordinate_role_condition: nn.Linear | None = None
+        if self.camera_condition_mode == "coordinate_role_v1":
+            retained_rng_state = torch.get_rng_state()
+            try:
+                self.camera_coordinate_role_condition = nn.Linear(
+                    2 + len(self.camera_names),
+                    hidden,
+                    bias=False,
+                )
+            finally:
+                torch.set_rng_state(retained_rng_state)
+            nn.init.zeros_(self.camera_coordinate_role_condition.weight)
+            stable_roles = {
+                name: index for index, name in enumerate(sorted(self.camera_names))
+            }
+            role_basis = torch.zeros(
+                len(self.camera_names),
+                len(self.camera_names),
+                dtype=torch.float32,
+            )
+            for camera_index, name in enumerate(self.camera_names):
+                role_basis[camera_index, stable_roles[name]] = 1.0
+        else:
+            role_basis = torch.empty(0, 0, dtype=torch.float32)
+        self.register_buffer(
+            "_camera_role_basis",
+            role_basis,
+            persistent=False,
+        )
 
     @staticmethod
     def _zero_preserving_condition(
@@ -388,10 +605,21 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         *,
         causal_interval: bool,
         collect_diagnostics: bool,
+        object_support: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         if value.ndim != 5 or int(value.shape[3]) != 3:
             raise ValueError("typed W state must be [B,I,K,3,H]")
         batch, intervals, objects, types, hidden = value.shape
+        typed_support: Tensor | None = None
+        if object_support is not None:
+            if object_support.ndim != 2 or tuple(object_support.shape) != (
+                batch,
+                objects,
+            ):
+                raise ValueError("typed W object support must be [B,K]")
+            typed_support = object_support[:, None, :].expand(
+                -1, types, -1
+            ).reshape(batch * types, objects)
         typed_batch = value.permute(0, 3, 1, 2, 4).reshape(
             batch * types, intervals, objects, hidden
         )
@@ -400,6 +628,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             causal_interval=causal_interval,
             typed=True,
             collect_diagnostics=collect_diagnostics,
+            object_support=typed_support,
         )
         if not isinstance(result, tuple):
             raise RuntimeError("typed W block did not return its diagnostic boundary")
@@ -451,31 +680,91 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     def _base(
         self,
         facts: ObjectFactSet | ObjectWorldBelief,
-        action: PhysicalActionCondition,
+        action: WorldActionCondition,
         *,
         collect_diagnostics: bool,
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         """Build a goal-invariant object transition from one physical action."""
 
         facts.validate()
-        action.validate(action_dim=int(self.physical_action_condition.in_features // 2))
-        objects = self.object_content(facts.content)
+        action_dim = int(self.physical_action_condition.in_features // 2)
+        if self.action_condition_mode == "interval_mean_v1":
+            if not isinstance(action, PhysicalActionCondition):
+                raise TypeError("interval-mean W requires PhysicalActionCondition")
+            action.validate(action_dim=action_dim)
+        else:
+            if not isinstance(action, PhysicalActionSequenceCondition):
+                raise TypeError(
+                    "sequence-prefix W requires PhysicalActionSequenceCondition"
+                )
+            action.validate(action_dim=action_dim)
+        validity = self._safe_object_validity(facts).to(device=facts.content.device)
+        safe_content = self._supported_object_values(facts.content, validity)
+        safe_transport_prior = self._supported_object_values(
+            facts.transport_prior.to(device=facts.content.device),
+            validity,
+        )
+        objects = self.object_content(safe_content)
         transport_prior = self.object_transport_prior(
-            facts.transport_prior.to(dtype=facts.content.dtype)
+            safe_transport_prior.to(dtype=facts.content.dtype)
         )
-        action_source = action.fingerprint.to(dtype=objects.dtype)
         gradient_metrics: dict[str, Tensor] = {}
-        if collect_diagnostics:
-            action_source = action_source.reshape_as(action_source)
-            register_gradient_rms_metric(
-                action_source,
-                gradient_metrics,
-                "gradient_tensor_w_physical_action_condition_rms",
+        if isinstance(action, PhysicalActionSequenceCondition):
+            if (
+                self.sequence_time_condition is None
+                or self.sequence_action_recurrence is None
+            ):
+                raise RuntimeError("sequence-prefix W encoder is not constructed")
+            action_source = action.physical_fingerprint.to(dtype=objects.dtype)
+            if collect_diagnostics:
+                action_source = action_source.reshape_as(action_source)
+                register_gradient_rms_metric(
+                    action_source,
+                    gradient_metrics,
+                    "gradient_tensor_w_physical_action_sequence_rms",
+                )
+            row_carrier, _ = smooth_rms_contract(
+                self.physical_action_condition(action_source),
+                0.35,
             )
-        action_carrier, _ = smooth_rms_contract(
-            self.physical_action_condition(action_source),
-            0.35,
-        )
+            row_time = (
+                action.row_end.to(device=objects.device, dtype=objects.dtype)
+                / float(action.horizon)
+            )
+            time_carrier = self.sequence_time_condition(row_time)
+            recurrent_input, _ = smooth_rms_contract(
+                row_carrier + time_carrier,
+                0.35,
+            )
+            recurrent_state = torch.zeros_like(recurrent_input[:, 0])
+            prefix_states: list[Tensor] = []
+            for row_index in range(action.horizon):
+                recurrent_state = self.sequence_action_recurrence(
+                    recurrent_input[:, row_index],
+                    recurrent_state,
+                )
+                prefix_states.append(recurrent_state)
+            action_carrier = torch.stack(
+                [
+                    prefix_states[prefix_end - 1]
+                    for prefix_end in self.SEQUENCE_PREFIX_ENDPOINTS
+                ],
+                dim=1,
+            )
+            action_carrier, _ = smooth_rms_contract(action_carrier, 0.35)
+        else:
+            action_source = action.fingerprint.to(dtype=objects.dtype)
+            if collect_diagnostics:
+                action_source = action_source.reshape_as(action_source)
+                register_gradient_rms_metric(
+                    action_source,
+                    gradient_metrics,
+                    "gradient_tensor_w_physical_action_condition_rms",
+                )
+            action_carrier, _ = smooth_rms_contract(
+                self.physical_action_condition(action_source),
+                0.35,
+            )
         if collect_diagnostics:
             # Keep the first trainable W carrier visible in the recovery
             # diagnostics.  In the single-pass training path this tensor is
@@ -496,10 +785,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         # goal-free facts.  The interval coordinate is a zero-mean,
         # zero-preserving modulation of the same physical owner; it cannot
         # create a typed value from a missing fact.
-        typed_sources = (
-            facts.semantic * facts.validity.to(dtype=facts.semantic.dtype),
-            facts.appearance * facts.validity.to(dtype=facts.appearance.dtype),
-            facts.geometry * facts.validity.to(dtype=facts.geometry.dtype),
+        typed_sources = tuple(
+            self._supported_object_values(source, validity)
+            * validity.to(dtype=source.dtype)
+            for source in (facts.semantic, facts.appearance, facts.geometry)
         )
         typed_source_views: list[Tensor] = []
         if collect_diagnostics:
@@ -543,20 +832,6 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             "object_w_coarse_hidden_direct_ingress": interval.new_zeros(
                 (), dtype=torch.float32
             ),
-            "object_w_physical_action_condition_rms": action.interval_action.detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_w_physical_action_delta_rms": action.interval_delta.detach()
-            .float()
-            .square()
-            .mean()
-            .sqrt(),
-            "object_w_physical_action_interval_variation": action.interval_action.detach()
-            .float()
-            .std(dim=1, unbiased=False)
-            .mean(),
             "object_w_physical_action_carrier_rms": action_carrier.detach()
             .float()
             .square()
@@ -569,6 +844,49 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .mean()
             .sqrt(),
         }
+        if isinstance(action, PhysicalActionSequenceCondition):
+            metrics.update(
+                {
+                    "object_w_physical_action_sequence_source_rms": action.source_action.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_physical_action_sequence_value_rms": action.canonical_value.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_physical_action_sequence_delta_rms": action.canonical_delta.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_physical_action_sequence_variation": action.canonical_value.detach()
+                    .float()
+                    .std(dim=1, unbiased=False)
+                    .mean(),
+                }
+            )
+        else:
+            metrics.update(
+                {
+                    "object_w_physical_action_condition_rms": action.interval_action.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_physical_action_delta_rms": action.interval_delta.detach()
+                    .float()
+                    .square()
+                    .mean()
+                    .sqrt(),
+                    "object_w_physical_action_interval_variation": action.interval_action.detach()
+                    .float()
+                    .std(dim=1, unbiased=False)
+                    .mean(),
+                }
+            )
         for type_index, name in enumerate(self.TYPE_NAMES):
             common = typed_common[..., type_index, :].detach().float()
             innovation = typed_interval[..., type_index, :].detach().float()
@@ -590,26 +908,109 @@ class ObjectFutureDynamicsCompiler(nn.Module):
 
         if typed_geometry.ndim not in (3, 4) or int(typed_geometry.shape[-1]) != self.hidden:
             raise ValueError("typed camera geometry must be [B,K,H] or [B,I,K,H]")
+        validity = self._safe_object_validity(facts).to(device=typed_geometry.device)
+        safe_geometry = self._supported_object_values(
+            typed_geometry,
+            validity,
+            object_dim=2 if typed_geometry.ndim == 4 else 1,
+        )
+        camera_validity = self._safe_camera_validity(
+            facts,
+            dtype=torch.float32,
+        ).to(device=typed_geometry.device)
+        # An invalid object can still carry a producer-side camera-valid bit in
+        # diagnostic fixtures.  Quarantine its camera transport before the
+        # zero-preserving modulation; otherwise ``0 * tanh(NaN)`` would make an
+        # otherwise empty geometry carrier non-finite.
+        object_camera_support = (
+            (camera_validity > 0.0)
+            & (validity[:, :, None, :] > 0.0)
+        )
+        safe_camera_transport = torch.where(
+            object_camera_support,
+            facts.camera_transport_prior.to(device=typed_geometry.device),
+            torch.zeros_like(
+                facts.camera_transport_prior.to(device=typed_geometry.device)
+            ),
+        )
         camera_context = self.object_transport_prior(
-            facts.camera_transport_prior.to(dtype=typed_geometry.dtype)
+            safe_camera_transport.to(dtype=typed_geometry.dtype)
+        )
+        camera_context = camera_context + self._camera_coordinate_role_context(
+            facts,
+            object_camera_support=object_camera_support,
+            dtype=typed_geometry.dtype,
+            device=typed_geometry.device,
         )
         cameras = int(camera_context.shape[2])
         if typed_geometry.ndim == 3:
             if tuple(typed_geometry.shape[:2]) != tuple(camera_context.shape[:2]):
                 raise ValueError("typed common geometry lost object identity")
-            carrier = typed_geometry[:, :, None].expand(-1, -1, cameras, -1)
+            carrier = safe_geometry[:, :, None].expand(-1, -1, cameras, -1)
             condition = camera_context
-            availability = facts.camera_validity
+            availability = camera_validity
         else:
             if tuple(typed_geometry.shape[:1] + typed_geometry.shape[2:3]) != tuple(
                 camera_context.shape[:2]
             ):
                 raise ValueError("typed interval geometry lost object identity")
-            carrier = typed_geometry[:, :, :, None].expand(-1, -1, -1, cameras, -1)
+            carrier = safe_geometry[:, :, :, None].expand(-1, -1, -1, cameras, -1)
             condition = camera_context[:, None].expand(-1, int(typed_geometry.shape[1]), -1, -1, -1)
-            availability = facts.camera_validity[:, None]
+            availability = camera_validity[:, None]
         conditioned, _ = self._zero_preserving_condition(carrier, condition)
         return conditioned * availability.to(dtype=conditioned.dtype)
+
+    def _camera_coordinate_role_context(
+        self,
+        facts: ObjectFactSet | ObjectWorldBelief,
+        *,
+        object_camera_support: Tensor,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor:
+        """Return a declared-role, current-coordinate W condition.
+
+        Coordinates remain image-plane facts; the stable role basis only
+        distinguishes their declared camera charts.  The shared projection
+        creates no transport value by itself because its output can only
+        modulate an existing producer-owned geometry carrier.
+        """
+
+        batch, objects, cameras = object_camera_support.shape[:3]
+        if self.camera_condition_mode == "motion_prior_only":
+            return torch.zeros(
+                batch,
+                objects,
+                cameras,
+                self.hidden,
+                device=device,
+                dtype=dtype,
+            )
+        if cameras != len(self.camera_names):
+            raise ValueError(
+                "W camera axis does not match the declared camera role order"
+            )
+        projection = self.camera_coordinate_role_condition
+        if projection is None:
+            raise RuntimeError("coordinate_role_v1 lost its condition projection")
+        coordinates = facts.camera_coordinates.to(device=device)
+        safe_coordinates = torch.where(
+            object_camera_support,
+            coordinates,
+            torch.zeros_like(coordinates),
+        )
+        role = self._camera_role_basis.to(device=device, dtype=dtype)
+        role = role[None, None].expand(batch, objects, -1, -1)
+        condition_input = torch.cat(
+            (safe_coordinates.to(dtype=dtype), role),
+            dim=-1,
+        )
+        context = projection(condition_input)
+        return torch.where(
+            object_camera_support,
+            context,
+            torch.zeros_like(context),
+        )
 
     def _field_with_diagnostics(
         self,
@@ -635,38 +1036,53 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         ):
             raise ValueError("W typed owner hidden width is invalid")
 
+        validity = self._safe_object_validity(facts).to(device=typed_common.device)
+        safe_typed_common = self._supported_object_values(typed_common, validity)
+        safe_typed_interval = self._supported_object_values(
+            typed_interval_innovation,
+            validity,
+            object_dim=2,
+        )
         semantic_common_state, _ = self._appearance_condition_semantic(
-            typed_common[..., 0, :],
-            typed_common[..., 1, :],
+            safe_typed_common[..., 0, :],
+            safe_typed_common[..., 1, :],
         )
         semantic_interval_state, _ = self._appearance_condition_semantic(
-            typed_interval_innovation[..., 0, :],
-            typed_interval_innovation[..., 1, :],
+            safe_typed_interval[..., 0, :],
+            safe_typed_interval[..., 1, :],
         )
         semantic_common = self.delta_head(semantic_common_state)
         semantic_innovation = self.delta_head(semantic_interval_state)
-        object_availability = facts.validity[:, None].to(dtype=semantic_innovation.dtype)
+        object_availability = validity[:, None].to(dtype=semantic_innovation.dtype)
         semantic_delta = (semantic_common[:, None] + semantic_innovation) * object_availability
 
         geometry_common = self._camera_geometry_carrier(
             facts,
-            typed_common[..., 2, :],
+            safe_typed_common[..., 2, :],
         )
         geometry_innovation = self._camera_geometry_carrier(
             facts,
-            typed_interval_innovation[..., 2, :],
+            safe_typed_interval[..., 2, :],
         )
         transport_common_pre_tanh = self.transport_head(geometry_common).float()
         transport_innovation_pre_tanh = self.transport_head(geometry_innovation).float()
         transport_common = 0.50 * torch.tanh(transport_common_pre_tanh)
         transport_innovation = 0.50 * torch.tanh(transport_innovation_pre_tanh)
-        camera_availability = facts.camera_validity[:, None].float()
+        base_camera_availability = self._safe_camera_validity(
+            facts,
+            dtype=torch.float32,
+        ).to(device=typed_interval_innovation.device)
+        camera_availability = base_camera_availability[:, None] * validity[:, None, :, None, :].to(
+            device=typed_interval_innovation.device,
+            dtype=torch.float32,
+        )
         transport = (transport_common[:, None] + transport_innovation) * camera_availability
         transport = transport.to(dtype=typed_interval_innovation.dtype)
 
         full_geometry = self._camera_geometry_carrier(
             facts,
-            typed_common[:, None, ..., 2, :] + typed_interval_innovation[..., 2, :],
+            safe_typed_common[:, None, ..., 2, :]
+            + safe_typed_interval[..., 2, :],
         )
         covariance_raw = self.covariance_head(full_geometry).float()
         covariance_xx = torch.nn.functional.softplus(covariance_raw[..., 0])
@@ -681,21 +1097,62 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             * camera_availability
         )
 
-        current_reference = facts.content.detach().to(dtype=semantic_delta.dtype)
+        current_reference = self._supported_object_values(
+            facts.content,
+            validity,
+        ).detach().to(dtype=semantic_delta.dtype)
+        base_camera_availability = self._safe_camera_validity(
+            facts,
+            dtype=torch.float32,
+        ).to(device=semantic_delta.device)
+        object_camera_availability = base_camera_availability * validity[:, :, None, :].to(
+            device=semantic_delta.device,
+            dtype=torch.float32,
+        )
+        camera_coordinates = facts.camera_coordinates.to(device=semantic_delta.device)
+        safe_camera_coordinates = torch.where(
+            object_camera_availability > 0.0,
+            camera_coordinates,
+            torch.zeros_like(camera_coordinates),
+        )
         field = FutureObjectDynamics(
             current_reference=current_reference,
             successor_content=current_reference[:, None] + semantic_delta,
             semantic_delta=semantic_delta,
             transport_mean=transport,
             transport_covariance=covariance,
-            chart_availability=facts.validity.float(),
-            log_chart_availability=facts.log_validity.float(),
-            camera_coordinates=facts.camera_coordinates.to(dtype=semantic_delta.dtype),
-            camera_chart_availability=facts.camera_validity.float(),
-            log_camera_chart_availability=facts.log_camera_validity.float(),
+            chart_availability=validity,
+            log_chart_availability=torch.nan_to_num(
+                facts.log_validity.float(), nan=0.0, posinf=0.0, neginf=0.0
+            ),
+            camera_coordinates=safe_camera_coordinates.to(dtype=semantic_delta.dtype),
+            camera_chart_availability=self._safe_camera_validity(facts),
+            log_camera_chart_availability=torch.nan_to_num(
+                facts.log_camera_validity.float(),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ),
         )
         if diagnostic_prefix is None:
             return field, {}
+        coordinate_role_context = self._camera_coordinate_role_context(
+            facts,
+            object_camera_support=(object_camera_availability > 0.0),
+            dtype=semantic_delta.dtype,
+            device=semantic_delta.device,
+        )
+        camera_condition_weight_rms = semantic_delta.new_zeros(
+            (), dtype=torch.float32
+        )
+        if self.camera_coordinate_role_condition is not None:
+            camera_condition_weight_rms = (
+                self.camera_coordinate_role_condition.weight.detach()
+                .float()
+                .square()
+                .mean()
+                .sqrt()
+            )
         saturation = torch.cat(
             (
                 transport_common_pre_tanh.detach().reshape(-1),
@@ -708,6 +1165,16 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .square()
             .mean()
             .sqrt(),
+            "object_w_camera_coordinate_role_mode_active": semantic_delta.new_tensor(
+                float(self.camera_condition_mode == "coordinate_role_v1"),
+                dtype=torch.float32,
+            ),
+            "object_w_camera_coordinate_role_weight_rms": (
+                camera_condition_weight_rms
+            ),
+            f"{diagnostic_prefix}_camera_coordinate_role_condition_rms": (
+                coordinate_role_context.detach().float().square().mean().sqrt()
+            ),
             f"{diagnostic_prefix}_transport_common_pre_tanh_rms": (
                 transport_common_pre_tanh.detach().square().mean().sqrt()
             ),
@@ -758,24 +1225,38 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self,
         *,
         facts: ObjectFactSet | ObjectWorldBelief,
-        action: PhysicalActionCondition,
+        action: WorldActionCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics | None, ObjectW1WorkingState, dict[str, Tensor]]:
         base, raw_common, raw_interval, base_metrics = self._base(
             facts, action, collect_diagnostics=collect_diagnostics
         )
-        near = self.w1(base[:, :2], causal_interval=True)
+        object_support = self._safe_object_validity(facts).detach()[..., 0] > 0.0
+        near = self.w1(
+            base[:, :2],
+            causal_interval=True,
+            object_support=object_support,
+        )
         common_batch, common_norm_metrics = self._run_typed_block(
             self.w1,
             raw_common[:, None],
             causal_interval=False,
             collect_diagnostics=collect_diagnostics,
+            object_support=object_support,
         )
         common_before = common_batch[:, 0]
-        common, common_modulation = self._zero_preserving_condition(
-            common_before,
-            near.mean(dim=1)[:, :, None, :].expand_as(common_before),
-        )
+        if isinstance(action, PhysicalActionSequenceCondition):
+            # A shared action-dependent common would let W1 interval 1's
+            # <=16-row prefix leak back into interval 0.  Keep common factual
+            # in sequence mode; the per-interval typed path remains action
+            # conditioned and causal below.
+            common = common_before
+            common_modulation = torch.zeros_like(common_before)
+        else:
+            common, common_modulation = self._zero_preserving_condition(
+                common_before,
+                near.mean(dim=1)[:, :, None, :].expand_as(common_before),
+            )
         near_context = (common[:, None] + near[:, :, :, None, :]).expand_as(raw_interval[:, :2])
         near_input, near_condition_modulation = self._zero_preserving_condition(
             raw_interval[:, :2],
@@ -786,6 +1267,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             near_input,
             causal_interval=True,
             collect_diagnostics=collect_diagnostics,
+            object_support=object_support,
         )
         field: FutureObjectDynamics | None = None
         metrics: dict[str, Tensor] = {}
@@ -867,7 +1349,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         )
         near_update, _ = smooth_rms_contract(near_update, 0.35)
         far = (far_query + near_update).reshape(batch, objects, 2, hidden).transpose(1, 2)
-        far = self.w2(far, causal_interval=True)
+        object_support = self._safe_object_validity(facts).detach()[..., 0] > 0.0
+        far = self.w2(
+            far,
+            causal_interval=True,
+            object_support=object_support,
+        )
 
         typed_far_query = w1_state.far_interval_innovation.permute(0, 2, 3, 1, 4).reshape(
             batch * objects * 3, 2, hidden
@@ -907,6 +1394,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             far_input,
             causal_interval=True,
             collect_diagnostics=collect_diagnostics,
+            object_support=object_support,
         )
         completed_innovation = torch.cat(
             (w1_state.near_interval_innovation, far_typed),

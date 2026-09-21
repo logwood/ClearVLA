@@ -14,7 +14,9 @@ from typing import Mapping, cast
 
 from .v120_core.bspine import (
     BSPINE0_IMPLEMENTATION,
+    BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
     BSPINE_ARM_ONLY_IMPLEMENTATION,
+    BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
     BSPINE_DISABLED_IMPLEMENTATION,
 )
 
@@ -148,6 +150,24 @@ ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
         )
     ),
 )
+ARM_COARSE_CONTEXT_BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
+    schema=BSPINE_CAPABILITY_SCHEMA,
+    components=ComponentABI(
+        bottom=(
+            ComponentABI().bottom
+            + "_parallel_fixed_bspline_arm_coarse_context_v1_cubic_k12_fp32_raw_detail_gripper"
+        )
+    ),
+)
+ARM_PRIVATE_READER_BSPINE_ARCHITECTURE_MANIFEST = ArchitectureManifest(
+    schema=BSPINE_CAPABILITY_SCHEMA,
+    components=ComponentABI(
+        bottom=(
+            ComponentABI().bottom
+            + "_parallel_fixed_bspline_arm_private_reader_v1_cubic_k12_fp32_raw_gripper_arm_private_correction"
+        )
+    ),
+)
 
 
 def architecture_manifest_for_bspine_implementation(
@@ -161,6 +181,10 @@ def architecture_manifest_for_bspine_implementation(
         return BSPINE_ARCHITECTURE_MANIFEST
     if str(implementation) == BSPINE_ARM_ONLY_IMPLEMENTATION:
         return ARM_ONLY_BSPINE_ARCHITECTURE_MANIFEST
+    if str(implementation) == BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION:
+        return ARM_COARSE_CONTEXT_BSPINE_ARCHITECTURE_MANIFEST
+    if str(implementation) == BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION:
+        return ARM_PRIVATE_READER_BSPINE_ARCHITECTURE_MANIFEST
     raise ValueError(f"unsupported B-spine implementation: {implementation!r}")
 
 

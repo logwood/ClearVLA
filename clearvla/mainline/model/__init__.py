@@ -5,6 +5,14 @@ single typed ingress into the retained bottom action model.
 """
 
 from .action_contract import BottomDecoderOutput, BottomOutput
+from .compiler import (
+    ObjectConsequenceState,
+    ObjectFutureEffectReader,
+    ObjectPolicyPlanCompiler,
+    ObjectPolicyPlanDeltaBank,
+    ObjectTypedEffect,
+    ZeroPreservingObjectConsequence,
+)
 from .component_contracts import (
     COMPONENT_ABI_REVISION,
     ComponentSelection,
@@ -28,14 +36,6 @@ from .components import (
     PolicyCompilerStage,
     TrainingTargetsStage,
     WorldStage,
-)
-from .compiler import (
-    ObjectConsequenceState,
-    ObjectFutureEffectReader,
-    ObjectPolicyPlanCompiler,
-    ObjectPolicyPlanDeltaBank,
-    ObjectTypedEffect,
-    ZeroPreservingObjectConsequence,
 )
 from .dynamics import ObjectFutureDynamicsCompiler, ObjectW1WorkingState
 from .grounding import DenseObjectGrounder
@@ -61,6 +61,7 @@ from .types import (
     DenseFactChart,
     FactualIntentDock,
     FactualPrecisionDock,
+    FlowStepContext,
     FutureObjectDynamics,
     FuturePlanRecognition,
     HistoryActionProposalState,
@@ -71,8 +72,10 @@ from .types import (
     ObjectWorldBelief,
     P2QueryDock,
     PhysicalActionCondition,
+    PhysicalActionSequenceCondition,
     PolicyIntentDock,
     StatelessIntentBundle,
+    WorldActionCondition,
 )
 
 __all__ = [
@@ -110,6 +113,7 @@ __all__ = [
     "LocalFactSet",
     "ObjectConsequenceState",
     "FactualPrecisionDock",
+    "FlowStepContext",
     "ObjectFactSet",
     "ObjectWorldBelief",
     "ObjectFutureDynamicsCompiler",
@@ -128,6 +132,7 @@ __all__ = [
     "PolicyCompileResult",
     "PolicyCompilerStage",
     "PhysicalActionCondition",
+    "PhysicalActionSequenceCondition",
     "ObservationEvidence",
     "OnlinePolicyCache",
     "OnlineTopContext",
@@ -143,4 +148,5 @@ __all__ = [
     "StatelessObjectIntentOrganizer",
     "ZeroPreservingObjectConsequence",
     "WorldStage",
+    "WorldActionCondition",
 ]
