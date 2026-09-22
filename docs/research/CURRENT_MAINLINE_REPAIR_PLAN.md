@@ -30,7 +30,7 @@ choices just to preserve old golden outputs.
 | M1b real-tail labels | Implemented candidate; validation recorded per commit | All labelled real current centers and independent action/state/visual support through loader, Teacher, auxiliary/formal losses and validation. Source files/caches and old defaults unchanged. |
 | M1c native/feature state | Implemented candidate; validation recorded per commit | One CALVIN rotation-column encoder for current/history/future/online; native statistics and seven-dimensional commands remain separate; explicit new ABI and checkpoint checks. |
 | M1d visual source time | Implemented candidate; verification recorded per commit | Source gaps, repeated frames, semantic/raw flow loss support, temporal/global G reads and future queries, S/W rates and Teacher duration use one observable clock. No claim about unprovided external controllers. |
-| M2 observation/G1 | Static source review started; redesign not implemented | Raw/DINO source clocks are repaired. G1 already retains the full coarse posterior, but G2 localization consumes moment-based centers; next change must preserve modes in the real candidate materializer, not add an unused copy. |
+| M2 observation/G1 | Implemented candidate; verification recorded per commit | Full FP32 G1 support in actual G2 candidate/value materialization; G3 observed-content quadrature and real per-candidate local P1 microgrids, explicit config/ABI. Deeper G2/G3 entity ownership remains M3/M4. |
 | M3 G2 | Not started | Entity-consistent attribute/localization refinement and bounded-error recovery/reassociation. |
 | M4 G3 + current Teacher identity | Not started | One entity state with per-camera support and causal association; update reconstruction and Teacher references together. |
 | M5 S/coarse | Interface adapted only | The history submodule is new; target/operation/progress decomposition, shared entity binding and recognizer supervision still require deep review. |
@@ -86,10 +86,22 @@ choices just to preserve old golden outputs.
 
 The production candidate continues to use the real current image at reset.
 A source-time support mask must never become a global visibility/success gate.
-M2 must consider how G1's full posterior is consumed by G2's actual resampler;
-retaining logits in a sidecar alone does not preserve mode information in the
-positions used for candidate values. Any next candidate-mode change must also
-review fine-count assumptions, P1/P2 reads, property support and Teacher.
+M2 now routes the full G1 parent measure into the real G2 sampler. Its
+consumer migration retains explicit camera/candidate axes through G3 observed
+content and P1 local patch quadrature, with mode-owned count and checkpoint
+validation. M3/M4 must not revert these paths to a barycenter-only read while
+unifying local attribute ownership and global/persistent entity identity.
+
+## M2 source and consumer map
+
+| Producer | Consumer | Contract |
+|---|---|---|
+| FP32 complete G1 logits | G2 real candidate sampler | Same camera support; no top-k or mean-location substitution. |
+| G2 bounded correction | Every retained candidate coordinate | Correct points individually; retain actual historical source query. |
+| Parent law + local evidence | G2 typed candidate and local-hypothesis reads | Integrate normalized parent probability, not candidate-count-dependent energy. |
+| Geometry candidate law | G3 observed DINO content | Read the content at support points before expectation; tiled exact value bandwidth. |
+| Actual candidate coordinates/RGB/detail | P1 real local microgrid | Local per-hypothesis 3x3 patches, masks and logit-space posterior conditioning. |
+| Explicit candidate-support selection | Factory, validation, deployment ABI | No silent N=49 assumptions, opaque fallback or old-checkpoint alias. |
 
 ## Review and publishing gates
 

@@ -376,6 +376,7 @@ class ModelDimensions:
 @dataclass(frozen=True)
 class ObservationConfig:
     source_time_mode: str = "fixed_history_steps_v1"
+    candidate_support_mode: str = "moment_local_v1"
     grid_size: int = 8
     local_hypotheses: int = 4
     feature_dim: int = 96
@@ -391,6 +392,8 @@ class ObservationConfig:
     microgrid_side: int = 3
 
     def validate(self) -> None:
+        if self.candidate_support_mode not in {"moment_local_v1", "full_posterior_lattice_v1"}:
+            raise ValueError("unknown observation candidate_support_mode")
         if self.source_time_mode not in {"fixed_history_steps_v1", "source_history_steps_v1"}:
             raise ValueError("unknown observation source_time_mode")
         integer_fields = (
@@ -1105,6 +1108,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.observation.candidate_support_mode == "moment_local_v1":
+            cast(dict[str, object], payload["observation"]).pop("candidate_support_mode")
         if self.observation.source_time_mode == "fixed_history_steps_v1":
             cast(dict[str, object], payload["observation"]).pop("source_time_mode")
         if self.top.state_feature_mode == NATIVE_AFFINE_STATE:

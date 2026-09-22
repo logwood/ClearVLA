@@ -36,6 +36,13 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
+from clearvla.vision.candidate_support import (
+    FULL_POSTERIOR_SUPPORT,
+    MOMENT_LOCAL_SUPPORT,
+    candidate_support_metadata,
+    posterior_candidate_support,
+    sample_candidate_expectation,
+)
 from clearvla.vision.source_time import (
     FIXED_VISUAL_TIME,
     SOURCE_VISUAL_TIME,
@@ -178,6 +185,7 @@ class ProgressiveFineCandidates:
     geometry_keys: Tensor | None = None
     literal_rgb: Tensor | None = None
     source_coordinates: Tensor | None = None
+    parent_log_probability: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -417,6 +425,7 @@ class ProgressiveGroundingAddressState:
     """Query-owned G1/G2/G3 selector state over an observation-only bank."""
 
     bank: SoftAddressLatticeBank
+    candidate_support_mode: str = MOMENT_LOCAL_SUPPORT
     stage: int = 0
     coarse_logits: Tensor | None = None
     coarse_probability: Tensor | None = None
@@ -432,6 +441,7 @@ class ProgressiveGroundingAddressState:
     dynamic_fine_values: Tensor | None = None
     dynamic_fine_valid: Tensor | None = None
     dynamic_fine_coordinates: Tensor | None = None
+    fine_log_probability: Tensor | None = None
     dynamic_source_coordinates: Tensor | None = None
     dynamic_semantic_keys: Tensor | None = None
     dynamic_appearance_keys: Tensor | None = None
@@ -3115,6 +3125,9 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
 
     def __init__(self, config: Any, *, raw_dim: int) -> None:
         super().__init__()
+        self.candidate_support_mode = str(getattr(config, "flow_jepa_candidate_support_mode", MOMENT_LOCAL_SUPPORT))
+        candidate_support_metadata(self.candidate_support_mode)
+
         self.grid = int(config.flow_jepa_grid_size)
         self.cameras = int(config.num_cameras)
         self.slots = int(config.flow_jepa_address_slots)
@@ -3307,6 +3320,8 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
         support: Tensor,
         variance: Tensor,
         aligned_keys: Tensor,
+        coarse_logits: Tensor | None = None,
+        correction_proposal: Tensor | None = None,
         collect_diagnostics: bool = True,
     ) -> ProgressiveFineCandidates:
         """Materialize G2 candidates around the corrected G1 modes.
@@ -3351,6 +3366,8 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
         if tuple(aligned_keys.shape[:-1]) != tuple(centers.shape[:-1]):
             raise ValueError("progressive aligned keys do not align with centers")
 
+        posterior_mode = self.candidate_support_mode == FULL_POSTERIOR_SUPPORT
+        parent_log_probability: Tensor | None = None
         offsets = self.fine_offset_lattice.to(
             device=centers.device, dtype=centers.dtype
         )
@@ -3367,6 +3384,20 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             source_centers[..., None, :]
             + support[..., None, None] * normalized_offsets
         )
+        if posterior_mode:
+            if coarse_logits is None or correction_proposal is None or bank.coarse_candidate_coordinates is None:
+                raise RuntimeError("full posterior materializer requires the real G1 posterior and G2 correction")
+            posterior = posterior_candidate_support(
+                positions=bank.coarse_candidate_coordinates, logits=coarse_logits,
+                correction=correction_proposal, source_centers=bank.coarse_source_centers, support=support,
+            )
+            target_coordinates = posterior.current_coordinates
+            source_coordinates = posterior.source_coordinates
+            normalized_offsets = posterior.relative_coordinates
+            parent_log_probability = posterior.parent_log_probability
+        elif coarse_logits is not None or correction_proposal is not None:
+            raise ValueError("moment-local materializer cannot silently ignore a supplied posterior")
+        candidate_count = int(target_coordinates.shape[-2])
         target_valid = (
             (target_coordinates[..., 0] >= -1.0)
             & (target_coordinates[..., 0] <= 1.0)
@@ -3417,7 +3448,7 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             epsilon=self.address_variance_epsilon_norm,
         )
         normalized_std = normalized_std_base[..., None, :].expand(
-            -1, -1, -1, -1, -1, int(offsets.shape[0]), -1
+            -1, -1, -1, -1, -1, candidate_count, -1
         )
         normalized_flow_delta = (
             centers.float()
@@ -3440,7 +3471,12 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
         )
         if int(geometry.shape[-1]) != self.FINE_GEOMETRY_DIM:
             raise RuntimeError("progressive fine geometry width changed unexpectedly")
-        semantic_keys = dino_key + aligned_keys[..., None, :]
+        if posterior_mode:
+            if bank.coarse_candidate_keys is None:
+                raise RuntimeError("full posterior materializer lost candidate-specific semantic keys")
+            semantic_keys = dino_key + bank.coarse_candidate_keys[:, :, None, None, None]
+        else:
+            semantic_keys = dino_key + aligned_keys[..., None, :]
         appearance_keys = target_raw_key + raw_pair_key
         geometry_keys = self.fine_geometry(
             geometry.to(dtype=target_raw_key.dtype)
@@ -3465,6 +3501,7 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             valid=valid,
             current_coordinates=target_coordinates,
             source_coordinates=source_coordinates,
+            parent_log_probability=parent_log_probability,
             semantic_keys=semantic_keys if self.coordinate_typed_raw_detail else None,
             appearance_keys=(
                 appearance_keys if self.coordinate_typed_raw_detail else None
@@ -4156,6 +4193,9 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
 
     def __init__(self, config: Any) -> None:
         super().__init__()
+        self.candidate_support_mode = str(getattr(config, "flow_jepa_candidate_support_mode", MOMENT_LOCAL_SUPPORT))
+        candidate_support_metadata(self.candidate_support_mode)
+
         self.hidden = int(config.hidden_size)
         self.route_dim = int(config.flow_jepa_address_route_dim)
         self.grid = int(config.flow_jepa_grid_size)
@@ -4862,7 +4902,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             raise RuntimeError(
                 "progressive grounding address requires the complete observation scaffold"
             )
-        return ProgressiveGroundingAddressState(bank=bank, metrics={})
+        return ProgressiveGroundingAddressState(bank=bank, candidate_support_mode=self.candidate_support_mode, metrics={})
 
     def _clean_query(self, rollout: Tensor) -> Tensor:
         expected = self.anchors * self.cameras * self.grid * self.grid
@@ -4911,6 +4951,8 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             raise RuntimeError(
                 f"progressive address expected stage {state.stage + 1}, got {stage}"
             )
+        if state.candidate_support_mode != self.candidate_support_mode:
+            raise ValueError("progressive state and candidate materializer contracts differ")
         bank = state.bank
         clean = self._clean_query(rollout)
         query = self.query_projections[stage - 1](
@@ -4987,8 +5029,8 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     .mean(),
                 })
             state.stage = 1
-            state.coarse_logits = logits.to(dtype=rollout.dtype)
-            state.coarse_probability = probability.to(dtype=rollout.dtype)
+            state.coarse_logits = logits if self.candidate_support_mode == FULL_POSTERIOR_SUPPORT else logits.to(dtype=rollout.dtype)
+            state.coarse_probability = probability if self.candidate_support_mode == FULL_POSTERIOR_SUPPORT else probability.to(dtype=rollout.dtype)
             state.aligned_centers = centers.to(dtype=rollout.dtype)
             state.aligned_variance = variance.to(dtype=rollout.dtype)
             state.aligned_keys = aligned_keys.to(dtype=rollout.dtype)
@@ -5123,6 +5165,8 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 support=support,
                 variance=state.aligned_variance.float(),
                 aligned_keys=state.aligned_keys,
+                **({"coarse_logits": state.coarse_logits, "correction_proposal": correction_proposal}
+                   if self.candidate_support_mode == FULL_POSTERIOR_SUPPORT else {}),
                 collect_diagnostics=collect_diagnostics,
             )
             if not isinstance(candidates, ProgressiveFineCandidates):
@@ -5196,6 +5240,11 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 spatial_prior = -0.5 * prior_strength[..., None] * (
                     distance / support[..., None].square().clamp_min(1e-4)
                 )
+                if self.candidate_support_mode == FULL_POSTERIOR_SUPPORT:
+                    if candidates.parent_log_probability is None:
+                        raise RuntimeError("G2 lost its complete G1 parent measure")
+                    # Same discrete measure for every typed read; no Gaussian at E[x].
+                    spatial_prior = torch.log_softmax(prior_strength[..., None] * candidates.parent_log_probability, dim=-1)
                 fine_logits = content_logits + spatial_prior
                 fine_logits = fine_logits.masked_fill(
                     ~dynamic_fine_valid,
@@ -5253,7 +5302,9 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                             slot_evidence = torch.logsumexp(
                                 safe_candidate_logit,
                                 dim=-1,
-                            ) - valid_count.log()
+                            )
+                            if self.candidate_support_mode != FULL_POSTERIOR_SUPPORT:
+                                slot_evidence = slot_evidence - valid_count.log()
                             slot_evidence = torch.where(
                                 any_valid[..., 0],
                                 slot_evidence,
@@ -5438,7 +5489,15 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 })
             state.stage = 2
             state.fine_logits = fine_logits.to(dtype=rollout.dtype)
-            state.fine_probability = fine_probability.to(dtype=rollout.dtype)
+            if self.candidate_support_mode == FULL_POSTERIOR_SUPPORT:
+                state.fine_probability = fine_probability
+                state.fine_log_probability = (
+                    torch.log_softmax(safe_logits, dim=-1)
+                    if intervention not in {"address_g2_zero", "address_g2_shuffle"}
+                    else fine_probability.clamp_min(torch.finfo(torch.float32).tiny).log()
+                )
+            else:
+                state.fine_probability = fine_probability.to(dtype=rollout.dtype)
             state.rectified_centers = center_from_fine.to(dtype=rollout.dtype)
             state.rectified_support = support.to(dtype=rollout.dtype)
             state.rectified_keys = rectified_keys.to(dtype=rollout.dtype)
@@ -5452,14 +5511,15 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             state.dynamic_geometry_keys = candidates.geometry_keys
             state.dynamic_literal_rgb = candidates.literal_rgb
             if self.structured_ownership:
+                probability_dtype = torch.float32 if self.candidate_support_mode == FULL_POSTERIOR_SUPPORT else rollout.dtype
                 state.g2_semantic_probability = semantic_probability.to(
-                    dtype=rollout.dtype
+                    dtype=probability_dtype
                 )
                 state.g2_appearance_probability = appearance_probability.to(
-                    dtype=rollout.dtype
+                    dtype=probability_dtype
                 )
                 state.g2_geometry_probability = geometry_probability.to(
-                    dtype=rollout.dtype
+                    dtype=probability_dtype
                 )
                 if self.exports_grounded_facts:
                     if set(g2_slot_probability) != {
@@ -5694,7 +5754,8 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             coarse_bias, 1.0
         )
         fine_bias = (
-            state.fine_probability.float().clamp_min(1e-8).log()
+            (state.fine_log_probability if self.candidate_support_mode == FULL_POSTERIOR_SUPPORT
+             and state.fine_log_probability is not None else state.fine_probability.float().clamp_min(1e-8).log())
             + math.log(float(max(int(state.fine_probability.shape[-1]), 1)))
         )
         if state.dynamic_fine_valid is None:
@@ -5968,10 +6029,20 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 raise RuntimeError(
                     "grounded G3 cannot form a complete object fact set"
                 )
-            content_slots = sample_spatial_slots(
-                state.bank.dense_current_dino_content,
-                state.rectified_centers,
-            )
+            if self.candidate_support_mode == FULL_POSTERIOR_SUPPORT:
+                if state.dynamic_fine_coordinates is None:
+                    raise RuntimeError("G3 lost the actual candidate support")
+                measure = state.g2_geometry_probability if self.structured_ownership else state.fine_probability
+                if measure is None:
+                    raise RuntimeError("G3 lost its geometry measure")
+                content_slots = sample_candidate_expectation(
+                    state.bank.dense_current_dino_content, state.dynamic_fine_coordinates, measure,
+                )
+            else:
+                content_slots = sample_spatial_slots(
+                    state.bank.dense_current_dino_content,
+                    state.rectified_centers,
+                )
             slot_validity = state.dynamic_fine_valid.any(
                 dim=-1,
                 keepdim=True,

@@ -6,7 +6,7 @@ blocks.  This module extracts the actual V120 observation compiler and adapts
 its lossless camera/cell/local-slot address bank to :class:`LocalFactSet`.
 
 The complete pre-G bank is compiled first.  The exact V120 progressive updater
-then rematerializes the N=49 candidates after G2 and emits the final local fact
+then rematerializes the selected G2 candidate support and emits the final local fact
 set after G3. Camera, 8x8 cell and M=4 axes are never pooled or recreated.
 """
 

@@ -17,6 +17,7 @@ import numpy as np
 
 from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.data.state_features import NATIVE_AFFINE_STATE, state_feature_metadata
+from clearvla.vision.candidate_support import MOMENT_LOCAL_SUPPORT, candidate_support_metadata
 from clearvla.vision.preprocessing import (
     PreprocessConfig,
     preprocessing_identity,
@@ -357,6 +358,8 @@ def build_deployment_abi(
                 "reference_batch_size": int(config.data.dinov2_reference_batch_size),
             },
             **({"visual_source_time": visual_time_metadata(config.observation.source_time_mode)} if config.observation.source_time_mode != FIXED_VISUAL_TIME else {}),
+            **({"candidate_support": candidate_support_metadata(config.observation.candidate_support_mode)}
+               if config.observation.candidate_support_mode != MOMENT_LOCAL_SUPPORT else {}),
             "state_dim": int(config.dimensions.state_dim),
             **({"state_features": state_feature_metadata(
                 config.top.state_feature_mode, config.data.data_profile,
@@ -433,6 +436,13 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     profile = _mapping(action.get("data_profile"), name="action.data_profile")
     profile_name = profile.get("name")
     graph_observation = _mapping(graph.get("observation"), name="graph_config.observation")
+    support_mode = str(graph_observation.get("candidate_support_mode", MOMENT_LOCAL_SUPPORT))
+    if support_mode != MOMENT_LOCAL_SUPPORT:
+        support_metadata = _mapping(observation.get("candidate_support"), name="observation.candidate_support")
+        if canonical_sha256(support_metadata) != canonical_sha256(candidate_support_metadata(support_mode)):
+            raise ValueError("deployment candidate support contract differs from graph")
+    elif "candidate_support" in observation:
+        raise ValueError("legacy visual graph cannot acquire an undeclared candidate support")
     visual_mode = str(graph_observation.get("source_time_mode", FIXED_VISUAL_TIME))
     if visual_mode != FIXED_VISUAL_TIME:
         visual_metadata = _mapping(observation.get("visual_source_time"), name="observation.visual_source_time")

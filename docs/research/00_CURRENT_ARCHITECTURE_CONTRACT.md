@@ -24,10 +24,12 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit candidate is
-`configs/mainline/structural_rebuild_m1d_calvin.json`. Legacy and M1a/M1b/M1c
+`configs/mainline/structural_rebuild_m2_calvin.json`. Legacy and M1a/M1b/M1c/M1d
 configs remain reproducible controls, not automatic aliases of this candidate.
-The G1/G2/G3 entity redesign, S-task, W-supervision and P redesign are not
-implemented or behaviorally validated. The user-authorized rebuild may revise
+M2 implements full G1 support through the actual G2 sampler and G3/P1
+value consumers. G2 attribute/entity consistency, global/persistent G3
+identity, S-task, W-supervision and the deeper P redesign are not implemented
+or behaviorally validated. The user-authorized rebuild may revise
 historical implementation details; accepted source semantics belong here,
 future work in the repair plan, and test/publish status in the handoff.
 
@@ -98,6 +100,51 @@ unknown unless declared by the source/controller.
 This unit does not resolve multi-camera coordinate pooling, G entity
 association, W action/target mismatch, or P3 execution feedback. M1d's passing
 boundary tests cannot be promoted to learned task success.
+
+## M2 full-posterior candidate support
+
+`observation.candidate_support_mode=full_posterior_lattice_v1` preserves the
+complete 64-point G1 camera-chart support in the actual dynamic G2 sampler.
+G1 already retained its full posterior; this unit changes its consumer, not
+just the returned diagnostics. Legacy `moment_local_v1` continues to use the
+49-point local lattice and remains a separately selected control.
+
+Every support point is individually rectified by the existing G2 correction
+head using the source-relative edge map. Its own coarse key and current
+DINO/RGB/detail evidence are read at that point. Real historical source-query
+coordinates are retained rather than inventing shifted historical pixels.
+The FP32 G1 log distribution is a normalized parent measure in G2;
+local content can update it without a hard top-k, entropy quota, or task label.
+A center/variance remains a summary, not the unique location of evidence.
+
+G3 exports current content from the expectation of observed DINO values over
+actual candidate positions, not a sample at a potentially empty barycenter.
+Its content-position measure uses the same geometry posterior. DINO channel
+tiling and checkpointed recomputation retain all channels and their gradients;
+they do not add an encoder, physical observation or W/ODE pass.
+
+P1 consumes the new candidate count explicitly. Its 3x3 microgrid is still a
+local patch: each microcell is sampled around each possible location BEFORE
+candidate marginalization. Resizing the old 49-to-9 global weighting basis
+would instead create a camera-wide thumbnail and is not used. The center cell
+reuses the exact cached RGB/detail read. Out-of-image cells and unsupported
+candidate payload are excluded before products; local posterior conditioning
+uses logit-space softmax for finite reverse derivatives under extreme logits.
+`fine_offset_zero` removes the local patch radius but does not choose a
+fictitious central index of the global candidate set.
+
+Config, restored core, observation validation and deployment metadata agree
+on this selection, candidate count and current-content rule. Checkpoint ABI
+rejects missing/malformed metadata and legacy aliases. No new old-checkpoint
+migration is defined. This changes source semantics even though there are no
+additional trainable parameters in the candidate support helpers.
+
+This unit is NOT persistent entity tracking or a proof that local hypotheses
+represent independent objects. Typed attributes and global K binding retain
+their existing algorithms pending M3/M4. P1 interface adaptation is not M7's
+shared-target precision review. End-to-end action gradients to G1 establish
+connectivity, not learned task success. Revisit density/memory and localization
+choices when later consumers expose a better representation.
 
 ## Agent quick contract
 

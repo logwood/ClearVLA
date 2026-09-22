@@ -14,6 +14,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from clearvla.vision.candidate_support import candidate_support_metadata
+
 from ..v120_core.flow_dino_evidence import (
     LateRawDetailEvidence,
     ProgressiveGroundingAddressState,
@@ -194,10 +196,16 @@ class ObservationEvidence:
             state.dynamic_literal_rgb,
         )
         if not all(torch.is_tensor(value) for value in required):
-            raise ValueError("completed G3 state lost its N=49 precision candidates")
+            raise ValueError("completed G3 state lost its selected precision candidates")
         assert state.dynamic_fine_values is not None
-        if int(state.dynamic_fine_values.shape[-2]) != 49:
-            raise ValueError("V120 P1 requires the complete N=49 candidate axis")
+        expected = candidate_support_metadata(state.candidate_support_mode)["candidate_count"]
+        if int(state.dynamic_fine_values.shape[-2]) != expected:
+            raise ValueError("P1 requires the complete selected candidate support axis")
+        prefix = tuple(state.dynamic_fine_values.shape[:-1])
+        for name in ("dynamic_fine_valid", "dynamic_fine_coordinates", "dynamic_semantic_keys", "dynamic_appearance_keys", "dynamic_geometry_keys", "dynamic_literal_rgb"):
+            value = getattr(state, name)
+            if tuple(value.shape if name == "dynamic_fine_valid" else value.shape[:-1]) != prefix:
+                raise ValueError(f"P1 {name} differs from the actual candidate lattice")
 
     @property
     def detail_features(self) -> Tensor:

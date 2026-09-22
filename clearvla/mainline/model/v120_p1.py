@@ -8,11 +8,17 @@ imported into the capability-named mainline.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
+
+from clearvla.vision.candidate_support import (
+    FULL_POSTERIOR_SUPPORT,
+    posterior_microgrid_expectation,
+)
 
 from ..v120_core.config import V39PolicyConfig
 from ..v120_core.flow_dino_evidence import LateRawDetailEvidence
@@ -1767,6 +1773,15 @@ class LateRawDetailPolicyReader(nn.Module):
             ),
         )
 
+    def _posterior_microgrid_expectation(
+        self, route: Tensor, fine_logits: Tensor, candidate_valid: Tensor, coordinates: Tensor, radius: Tensor,
+        rgb: Tensor, detail: Tensor, center_rgb: Tensor, center_detail: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        return posterior_microgrid_expectation(
+            route, fine_logits, candidate_valid, coordinates, radius, rgb, detail, center_rgb, center_detail,
+            microgrid_side=self.raw_micro_grid,
+        )
+
     def set_address_eval_intervention(self, mode: str) -> None:
         normalized = str(mode).strip().lower().replace("-", "_")
         allowed = {
@@ -3208,7 +3223,9 @@ class LateRawDetailPolicyReader(nn.Module):
                             dim=-1, keepdim=True
                         ).clamp_min(1e-8)
                 baseline_fine_weights = fine_weights
-                if intervention == "fine_offset_zero":
+                if intervention == "fine_offset_zero" and (
+                    progressive is None or progressive.candidate_support_mode != FULL_POSTERIOR_SUPPORT
+                ):
                     center = candidates // 2
                     center_weights = torch.zeros_like(fine_weights)
                     center_weights[..., center] = 1.0
@@ -3443,9 +3460,10 @@ class LateRawDetailPolicyReader(nn.Module):
                 if typed_fine_keys:
                     assert typed_literal_rgb is not None
                     assert typed_coordinates is not None
-                    assert self.typed_micro_basis is not None
+                    if not isinstance(self.typed_micro_basis, Tensor):
+                        raise RuntimeError("typed P1 microgrid basis is missing")
                     assert typed_future_rows is not None
-                    micro_inputs = (
+                    micro_inputs: tuple[Tensor, ...] = (
                         route_weights,
                         fine_weights,
                         self.typed_micro_basis,
@@ -3453,13 +3471,29 @@ class LateRawDetailPolicyReader(nn.Module):
                         fine_values,
                         typed_coordinates,
                     )
+                    micro_reader: Callable[..., tuple[Tensor, Tensor, Tensor]] = self._configured_typed_microgrid_expectation
+                    if progressive is not None and progressive.candidate_support_mode == FULL_POSTERIOR_SUPPORT:
+                        radius = progressive.rectified_support
+                        rgb_chart = progressive.bank.dense_current_rgb
+                        detail_chart = progressive.bank.dense_target_detail
+                        if radius is None or rgb_chart is None or detail_chart is None:
+                            raise RuntimeError("posterior P1 requires actual local patch charts and radius")
+                        if intervention == "camera_swap":
+                            radius = radius.roll(1, 1)
+                            rgb_chart = rgb_chart.roll(1, 1)
+                            detail_chart = detail_chart.roll(1, 1)
+                        if intervention == "fine_offset_zero":
+                            radius = torch.zeros_like(radius)
+                        micro_inputs = (route_weights, safe_fine_logits, fine_valid, typed_coordinates, radius,
+                                        rgb_chart, detail_chart, typed_literal_rgb, fine_values)
+                        micro_reader = self._posterior_microgrid_expectation
                     if activation_checkpoint_active:
                         (
                             typed_rgb_micro,
                             typed_detail_micro,
                             typed_coordinate_micro,
                         ) = checkpoint(
-                            self._configured_typed_microgrid_expectation,
+                            micro_reader,
                             *micro_inputs,
                             use_reentrant=False,
                         )
@@ -3468,9 +3502,7 @@ class LateRawDetailPolicyReader(nn.Module):
                             typed_rgb_micro,
                             typed_detail_micro,
                             typed_coordinate_micro,
-                        ) = self._configured_typed_microgrid_expectation(
-                            *micro_inputs
-                        )
+                        ) = micro_reader(*micro_inputs)
                     typed_contexts = {
                         name: torch.einsum(
                             "bqgcijm,bqgcijmk,bcijmkr->bqgr",

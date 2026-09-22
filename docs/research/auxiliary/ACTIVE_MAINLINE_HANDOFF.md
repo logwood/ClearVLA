@@ -79,11 +79,40 @@ transport commit by itself is NOT source publication. No workflow is silently
 removed using the Actions token. Local recovery history remains synthetic,
 with exact source-tree/patch identities documented separately.
 
+## Current M2 implementation and verification
+
+M1c is published as `c8341571e2eec12799a90c642aee634614368b86`.
+Its reviewed source tree is `9a8b27fee31f51d20908231d3c8bcc3703311003`;
+with the retained publisher workflow the remote tree is
+`ab7fac4cebb2f1836b01cf9268e56a3199623b85`. Workflow `35672986893`
+verified 552 cases (551 passed, one skipped, no failures/errors) on Python
+3.12.14 / PyTorch 2.11.0 CPU and completed its normal fast-forward publication.
+
+M1d is a locally frozen source unit with 580 cases (579 passed, one skipped,
+no failures/errors). Scoped Ruff is clean and there are zero new Pyright
+errors or missing imports. Its subsequent remote publication must be verified
+independently; a temporary payload commit is not the implemented source.
+
+M2's new explicit candidate is
+`configs/mainline/structural_rebuild_m2_calvin.json`. Twenty-one focused tests
+passed in local Python 3.13.5 / PyTorch 2.10.0 CPU. They cover same-moment
+separated distributions, actual pointwise support/G2 prior use, G3 observed
+content instead of empty-center sampling, all-257-channel tiling and backward
+reference equality, local P1 patches, extreme and unsupported payload, query
+partition/candidate permutation, real policy gradients to G1 without Teacher,
+CPU BF16, optimizer update and exact checkpoint/deployment same-noise output.
+Fixtures replace only named external transport/identity; real neural paths run.
+M2 scoped Ruff is clean with zero added Pyright errors/imports; inherited
+diagnostics remain. The full regression and disabled-mode equivalence are
+recorded separately in the runtime artifact; do not infer their completion
+from this focused result. GPU/CUDA BF16, full-data training, memory/latency at
+production batch sizes and physical closed-loop behavior remain unrun.
+
 ## Resume boundary
 
-Read the current architecture contract and work plan. Verify full M1d tests and
-publication status in artifacts, then continue candidate-preserving G1 with
-its actual G2 sampler and downstream property/P1 consumers. Do not implement
+Read the current architecture contract and work plan. Verify M1d/M2 final test and publication status from artifacts, then continue
+M3 typed local ownership and M4 global/persistent entity review. M2 is a real
+G2/G3/P1 consumer change, not completion of the later task/entity redesign. Do not implement
 a second unused posterior container: G1 already stores its full distribution.
 The source-time and state-feature tests now become guards for later changes.
 Do not restart M1a/M1b or repeat a failing publication loop; preserve a verified
