@@ -18,6 +18,7 @@ from torch import Tensor, nn
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import is_binary_gripper_selection
 from ..interfaces import CurrentObservation, ObservableHistory, OnlinePolicyInput
+from ..robot_execution import RobotResponseFeedback
 from ..supervision import FutureLabelSupport, supported_mean
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
 from ..v120_core.primitives import TimeEmbedding
@@ -148,6 +149,8 @@ class ConditioningStage(nn.Module):
             )
         conditioned_history = replace(
             policy_input.history,
+            executed_robot_step=(None if policy_input.history.executed_robot_step is None else
+                                 policy_input.history.executed_robot_step.without_actions(history_keep)),
             timing=None if timing is None else timing.without_actions(history_keep),
             state_history=state_history,
             executed_action_history=executed_history * history_keep[:, None, None],
@@ -863,6 +866,7 @@ class PolicyCompilerStage(nn.Module):
         *,
         p1_state: CompletedP1PolicyState,
         action_query: Tensor,
+        robot_feedback: RobotResponseFeedback | None = None,
         collect_diagnostics: bool = False,
     ) -> tuple[CompiledPolicyState, dict[str, Tensor]]:
         context.validate(hidden=self.hidden, horizon=self.horizon)
@@ -910,6 +914,7 @@ class PolicyCompilerStage(nn.Module):
             else action_query + consequence.protected_consequence
         )
         plan, plan_metrics = self.plan_compiler(
+            robot_feedback=robot_feedback,
             p1_policy_residual=p1_state.policy_query_residual,
             consequence=consequence,
             intent=context.intent.policy_dock(),

@@ -24,6 +24,7 @@ from clearvla.data.window_boundaries import OBSERVED_TAIL_V1
 from .config import ExperimentConfig
 from .future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from .instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
+from .robot_execution import ExecutedRobotStep
 from .supervision import FutureLabelSupport
 from .temporal import TIMED_HISTORY_ENCODING, HistoryTiming
 
@@ -135,6 +136,7 @@ class ObservableHistory:
     state_history: Tensor  # [B,Hs,S]
     executed_action_history: Tensor  # [B,Ha,A]
     timing: HistoryTiming | None = None  # required by timestamped_streams_v1
+    executed_robot_step: ExecutedRobotStep | None = None
 
     @property
     def batch(self) -> int:
@@ -143,6 +145,13 @@ class ObservableHistory:
     def validate(self, config: ExperimentConfig) -> None:
         dims = config.dimensions
         batch = self.batch
+        if config.top.robot_feedback_mode != "none":
+            if self.executed_robot_step is None:
+                raise ValueError("selected robot feedback graph requires the adjacent executed step")
+            self.executed_robot_step.validate(batch=batch, state_dim=dims.state_dim,
+                                              action_dim=dims.action_dim, device=self.state.device)
+        elif self.executed_robot_step is not None:
+            raise ValueError("executed robot step supplied to an unselected graph")
         _shape(self.state, (batch, dims.state_dim), "current state")
         _shape(self.action_state, (batch, dims.action_dim), "current action-state")
         _shape(

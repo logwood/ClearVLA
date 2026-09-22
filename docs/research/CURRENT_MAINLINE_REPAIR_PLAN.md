@@ -332,3 +332,18 @@ match predictions to actually executed prefixes and new causal observations.
 S desired-operation supervision, persistent entity association, P3 execution
 state/reset, M9 bottom/codec and full-stage numerical debt remain open. Keep
 minor-source preservation separate from test or behavior acceptance.
+
+## M6g one-step robot response checkpoint
+
+Implemented candidate: exact adjacent prior observation/recorded command through
+actual data and online paths; missing/reset/dropout support; separately trained
+causal response MLP; detached innovation directly consumed by typed P3. The
+predictor is not trained by action loss. Current/provenance cache identity and
+exact deployment metadata prevent accidental observation/command swapping.
+
+This partially implements M8 execution feedback for PROPRIOCEPTION only. It does
+not close object identity, object response, S desired relation/progress, M9
+transition/codec/Q5 or M10 full-stage validation. Next object feedback must use
+a real matching endpoint (not an interval mean), actual executed control prefix,
+and a trustworthy correspondence across observations/camera charts. Do not add
+an oracle contact/success field or a task-phase timer as a shortcut.

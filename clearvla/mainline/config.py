@@ -465,6 +465,7 @@ class TopConfig:
     p2_spatial_intent_mode: str = "post_pool_only"
     p2_geometry_mode: str = POOLED_TRANSPORT
     p3_coordination_mode: str = POINTWISE_PLAN
+    robot_feedback_mode: str = "none"
     # Explicit new behavior; legacy checkpoints keep their existing history chart.
     history_encoding_mode: str = "paired_rows_v1"
     state_feature_mode: str = NATIVE_AFFINE_STATE
@@ -476,6 +477,12 @@ class TopConfig:
     instruction_reference_mode: str = "none"
 
     def validate(self) -> None:
+        if self.robot_feedback_mode not in {"none", "one_step_proprioceptive_v1"}:
+            raise ValueError("unknown robot_feedback_mode")
+        if self.robot_feedback_mode != "none" and (
+            self.p3_coordination_mode != TYPED_HORIZON_PLAN or self.history_encoding_mode != TIMED_HISTORY_ENCODING
+        ):
+            raise ValueError("robot feedback requires typed P3 and physical history")
         grid = resolve_future_time(self.future_time_grid_mode)
         if self.p3_coordination_mode not in P3_COORDINATION_MODES:
             raise ValueError("unknown top p3_coordination_mode")
@@ -764,6 +771,7 @@ class BottomConfig:
 
 @dataclass(frozen=True)
 class ObjectiveConfig:
+    robot_response: float = 0.0
     future_dynamics: float = 0.10
     intent_structure: float = 0.02
     flow_warp: float = 0.03
@@ -1031,6 +1039,13 @@ class ExperimentConfig:
             raise ValueError("current-image entities require completed G3 and coupled full support")
         if self.top.entity_context_mode == "completed_g3_v1" and self.observation.candidate_support_mode != "full_posterior_lattice_v1":
             raise ValueError("completed G3 context requires actual full posterior coordinates")
+        if self.top.robot_feedback_mode != "none":
+            if self.data.data_profile != "calvin_relative_7d_v1" or self.top.state_feature_mode != CALVIN_ROTATION6D_STATE:
+                raise ValueError("robot response needs the declared CALVIN feature/command producer")
+            if self.objectives.robot_response <= 0:
+                raise ValueError("robot response predictor requires its own observed-response objective")
+        elif self.objectives.robot_response != 0:
+            raise ValueError("robot response objective requires the selected response graph")
         if self.top.instruction_reference_mode != "none" and self.data.data_profile != "calvin_relative_7d_v1":
             raise ValueError("instruction reference requires a declared CALVIN instruction-start producer")
         if self.observation.source_time_mode == "source_history_steps_v1" and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING:
@@ -1208,6 +1223,10 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.robot_feedback_mode == "none":
+            cast(dict[str, object], payload["top"]).pop("robot_feedback_mode")
+        if self.objectives.robot_response == 0:
+            cast(dict[str, object], payload["objectives"]).pop("robot_response")
         if self.top.p3_coordination_mode == POINTWISE_PLAN:
             cast(dict[str, object], payload["top"]).pop("p3_coordination_mode")
         if self.top.p2_geometry_mode == POOLED_TRANSPORT:

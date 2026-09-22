@@ -76,6 +76,7 @@ from ..interfaces import (
     OnlinePolicyInput,
     TrainingBatch,
 )
+from ..robot_execution import ExecutedRobotStep
 from ..supervision import FutureLabelSupport
 from ..temporal import TIMED_HISTORY_ENCODING, HistoryTiming
 from .dataset import (
@@ -522,6 +523,7 @@ def _load_mainline_data(
     strict_dataset_config = ObservedStateDatasetConfig(
         emit_history_timing=config.top.history_encoding_mode == TIMED_HISTORY_ENCODING,
         instruction_reference_mode=config.top.instruction_reference_mode,
+        robot_feedback_mode=config.top.robot_feedback_mode,
         state_feature_mode=config.top.state_feature_mode,
         state_profile=profile.name,
         world_horizon=resolve_future_time(config.top.future_time_grid_mode).horizon,
@@ -1133,6 +1135,14 @@ def to_training_batch(
             observed=_device_tensor(batch, "instruction_reference_observed", device=device),
             age_steps=_device_tensor(batch, "instruction_reference_age", device=device),
         )
+    robot_step = None
+    if config.top.robot_feedback_mode != "none":
+        robot_step = ExecutedRobotStep(
+            previous_state=_device_tensor(batch, "robot_step_previous_state", device=device, dtype=torch.float32),
+            command=_device_tensor(batch, "robot_step_command", device=device, dtype=torch.float32),
+            observed=_device_tensor(batch, "robot_step_observed", device=device),
+            offsets=_device_tensor(batch, "robot_step_offsets", device=device),
+        )
     online = OnlinePolicyInput(
         instruction_reference=instruction_reference,
         observation=CurrentObservation(
@@ -1140,6 +1150,7 @@ def to_training_batch(
             raw_rgb=_device_tensor(batch, "history_obs_image", device=device, dtype=torch.float32),
         ),
         history=ObservableHistory(
+            executed_robot_step=robot_step,
             state=_device_tensor(batch, "state", device=device, dtype=torch.float32),
             action_state=action_state,
             timing=timing,

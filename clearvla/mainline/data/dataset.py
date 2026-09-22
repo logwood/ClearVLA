@@ -59,11 +59,17 @@ class ObservedStateDatasetConfig:
     causal_reset_padding: bool = False
     emit_history_timing: bool = False
     instruction_reference_mode: str = "none"
+    robot_feedback_mode: str = "none"
     state_feature_mode: str = NATIVE_AFFINE_STATE
     state_profile: str = "identity_7d_pen"
     window_boundary_contract: str = STRICT_COMPLETE_V1
 
     def validate(self) -> None:
+        if self.robot_feedback_mode not in {"none", "one_step_proprioceptive_v1"}:
+            raise ValueError("unknown robot feedback producer")
+        if self.robot_feedback_mode != "none" and (not self.emit_history_timing or
+                self.state_profile != "calvin_relative_7d_v1" or self.executed_action_offsets[-1] != -1):
+            raise ValueError("robot feedback requires pre-action CALVIN and exact last recorded command")
         validate_state_feature_profile(self.state_feature_mode, self.state_profile)
         if self.instruction_reference_mode not in {"none", INSTRUCTION_START_REFERENCE}:
             raise ValueError("unknown instruction reference producer")
@@ -637,6 +643,24 @@ class ObservedStateWindowDataset(Dataset):
             # is still missing data, so quarantine AFTER the nonlinear chart
             # as well as before it. Never export invented terminal targets.
             future_state_features[~future_support["future_state_observed"].numpy()] = 0.0
+        step_fields: dict[str, torch.Tensor] = {}
+        if cfg.robot_feedback_mode != "none":
+            # Prefix rows in the raw overlay are actual causal observations;
+            # instruction boundary is not an environment reset boundary.
+            available = state_index > 0 and (
+                episode.terminal_state_index is None or state_index <= episode.terminal_state_index
+            )
+            previous = encode_state_features(
+                np.asarray(states_raw[max(state_index - 1, 0)], dtype=np.float32), self.state_normalizer,
+                mode=cfg.state_feature_mode, profile=cfg.state_profile,
+            )
+            command = self.action_normalizer.encode(np.asarray(actions_raw[max(action_start - 1, 0)], dtype=np.float32))
+            step_fields = {
+                "robot_step_previous_state": torch.from_numpy(previous if available else np.zeros_like(previous)),
+                "robot_step_command": torch.from_numpy(command if available else np.zeros_like(command)),
+                "robot_step_observed": torch.tensor(available, dtype=torch.bool),
+                "robot_step_offsets": torch.tensor([-1, -1, 0] if available else [0, 0, 0], dtype=torch.long),
+            }
         reference_fields: dict[str, torch.Tensor] = {}
         if cfg.instruction_reference_mode == INSTRUCTION_START_REFERENCE:
             start = self.instruction_starts[ref.episode_idx]
@@ -650,6 +674,7 @@ class ObservedStateWindowDataset(Dataset):
             }
         return {
             **reference_fields,
+            **step_fields,
             **future_support,
             **(
                 {

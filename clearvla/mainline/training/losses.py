@@ -2430,6 +2430,13 @@ def compose_losses(
         + objective.flow_refinement_sequence * geometry["flow_refinement_sequence"]
     )
     execution_group = objective.execution_value * execution["execution_value"]
+    response = top_targets.robot_response_loss
+    if config.top.robot_feedback_mode != "none":
+        if response is None or response.ndim != 0:
+            raise ValueError("selected robot observer requires scalar response objective")
+        representation_group = representation_group + objective.robot_response * response
+    elif response is not None:
+        raise ValueError("unselected robot objective supplied")
     groups = {
         "action": action_group,
         "representation": representation_group,
@@ -2512,6 +2519,9 @@ def compose_losses(
         "coarse_action": top_targets.coarse_action_loss,
         "history_action_proposal": top_targets.history_proposal_loss,
     }
+    if response is not None:
+        contributions["robot_response"] = objective.robot_response * response
+        terms["robot_response"] = response
     ledger = LossLedger(
         total=action_group + representation_group + execution_group,
         groups=groups,

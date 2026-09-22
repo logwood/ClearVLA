@@ -28,11 +28,15 @@ class HistorySnapshot:
     action_state: np.ndarray  # [7]
     state_history: np.ndarray  # [3,7]
     executed_action_history: np.ndarray  # [8,7]
+    previous_state: np.ndarray | None = None  # exact o[t-1], not sparse -4/-8
 
     def timing_arrays(self) -> dict[str, np.ndarray]:
         return sparse_history_clock(self.time_index)
 
     def validate(self) -> None:
+        if self.previous_state is not None:
+            if self.time_index == 0 or self.previous_state.shape != (STATE_DIM,) or not np.isfinite(self.previous_state).all():
+                raise ValueError("previous robot state requires a real one-step predecessor")
         if self.time_index < 0:
             raise ValueError("history time index must be non-negative")
         if tuple(self.rgb_history) != CAMERA_NAMES:
@@ -157,6 +161,7 @@ class CausalHistory:
         current = self._observations[-1]
         result = HistorySnapshot(
             time_index=now,
+            previous_state=None if now == 0 else np.asarray(self._observation_at(now - 1).state, dtype=np.float32).copy(),
             rgb_history=rgb,
             state=np.asarray(current.state, dtype=np.float32).copy(),
             action_state=np.asarray(current.action_state, dtype=np.float32).copy(),

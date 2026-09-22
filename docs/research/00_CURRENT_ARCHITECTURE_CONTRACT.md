@@ -24,7 +24,7 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit source candidate is
-`configs/mainline/structural_rebuild_m6f_calvin.json` (validation scope in handoff).
+`configs/mainline/structural_rebuild_m6g_calvin.json` (validation scope in handoff).
 M5a adds one soft operated-
 object distribution across actual S/coarse/P1/P2 readers; its detailed contract
 is below. M5b adds a causal instruction reference; M6a/b/c separate action-matched W
@@ -42,6 +42,66 @@ W-supervision and the deeper P redesign remain open. No learned behavior
 is established by these source changes. The user-authorized rebuild may revise
 historical implementation details; accepted source semantics belong here,
 future work in the repair plan, and test/publish status in the handoff.
+
+## M6g matched one-step proprioceptive response
+
+`top.robot_feedback_mode=one_step_proprioceptive_v1` selects an independent
+robot-response observer inside the P3 compiler owner. It requires timestamped
+CALVIN rotation-column state features, typed-horizon P3, and a positive explicit
+`objectives.robot_response` (candidate 0.1). Legacy modes allocate no observer
+parameters and omit default mode/objective fields from serialized graphs.
+
+The dataset and the actual online adapter supply the exact adjacent pair
+`o[t-1], a[t-1] -> o[t]`. The source of `a[t-1]` is the recorded controller
+command, NOT a generated row that was never executed. Dataset row boundaries
+are real source rows; an instruction start is not a physical reset. CausalHistory
+already retains nine observations: the new scalar-state predecessor uses that
+storage, without another RGB/DINO encoding or additional history capacity.
+Reset has no pair. Missing predecessor in a non-reset online snapshot fails
+closed; it is never substituted by the nearest sparse state (-4/-8).
+
+`ExecutedRobotStep` keeps actual relative offsets (-1,-1,0) and an observed
+mask. Source admission checks exact clocks and equality to the last executed
+command. Action-history condition dropout masks this separate path too, so it
+cannot bypass dropout. Unknown payload is quarantined BEFORE learned operations.
+
+The response MLP predicts the one-step CHANGE in the configured state-feature
+chart using only detached prior state and recorded command. A masked observed
+response MSE supervises it directly from the now-available current observation.
+This loss is in the representation group; it needs no future Teacher label.
+The predictor cannot access current state, G, S, instruction, candidate actions,
+future observations or a task-success flag as its predictor INPUT. Current state
+is used only as the now-observed response target and difference after prediction.
+
+The feedback is `(current - previous) - predicted_delta`, detached before the
+policy read. Thus action loss cannot train the predictor to manufacture task
+features disguised as an error. P3's separately parameterized error read IS
+trained by the action path; it modulates horizon context and joins the existing
+observed-change innovation lane before its RMS bound. It does not replace the
+protected facts/precision, alter W, or add an optional-source routing gate.
+Zero innovation gives exact zero contribution and zero context derivative.
+
+The observer runs once per online encode, never once per ODE node/refinement.
+Its response loss stays in OnlineTrainingState; cached feedback is detached and
+paired by source identity with the same current history and executed step.
+The two ODE passes reuse it read-only. No mutable cross-decision state is added.
+Expectations are recomputed under the current model from past inputs, not falsely
+claimed to be a previously issued forecast with another parameter version.
+
+**Limits:** this is model innovation in proprioceptive feature space, not a
+calibrated controller tracking error, physical twist, force, contact truth,
+world-coordinate object motion or task progress. Feature rotation differences
+are chord differences, not angular velocity. One control step has no assumed
+seconds-per-step. Sparse W interval statistics remain separate and never become
+one-step endpoints. Lack of response can reflect dynamics or model error; the
+observer does not decide that a grasp/push succeeded. Object-matched feedback,
+expected task relations, S progress and deeper transition/bottom review remain
+open. No demonstration command is asserted to be measured actuator torque.
+
+Config, normalizer identity, source closure, cache consumers and deployment ABI
+include this mode. No silent weight/optimizer migration. This module does not
+add a W materialization, DINO pass or ODE solve, but adds one small response MLP
+per encode and a per-P3 dynamic error read; GPU cost is not measured.
 
 ## M1c native state and model feature boundary
 

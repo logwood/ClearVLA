@@ -591,3 +591,20 @@ endpoint states. Do not claim closed-loop error correction from the new plan
 attention. Remaining S semantics, actual entity identity and aggregate numerical
 failures continue as open issues. Intermediate recovered snapshots/tests and
 failed invocations retain their exact provenance in the source checkpoint.
+
+## M6g scope and residual risks
+
+The missing adjacent proprioceptive source has an explicit producer now; sparse
+[-8,-4,0] state rows are not used as a fake previous frame. P3 can consume a
+matched one-step robot model innovation, independently of W interval statistics.
+The response predictor is supervised on observed response and detached from the
+action loss to prevent arbitrary error-feature gaming.
+
+An untrained or misspecified predictor can produce innovation without a real
+controller fault. It is not calibrated risk or contact, and should not be
+reported as such. Object movement/task progress still require correspondence
+and compatible endpoint predictions. No uniform timestep-in-seconds is known.
+The repository rollout passes clipped controller commands to CausalHistory;
+external evaluators not supplied with this source still require that contract.
+One-step state features omit hidden actuator/velocity state, so the prediction
+is a learned conditional mean under partial observability, not exact physics.

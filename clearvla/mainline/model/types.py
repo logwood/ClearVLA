@@ -2447,6 +2447,7 @@ class ObjectTopTrainingTargets:
     object_reconstruction_loss: Tensor
     future_interval_valid: Tensor | None = None  # dataset-owned, never a predicted confidence
     supervised_world: SupervisedWorld | None = None  # training plane only
+    robot_response_loss: Tensor | None = None  # past-to-current observed response
 
     @property
     def total_unweighted(self) -> Tensor:

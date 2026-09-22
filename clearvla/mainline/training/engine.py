@@ -114,6 +114,10 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
         "future.action": batch.future.action_sequence,
         "future.state": batch.future.state_sequence,
     }
+    robot_step = batch.online.history.executed_robot_step
+    if robot_step is not None:
+        for name in ("previous_state", "command"):
+            values["online.robot_step." + name] = torch.where(robot_step.observed[:, None], getattr(robot_step, name), 0.0)
     if batch.online.instruction_reference is not None:
         reference = batch.online.instruction_reference
         values["online.instruction_reference.state"] = reference.state

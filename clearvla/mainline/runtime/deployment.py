@@ -54,6 +54,7 @@ from ..model.target_binding import (
 )
 from ..p2_geometry import POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, p2_geometry_metadata
 from ..p3_coordination import POINTWISE_PLAN, TYPED_HORIZON_PLAN, p3_coordination_metadata
+from ..robot_execution import robot_execution_metadata
 from ..temporal import HISTORY_TIMING_CONTRACT, TIMED_HISTORY_ENCODING
 from ..world_control import KNOWN_PREFIX_WORLD_CONTROL, LEGACY_WORLD_CONTROL, world_control_metadata
 from ..world_robot import NO_ROBOT_WORLD, OBSERVED_ROBOT_VIEWS, world_robot_metadata
@@ -356,6 +357,7 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"robot_execution": robot_execution_metadata()} if config.top.robot_feedback_mode != "none" else {}),
         **({"p3_coordination": p3_coordination_metadata()}
            if config.top.p3_coordination_mode == TYPED_HORIZON_PLAN else {}),
         **({"p2_geometry": p2_geometry_metadata(tuple(config.data.camera_names))}
@@ -476,6 +478,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     graph_top = _mapping(
         _mapping(abi.get("graph_config"), name="graph_config").get("top"), name="graph_config.top"
     )
+    robot_mode = graph_top.get("robot_feedback_mode", "none")
+    if robot_mode == "one_step_proprioceptive_v1":
+        if abi.get("robot_execution") != robot_execution_metadata():
+            raise ValueError("robot execution response ABI mismatch")
+    elif robot_mode != "none" or "robot_execution" in abi:
+        raise ValueError("robot execution response ABI is unselected or unknown")
     plan_mode = graph_top.get("p3_coordination_mode", POINTWISE_PLAN)
     if plan_mode == TYPED_HORIZON_PLAN:
         if abi.get("p3_coordination") != p3_coordination_metadata():

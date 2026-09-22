@@ -11,8 +11,10 @@ from torch import Tensor, nn
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
+from ..robot_execution import RobotResponseFeedback
 from .action_codec import ACTION_BAND_ENDS
 from .horizon_coordination import P3HorizonContext, TypedHorizonCoordinator
+from .robot_execution import RobotExecutionObserver
 from .routing import (
     PolicyRoleDeltaBank,
     register_gradient_axis_rms_metrics,
@@ -1450,7 +1452,8 @@ class ObjectPolicyPlanCompiler(nn.Module):
     """Compile the two P3 innovations without duplicating protected owners."""
 
     def __init__(self, *, hidden: int, horizon: int, basis: int, future_time_grid_mode: str = LEGACY_FUTURE_TIME,
-                 coordination_mode: str = POINTWISE_PLAN, heads: int = 1) -> None:
+                 coordination_mode: str = POINTWISE_PLAN, heads: int = 1,
+                 robot_feedback_mode: str = "none", state_dim: int = 7, action_dim: int = 7) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
         self.hidden = int(hidden)
@@ -1459,6 +1462,12 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if coordination_mode not in P3_COORDINATION_MODES:
             raise ValueError("unknown P3 coordination mode")
         self.coordination_mode = coordination_mode
+        if robot_feedback_mode not in {"none", "one_step_proprioceptive_v1"}:
+            raise ValueError("unknown robot feedback mode")
+        if robot_feedback_mode != "none" and coordination_mode != TYPED_HORIZON_PLAN:
+            raise ValueError("robot feedback requires typed horizon P3")
+        self.robot_observer = (RobotExecutionObserver(state_dim=state_dim, action_dim=action_dim, hidden=hidden)
+                               if robot_feedback_mode != "none" else None)
         self.coordinator: TypedHorizonCoordinator | None = None
         if coordination_mode == TYPED_HORIZON_PLAN:
             if not self.time_grid.aligned:
@@ -1489,6 +1498,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
         consequence: ObjectConsequenceState,
         intent: PolicyIntentDock,
         action_query: Tensor,
+        robot_feedback: RobotResponseFeedback | None = None,
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectPolicyPlanDeltaBank, dict[str, Tensor]]:
         expected = (int(action_query.shape[0]), self.horizon, self.basis, self.hidden)
@@ -1539,6 +1549,14 @@ class ObjectPolicyPlanCompiler(nn.Module):
             state_change_raw = self.state_change_lane(
                 state_change_source * state_change_modulation
             )
+        if self.robot_observer is not None:
+            if robot_feedback is None:
+                raise ValueError("P3 robot observer requires current causal feedback")
+            # Distinct source-specific projection BEFORE joining the existing
+            # observed-change innovation lane. No extra route/gate or alias.
+            state_change_raw = state_change_raw + self.robot_observer.read(robot_feedback, temporal_private)
+        elif robot_feedback is not None:
+            raise ValueError("robot feedback supplied to an unselected P3")
         temporal, temporal_scale = smooth_rms_contract(temporal_raw, 0.35)
         state_change, state_change_scale = smooth_rms_contract(
             state_change_raw,

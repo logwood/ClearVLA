@@ -1,5 +1,34 @@
 # ClearVLA structural rebuild handoff
 
+## Current M6g source checkpoint — 2026-09-22
+
+Recovered all 806 M6f source files and verified all 893 archive manifest entries.
+Reproduced Git source tree `bc04805ce868a125c851cff2ef887f6cfbfe1b5c`; remote
+base read as `a8868a389cd1fb8994ebf5404f0eddbb4493b754`. Local Git history is
+synthetic recovery, never force-push. No workflow/master modifications.
+
+M6g supplies an exact adjacent robot state/recorded command through dataset,
+collation, history, online adapter, source checks, dropout, one causal response
+predictor, detached P3 innovation, auxiliary objective and ABI. Read the M6g
+architecture section. It is NOT object-outcome feedback or complete P3/M6.
+
+Initial production diagnostics-enabled optimization and two-pass sampling ran.
+The first enclosing tool timeout left an incomplete log (not a passing run).
+The next 33-case inventory exposed one invalid test dropout=1; the production
+config correctly rejected it. The test now uses a legal seeded .99 dropout.
+A 37-case expanded inventory passed; final source adds two count/consumer tests,
+and exact final results are in the external source-checkpoint logs. Static
+review corrected test type narrowing without arithmetic/tolerance changes.
+Legacy M6f controls at seeds 0,71 exactly match config, registered parameter and
+buffer contents/order, RNG and same-noise action. Preserve old failing tests.
+
+Save each small version before full milestone CI, as instructed. Continue
+object identity and matched object-outcome semantics, expected relation/progress
+supervision and full transition/bottom audit after this bounded proprioceptive
+bridge. Do not replace W interval means with one-frame observations. No task
+performance, calibrated uncertainty, GPU latency or formal training is claimed.
+
+
 ## Current M6f source checkpoint — 2026-09-22
 
 Source recovered from the verified M6e archive: all 802 source files matched and

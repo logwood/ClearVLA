@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from ..config import ExperimentConfig
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
 from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT
+from ..robot_execution import RobotResponseFeedback
 from ..supervision import quarantine, supported_mean
 from ..world_robot import OBSERVED_ROBOT_VIEWS, RobotWorldObservation
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
@@ -128,9 +129,18 @@ class OnlinePolicyCache:
     executed_memory: Tensor
     action_history_keep: Tensor
     role_table: Tensor
+    robot_feedback: RobotResponseFeedback | None = None
 
     def validate(self, config: ExperimentConfig) -> None:
         self.history.validate(config)
+        if (self.robot_feedback is not None) != (config.top.robot_feedback_mode != "none"):
+            raise ValueError("robot feedback cache differs from configured mode")
+        if self.robot_feedback is not None:
+            self.robot_feedback.validate(batch=self.history.batch, state_dim=config.dimensions.state_dim, device=self.history.state.device)
+            if self.robot_feedback.current_state is not self.history.state or self.robot_feedback.source_step is not self.history.executed_robot_step:
+                raise ValueError("robot feedback cache is paired with another observation/command")
+            if self.history.executed_robot_step is None or self.robot_feedback.observed is not self.history.executed_robot_step.observed:
+                raise ValueError("robot feedback cache support has another owner")
         self.top.validate(
             hidden=config.dimensions.hidden_size,
             horizon=config.dimensions.action_horizon,
@@ -176,8 +186,13 @@ class OnlineTrainingState:
     observation: ObservationEvidence
     top: OnlineTopContext
     history_proposal: HistoryActionProposalState
+    robot_response_loss: Tensor | None = None
 
     def validate(self, config: ExperimentConfig) -> None:
+        if (self.robot_response_loss is not None) != (config.top.robot_feedback_mode != "none"):
+            raise ValueError("robot response training objective differs from configured mode")
+        if self.robot_response_loss is not None and self.robot_response_loss.ndim != 0:
+            raise ValueError("robot response training objective must be scalar")
         self.observation.validate()
         self.top.validate(
             hidden=config.dimensions.hidden_size,
@@ -267,6 +282,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             p2_spatial_intent_mode=top.p2_spatial_intent_mode,
             p2_geometry_mode=top.p2_geometry_mode,
             p3_coordination_mode=top.p3_coordination_mode,
+            robot_feedback_mode=top.robot_feedback_mode,
             target_binding_mode=top.target_binding_mode,
             instruction_reference_mode=top.instruction_reference_mode,
             history_encoding_mode=top.history_encoding_mode,
@@ -505,6 +521,18 @@ class ClearVLAMainlinePolicy(nn.Module):
                 device=policy_input.device,
                 strict=True,
             )
+        step = policy_input.history.executed_robot_step
+        if step is not None:
+            step.validate(batch=batch, state_dim=self.config.dimensions.state_dim,
+                          action_dim=self.config.dimensions.action_dim, device=policy_input.device, strict=True)
+            timing = policy_input.history.timing
+            if timing is None or not torch.equal(step.observed, timing.action_executed[:, -1]):
+                raise ValueError("robot pair support disagrees with last executed command")
+            if not torch.all(timing.action_offsets[:, -1] == -1):
+                raise ValueError("robot feedback command timestamp must be exactly minus one")
+            if not torch.equal(torch.where(step.observed[:, None], step.command, 0.0),
+                               torch.where(step.observed[:, None], policy_input.history.executed_action_history[:, -1], 0.0)):
+                raise ValueError("robot step command is not the recorded last executed command")
         # Conditioning owns the two masks and the auxiliary proposal.  It is
         # called once, preserving the original RNG draw order.
         conditioned_policy_input, history_proposal, goal_keep, history_keep = (
@@ -516,6 +544,13 @@ class ClearVLAMainlinePolicy(nn.Module):
                 condition_generator=condition_generator,
             )
         )
+        robot_feedback, robot_response_loss = None, None
+        observer = self.policy_compiler.plan_compiler.robot_observer
+        if observer is not None:
+            executed_step = conditioned_policy_input.history.executed_robot_step
+            if executed_step is None:
+                raise ValueError("robot response lost its one-step observation pair")
+            robot_feedback, robot_response_loss = observer.observe(executed_step, conditioned_policy_input.history.state)
         source_offsets = None
         if self.config.observation.source_time_mode == "source_history_steps_v1":
             source_clock = conditioned_policy_input.history.timing
@@ -719,6 +754,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             collect_diagnostics=collect_diagnostics,
         )
         cache = OnlinePolicyCache(
+            robot_feedback=robot_feedback,
             top=context.deployment_cache(),
             factual_dock=factual_dock,
             transition_source=transition_source,
@@ -728,6 +764,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             role_table=role_table,
         )
         training_state = OnlineTrainingState(
+            robot_response_loss=robot_response_loss,
             observation=evidence,
             top=context,
             history_proposal=history_proposal,
@@ -824,6 +861,10 @@ class ClearVLAMainlinePolicy(nn.Module):
                 **metrics,
                 "history_action_proposal_loss": proposal_loss.detach(),
             }
+        if self.config.top.robot_feedback_mode != "none":
+            if training_state.robot_response_loss is None:
+                raise ValueError("robot response objective missing from online training plane")
+            targets = replace(targets, robot_response_loss=training_state.robot_response_loss)
         return targets, metrics
 
     def velocity(
@@ -885,6 +926,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             )
         compiled, top_metrics = self.policy_compiler.compile(
             cache.top,
+            robot_feedback=cache.robot_feedback,
             p1_state=p1_state,
             action_query=action_query,
             collect_diagnostics=collect_diagnostics,

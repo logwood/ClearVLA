@@ -25,6 +25,7 @@ from clearvla.mainline.interfaces import (
     ObservableHistory,
     OnlinePolicyInput,
 )
+from clearvla.mainline.robot_execution import ExecutedRobotStep
 from clearvla.mainline.runtime.sampling import sample_action
 from clearvla.mainline.temporal import TIMED_HISTORY_ENCODING, HistoryTiming
 from clearvla.vision.preprocessing import PreprocessConfig, preprocessing_identity
@@ -271,6 +272,18 @@ class ClearVLACheckpointPolicy:
                 owned.dino, owned.state, owned.observed,
                 torch.tensor([history.time_index - self._instruction_anchor_step], dtype=torch.long, device=self.device),
             )
+        robot_step = None
+        if config.top.robot_feedback_mode != "none":
+            if history.time_index > 0 and history.previous_state is None:
+                raise ValueError("robot feedback cannot infer predecessor from sparse state history")
+            available = history.time_index > 0
+            robot_step = ExecutedRobotStep(
+                previous_state=(self._normal(history.previous_state[None], action=False)
+                                if history.previous_state is not None else torch.zeros_like(current_state)),
+                command=executed_action_history[:, -1] if available else torch.zeros_like(action_state),
+                observed=torch.tensor([available], dtype=torch.bool, device=self.device),
+                offsets=torch.tensor([[-1, -1, 0] if available else [0, 0, 0]], dtype=torch.long, device=self.device),
+            )
         online = OnlinePolicyInput(
             instruction_reference=instruction_reference,
             observation=CurrentObservation(
@@ -278,6 +291,7 @@ class ClearVLACheckpointPolicy:
                 raw_rgb=raw_rgb,
             ),
             history=ObservableHistory(
+                executed_robot_step=robot_step,
                 state=current_state,
                 action_state=action_state,
                 timing=timing,

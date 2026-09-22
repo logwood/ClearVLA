@@ -217,6 +217,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         p2_spatial_intent_mode: str = "post_pool_only",
         p2_geometry_mode: str = "pooled_transport_v1",
         p3_coordination_mode: str = "pointwise_legacy_v1",
+        robot_feedback_mode: str = "none",
         target_binding_mode: str = "reader_local_v1",
         instruction_reference_mode: str = "none",
         history_encoding_mode: str = "paired_rows_v1",
@@ -343,6 +344,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         self.plan_compiler = ObjectPolicyPlanCompiler(
             future_time_grid_mode=future_time_grid_mode,
             coordination_mode=p3_coordination_mode, heads=heads,
+            robot_feedback_mode=robot_feedback_mode, state_dim=state_dim, action_dim=action_dim,
             hidden=hidden,
             horizon=horizon,
             basis=basis,
