@@ -24,7 +24,7 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit source candidate is
-`configs/mainline/structural_rebuild_m6e_calvin.json` (validation scope in handoff).
+`configs/mainline/structural_rebuild_m6f_calvin.json` (validation scope in handoff).
 M5a adds one soft operated-
 object distribution across actual S/coarse/P1/P2 readers; its detailed contract
 is below. M5b adds a causal instruction reference; M6a/b/c separate action-matched W
@@ -1572,3 +1572,56 @@ is a single-step endpoint, total temporal mixture variance, calibrated confidenc
 or a task-risk score. No observed-target, loss, W call count, ODE step count or
 persistent state is changed. P3 executed-prefix comparison is still open and
 cannot subtract these interval features from a newly observed physical state.
+
+
+## M6f typed P3 horizon coordination (partial P3 review)
+
+`top.p3_coordination_mode=typed_horizon_v1` in the M6f candidate replaces the
+pointwise P3 internals, not the P2 producer or the protected bottom ingress.
+It requires the explicit aligned 24-step grid, shared target binding and named
+view geometry mode. The old omitted `pointwise_legacy_v1` selection is unchanged.
+New graphs/checkpoints are explicitly different; no partial weight migration.
+
+`P3HorizonContext` carries the original action query, current P1 facts, dynamic
+P1 precision, semantic effect plus its interaction, geometry FEATURE effect plus
+its interaction, S temporal plan and observed-change summary. Producer names,
+axes and time identity are retained before separate source projections. Typed
+P3 never receives an already summed action-plus-protected-consequence as its
+original action query. Both modular and top composition paths implement this.
+Semantic and geometry are projected before fusion rather than being compulsorily
+summed in the original hidden basis. This removes a structural cancellation,
+not a guarantee that learned projected values never cancel.
+
+One attention read coordinates all T*Q proposed plan features without averaging
+away either the action row or basis axis. Bidirectional attention is over the
+currently imagined plan, not future observed data. The W control-prefix causal
+contract is unchanged. Physical row midpoints `(j+0.5)/24` supply deterministic
+Q/K-only time codes; this is not task elapsed time, an endpoint prediction or ODE
+time. Q/K are normalized, while raw projected value amplitudes are retained. A
+local term retains row-specific information alongside the contextual attention
+read. No dropout, mutable cross-node cache or persistent task state is added.
+
+The same two optional delta outputs enter the existing role bank. The original
+protected consequence and dynamic policy precision return by tensor reference;
+there is no additional exact copy or pseudo-owner in that bank. Their content
+may condition the learned innovation, just as an ordinary residual block reads
+its input. There are no inactive legacy P3 projections in the new graph. All
+new weights belong to the existing `p3_compiler` parameter group.
+
+The observed-change lane is a bias-free value projection modulated by the
+coordinated plan; zero S change yields exactly zero value and zero gradient to
+plan context, while its derivative to an observed-change input can remain
+nonzero. Its meaning remains S's observable-change feature. It is NOT a measured
+contact signal, task success, or a comparison with a previous predicted world.
+True executed-prefix feedback still requires matched future endpoints, actual
+executed commands, observed-time alignment and entity association. Interval-mean
+W outputs must not be reused as one-step errors.
+
+Configuration, deployment metadata/source closure and exact reload carry this
+selection. Attention always uses `need_weights=False`, including diagnostics.
+A source save is not supported-runtime/whole-M6/P3/robot acceptance. The new
+P3 has 14*H^2 weights vs 6*H^2 in the legacy pointwise compiler; at H=512 the net
+increase is 2,097,152 weights. One contextual P3 attention is evaluated per
+EXISTING dynamic policy call; no W/ODE count changes, but GPU latency/memory is
+not yet measured. Review this cost, long-horizon conditioning, S progress and
+bottom role routing at their actual consumers rather than declaring them closed.

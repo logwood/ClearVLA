@@ -49,9 +49,9 @@ merely because this subunit is saved.
 | M4d entity-motion chart | Implemented candidate; validation per source | Shared current-image spatial law for position and motion; includes earlier-source status correction. No extra parameters or world calls; view-aware downstream reasoning remains open. |
 | M5a S/shared target | Implemented; exact-source acceptance recorded in artifacts | One soft K-plus-null binding consumed by real S/coarse/P1/P2, post-read mass, current spatial evidence, registered optimizer/checkpoint owners. Not task progress or persistent physical identity. |
 | M5b S causal instruction reference | Implemented candidate; acceptance per exact source | Actual labelled origin in dataset, immutable runtime anchor, same-query per-view reference/current comparison consumed by S and real policy. No phase timer or persistent K-ID. Desired-relation/recognizer objectives remain for subsequent S/W supervision review. |
-| M6 W1/W2 | Not started | Match supervised action to observed outcome; separate candidate prediction from demonstration-target training; explicit robot-object relations and known control horizon. |
+| M6 W1/W2 | M6a–M6e source units implemented; milestone open | Matched supervision, known control, robot/view relations, aligned time and typed P2 views implemented. Physical transition validity, endpoint feedback and aggregate acceptance remain open. |
 | M7 P1/P2 | M5a target marginal/current-evidence seam implemented | Deeper target-local precision, view-aware future geometry and physical consequence semantics remain open; shared binding alone does not close them. |
-| M8 P3 | Not started | Task-related local coordination and actual-prefix execution feedback; no task-clock or oracle state machine. |
+| M8 P3 | M6f typed horizon coordination implemented; feedback open | Distinct current fact/precision/typed effects participate in real cross-row coordination. Not endpoint-error feedback, progress recognition, or a full P3 milestone. |
 | M9 transition/bottom/outlets | Padding values quarantined only | Audit actual consumers, redundant/frozen paths, action codec, clipping/history feedback and endpoint heads. Do not treat retained topology as approved. |
 | M10 training/deployment/resume | M1a/history and M1b/label interfaces integrated only | Production CPU train/restore/sample and source-label masks are exercised; W supervision, endpoint context and new entity/task state lifecycle remain open. |
 | M11 full release review | Not started | Rewalk output-to-input gradients and input-to-output semantics, remove temporary transport/compatibility paths, record all remaining unsupported claims. |
@@ -317,3 +317,18 @@ Teacher physical association, W uncertainty interpretation and phase/contact
 relations, S desired-operation objectives, P3 actually-executed-prefix feedback,
 M4c2 physical identity, and the M9--M11 bottom/training/full-graph review. No
 single-step predictor has been fabricated from the interval-mean field.
+
+
+## M6f bridge to P3
+
+Preserve each source subunit without waiting for milestone CI. The implemented
+P3 boundary no longer treats dynamic P1 precision as passthrough-only and no
+longer requires semantic and geometry hidden effects to cancel before P3 source
+interpretation. The two existing protected owners are returned unchanged.
+
+Next work is NOT to treat the new attention as a feedback controller. Audit a
+separate endpoint/transition representation and its supervision first, then
+match predictions to actually executed prefixes and new causal observations.
+S desired-operation supervision, persistent entity association, P3 execution
+state/reset, M9 bottom/codec and full-stage numerical debt remain open. Keep
+minor-source preservation separate from test or behavior acceptance.

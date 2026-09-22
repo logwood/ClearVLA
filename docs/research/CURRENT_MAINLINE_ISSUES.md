@@ -572,3 +572,22 @@ P3 cannot use it as next-observation error. Teacher physical association,
 calibrated 3D/contact state, persistent object identity, desired operation and
 executed-prefix feedback remain open. Existing numerical failures stay recorded
 until the full milestone audit; they are not waived by this source save.
+
+
+## M6f: P3 local precision and typed effects were not jointly coordinated
+
+The legacy compiler returns dynamic P1 precision by reference but does not
+consume it directly in its two private innovations. It sums typed effects and
+computes each row independently (upstream/downstream networks can still be
+temporal). The M6f opt-in adds separate source projections and a proposed-horizon
+context read, preserving protected owners and a zero-observed-change lane.
+This closes those source-level missing dependencies only. It introduces a
+measurable P3 compute/parameter cost and does not guarantee learned use.
+
+No matched executed-outcome prediction is yet available at the P3 interface.
+The first declared visual future is t+4; later bins may average multiple sparse
+observations. A t+1 observation cannot be compared to this as if both were
+endpoint states. Do not claim closed-loop error correction from the new plan
+attention. Remaining S semantics, actual entity identity and aggregate numerical
+failures continue as open issues. Intermediate recovered snapshots/tests and
+failed invocations retain their exact provenance in the source checkpoint.

@@ -266,6 +266,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             state_feature_mode=top.state_feature_mode,
             p2_spatial_intent_mode=top.p2_spatial_intent_mode,
             p2_geometry_mode=top.p2_geometry_mode,
+            p3_coordination_mode=top.p3_coordination_mode,
             target_binding_mode=top.target_binding_mode,
             instruction_reference_mode=top.instruction_reference_mode,
             history_encoding_mode=top.history_encoding_mode,

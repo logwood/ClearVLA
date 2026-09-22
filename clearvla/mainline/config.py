@@ -39,6 +39,7 @@ from .gripper_contract import (
 )
 from .manifest import ARCHITECTURE_MANIFEST
 from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
+from .p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from .temporal import TIMED_HISTORY_ENCODING
 from .v120_core.bspine import (
     BSPINE0_BASIS_DIGEST,
@@ -463,6 +464,7 @@ class TopConfig:
     # value/support authority and the geometry reader retains its camera axis.
     p2_spatial_intent_mode: str = "post_pool_only"
     p2_geometry_mode: str = POOLED_TRANSPORT
+    p3_coordination_mode: str = POINTWISE_PLAN
     # Explicit new behavior; legacy checkpoints keep their existing history chart.
     history_encoding_mode: str = "paired_rows_v1"
     state_feature_mode: str = NATIVE_AFFINE_STATE
@@ -475,6 +477,13 @@ class TopConfig:
 
     def validate(self) -> None:
         grid = resolve_future_time(self.future_time_grid_mode)
+        if self.p3_coordination_mode not in P3_COORDINATION_MODES:
+            raise ValueError("unknown top p3_coordination_mode")
+        if self.p3_coordination_mode == TYPED_HORIZON_PLAN and (
+            not grid.aligned or self.p2_geometry_mode != VIEW_CONDITIONED_TRANSPORT
+            or self.target_binding_mode != "shared_operation_v1"
+        ):
+            raise ValueError("typed P3 requires aligned, shared-target, named-view P2 context")
         if self.p2_geometry_mode not in P2_GEOMETRY_MODES:
             raise ValueError("unknown top p2_geometry_mode")
         if self.p2_geometry_mode == VIEW_CONDITIONED_TRANSPORT and (
@@ -1199,6 +1208,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.p3_coordination_mode == POINTWISE_PLAN:
+            cast(dict[str, object], payload["top"]).pop("p3_coordination_mode")
         if self.top.p2_geometry_mode == POOLED_TRANSPORT:
             cast(dict[str, object], payload["top"]).pop("p2_geometry_mode")
         if self.top.future_time_grid_mode == LEGACY_FUTURE_TIME:

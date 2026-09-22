@@ -902,11 +902,13 @@ class PolicyCompilerStage(nn.Module):
             effect=effect,
             collect_diagnostics=collect_diagnostics,
         )
-        # P3 likewise read the trajectory after the P2 write.  The protected
-        # consequence is the complete P1+P2 residual, so adding it to the
-        # original seed reconstructs that exact boundary without rebuilding a
-        # generic canvas.
-        p3_action_query = action_query + consequence.protected_consequence
+        # Legacy P3 expects the summed post-consequence trajectory. Typed P3
+        # instead receives the original action query and all named owners,
+        # so factual/effect content is not counted twice on its value ingress.
+        p3_action_query = (
+            action_query if self.plan_compiler.coordinator is not None
+            else action_query + consequence.protected_consequence
+        )
         plan, plan_metrics = self.plan_compiler(
             p1_policy_residual=p1_state.policy_query_residual,
             consequence=consequence,

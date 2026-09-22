@@ -10,7 +10,9 @@ from torch import Tensor, nn
 
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
+from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from .action_codec import ACTION_BAND_ENDS
+from .horizon_coordination import P3HorizonContext, TypedHorizonCoordinator
 from .routing import (
     PolicyRoleDeltaBank,
     register_gradient_axis_rms_metrics,
@@ -1447,12 +1449,24 @@ class ZeroPreservingObjectConsequence(nn.Module):
 class ObjectPolicyPlanCompiler(nn.Module):
     """Compile the two P3 innovations without duplicating protected owners."""
 
-    def __init__(self, *, hidden: int, horizon: int, basis: int, future_time_grid_mode: str = LEGACY_FUTURE_TIME) -> None:
+    def __init__(self, *, hidden: int, horizon: int, basis: int, future_time_grid_mode: str = LEGACY_FUTURE_TIME,
+                 coordination_mode: str = POINTWISE_PLAN, heads: int = 1) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
         self.hidden = int(hidden)
         self.horizon = int(horizon)
         self.basis = int(basis)
+        if coordination_mode not in P3_COORDINATION_MODES:
+            raise ValueError("unknown P3 coordination mode")
+        self.coordination_mode = coordination_mode
+        self.coordinator: TypedHorizonCoordinator | None = None
+        if coordination_mode == TYPED_HORIZON_PLAN:
+            if not self.time_grid.aligned:
+                raise ValueError("typed P3 needs a control-aligned physical clock")
+            self.coordinator = TypedHorizonCoordinator(
+                hidden=hidden, horizon=horizon, basis=basis, heads=heads,
+            )
+            return
         # Consume the six removed alias projections' historical draws so the
         # retained P3 weights and every subsequently constructed module keep
         # their R1f fresh-run initialization stream. These temporary tensors
@@ -1493,22 +1507,38 @@ class ObjectPolicyPlanCompiler(nn.Module):
             -1, -1, self.basis, -1
         )
         consequence_innovation = consequence.innovation()
-        temporal_private = temporal_context + self.temporal_effect(
-            consequence_innovation
-        )
-        temporal_raw = self.temporal_lane(
-            temporal_private * torch.tanh(self.temporal_action(action_query))
-        )
-        state_change_source = intent.state_change_evidence[:, None, None].expand(
-            -1, self.horizon, self.basis, -1
-        )
-        state_change_modulation = torch.tanh(
-            self.state_change_action(action_query)
-            + self.state_change_temporal(temporal_context)
-        )
-        state_change_raw = self.state_change_lane(
-            state_change_source * state_change_modulation
-        )
+        if self.coordinator is not None:
+            # Callers supply the original noisy-action query, not a sum with
+            # protected consequence. All other owners enter explicitly here.
+            temporal_raw, state_change_raw, temporal_private = self.coordinator(
+                P3HorizonContext(
+                    action=action_query,
+                    current_fact=consequence.factual_base,
+                    policy_precision=p1_policy_residual,
+                    semantic_effect=consequence.effect.semantic + consequence.interaction.semantic,
+                    geometry_feature_effect=consequence.effect.geometry + consequence.interaction.geometry,
+                    task_temporal=temporal_context,
+                    observed_change=intent.state_change_evidence,
+                    time_grid_mode=intent.time_grid_mode,
+                )
+            )
+        else:
+            temporal_private = temporal_context + self.temporal_effect(
+                consequence_innovation
+            )
+            temporal_raw = self.temporal_lane(
+                temporal_private * torch.tanh(self.temporal_action(action_query))
+            )
+            state_change_source = intent.state_change_evidence[:, None, None].expand(
+                -1, self.horizon, self.basis, -1
+            )
+            state_change_modulation = torch.tanh(
+                self.state_change_action(action_query)
+                + self.state_change_temporal(temporal_context)
+            )
+            state_change_raw = self.state_change_lane(
+                state_change_source * state_change_modulation
+            )
         temporal, temporal_scale = smooth_rms_contract(temporal_raw, 0.35)
         state_change, state_change_scale = smooth_rms_contract(
             state_change_raw,

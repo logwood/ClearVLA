@@ -1,5 +1,32 @@
 # ClearVLA structural rebuild handoff
 
+## Current M6f source checkpoint — 2026-09-22
+
+Source recovered from the verified M6e archive: all 802 source files matched and
+Git tree `7bc4ea9ca239f658b5dbd4d69049cb476f480440` was reproduced exactly.
+Remote base was read at `8dda4c0e8b66e185405407f919a30c064f807940`.
+Local commit ancestry is synthetic recovery, never force-push it.
+
+M6f implements actual P3 typed horizon coordination. Read its architecture
+section and `configs/mainline/structural_rebuild_m6f_calvin.json`. Producer P1
+precision and separate semantic/geometry effects participate directly; original
+query and protected carriers remain separately owned. It is NOT matched
+executed-prefix feedback or completion of remaining W/S/P/bottom work.
+
+Initial production optimizer/sampling smoke completed. The first 29-case
+focused inventory passed (exit zero) on Python 3.13.5/Torch 2.10 CPU. An earlier
+bounded run was interrupted and used an incorrect test output-field name;
+it is preserved as incomplete, not another passing total. Static review found
+buffer type annotations and a TypedDict constructor omission; those were
+corrected without arithmetic or tolerance changes. Final source tests and
+static/parity results are recorded in external checkpoint logs.
+
+User instruction: save this small unit promptly, preserve CI failures, no new
+workflow/master changes. Continue endpoint/action-prefix/observation matching
+and S progress after this semantic bridge. No formal data training, CUDA,
+learned persistent identity or robot success is established here.
+
+
 ## Current M6e source continuation
 
 Recovered all 798 files from the M6d archive, reproducing remote source tree
@@ -429,3 +456,12 @@ review is clean for changed-file Ruff and adds no Pyright errors/imports against
 M6c; inherited diagnostics and the failed preliminary attempts are preserved.
 Final two-seed old-mode parity passed. This is a source checkpoint, not complete
 M6/GPU/behavior validation. Existing CI will evaluate it separately.
+
+M6f final local focused run: 31 cases passed with exit code zero; nine-file
+Ruff clean and differential Pyright has no added errors/missing imports
+(56 inherited type errors remain). Two seeds (0,71) reproduce the M6e legacy
+parameter/buffer/order/config/RNG and same-noise action hashes exactly. A test
+annotation editing error was fixed before the final run; the WIP local commit
+is historical preservation, not the accepted test source. Joint regression is
+tracked externally. Existing workflow is unchanged. One P3 contextual read per
+dynamic policy call increases compute; no measured GPU speed claim is made.

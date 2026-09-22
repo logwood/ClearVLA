@@ -216,6 +216,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         state_feature_mode: str = "native_affine_v1",
         p2_spatial_intent_mode: str = "post_pool_only",
         p2_geometry_mode: str = "pooled_transport_v1",
+        p3_coordination_mode: str = "pointwise_legacy_v1",
         target_binding_mode: str = "reader_local_v1",
         instruction_reference_mode: str = "none",
         history_encoding_mode: str = "paired_rows_v1",
@@ -341,6 +342,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         self.consequence = ZeroPreservingObjectConsequence(hidden)
         self.plan_compiler = ObjectPolicyPlanCompiler(
             future_time_grid_mode=future_time_grid_mode,
+            coordination_mode=p3_coordination_mode, heads=heads,
             hidden=hidden,
             horizon=horizon,
             basis=basis,
@@ -798,11 +800,13 @@ class ObjectIntentDynamicsTop(nn.Module):
             effect=effect,
             collect_diagnostics=collect_diagnostics,
         )
-        # P3 likewise read the trajectory after the P2 write.  The protected
-        # consequence is the complete P1+P2 residual, so adding it to the
-        # original seed reconstructs that exact boundary without rebuilding a
-        # generic canvas.
-        p3_action_query = action_query + consequence.protected_consequence
+        # Legacy P3 expects the summed post-consequence trajectory. Typed P3
+        # instead receives the original action query and all named owners,
+        # so factual/effect content is not counted twice on its value ingress.
+        p3_action_query = (
+            action_query if self.plan_compiler.coordinator is not None
+            else action_query + consequence.protected_consequence
+        )
         plan, plan_metrics = self.plan_compiler(
             p1_policy_residual=p1_state.policy_query_residual,
             consequence=consequence,
