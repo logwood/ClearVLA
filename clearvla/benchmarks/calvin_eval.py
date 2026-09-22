@@ -19,7 +19,7 @@ from .bridge import RemotePolicyClient, policy_observation
 from .io import atomic_json, atomic_npz
 
 CALVIN_EVALUATION_SCHEMA = "clearvla-calvin-lh-mtlc-evaluation-v2"
-CALVIN_TARGETED_SCHEMA = "clearvla-calvin-targeted-rollout-audit-v3"
+CALVIN_TARGETED_SCHEMA = "clearvla-calvin-targeted-rollout-audit-v4"
 CALVIN_OFFICIAL_SEQUENCES = 1000
 CALVIN_OFFICIAL_SUBTASK_STEPS = 360
 CALVIN_ACTION_NAMES = (
@@ -164,6 +164,12 @@ class CalvinBridgeModel:
         self.executed_actions: list[np.ndarray] = []
         self.executed_plan_indices: list[int] = []
         self.executed_chunk_rows: list[int] = []
+        # Explicit local replan provenance.  A row index is only meaningful
+        # together with the cumulative environment step at which its plan was
+        # created; retaining both prevents a chunk boundary from being
+        # misread as a fresh episode phase in audit artifacts.
+        self.plan_origin_steps: list[int] = []
+        self.executed_plan_origin_steps: list[int] = []
         self.observed_history_time_indices: list[int] = []
         self.observed_after_executed_steps: list[int] = []
         self.latency_seconds: list[float] = []
@@ -174,6 +180,7 @@ class CalvinBridgeModel:
         self._pending_reset = True
         self._planned_chunk: np.ndarray | None = None
         self._planned_chunk_index: int | None = None
+        self._planned_chunk_origin_step = 0
         self._next_chunk_row = 0
 
     def plan(self, observation: Mapping[str, Any], goal: str) -> np.ndarray:
@@ -196,6 +203,8 @@ class CalvinBridgeModel:
         self.latency_seconds.append(float(elapsed))
         self._planned_chunk = raw.copy()
         self._planned_chunk_index = len(self.raw_chunks) - 1
+        self._planned_chunk_origin_step = len(self.executed_actions)
+        self.plan_origin_steps.append(int(self._planned_chunk_origin_step))
         self._next_chunk_row = 0
         self._pending_reset = False
         return raw.copy()
@@ -216,6 +225,7 @@ class CalvinBridgeModel:
         self.executed_actions.append(action.copy())
         self.executed_plan_indices.append(int(self._planned_chunk_index))
         self.executed_chunk_rows.append(row_index)
+        self.executed_plan_origin_steps.append(int(self._planned_chunk_origin_step))
         self._previous_action = action.copy()
         self._next_chunk_row = max(int(self._next_chunk_row), row_index + 1)
         return action
@@ -274,6 +284,8 @@ class CalvinBridgeModel:
                 "executed": np.empty((0, 7), dtype=np.float32),
                 "executed_plan_index": np.empty((0,), dtype=np.int64),
                 "executed_chunk_row": np.empty((0,), dtype=np.int64),
+                "plan_origin_step": np.empty((0,), dtype=np.int64),
+                "executed_plan_origin_step": np.empty((0,), dtype=np.int64),
                 "observed_history_time_index": np.empty((0,), dtype=np.int64),
                 "observed_after_executed_steps": np.empty((0,), dtype=np.int64),
                 "latency_seconds": np.empty((0,), dtype=np.float64),
@@ -291,6 +303,10 @@ class CalvinBridgeModel:
                 self.executed_plan_indices, dtype=np.int64
             ),
             "executed_chunk_row": np.asarray(self.executed_chunk_rows, dtype=np.int64),
+            "plan_origin_step": np.asarray(self.plan_origin_steps, dtype=np.int64),
+            "executed_plan_origin_step": np.asarray(
+                self.executed_plan_origin_steps, dtype=np.int64
+            ),
             "observed_history_time_index": np.asarray(
                 self.observed_history_time_indices, dtype=np.int64
             ),
@@ -1036,7 +1052,11 @@ def evaluate_calvin_targeted(
         raise ValueError("targeted CALVIN instruction must be non-empty")
 
     env = _environment(dataset_root, show_gui=show_gui)
-    model = CalvinBridgeModel(client)
+    # The targeted path must use the same chunk-retention state machine as the
+    # formal evaluator.  Constructing the default one-row bridge here and then
+    # manually indexing a fresh plan made execute_rows an outer-loop cosmetic
+    # override and reset the action phase at every replan.
+    model = CalvinBridgeModel(client, execute_rows=execute_rows)
     output_dir.mkdir(parents=True, exist_ok=True)
     resolved_video_dir = (
         Path(video_dir) if video_dir is not None else output_dir / "videos"
@@ -1073,35 +1093,24 @@ def evaluate_calvin_targeted(
         success = False
         environment_steps = 0
         while environment_steps < int(max_steps) and not success:
-            chunk = model.plan(observation, task_instruction)
-            remaining = int(max_steps) - environment_steps
-            rows_this_plan = min(int(execute_rows), remaining)
-            if chunk.shape[0] < rows_this_plan:
-                raise ValueError(
-                    f"requested {rows_this_plan} executed rows but policy horizon is "
-                    f"only {chunk.shape[0]}"
-                )
-            for row in range(rows_this_plan):
-                robot_states.append(
-                    np.asarray(observation["robot_obs"], dtype=np.float32).copy()
-                )
-                action = model.execute_planned_row(row)
-                observation, _reward, _done, current_info = env.step(action)
-                environment_steps += 1
-                if video_recorder is not None:
-                    video_recorder.capture_step(observation)
-                current_task = oracle.get_task_info_for_set(
-                    start_info,
-                    current_info,
-                    {task},
-                )
-                if len(current_task) > 0:
-                    success = True
-                    break
-                if environment_steps >= int(max_steps):
-                    break
-                if row + 1 < rows_this_plan:
-                    model.observe(observation)
+            robot_states.append(
+                np.asarray(observation["robot_obs"], dtype=np.float32).copy()
+            )
+            # step() retains the current chunk for execute_rows physical steps,
+            # appends observe-only history between rows, and replans only at
+            # the declared cursor boundary.
+            action = model.step(observation, task_instruction)
+            observation, _reward, _done, current_info = env.step(action)
+            environment_steps += 1
+            if video_recorder is not None:
+                video_recorder.capture_step(observation)
+            current_task = oracle.get_task_info_for_set(
+                start_info,
+                current_info,
+                {task},
+            )
+            if len(current_task) > 0:
+                success = True
         if video_recorder is not None:
             video_recorder.finish_task(success)
             video_report = video_recorder.finish_sequence(1 if success else 0)
@@ -1145,6 +1154,8 @@ def evaluate_calvin_targeted(
             "checkpoint_receding_horizon_execute_rows": 1,
             "evaluator_execute_rows": int(execute_rows),
             "experimental_override": bool(execute_rows != 1),
+            "replan_cursor_schema": "calvin_replan_cursor_v1",
+            "plan_origin_steps": [int(value) for value in model.plan_origin_steps],
             "planning_decisions": planning_decisions,
             "mean_executed_rows_per_plan": (
                 float(environment_steps / planning_decisions)

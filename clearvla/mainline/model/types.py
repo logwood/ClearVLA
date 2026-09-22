@@ -1117,6 +1117,11 @@ class PolicyIntentDock:
     typed_interval_residual_value: Tensor  # [B,I,K,3,R]
     target_posterior: Tensor | None = None  # FP32 [B,K]
     target_support: Tensor | None = None  # bool [B,K]
+    # TargetFact physical-readability mass.  These are continuous producer
+    # values, not another K/C selector: identity p and the scene complement
+    # remain defined solely by target_posterior/target_support.
+    target_physical_mass: Tensor | None = None  # FP32 [B,K]
+    target_camera_mass: Tensor | None = None  # FP32 [B,K,C]
     target_log_prior: Tensor | None = None  # FP32 [B,K]
     target_summary: Tensor | None = None  # [B,H]
 
@@ -1180,6 +1185,38 @@ class PolicyIntentDock:
                 raise ValueError(
                     "policy-intent target support must share intent device"
                 )
+        if self.target_physical_mass is not None:
+            if tuple(self.target_physical_mass.shape) != (batch, objects):
+                raise ValueError("policy-intent physical mass must be [B,K]")
+            if self.target_physical_mass.dtype != torch.float32:
+                raise TypeError("policy-intent physical mass must remain FP32")
+            if self.target_physical_mass.device != self.interval_key.device:
+                raise ValueError("policy-intent physical mass must share intent device")
+            if not bool(torch.isfinite(self.target_physical_mass).all()):
+                raise ValueError("policy-intent physical mass must be finite")
+            if bool(
+                ((self.target_physical_mass < 0.0) | (self.target_physical_mass > 1.0)).any()
+            ):
+                raise ValueError("policy-intent physical mass must stay in [0,1]")
+            if self.target_posterior is not None and bool(
+                (self.target_physical_mass > self.target_posterior + 1.0e-6).any()
+            ):
+                raise ValueError("policy-intent physical mass cannot exceed identity mass")
+        if self.target_camera_mass is not None:
+            if self.target_camera_mass.ndim != 3 or tuple(
+                self.target_camera_mass.shape[:2]
+            ) != (batch, objects):
+                raise ValueError("policy-intent camera mass must be [B,K,C]")
+            if self.target_camera_mass.dtype != torch.float32:
+                raise TypeError("policy-intent camera mass must remain FP32")
+            if self.target_camera_mass.device != self.interval_key.device:
+                raise ValueError("policy-intent camera mass must share intent device")
+            if not bool(torch.isfinite(self.target_camera_mass).all()):
+                raise ValueError("policy-intent camera mass must be finite")
+            if bool(
+                ((self.target_camera_mass < 0.0) | (self.target_camera_mass > 1.0)).any()
+            ):
+                raise ValueError("policy-intent camera mass must stay in [0,1]")
         if self.target_log_prior is not None:
             if tuple(self.target_log_prior.shape) != (batch, objects):
                 raise ValueError("policy-intent target log prior must be [B,K]")
@@ -1219,6 +1256,10 @@ class ObjectIntentState:
     # construct this compatibility container by hand.
     object_validity: Tensor | None = None  # FP32 [B,K,1]
     target_posterior: Tensor | None = None  # FP32 [B,K]
+    # Continuous physical-readability mass exported by TargetFact's producer
+    # seam.  It is intentionally separate from identity posterior p.
+    target_physical_mass: Tensor | None = None  # FP32 [B,K]
+    target_camera_mass: Tensor | None = None  # FP32 [B,K,C]
     target_log_prior: Tensor | None = None  # FP32 [B,K]
     target_summary: Tensor | None = None  # [B,H]
     target_typed_summary: Tensor | None = None  # [B,3,R]
@@ -1303,6 +1344,8 @@ class ObjectIntentState:
             typed_interval_residual_value=self.typed_interval_residual_value,
             target_posterior=self.target_posterior,
             target_support=self.target_support,
+            target_physical_mass=self.target_physical_mass,
+            target_camera_mass=self.target_camera_mass,
             target_log_prior=self.target_log_prior,
             target_summary=self.target_summary,
         )
@@ -1355,6 +1398,45 @@ class ObjectIntentState:
                 raise TypeError("target posterior must remain FP32")
             if self.target_posterior.device != self.object_tokens.device:
                 raise ValueError("target posterior must share object-token device")
+        if self.target_physical_mass is not None:
+            _shape(
+                self.target_physical_mass,
+                (batch, objects),
+                "target physical readability mass",
+            )
+            if self.target_physical_mass.dtype != torch.float32:
+                raise TypeError("target physical readability mass must remain FP32")
+            if self.target_physical_mass.device != self.object_tokens.device:
+                raise ValueError(
+                    "target physical readability mass must share object-token device"
+                )
+            if not bool(torch.isfinite(self.target_physical_mass).all()):
+                raise ValueError("target physical readability mass must be finite")
+            if bool(
+                ((self.target_physical_mass < 0.0) | (self.target_physical_mass > 1.0)).any()
+            ):
+                raise ValueError("target physical readability mass must stay in [0,1]")
+            if self.target_posterior is not None and bool(
+                (self.target_physical_mass > self.target_posterior + 1.0e-6).any()
+            ):
+                raise ValueError("target physical mass cannot exceed identity mass")
+        if self.target_camera_mass is not None:
+            if self.target_camera_mass.ndim != 3 or tuple(
+                self.target_camera_mass.shape[:2]
+            ) != (batch, objects):
+                raise ValueError("target camera readability mass must be [B,K,C]")
+            if self.target_camera_mass.dtype != torch.float32:
+                raise TypeError("target camera readability mass must remain FP32")
+            if self.target_camera_mass.device != self.object_tokens.device:
+                raise ValueError(
+                    "target camera readability mass must share object-token device"
+                )
+            if not bool(torch.isfinite(self.target_camera_mass).all()):
+                raise ValueError("target camera readability mass must be finite")
+            if bool(
+                ((self.target_camera_mass < 0.0) | (self.target_camera_mass > 1.0)).any()
+            ):
+                raise ValueError("target camera readability mass must stay in [0,1]")
         if self.target_log_prior is not None:
             if tuple(self.target_log_prior.shape) != (batch, objects):
                 raise ValueError("target log prior must be [B,K]")
@@ -1461,6 +1543,16 @@ class ObjectIntentState:
                 None
                 if self.target_posterior is None
                 else self.target_posterior[:, index]
+            ),
+            target_physical_mass=(
+                None
+                if self.target_physical_mass is None
+                else self.target_physical_mass[:, index]
+            ),
+            target_camera_mass=(
+                None
+                if self.target_camera_mass is None
+                else self.target_camera_mass[:, index]
             ),
             target_log_prior=(
                 None

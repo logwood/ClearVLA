@@ -421,7 +421,16 @@ class StatelessObjectIntentOrganizer(nn.Module):
         camera_transport_prior: Tensor,
         camera_validity: Tensor,
         existence: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+    ]:
         """Resolve one observation-level language-to-object fact.
 
         The final target-score row is the only zero-start selector part.
@@ -462,7 +471,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # under this weight; it never receives the mixed high-capacity object
         # content that could let the full instruction reconstruct a second
         # object selector after a uniform p.
-        target_weight = target_posterior * validity_values[..., 0].float()
+        # Keep identity and physical readability as two typed quantities.
+        # ``target_posterior`` is normalized over legal identity support;
+        # ``target_physical_mass`` is deliberately *not* renormalized and is
+        # the only mass allowed to scale action-facing physical evidence.
+        target_physical_mass = target_posterior * validity_values[..., 0].float()
         camera_index = torch.as_tensor(
             self.camera_canonical_permutation,
             device=camera_coordinates.device,
@@ -544,7 +557,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         existence_f = torch.nan_to_num(
             existence[..., 0].float(), nan=0.0, posinf=0.0, neginf=0.0
         ).clamp(0.0, 1.0)
-        readable_mass = target_weight.sum(dim=-1, keepdim=True)
+        readable_mass = target_physical_mass.sum(dim=-1, keepdim=True)
         existence_mass = (
             target_posterior * existence_f
         ).sum(dim=-1, keepdim=True)
@@ -569,7 +582,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         target_summary, _ = smooth_rms_contract(target_summary, 0.35)
 
         typed_summary = torch.einsum(
-            "bk,bktr->btr", target_weight, typed_route.float()
+            "bk,bktr->btr", target_physical_mass, typed_route.float()
         )
         typed_summary = torch.where(
             has_target[..., None],
@@ -605,6 +618,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
             typed_summary.to(dtype=objects.dtype),
             object_support,
             target_logits,
+            target_physical_mass.float(),
+            (
+                target_posterior[:, :, None]
+                * camera_validity_f[..., 0]
+            ).float(),
         )
 
     def _typed_relevance(
@@ -827,6 +845,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
             interval_base, history, diagnostics=collect_diagnostics
         )
         target_posterior: Tensor | None = None
+        target_physical_mass: Tensor | None = None
+        target_camera_mass: Tensor | None = None
         target_log_prior: Tensor | None = None
         target_summary: Tensor | None = None
         target_typed_summary: Tensor | None = None
@@ -858,6 +878,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 target_typed_summary,
                 target_support,
                 target_logits,
+                target_physical_mass,
+                target_camera_mass,
             ) = self._target_fact(
                 protected_goal=protected_goal,
                 history=history,
@@ -1049,6 +1071,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 dtype=torch.float32,
             ),
             target_posterior=target_posterior,
+            target_physical_mass=target_physical_mass,
+            target_camera_mass=target_camera_mass,
             target_log_prior=target_log_prior,
             target_summary=target_summary,
             target_typed_summary=target_typed_summary,

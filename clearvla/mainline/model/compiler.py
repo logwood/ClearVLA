@@ -617,6 +617,51 @@ class ObjectFutureEffectReader(nn.Module):
         ):
             raise ValueError("TargetFact P2 posterior must carry one supported target")
 
+        # Identity and physical readability are separate producer-owned
+        # quantities.  Keep the normalized posterior for identity/scene
+        # routing, while action-facing physical values consume the continuous
+        # p*validity masses exported by S.  Compatibility fixtures may omit
+        # the new fields; in that case the legacy posterior is the exact
+        # fallback rather than silently changing their ABI.
+        physical_object_mass = (
+            posterior
+            if intent.target_physical_mass is None
+            else intent.target_physical_mass.float()
+        )
+        if tuple(physical_object_mass.shape) != (batch, objects):
+            raise ValueError("TargetFact P2 physical object mass must be [B,K]")
+        if not bool(torch.isfinite(physical_object_mass).all()) or bool(
+            ((physical_object_mass < 0.0) | (physical_object_mass > 1.0)).any()
+        ):
+            raise ValueError("TargetFact P2 physical object mass is invalid")
+        if bool((physical_object_mass.masked_select(~producer_support) != 0.0).any()):
+            raise ValueError("TargetFact P2 physical object mass violates producer support")
+        if bool((physical_object_mass > posterior + 1.0e-6).any()):
+            raise ValueError("TargetFact P2 physical object mass exceeds identity mass")
+        physical_camera_mass = intent.target_camera_mass
+        if physical_camera_mass is not None:
+            physical_camera_mass = physical_camera_mass.float()
+            if physical_camera_mass.ndim != 3 or tuple(
+                physical_camera_mass.shape[:2]
+            ) != (batch, objects):
+                raise ValueError("TargetFact P2 physical camera mass must be [B,K,C]")
+            if not bool(torch.isfinite(physical_camera_mass).all()) or bool(
+                ((physical_camera_mass < 0.0) | (physical_camera_mass > 1.0)).any()
+            ):
+                raise ValueError("TargetFact P2 physical camera mass is invalid")
+            if int(physical_camera_mass.shape[-1]) != int(
+                dynamics.camera_chart_availability.shape[-2]
+            ):
+                raise ValueError(
+                    "TargetFact P2 physical camera mass has the wrong camera axis"
+                )
+            if bool(
+                (physical_camera_mass > posterior[:, :, None] + 1.0e-6).any()
+            ):
+                raise ValueError(
+                    "TargetFact P2 physical camera mass exceeds identity mass"
+                )
+
         # ``scene_posterior`` is not another learned selector.  It is the
         # complement expectation for one uncertain primary target over the
         # same producer-owned K domain.  The fixed n-1 denominator prevents a
@@ -702,13 +747,13 @@ class ObjectFutureEffectReader(nn.Module):
             "bk,bikh->bih", posterior, semantic_key.float()
         )
         semantic_selected_common = torch.einsum(
-            "bk,bkv->bv", posterior, semantic_common.float()
+            "bk,bkv->bv", physical_object_mass, semantic_common.float()
         )[:, None].expand(-1, intervals, -1)
         semantic_selected_residual = torch.einsum(
-            "bk,bikv->biv", posterior, semantic_residual.float()
+            "bk,bikv->biv", physical_object_mass, semantic_residual.float()
         )
         semantic_selected_typed = torch.einsum(
-            "bk,bikh->bih", posterior, semantic_typed.float()
+            "bk,bikh->bih", physical_object_mass, semantic_typed.float()
         )
         semantic_scene_key = torch.einsum(
             "bk,bikh->bih", scene_posterior, semantic_key.float()
@@ -776,8 +821,12 @@ class ObjectFutureEffectReader(nn.Module):
             camera_support[:, None, None, None].expand_as(camera_logit),
             dim=-1,
         )
+        if physical_camera_mass is None:
+            physical_camera_mass = posterior[:, :, None].expand(
+                -1, -1, int(camera_posterior.shape[-1])
+            )
         joint_geometry_weight = (
-            posterior[:, None, None, None, :, None] * camera_posterior
+            physical_camera_mass[:, None, None, None, :, :] * camera_posterior
         )
         scene_joint_geometry_weight = (
             scene_posterior[:, None, None, None, :, None] * camera_posterior
@@ -837,7 +886,7 @@ class ObjectFutureEffectReader(nn.Module):
         )
         geometry_typed = self.typed_intent_key[1](geometry_typed_route).float()
         geometry_selected_typed = torch.einsum(
-            "bk,bikh->bih", posterior, geometry_typed
+            "bk,bikh->bih", physical_object_mass, geometry_typed
         )
         geometry_scene_typed = torch.einsum(
             "bk,bikh->bih", scene_posterior, geometry_typed
@@ -872,11 +921,11 @@ class ObjectFutureEffectReader(nn.Module):
         geometry_typed_expanded = expand_interval(geometry_selected_typed)
         geometry_scene_typed_expanded = expand_interval(geometry_scene_typed)
         semantic_resolved = (
-            posterior * object_support.float()
+            physical_object_mass * object_support.float()
         ).sum(dim=-1)
         geometry_resolved = (
-            posterior * camera_support.any(dim=-1).float()
-        ).sum(dim=-1)
+            physical_camera_mass * camera_support.float()
+        ).sum(dim=(-1, -2))
         semantic_scene_resolved = (
             scene_posterior * object_support.float()
         ).sum(dim=-1)
@@ -955,8 +1004,8 @@ class ObjectFutureEffectReader(nn.Module):
         geometry_k_marginal = joint_geometry_weight.sum(dim=-1)
         scene_geometry_k_marginal = scene_joint_geometry_weight.sum(dim=-1)
         expected_geometry_k = (
-            posterior[:, None, None, None]
-            * camera_support.any(dim=-1).float()[:, None, None, None]
+            (physical_camera_mass * camera_support.float()).sum(dim=-1)
+            [:, None, None, None]
         )
         expected_scene_geometry_k = (
             scene_posterior[:, None, None, None]

@@ -369,6 +369,26 @@ def _p2_contract(seed: int) -> dict[str, object]:
         collect_diagnostics=False,
     )
 
+    # V contract: identity p remains a normalized selector, while the
+    # producer-owned physical readability masses attenuate only the
+    # action-facing target values.  The scene complement must not be
+    # renormalized by this attenuation.
+    fractional_intent = replace(
+        intent,
+        target_physical_mass=torch.tensor([[0.25, 0.0, 0.0]], dtype=torch.float32),
+        target_camera_mass=torch.tensor(
+            [[[0.25, 0.25], [0.0, 0.0], [0.0, 0.0]]],
+            dtype=torch.float32,
+        ),
+    )
+    fractional_bundle, fractional_metrics = reader(
+        action_query,
+        dynamics,
+        fractional_intent,
+        action_condition=action_condition,
+        collect_diagnostics=True,
+    )
+
     consequence = ZeroPreservingObjectConsequence(hidden=8)
     factual = torch.randn_like(original_bundle.target.semantic)
     original_consequence, _ = consequence(
@@ -472,6 +492,48 @@ def _p2_contract(seed: int) -> dict[str, object]:
         "scene_geometry_survives_missing_target_camera": (
             _rms(camera_missing_bundle.target.geometry) == 0.0
             and _rms(camera_missing_bundle.scene.geometry) > 0.0
+        ),
+        "physical_mass_scales_target_semantic_values_only": (
+            _max_delta(
+                fractional_bundle.target.semantic,
+                original_bundle.target.semantic * 0.25,
+            )
+            <= 1e-6
+            and _max_delta(
+                fractional_bundle.target.key[..., 0, :],
+                original_bundle.target.key[..., 0, :],
+            )
+            <= 1e-6
+        ),
+        "physical_camera_mass_scales_target_geometry_values_only": (
+            _max_delta(
+                fractional_bundle.target.geometry,
+                original_bundle.target.geometry * 0.25,
+            )
+            <= 1e-6
+            and _max_delta(
+                fractional_bundle.target.key[..., 1, :],
+                original_bundle.target.key[..., 1, :],
+            )
+            <= 1e-6
+        ),
+        "physical_mass_does_not_renormalize_scene": (
+            _max_delta(
+                fractional_bundle.scene.semantic,
+                original_bundle.scene.semantic,
+            )
+            <= 1e-6
+            and _max_delta(
+                fractional_bundle.scene.geometry,
+                original_bundle.scene.geometry,
+            )
+            <= 1e-6
+        ),
+        "physical_mass_diagnostics_match_effective_support": (
+            float(fractional_metrics["object_p2_target_semantic_effective_mass"])
+            < float(spatial_metrics["object_p2_target_semantic_effective_mass"])
+            and float(fractional_metrics["object_p2_target_geometry_effective_mass"])
+            < float(spatial_metrics["object_p2_target_geometry_effective_mass"])
         ),
         "scene_stays_separate_through_consequence_and_plan": (
             _max_delta(
