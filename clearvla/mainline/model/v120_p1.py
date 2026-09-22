@@ -1942,7 +1942,7 @@ class LateRawDetailPolicyReader(nn.Module):
         *,
         target_spatial: P1TargetSpatialDock,
         fine_weights: Tensor,
-        route_logits: Tensor,
+        scene_route_logits: Tensor,
         valid_any: Tensor,
         typed_literal_rgb: Tensor,
         fine_values: Tensor,
@@ -2082,7 +2082,16 @@ class LateRawDetailPolicyReader(nn.Module):
             for name, value in metrics.items():
                 local_metrics.setdefault(name, []).append(value)
 
-        scene_logit = route_logits[:, :, 3:4]
+        # TargetFact owns the first three factual lanes through the already
+        # materialized ObjectFactSet assignment and p_target.  Only the
+        # fourth, goal-free coverage lane has a learned coarse spatial route
+        # here.  The caller therefore supplies a one-lane tensor instead of
+        # carrying three dead target-route logits through the autograd graph.
+        if scene_route_logits.ndim != 7 or int(scene_route_logits.shape[2]) != 1:
+            raise ValueError(
+                "TargetFact scene route logits must be [B,Q,1,C,Y,X,M]"
+            )
+        scene_logit = scene_route_logits
         scene_support = valid_any[:, None, None].expand_as(scene_logit)
         scene_route = self._safe_flat_spatial_softmax(scene_logit, scene_support)
         scene_camera_mass = scene_route.sum(dim=(4, 5, 6))
@@ -3381,8 +3390,19 @@ class LateRawDetailPolicyReader(nn.Module):
                         and name == "semantic"
                     )
                 }
+                # In TargetFact mode the first three factual glimpses are
+                # addressed by the already materialized ObjectFactSet dock.
+                # Coarse route logits are consumed only by the fourth,
+                # goal-free scene lane.  Project that lane alone instead of
+                # allocating three route-query copies that cannot affect the
+                # target output or its loss.
+                coarse_query_row = (
+                    query_row[:, :, 3:4]
+                    if self.target_fact_routing
+                    else query_row
+                )
                 typed_coarse_query_rows = {
-                    name: self.typed_coarse_query[name](query_row)
+                    name: self.typed_coarse_query[name](coarse_query_row)
                     for name in typed_coarse_keys
                 }
                 if (
@@ -3809,11 +3829,19 @@ class LateRawDetailPolicyReader(nn.Module):
                     )
                 )
                 valid_count = candidate_mask.float().sum(dim=-1).clamp_min(1.0)
+                # TargetFact consumes the fine posterior for the first three
+                # object lanes directly.  Fine evidence is a coarse-route
+                # term, so only the scene lane needs it in target mode.
+                route_fine_logits = (
+                    safe_fine_logits[:, :, 3:4]
+                    if self.target_fact_routing
+                    else safe_fine_logits
+                )
                 fine_evidence = torch.logsumexp(
-                    safe_fine_logits, dim=-1
+                    route_fine_logits, dim=-1
                 ) - valid_count.log()
                 fine_evidence = torch.where(
-                    valid_any[:, None, None],
+                    valid_any[:, None, None, :, :, :, :],
                     fine_evidence,
                     fine_evidence.new_full((), -1e4),
                 )
@@ -3840,6 +3868,8 @@ class LateRawDetailPolicyReader(nn.Module):
                         # fine evidence below instead of voting twice.
                         if self.shared_factual_glimpse_bank:
                             owner_mix = self._shared_factual_owner_weights()
+                            if self.target_fact_routing:
+                                owner_mix = owner_mix[3:4]
                             route_stack = torch.stack(
                                 tuple(
                                     typed_route_logits[name]
@@ -3855,7 +3885,14 @@ class LateRawDetailPolicyReader(nn.Module):
                             route_logits = (
                                 route_stack
                                 * owner_mix.reshape(
-                                    1, 1, self.heads, 1, 1, 1, 1, 3
+                                    1,
+                                    1,
+                                    int(owner_mix.shape[0]),
+                                    1,
+                                    1,
+                                    1,
+                                    1,
+                                    3,
                                 )
                             ).sum(dim=-1) * math.sqrt(3.0)
                         else:
@@ -3869,9 +3906,14 @@ class LateRawDetailPolicyReader(nn.Module):
                     typed_route_logit_rms = {}
                     typed_route_logits = {}
                     assert coarse_key is not None
+                    coarse_query_f = (
+                        query_f[:, :, 3:4]
+                        if self.target_fact_routing
+                        else query_f
+                    )
                     route_logits = torch.einsum(
                         "bqgcr,bcijmr->bqgcijm",
-                        query_f,
+                        coarse_query_f,
                         coarse_key.float(),
                     ) * (float(self.lattice_route_dim) ** -0.5)
                 if progressive_coarse_bias is not None:
@@ -3880,16 +3922,24 @@ class LateRawDetailPolicyReader(nn.Module):
                         + progressive_coarse_bias[:, None, None].float()
                     )
                 if progressive_world_route_prior is not None:
-                    route_logits = route_logits + progressive_world_route_prior[
+                    world_route_prior = progressive_world_route_prior[
                         :, start:stop
-                    ].float()
+                    ]
+                    if self.target_fact_routing:
+                        world_route_prior = world_route_prior[:, :, 3:4]
+                    route_logits = route_logits + world_route_prior.float()
                 # The chart is the protected completed-G3 snapshot under V115
                 # (legacy versions retain their W-organized chart).  Add its
                 # current-fact compatibility once per camera/xy cell and let
                 # the existing selector choose slot and sub-cell offset.
+                world_query_f = (
+                    query_f[:, :, 3:4]
+                    if self.target_fact_routing
+                    else query_f
+                )
                 world_logits = torch.einsum(
                     "bqgcr,bqcijr->bqgcij",
-                    query_f,
+                    world_query_f,
                     world_route[:, start:stop].float(),
                 ) * (float(self.lattice_route_dim) ** -0.5)
                 route_logits = route_logits + world_logits[..., None]
@@ -3900,18 +3950,22 @@ class LateRawDetailPolicyReader(nn.Module):
                     # Source ownership is a coarse W prior.  Keep it outside
                     # the trainable local-evidence scale so the appearance
                     # owner cannot be silently attenuated with P1 detail.
-                    route_logits = route_logits + appearance_pre_value_prior
+                    route_prior = appearance_pre_value_prior
+                    if self.target_fact_routing:
+                        route_prior = route_prior[:, :, 3:4]
+                    route_logits = route_logits + route_prior
                 route_logits = route_logits + evidence_scale * fine_evidence
                 route_logits = route_logits.masked_fill(
                     ~valid_any[:, None, None], torch.finfo(route_logits.dtype).min
                 )
+                route_glimpses = 1 if self.target_fact_routing else glimpses
                 route_logits_flat = route_logits.reshape(
-                    batch, stop - start, glimpses, state_count
+                    batch, stop - start, route_glimpses, state_count
                 )
                 route_weights = torch.softmax(route_logits_flat, dim=-1).reshape(
                     batch,
                     stop - start,
-                    glimpses,
+                    route_glimpses,
                     cameras,
                     grid,
                     grid,
@@ -3946,13 +4000,13 @@ class LateRawDetailPolicyReader(nn.Module):
                         )
                         owner_route_weights[name] = torch.softmax(
                             owner_logits.reshape(
-                                batch, stop - start, glimpses, state_count
+                                batch, stop - start, route_glimpses, state_count
                             ),
                             dim=-1,
                         ).reshape(
                             batch,
                             stop - start,
-                            glimpses,
+                            route_glimpses,
                             cameras,
                             grid,
                             grid,
@@ -3977,7 +4031,7 @@ class LateRawDetailPolicyReader(nn.Module):
                     camera_logits = route_logits.reshape(
                         batch,
                         stop - start,
-                        glimpses,
+                        route_glimpses,
                         cameras,
                         grid * grid * slots,
                     )
@@ -4003,7 +4057,7 @@ class LateRawDetailPolicyReader(nn.Module):
                     ).reshape(
                         batch,
                         stop - start,
-                        glimpses,
+                        route_glimpses,
                         cameras,
                         grid,
                         grid,
@@ -4034,7 +4088,7 @@ class LateRawDetailPolicyReader(nn.Module):
                         self._target_fact_local_output(
                             target_spatial=target_spatial,
                             fine_weights=fine_weights,
-                            route_logits=route_logits,
+                            scene_route_logits=route_logits,
                             valid_any=valid_any,
                             typed_literal_rgb=typed_literal_rgb,
                             fine_values=fine_values,
