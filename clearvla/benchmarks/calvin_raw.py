@@ -86,19 +86,52 @@ def _load_object_npy(path: Path) -> object:
     return value.item() if value.shape == () else value
 
 
-def _frame_pattern(root: Path) -> tuple[str, int, str]:
-    # The raw CALVIN frame directory can contain millions of indexed files.
-    # Materialising and sorting both globs makes loader construction scan the
-    # entire directory before it can read even one episode.  Naming is a
-    # directory-level ABI (all frames use one prefix/width/suffix), so the
-    # first matching entry is sufficient; keep npz preference identical to
-    # the previous implementation and only fall back to pkl when no npz is
-    # present.  Path.glob is intentionally consumed lazily here.
-    for pattern in ("*.npz", "*.pkl"):
-        for path in root.glob(pattern):
-            match = re.match(r"^(.*?)(\d+)(\.(?:npz|pkl))$", path.name)
-            if match:
-                return match.group(1), len(match.group(2)), match.group(3)
+def _frame_pattern(
+    root: Path,
+    *,
+    required_indices: Sequence[int],
+) -> tuple[str, int, str]:
+    """Discover a complete frame chart without materialising the directory.
+
+    The raw CALVIN split can contain hundreds of thousands of frame files and
+    Python 3.10's ``Path.glob`` eagerly materialises its scandir iterator.  A
+    sorted glob therefore turns loader construction into a full-directory
+    scan.  The trajectory inventory already supplies the required endpoints;
+    stream candidates with ``iterdir`` and accept only a chart covering every
+    endpoint.  A decoy archive that covers none is ignored, while a partially
+    covering chart fails closed instead of being selected and failing later in
+    ``frame_path``.
+    """
+
+    endpoints = tuple(dict.fromkeys(int(index) for index in required_indices))
+    if not endpoints:
+        raise ValueError("CALVIN frame pattern requires trajectory endpoints")
+    rejected_charts: set[tuple[str, int, str]] = set()
+    for path in root.iterdir():
+        if path.suffix not in {".npz", ".pkl"}:
+            continue
+        match = re.match(r"^(.*?)(\d+)(\.(?:npz|pkl))$", path.name)
+        if match is None:
+            continue
+        prefix, digits, suffix = match.group(1), len(match.group(2)), match.group(3)
+        chart = (prefix, digits, suffix)
+        if chart in rejected_charts:
+            continue
+        present = tuple(
+            (root / f"{prefix}{index:0{digits}d}{suffix}").is_file()
+            for index in endpoints
+        )
+        if all(present):
+            return chart
+        if any(present):
+            missing = endpoints[present.index(False)]
+            raise FileNotFoundError(
+                "CALVIN indexed frame pattern misses trajectory endpoint "
+                f"{missing} under {root}"
+            )
+        # An indexed side artifact (for example a dated metadata dump) is not
+        # a frame chart when it names none of the source trajectory endpoints.
+        rejected_charts.add(chart)
     raise FileNotFoundError(f"no indexed CALVIN frame files found under {root}")
 
 
@@ -414,7 +447,15 @@ def _source_trajectories(split_root: Path, source_split: str) -> tuple[RawCalvin
     values = np.asarray(np.load(path, allow_pickle=False), dtype=np.int64)
     if values.ndim != 2 or values.shape[1] != 2 or len(values) == 0:
         raise ValueError(f"CALVIN source trajectory inventory must be [N,2], got {values.shape}")
-    prefix, digits, suffix = _frame_pattern(split_root)
+    endpoints = tuple(
+        int(index)
+        for start, end in values.tolist()
+        for index in (start, end)
+    )
+    prefix, digits, suffix = _frame_pattern(
+        split_root,
+        required_indices=endpoints,
+    )
     rows = tuple(
         RawCalvinTrajectory(
             source_split=str(source_split),

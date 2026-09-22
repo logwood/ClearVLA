@@ -271,6 +271,13 @@ language, normalizer, component and model-state identities apart from the one
 new exact-zero parameter. Both start fresh optimizer/schedule/RNG state and are
 never exact resume across modes.
 
+The CALVIN raw-overlay reader is also admitted in that pread migration's
+source allow-list. Its frame-chart discovery is endpoint-validated and lazy:
+the `ep_start_end_ids.npy` start/end indices are the finite evidence for a
+candidate prefix/width/suffix, unrelated indexed archives are ignored, and a
+partially covered chart fails closed. This avoids an eager full-directory glob
+without weakening raw-frame ABI validation.
+
 The explicit `target_action_bottleneck_v1` identifier names a full
 single-target factorization. It replaces the legacy language-conditioned
 interval-K reader, the coarse-action raw-K read, and P2's semantic
