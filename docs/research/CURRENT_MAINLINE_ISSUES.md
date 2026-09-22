@@ -40,7 +40,10 @@ Still open before/through subsequent milestones:
   values. Still open: global entity objectness, reduction of ambiguous support,
   causal entity association and Teacher's dependence on current G. M4a connects
   the completed G3 block to the binder; M4b corrects query/image correspondence
-  and log-domain image conditioning. Neither establishes physical objectness.
+  and log-domain image conditioning. M4c1 now supplies finite-window causal
+  observed correspondences to actual K grouping; current/history provenance
+  is checked before consumption. It adds no persistent identity state. These
+  units do not establish physical objectness or cross-window re-identification.
   Distribution preservation is not a trained segmentation/tracking guarantee;
   production-scale memory/latency must be measured on the user's GPU.
 - S: target/operation/progress separation, object-specific change, shared

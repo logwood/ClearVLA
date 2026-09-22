@@ -24,7 +24,7 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit candidate is
-`configs/mainline/structural_rebuild_m4b_calvin.json`. Legacy and M1a/M1b/M1c/M1d/M2/M3
+`configs/mainline/structural_rebuild_m4c_calvin.json`. Legacy and M1a/M1b/M1c/M1d/M2/M3/M4b
 configs remain reproducible controls, not automatic aliases of this candidate.
 M2 preserves full G1 support through the actual G2 sampler and G3/P1
 value consumers. M3 adds one soft local observation law for typed properties
@@ -266,6 +266,54 @@ refinement. It does not resolve global physical objectness, persistent entity
 association, cross-camera physical calibration, or later S/W/P responsibilities.
 CUDA scatter determinism, production memory/latency and learned task success
 remain hardware/behavior verification, not consequences of CPU tests.
+
+## M4c1 observed temporal evidence for current entity grouping
+
+`top.entity_history_mode=flow_pulled_history_v1` requires source-timed visual
+history and M4b current-image candidate support. History/current observed content,
+cell masks, chart axes, device and latest source gap must agree; a stale or
+foreign history packet is rejected, not adapted silently. Current-only M4b remains a
+separately selected control, not an implicit fallback.
+
+The observed-history packet contains only the already causal DINO frames,
+the existing two directed flow estimates, actual frame offsets and the exact
+context-dropout/source masks. It reuses the current-observation content grid's
+full-width normalization; it does not call a future-target API. Backward flow
+is indexed on the later SOURCE image and converts from chart-cell displacement
+to normalized xy once. Earlier coordinates compose the two adjacent maps at
+the appropriate intermediate location; multiplying the latest flow by age is
+not equivalent and is not used. Current-observation aliases at reset are counted
+once. Leaving the image cannot manufacture an observation by reentering later.
+
+Masked values are removed before projection and interpolation. Fractional
+coverage is retained, not divided out. Confidence/occlusion are inferred path
+features, NEVER observational validity, entity existence or a loss mask. The
+history relation contains per-camera feature and image displacement changes
+per actual control step, and separate coverage/status/age features. These are
+visual correspondences, not world velocity, contact truth or task progress.
+There is no cross-camera raw-coordinate average in this new path.
+
+Learned temporal relations are formed on the CURRENT image chart before the
+same full-candidate quadrature used by G3. They enter the real K competition
+key AND iterative slot update, so this is not an unused diagnostic sidecar.
+All downstream facts and their S/coarse/W/P consumers use the resulting single
+K allocation. The independent observed current DINO target, cell mask and
+real/null ownership law are unchanged. Dense history stays on the ephemeral
+observation plane, not in the compact candidate-W/ODE cache.
+
+Train and deployment recompute the identical finite causal window. No hidden
+cross-observation state, task counter, extra G/W solve, deployment-only recurrent
+cache or ODE-time memory update is introduced. This deliberately bounded first
+association unit supplies temporal evidence for grouping, but does NOT claim
+persistent K IDs, long-occlusion re-identification, calibrated multiview physical
+identity, complete segmentation, or learned behavioral success. M4c2 still owns
+those remaining global/persistent-identity design questions; M5-M11 are not
+completed by this upstream interface change.
+
+The explicit config and deployment ABI reject missing/unknown/drifting history
+semantics. New parameters are instantiated only in the selected mode and are
+owned by the real grounder. Current-only controls have no placeholder parameters
+or changed constructor RNG/order. No old-checkpoint or optimizer migration.
 
 ## Agent quick contract
 

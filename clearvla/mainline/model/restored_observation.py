@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from clearvla.vision.candidate_support import sample_candidate_expectation
+from clearvla.vision.entity_history import CAUSAL_ENTITY_HISTORY, ObservedEntityHistory
 from clearvla.vision.source_time import VisualSourceTime
 
 from ..config import ExperimentConfig
@@ -233,7 +234,26 @@ class RestoredV120ObservationCompiler(nn.Module):
         literal = bank.dense_current_rgb
         previous_literal = 2.0 * observation.raw_rgb[:, -2].float() - 1.0
         earlier_literal = 2.0 * observation.raw_rgb[:, -3].float() - 1.0
+        observed_history = None
+        if self.config.top.entity_history_mode == CAUSAL_ENTITY_HISTORY:
+            time = pack.visual_source_time
+            if time is None:
+                raise ValueError("causal entity history requires source-owned image times")
+            # Reuse the SAME full-width normalization/pooling as observed current
+            # content. This accepts only the already causal online image packet.
+            content = self.encoder._teacher_content_grid(observation.dino_history)
+            observed = (~pack.context_dropout_mask) & time.frame_observed[:, :, None, None, None]
+            side = int(content.shape[-2])
+            if side < 2 or content.shape[-3] != side:
+                raise ValueError("entity history flow requires a square chart of side >= 2")
+            observed_history = ObservedEntityHistory(
+                content=content, observed=observed, source_time=time,
+                backward_flow=pack.patch_flow_backward * (2.0 / float(side - 1)),
+                confidence=pack.flow_confidence, occlusion=pack.flow_occlusion,
+            )
+            observed_history.validate()
         grounding = GroundingObservationBank(
+            observed_history=observed_history,
             address_bank=bank,
             late_detail=detail,
             visual_memory=visual_memory,
@@ -399,6 +419,7 @@ class RestoredV120ObservationCompiler(nn.Module):
             slot_transport_prior=grounded.slot_transport_prior,
             latest_flow_steps=bank.latest_flow_steps,
             context_slots=context_slots,
+            observed_history=bank.observed_history,
             current_image_support=current_image_support,
         )
         evidence = ObservationEvidence(

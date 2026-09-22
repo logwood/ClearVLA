@@ -16,6 +16,7 @@ from clearvla.vision.entity_chart import (
     CurrentImageSupport,
     ImageLogMeasure,
 )
+from clearvla.vision.entity_history import ObservedEntityHistory
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
 
 from ..manifest import INTERVALS
@@ -295,6 +296,7 @@ class LocalFactSet:
     geometry_owner_log_probs: Tensor | None = None
     context_slots: Tensor | None = None  # completed current G3 at the same support [B,C,Y,X,M,H]
     current_image_support: CurrentImageSupport | None = None
+    observed_history: ObservedEntityHistory | None = None
 
     @property
     def batch(self) -> int:
@@ -364,6 +366,28 @@ class LocalFactSet:
                 raise TypeError(f"local {name} must be finite FP32")
         if self.current_image_support is not None:
             self.current_image_support.validate(self.slot_validity)
+        if self.observed_history is not None:
+            self.observed_history.validate()
+            if self.current_image_support is None:
+                raise ValueError("causal entity history needs actual current-image support")
+            history_shape = self.observed_history.content.shape
+            if (history_shape[0], *history_shape[2:5], history_shape[-1]) != tuple(self.target_dino_content.shape):
+                raise ValueError("entity history and current observed chart axes differ")
+            history = self.observed_history
+            if history.content.device != self.content_slots.device:
+                raise ValueError("entity history and current facts must share their source device")
+            if self.latest_flow_steps is None or not torch.equal(
+                self.latest_flow_steps, history.source_time.pair_steps[:, -1]
+            ):
+                raise ValueError("entity history and current flow durations disagree")
+            if not torch.equal(history.observed[:, -1], self.cell_observed[..., 0]):
+                raise ValueError("entity history and current observation support disagree")
+            current = history.content[:, -1].to(dtype=self.target_dino_content.dtype)
+            if not torch.equal(
+                current.masked_select(self.cell_observed),
+                self.target_dino_content.masked_select(self.cell_observed),
+            ):
+                raise ValueError("entity history and current observed content disagree")
         if self.context_slots is not None:
             _shape(self.context_slots, (*prefix, int(self.public_scene_base.shape[-1])), "local completed G3 context")
             if self.context_slots.device != self.content_slots.device:

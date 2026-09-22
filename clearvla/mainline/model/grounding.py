@@ -14,6 +14,11 @@ from clearvla.vision.entity_chart import (
     current_image_grid,
     pushforward_log_to_current_image,
 )
+from clearvla.vision.entity_history import (
+    CAUSAL_ENTITY_HISTORY,
+    NO_ENTITY_HISTORY,
+    CausalEntityEvidence,
+)
 
 from .routing import smooth_rms_contract
 from .types import DenseFactChart, LocalFactSet, ObjectFactSet, normalized_entropy
@@ -220,6 +225,7 @@ class DenseObjectGrounder(nn.Module):
         maximum_update_rms: float = 0.35,
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = QUERY_CHART,
+        entity_history_mode: str = NO_ENTITY_HISTORY,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -281,7 +287,21 @@ class DenseObjectGrounder(nn.Module):
             else None
         )
 
-    def _candidate_tokens(self, chart: DenseFactChart) -> Tensor:
+        if entity_history_mode not in (NO_ENTITY_HISTORY, CAUSAL_ENTITY_HISTORY):
+            raise ValueError("unknown entity history mode")
+        if entity_history_mode == CAUSAL_ENTITY_HISTORY and entity_chart_mode != CURRENT_IMAGE_CHART:
+            raise ValueError("causal entity history requires current image coordinates")
+        self.entity_history_mode = entity_history_mode
+        self.history_evidence = (
+            CausalEntityEvidence(content_dim, route_dim)
+            if entity_history_mode == CAUSAL_ENTITY_HISTORY else None
+        )
+        self.history_key = (
+            nn.Linear(route_dim, hidden, bias=False)
+            if entity_history_mode == CAUSAL_ENTITY_HISTORY else None
+        )
+
+    def _candidate_tokens(self, chart: DenseFactChart, history_context: Tensor | None = None) -> Tensor:
         """Return the exact shared V120 key/value candidate representation."""
 
         # Candidate validity is a producer-owned support boundary.  Apply it
@@ -322,6 +342,12 @@ class DenseObjectGrounder(nn.Module):
             value = value + self.context_key(context)
         elif chart.candidate_context is not None:
             raise ValueError("candidate-only grounder rejects undeclared G3 context")
+        if self.history_key is not None:
+            if history_context is None:
+                raise ValueError("causal entity keys require observed history evidence")
+            value = value + self.history_key(_supported_values(history_context, chart.candidate_validity))
+        elif history_context is not None:
+            raise ValueError("current-only entity keys reject undeclared temporal context")
         return self.candidate_norm(value)
 
     def _competition(
@@ -414,7 +440,14 @@ class DenseObjectGrounder(nn.Module):
         chart = dense_chart_from_local_facts(local_facts)
         if (self.entity_chart_mode == CURRENT_IMAGE_CHART) != (chart.current_image_support is not None):
             raise ValueError("entity chart mode requires matching declared current-image support")
-        candidates_structured = self._candidate_tokens(chart)
+        history_context = None
+        if self.history_evidence is not None:
+            if local_facts.observed_history is None or local_facts.current_image_support is None:
+                raise ValueError("causal entity binding requires the online history and support")
+            history_context = self.history_evidence(local_facts.observed_history, local_facts.current_image_support)
+        elif local_facts.observed_history is not None:
+            raise ValueError("current-only binding rejects undeclared observed history")
+        candidates_structured = self._candidate_tokens(chart, history_context)
         batch = int(candidates_structured.shape[0])
         candidate_shape = candidates_structured.shape[1:-1]
         count = math.prod(int(value) for value in candidate_shape)

@@ -19,6 +19,11 @@ from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.data.state_features import NATIVE_AFFINE_STATE, state_feature_metadata
 from clearvla.vision.candidate_support import MOMENT_LOCAL_SUPPORT, candidate_support_metadata
 from clearvla.vision.entity_chart import CURRENT_IMAGE_CHART, QUERY_CHART, entity_chart_metadata
+from clearvla.vision.entity_history import (
+    CAUSAL_ENTITY_HISTORY,
+    NO_ENTITY_HISTORY,
+    entity_history_metadata,
+)
 from clearvla.vision.local_ownership import INDEPENDENT_LOCAL_OWNERS, local_ownership_metadata
 from clearvla.vision.preprocessing import (
     PreprocessConfig,
@@ -342,6 +347,8 @@ def build_deployment_abi(
         "flow_schedule": flow_schedule,
         "flow_schedule_sha256": canonical_sha256(flow_schedule),
         "observation": {
+            **({"entity_history": entity_history_metadata(config.top.entity_history_mode)}
+               if config.top.entity_history_mode == CAUSAL_ENTITY_HISTORY else {}),
             **({"entity_chart": entity_chart_metadata(config.top.entity_chart_mode)}
                if config.top.entity_chart_mode == CURRENT_IMAGE_CHART else {}),
             **({"entity_context": {"schema": "completed-current-g3-v1", "read": "same-full-candidate-support", "target": "observed-dino-unchanged"}}
@@ -438,6 +445,13 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     )
     if observation.get("history_timing_contract") != expected_timing:
         raise ValueError("deployment history timing contract differs from selected graph")
+    history_mode = graph_top.get("entity_history_mode", NO_ENTITY_HISTORY)
+    if history_mode == CAUSAL_ENTITY_HISTORY:
+        actual_history = _mapping(observation.get("entity_history"), name="observation.entity_history")
+        if canonical_sha256(actual_history) != canonical_sha256(entity_history_metadata(CAUSAL_ENTITY_HISTORY)):
+            raise ValueError("deployment entity history differs from the graph")
+    elif history_mode != NO_ENTITY_HISTORY or "entity_history" in observation:
+        raise ValueError("deployment entity history is unknown or undeclared")
     chart_mode = graph_top.get("entity_chart_mode", QUERY_CHART)
     if chart_mode == CURRENT_IMAGE_CHART:
         actual_chart = _mapping(observation.get("entity_chart"), name="observation.entity_chart")

@@ -34,7 +34,8 @@ choices just to preserve old golden outputs.
 | M3 G2 local observation | Implemented candidate; verification recorded per commit | One soft FP32 location law across typed attributes, full-support G2 evidence and joint G3 local-M refinement; actual binder/Teacher/P1 consumers adapted. Global entities and temporal reassociation remain M4. |
 | M4a G3 context -> entity binder | Implemented candidate; verification recorded per commit | Completed current G3 sampled on actual support reaches real K competition; observed target/support authority unchanged; source-owned gradient and restore tests. |
 | M4b current-image entity support | Implemented candidate; verification recorded per source | Complete spatial law in actual reverse lookup/reconstruction and one geometric summary; stable log-domain conditioning; query/image identities separated. |
-| M4c remaining global/persistent identity | Open | Physical objectness, causal association and matching training/online state; do not mistake a corrected image write for persistent entity identity. |
+| M4c1 causal observed entity evidence | Implemented candidate; verification per source | Existing inverse flows compose observed past onto current pixels; actual full-candidate evidence reaches K competition. Same finite window in training and online, no deployment-only state. |
+| M4c2 remaining global/persistent identity | Open | Physical objectness, cross-window association and any matching recurrent training/online state; do not mistake finite-window grouping for persistent K identity. |
 | M5 S/coarse | Interface adapted only | The history submodule is new; target/operation/progress decomposition, shared entity binding and recognizer supervision still require deep review. |
 | M6 W1/W2 | Not started | Match supervised action to observed outcome; separate candidate prediction from demonstration-target training; explicit robot-object relations and known control horizon. |
 | M7 P1/P2 | History context adapted only | Shared operated entity, current target facts, view-aware geometry and corresponding candidate consequences. |
@@ -168,3 +169,20 @@ association algorithms, world intervals, memory sizes and solver call budgets
 remain reviewable decisions. A new module or renamed type is not evidence that
 its consumer uses it. No attention quota, hand-set gain floor, hidden oracle,
 phase timer or arbitrary extra solver pass substitutes for a sound dataflow.
+
+## M4c1 source and consumer map
+
+| Producer | Consumer | Contract |
+|---|---|---|
+| Prepared causal image packet | `ObservedEntityHistory` | Exact source offsets/context masks; current content normalization reused, no future argument. |
+| Existing inverse flow on later cells | `pull_causal_history` | Compose maps at intermediate coordinates; image-chart units, duplicate step is identity. |
+| Source-mask interpolation | Temporal relation features | Partial coverage is retained, never tiny-mass normalized or promoted to physical visibility. |
+| Camera-local temporal features | Full current-candidate quadrature | Project before expansion; no barycenter or top-k support collapse. |
+| Temporal candidate context | Real K competition and slot updates | Alter the actual exported entity law, not an unused metric; independent current target unchanged. |
+| Current facts | S/coarse/W/P, compact deployment cache | No new dense source tensor or mutable memory in an ODE/W rerun. |
+| Config/ABI | Save/exact reload/deployment loader | Explicit new mode; source file included in import-closure identity. |
+
+M4c1 chooses a bounded observation-derived association path before considering
+persistent recurrent identities. Global physical objectness and cross-window
+re-identification are NOT declared complete. Do not promote a new field, an
+action gradient, or a passing structural test into a learned tracking claim.

@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from clearvla.vision.candidate_support import candidate_support_metadata
+from clearvla.vision.entity_history import ObservedEntityHistory
 
 from ..v120_core.flow_dino_evidence import (
     LateRawDetailEvidence,
@@ -106,8 +107,11 @@ class GroundingObservationBank:
     native_flow_losses: dict[str, Tensor] | None = None
     visual_memory_observed: Tensor | None = None
     latest_flow_steps: Tensor | None = None
+    observed_history: ObservedEntityHistory | None = None
 
     def validate(self) -> None:
+        if self.observed_history is not None:
+            self.observed_history.validate()
         if self.address_bank.dense_current_dino_content is None:
             raise ValueError("grounding bank lost the full current DINO chart")
         if self.late_detail.address_bank is not self.address_bank:

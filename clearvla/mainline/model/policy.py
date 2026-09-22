@@ -230,6 +230,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,
+            entity_history_mode=top.entity_history_mode,
             core_config=raw_observation.v120_config,
         )
         raw_history_proposal = HistoryActionProposal(
