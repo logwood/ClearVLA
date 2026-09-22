@@ -23,10 +23,13 @@ they do not define the current graph.
 current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
-S/W motion and Teacher. The latest explicit candidate is
-`configs/mainline/structural_rebuild_m5a_calvin.json`. M5a adds one soft operated-
+S/W motion and Teacher. The latest explicit source candidate is
+`configs/mainline/structural_rebuild_m6c_calvin.json` (validation scope in handoff).
+M5a adds one soft operated-
 object distribution across actual S/coarse/P1/P2 readers; its detailed contract
-is below. Instruction-start progress and deeper downstream redesign are open. Legacy and M1a/M1b/M1c/M1d/M2/M3/M4b
+is below. M5b adds a causal instruction reference; M6a/b/c separate action-matched W
+supervision, known-control evidence and current robot/view relations. Learned
+progress, physical object identity and deeper downstream redesign remain open. Legacy and M1a/M1b/M1c/M1d/M2/M3/M4b
 configs remain reproducible controls, not automatic aliases of this candidate.
 M2 preserves full G1 support through the actual G2 sampler and G3/P1
 value consumers. M3 adds one soft local observation law for typed properties
@@ -1388,3 +1391,89 @@ deployment conditioning mismatch or justify far-horizon planning claims. M6
 still owns control-horizon alignment, robot-object physical relationships and
 Teacher association quality. M4c2, remaining S objectives and P redesign remain
 open. Full-stage CI and learned behavior are not implied by source preservation.
+
+
+## M6b candidate control domain (explicit candidate)
+
+`top.world_control_mode=known_prefix_v1` is selected by
+`configs/mainline/structural_rebuild_m6b_calvin.json`. It requires sequence
+physical controls and matched observed-action W supervision. The old mode is
+omitted in serialized legacy configs and remains a reproducible control.
+
+W constructs an immutable `CandidateControlDomain` from the actual candidate
+length; it accompanies W1's working state and W2's final prediction. It is NOT
+pixel validity, target probability, predicted uncertainty, or a learned gate.
+CandidateWorld checks agreement with its exact action tag; policy caches and P2
+reject a missing or unconfigured domain. No host read of a CUDA value is added
+at numerical nodes. Object permutations retain the same physical time domain.
+
+The existing interval endpoints are 8/16/32/48. A known 24-step proposal fully
+covers the first two, not the last two; no zero-filled continuation is invented.
+P2 quarantines unknown semantic/transport/covariance values BEFORE nonlinear
+keys, geometry scores, and common/residual decomposition. Common effects use
+only admitted intervals. Spatial and terminal posteriors exclude unknown
+intervals; shared target mass and null semantics are preserved. An empty
+domain yields no effect, not a confident prediction of zero motion, and leaves
+the factual P1 path intact. Current observation masks/coordinates are unchanged.
+
+Raw extrapolated fields remain explicitly non-admitted diagnostics. They cannot
+enter P3 or the bottom through P2; changing them, even to NaN, leaves the actual
+same-noise sampled action unchanged after a real training update. Training-only
+SupervisedWorld has its own per-sample observed-control support and no candidate
+domain; real 32/48-step supervision still trains W2. No parameters, W passes,
+ODE passes, ground-truth deployment inputs or recurrent state are added.
+
+This is an honest boundary, not full-horizon planning: the old 16..32 interval
+cannot supply a separately supervised 16..24 prediction. A later time-grid or
+explicit candidate-continuation redesign must address that granularity, with
+matching Teacher/S/data/ABI changes. Do not relabel the 32-step prediction as
+24 steps. Robot-object relation conditioning and remaining M6/M7/M8 work are
+still open. Full milestone/GPU/behavior acceptance is separate from source save.
+
+
+## M6c observed robot/object/view relation in W
+
+`top.world_robot_condition_mode=observed_state_views_v1` is explicit in
+`structural_rebuild_m6c_calvin.json`. It requires the current entity chart,
+source-timed motion, named camera geometry and known candidate-control domain.
+The legacy mode `implicit_g_only_v1` remains omitted in serialized configs.
+This is a new graph identity, not an automatic checkpoint migration.
+
+G exports a compact ObjectWorldBelief. Its optional RobotWorldObservation holds
+only the SAME authoritative current history.state tensor and its feature-chart
+identity: normalized xyz, rotation-column features and opening in the CALVIN
+candidate. It is not a candidate action, language value, future state, contact
+oracle or instruction-start state. Candidate W, observed-control supervision W,
+and outer refinement use the same belief. Training and policy caches check the
+configured chart and current-source identity; W1/W2 reject stale relation reuse.
+The deployed compact belief still excludes dense visual/history/target banks.
+
+RobotObjectRelationEncoder combines robot state, each object's current content,
+each named camera's image coordinates, its observed image velocity and an
+explicit positive-flow-gap flag. Missing views are quarantined before learned
+projections/products. At reset a current image remains valid but motion is
+unobserved, not positive evidence of zero velocity. Coordinates are never
+subtracted from proprioceptive xyz. These are learned relational FEATURES, not
+calibrated 3D object poses, metric distances or inferred contact truth.
+
+A nonlinear per-view relation (including robot/object-view interaction) is
+computed BEFORE any camera reduction. Conditional source-supported weights pool
+features, not raw 2D motion vectors. The generic W base consumes those features
+instead of the camera-averaged raw displacement/rate. Per-view relation also
+conditions the existing typed geometric carriers, including covariance. The
+existing source validity and independent observation loss targets do not change.
+No goal relevance enters W; shared target selection stays in S/P.
+
+Relation encoding runs once for each W materialization and is reused by W1,
+W2, mean and covariance branches. It is private working state, not a mutable
+ODE memory. Numerical solver nodes consume the final field; the number of W,
+ODE and G/S evaluations is unchanged from M6a/b. New parameters are owned by
+the existing dynamics optimizer/checkpoint group, with a new explicit config
+and deployment ABI. Unknown horizons remain excluded under M6b, while real
+48-step observed controls retain their separate supervised W2 learning.
+
+This repairs physical conditioning, not physical correctness by construction.
+A learned encoder may still rely on shortcuts. Lack of calibrated 3D/contact
+state, physical cross-window entity association, 16..24 control-grid resolution,
+S desired-operation supervision and P3 executed-prefix feedback remain open.
+Do not claim successful manipulation or whole-M6 acceptance from these checks.

@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from ..config import ExperimentConfig
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
 from ..supervision import quarantine, supported_mean
+from ..world_robot import OBSERVED_ROBOT_VIEWS, RobotWorldObservation
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from .action_contract import BottomOutput
 from .component_contracts import ComponentSelection, modular_to_legacy_name
@@ -132,6 +133,17 @@ class OnlinePolicyCache:
             horizon=config.dimensions.action_horizon,
         )
         _validate_configured_world_action_condition(self.top.action_condition, config)
+        has_domain = self.top.predicted_dynamics.control_domain is not None
+        if has_domain != (config.top.world_control_mode == "known_prefix_v1"):
+            raise ValueError("policy cache control domain differs from configured world mode")
+        robot = self.top.belief.robot_observation
+        if (robot is not None) != (config.top.world_robot_condition_mode == OBSERVED_ROBOT_VIEWS):
+            raise ValueError("policy cache robot observation differs from configured W")
+        if robot is not None:
+            robot.validate(batch=self.history.state.shape[0], device=self.history.state.device,
+                           state_dim=config.dimensions.state_dim, feature_mode=config.top.state_feature_mode)
+            if robot.state is not self.history.state:
+                raise ValueError("W cache must retain the same current robot state as policy")
         self.factual_dock.validate(
             horizon=config.dimensions.action_horizon,
             basis=config.dimensions.action_basis_tokens,
@@ -165,6 +177,16 @@ class OnlineTrainingState:
             horizon=config.dimensions.action_horizon,
         )
         _validate_configured_world_action_condition(self.top.action_condition, config)
+        has_domain = self.top.predicted_dynamics.control_domain is not None
+        if has_domain != (config.top.world_control_mode == "known_prefix_v1"):
+            raise ValueError("policy cache control domain differs from configured world mode")
+        belief = self.top.current_world_belief
+        robot = None if belief is None else belief.robot_observation
+        if (robot is not None) != (config.top.world_robot_condition_mode == OBSERVED_ROBOT_VIEWS):
+            raise ValueError("training cache robot observation differs from configured W")
+        if robot is not None:
+            robot.validate(batch=self.top.facts.batch, device=self.top.facts.content.device,
+                           state_dim=config.dimensions.state_dim, feature_mode=config.top.state_feature_mode)
         self.history_proposal.validate(
             horizon=config.dimensions.action_horizon,
             hidden=config.dimensions.hidden_size,
@@ -227,6 +249,9 @@ class ClearVLAMainlinePolicy(nn.Module):
             camera_names=config.data.camera_names,
             world_camera_condition_mode=top.world_camera_condition_mode,
             world_action_condition_mode=top.world_action_condition_mode,
+            world_control_mode=top.world_control_mode,
+            world_robot_condition_mode=top.world_robot_condition_mode,
+            state_feature_mode=top.state_feature_mode,
             p2_spatial_intent_mode=top.p2_spatial_intent_mode,
             target_binding_mode=top.target_binding_mode,
             instruction_reference_mode=top.instruction_reference_mode,
@@ -545,8 +570,14 @@ class ClearVLAMainlinePolicy(nn.Module):
             conditioned_policy_input.history.action_state,
         )
         self.outlet_adapter.validate_world_condition(action_condition)
+        world_belief = (
+            facts.world_belief(robot_observation=RobotWorldObservation(
+                state=conditioned_policy_input.history.state,
+                feature_mode=self.config.top.state_feature_mode,
+            )) if self.config.top.world_robot_condition_mode == OBSERVED_ROBOT_VIEWS else None
+        )
         world, world_metrics = self.world.materialize(
-            belief=facts,
+            belief=facts if world_belief is None else world_belief,
             action_condition=action_condition,
             collect_diagnostics=collect_diagnostics,
         )
@@ -555,6 +586,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             intent=intent,
             coarse_action=coarse,
             candidate_world=world,
+            current_world_belief=world_belief,
         )
         context.validate(hidden=self.config.dimensions.hidden_size, horizon=self.config.dimensions.action_horizon)
         top_metrics = {
@@ -762,7 +794,8 @@ class ClearVLAMainlinePolicy(nn.Module):
                 None if future.support is None else future.support.action,
             )
             supervised, world_metrics = self.world.materialize_supervised(
-                belief=training_state.top.facts, action_condition=controls,
+                belief=(training_state.top.facts if training_state.top.current_world_belief is None
+                        else training_state.top.current_world_belief), action_condition=controls,
                 collect_diagnostics=collect_diagnostics,
             )
             targets = replace(targets, supervised_world=supervised)

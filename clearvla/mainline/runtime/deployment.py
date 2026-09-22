@@ -52,6 +52,8 @@ from ..model.target_binding import (
     target_binding_metadata,
 )
 from ..temporal import HISTORY_TIMING_CONTRACT, TIMED_HISTORY_ENCODING
+from ..world_control import KNOWN_PREFIX_WORLD_CONTROL, LEGACY_WORLD_CONTROL, world_control_metadata
+from ..world_robot import NO_ROBOT_WORLD, OBSERVED_ROBOT_VIEWS, world_robot_metadata
 from .flow_schedule import DeploymentFlowSchedule
 
 DEPLOYMENT_ABI_SCHEMA = "clearvla-mainline-deployment-abi-v1"
@@ -351,7 +353,12 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"world_robot": world_robot_metadata(state_mode=config.top.state_feature_mode,
+                                               state_dim=config.dimensions.state_dim)}
+           if config.top.world_robot_condition_mode == OBSERVED_ROBOT_VIEWS else {}),
         "source_config_digest": identity.config_digest,
+        **({"world_control": world_control_metadata()}
+           if config.top.world_control_mode == KNOWN_PREFIX_WORLD_CONTROL else {}),
         **({"world_supervision": {
             "schema": "matched-observed-world-v1", "source": "training-only-observed-controls",
             "prefix_endpoints": [8, 16, 32, 48], "online_known_prefix": 24,
@@ -460,6 +467,25 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     graph_top = _mapping(
         _mapping(abi.get("graph_config"), name="graph_config").get("top"), name="graph_config.top"
     )
+    robot_mode = graph_top.get("world_robot_condition_mode", NO_ROBOT_WORLD)
+    if robot_mode == OBSERVED_ROBOT_VIEWS:
+        graph = _mapping(abi.get("graph_config"), name="graph_config")
+        dim = _mapping(graph.get("dimensions"), name="graph_config.dimensions")
+        width = dim.get("state_dim")
+        if type(width) is not int or width < 1:
+            raise ValueError("deployment W robot state width is invalid")
+        if abi.get("world_robot") != world_robot_metadata(
+            state_mode=str(graph_top.get("state_feature_mode", NATIVE_AFFINE_STATE)), state_dim=width,
+        ):
+            raise ValueError("deployment W robot observation contract differs from trained graph")
+    elif robot_mode != NO_ROBOT_WORLD or "world_robot" in abi:
+        raise ValueError("unknown or undeclared W robot observation")
+    control_mode = graph_top.get("world_control_mode", LEGACY_WORLD_CONTROL)
+    if control_mode == KNOWN_PREFIX_WORLD_CONTROL:
+        if abi.get("world_control") != world_control_metadata():
+            raise ValueError("deployment world control domain differs from trained graph")
+    elif control_mode != LEGACY_WORLD_CONTROL or "world_control" in abi:
+        raise ValueError("unknown or undeclared world control domain")
     world_mode = graph_top.get("world_supervision_mode", "candidate_legacy_v1")
     expected_world: dict[str, object] = {
         "schema": "matched-observed-world-v1", "source": "training-only-observed-controls",

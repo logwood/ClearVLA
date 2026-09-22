@@ -273,3 +273,66 @@ checks for every other expected owner. Two further tests exercise ordinary
 `train_step(..., collect_diagnostics=True)` including gradient diagnostics and
 optimizer updates in M5a/M5b. Earlier partial full runs are invalidated before
 source mutation; final release uses the subsequent exact frozen inventory.
+
+
+## 2026-09-22 M6b source continuation
+
+Recovered the 788-file M6a archive and matched all manifest hashes. Remote M6a
+is an actual saved source commit `d4ae4361045e525fae143218329d7ec9b10127f7`, tree
+`9310aba10c76d4ca4b9dfc5e08e44e16bc2caaa5`. Local bundle ancestry remains synthetic;
+do not force-push it. M6b implements the candidate-control-domain contract above
+and config `structural_rebuild_m6b_calvin.json`.
+
+Focused final inventory: 25 passed, exit 0. Real optimizer update, full same-noise
+sampling with poisoned far predictions, matched near physics, FP32/CPU BF16
+backward, exact checkpoint/deployment and ABI guards execute production modules.
+The first short tool call timed out without JUnit and is invalid. The next
+inventory had 23 passes and 2 failed assertions that wrongly assumed internal
+W2 gradients before zero-initialized output heads had learned. The test now uses
+an ordinary optimizer step first; no head/parameter is manually altered and
+no threshold is weakened. One test needed explicit action-condition type
+narrowing; production checks are retained. These earlier logs stay as failures.
+
+Final nine-file differential static check vs exact M6a: scoped Ruff clean,
+zero new Pyright errors/imports. Existing warnings/errors remain visible.
+Runtime is Python 3.13.5 / PyTorch 2.10 CPU, supplementary not supported CI.
+No full milestone/CUDA/real-data/closed-loop acceptance is claimed. Preserve the
+source unit now; continue observed robot/object physical conditions and
+view-aware W reads rather than delaying on workflow mechanics.
+
+
+## 2026-09-22 M6c source checkpoint
+
+M6b is preserved locally at `c27c2ef0c49217b06ab1e9a6cf2e4fe79b767619`,
+full source tree `825730a60764e4b5681f4b4ea12388a607a7f4a5`; archive contains
+791 source files with checked hashes and real diagnostics. Remote M6a remains
+the last re-read reference until a subsequent ordinary push is confirmed.
+
+M6c adds the explicit current RobotWorldObservation to the compact W belief,
+and per-view robot/object relation features to W's generic base, typed transport
+and covariance. Actual candidate, observed-supervision and refinement consumers
+retain one belief; no relation encoding occurs inside ODE velocity calls.
+The full new focused file completed 20 passing cases, exit 0 on supplementary
+Python 3.13.5 / PyTorch 2.10 CPU. Tests execute real neural modules, optimizer,
+FP32/CPU-BF16 backward, exact checkpoint and deployment. Two seeds (0 and 71)
+match the M6b legacy mode bit-for-bit in state_dict, named parameters/buffers,
+config, same-noise native action and RNG. Scoped nine-file Ruff is clean;
+Pyright has zero added errors/imports against exact M6b. Inherited warnings and
+errors remain in the report. An added non-null type assertion is non-numerical;
+its final source is in the joint M6a/b/c inventory now running separately.
+
+The first focused attempt had 19 passes and one failure: covariance's third
+geometry-carrier call was recomputing the new relation. Production was corrected
+to reuse the same private relation there too; the expected one-per-world count
+was NOT relaxed. Initial static failures (buffer type and unused import; then
+an optional test argument) were fixed, not suppressed. Every attempt is kept.
+The action-path gradient assertion targets the NEW W state-projection parameter,
+not only proprioceptive input, which is also independently used by the bottom.
+Thus a separate history/state shortcut cannot satisfy that routing assertion.
+
+Whole-M6/source-wide supported-runtime/CUDA/behavior acceptance is pending.
+The matched-action/domain/robot-view joint regression is recorded externally;
+its interim progress is not a pass. Save the small source unit before waiting
+for that run, per user instruction. Continue the fixed 16..32 interval versus
+24-row candidate issue and S/P consumption as described in the repair plan;
+physical cross-window association and full P3 feedback are not solved here.

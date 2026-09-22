@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, overload
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..world_control import (
+    KNOWN_PREFIX_WORLD_CONTROL,
+    LEGACY_WORLD_CONTROL,
+    CandidateControlDomain,
+)
+from ..world_robot import NO_ROBOT_WORLD, OBSERVED_ROBOT_VIEWS
+from .robot_relation import RobotObjectRelation, RobotObjectRelationEncoder
 from .routing import (
     VarianceFlooredCenteredNorm,
     register_gradient_axis_rms_metrics,
@@ -36,6 +43,8 @@ class ObjectW1WorkingState:
     common_typed: Tensor  # completed once by W1 [B,K,3,H]
     near_interval_innovation: Tensor  # completed by W1 [B,2,K,3,H]
     far_interval_innovation: Tensor  # raw W2-owned input [B,2,K,3,H]
+    control_domain: CandidateControlDomain | None = None
+    robot_relation: RobotObjectRelation | None = None
 
 
 class _ObjectIntervalBlock(nn.Module):
@@ -418,6 +427,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         camera_names: tuple[str, ...] | None = None,
         camera_condition_mode: str = "motion_prior_only",
         action_condition_mode: str = "interval_mean_v1",
+        control_mode: str = LEGACY_WORLD_CONTROL,
+        robot_condition_mode: str = NO_ROBOT_WORLD,
+        state_dim: int | None = None,
+        state_feature_mode: str = "native_affine_v1",
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -441,6 +454,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 )
             if any(not name for name in self.camera_names):
                 raise ValueError("W camera role names must be non-empty")
+        self.control_mode = str(control_mode)
+        if self.control_mode not in {LEGACY_WORLD_CONTROL, KNOWN_PREFIX_WORLD_CONTROL}:
+            raise ValueError("unknown W control domain mode")
+        if self.control_mode == KNOWN_PREFIX_WORLD_CONTROL and action_condition_mode != "sequence_prefix_v1":
+            raise ValueError("known-prefix world requires sequence physical controls")
         self.action_condition_mode = str(action_condition_mode)
         if self.action_condition_mode not in self.ACTION_CONDITION_MODES:
             raise ValueError(
@@ -573,6 +591,31 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             role_basis,
             persistent=False,
         )
+        self.robot_condition_mode = str(robot_condition_mode)
+        self.robot_relation_encoder: RobotObjectRelationEncoder | None = None
+        if self.robot_condition_mode == OBSERVED_ROBOT_VIEWS:
+            if state_dim is None or self.camera_condition_mode != "coordinate_role_v1":
+                raise ValueError("robot-object W requires explicit state width and named view conditions")
+            retained_rng_state = torch.get_rng_state()
+            try:
+                self.robot_relation_encoder = RobotObjectRelationEncoder(
+                    state_dim=state_dim, state_mode=state_feature_mode,
+                    content_dim=content_dim, hidden=hidden, camera_names=self.camera_names,
+                )
+            finally:
+                torch.set_rng_state(retained_rng_state)
+        elif self.robot_condition_mode != NO_ROBOT_WORLD:
+            raise ValueError("unknown W robot observation mode")
+
+    def _robot_relation(self, facts: ObjectFactSet | ObjectWorldBelief) -> RobotObjectRelation | None:
+        if self.robot_relation_encoder is None:
+            if isinstance(facts, ObjectWorldBelief) and facts.robot_observation is not None:
+                raise ValueError("legacy W cannot silently consume an undeclared robot observation")
+            return None
+        if not isinstance(facts, ObjectWorldBelief):
+            raise ValueError("robot-object W requires a compact belief with current robot observation")
+        return self.robot_relation_encoder(facts)
+
 
     @staticmethod
     def _zero_preserving_condition(
@@ -685,6 +728,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         action: WorldActionCondition | ObservedActionSequenceCondition,
         *,
         collect_diagnostics: bool,
+        robot_relation: RobotObjectRelation | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         """Build a goal-invariant object transition from one physical action."""
 
@@ -702,14 +746,18 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             action.validate(action_dim=action_dim)
         validity = self._safe_object_validity(facts).to(device=facts.content.device)
         safe_content = self._supported_object_values(facts.content, validity)
-        safe_transport_prior = self._supported_object_values(
-            (facts.transport_prior if facts.latest_flow_steps is None else facts.transport_rate).to(device=facts.content.device),
-            validity,
-        )
         objects = self.object_content(safe_content)
-        transport_prior = self.object_transport_prior(
-            safe_transport_prior.to(dtype=facts.content.dtype)
-        )
+        if self.robot_relation_encoder is not None:
+            relation = self._robot_relation(facts) if robot_relation is None else robot_relation
+            assert relation is not None and isinstance(facts, ObjectWorldBelief)
+            relation.validate_source(facts)
+            transport_prior = relation.pooled.to(dtype=objects.dtype)
+        else:
+            safe_transport_prior = self._supported_object_values(
+                (facts.transport_prior if facts.latest_flow_steps is None else facts.transport_rate).to(device=facts.content.device),
+                validity,
+            )
+            transport_prior = self.object_transport_prior(safe_transport_prior.to(dtype=facts.content.dtype))
         gradient_metrics: dict[str, Tensor] = {}
         if isinstance(action, (PhysicalActionSequenceCondition, ObservedActionSequenceCondition)):
             if (
@@ -913,6 +961,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self,
         facts: ObjectFactSet | ObjectWorldBelief,
         typed_geometry: Tensor,
+        *, robot_relation: RobotObjectRelation | None = None,
     ) -> Tensor:
         """Condition geometry independently on each observed camera motion."""
 
@@ -953,6 +1002,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             dtype=typed_geometry.dtype,
             device=typed_geometry.device,
         )
+        if self.robot_relation_encoder is not None:
+            relation = self._robot_relation(facts) if robot_relation is None else robot_relation
+            assert relation is not None and isinstance(facts, ObjectWorldBelief)
+            relation.validate_source(facts)
+            camera_context = camera_context + relation.per_view.to(dtype=camera_context.dtype)
         cameras = int(camera_context.shape[2])
         if typed_geometry.ndim == 3:
             if tuple(typed_geometry.shape[:2]) != tuple(camera_context.shape[:2]):
@@ -1030,6 +1084,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         typed_common: Tensor,
         typed_interval_innovation: Tensor,
         diagnostic_prefix: str | None = None,
+        robot_relation: RobotObjectRelation | None = None,
     ) -> tuple[FutureObjectDynamics, dict[str, Tensor]]:
         if typed_common.ndim != 4 or tuple(typed_common.shape[1:3]) != (
             facts.objects,
@@ -1070,10 +1125,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         geometry_common = self._camera_geometry_carrier(
             facts,
             safe_typed_common[..., 2, :],
+            robot_relation=robot_relation,
         )
         geometry_innovation = self._camera_geometry_carrier(
             facts,
             safe_typed_interval[..., 2, :],
+            robot_relation=robot_relation,
         )
         transport_common_pre_tanh = self.transport_head(geometry_common).float()
         transport_innovation_pre_tanh = self.transport_head(geometry_innovation).float()
@@ -1094,6 +1151,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             facts,
             safe_typed_common[:, None, ..., 2, :]
             + safe_typed_interval[..., 2, :],
+            robot_relation=robot_relation,
         )
         covariance_raw = self.covariance_head(full_geometry).float()
         covariance_xx = torch.nn.functional.softplus(covariance_raw[..., 0])
@@ -1239,8 +1297,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         action: WorldActionCondition | ObservedActionSequenceCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics | None, ObjectW1WorkingState, dict[str, Tensor]]:
+        relation = self._robot_relation(facts)
         base, raw_common, raw_interval, base_metrics = self._base(
-            facts, action, collect_diagnostics=collect_diagnostics
+            facts, action, collect_diagnostics=collect_diagnostics, robot_relation=relation,
         )
         object_support = self._safe_object_validity(facts).detach()[..., 0] > 0.0
         near = self.w1(
@@ -1288,6 +1347,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 typed_common=common,
                 typed_interval_innovation=near_typed,
                 diagnostic_prefix="object_w1",
+                robot_relation=relation,
             )
             field.validate(expected_intervals=2)
             metrics.update(self._metrics(field, prefix="object_w1"))
@@ -1324,11 +1384,17 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         return (
             field,
             ObjectW1WorkingState(
+                robot_relation=relation,
                 near=near,
                 far_base=base[:, 2:],
                 common_typed=common,
                 near_interval_innovation=near_typed,
                 far_interval_innovation=raw_interval[:, 2:],
+                control_domain=(
+                    CandidateControlDomain(action.horizon)
+                    if self.control_mode == KNOWN_PREFIX_WORLD_CONTROL
+                    and isinstance(action, PhysicalActionSequenceCondition) else None
+                ),
             ),
             metrics,
         )
@@ -1438,7 +1504,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             typed_common=w1_state.common_typed,
             typed_interval_innovation=completed_innovation,
             diagnostic_prefix="object_w2" if collect_diagnostics else None,
+            robot_relation=w1_state.robot_relation,
         )
+        if w1_state.control_domain is not None:
+            field = replace(field, control_domain=w1_state.control_domain)
         field.validate()
         if not collect_diagnostics:
             return field, {}

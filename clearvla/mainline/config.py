@@ -452,6 +452,8 @@ class TopConfig:
     # normalized physical proposal through a causal prefix encoder.
     world_action_condition_mode: str = "interval_mean_v1"
     world_supervision_mode: str = "candidate_legacy_v1"
+    world_control_mode: str = "legacy_extrapolation_v1"
+    world_robot_condition_mode: str = "implicit_g_only_v1"
     # The accepted reader applies typed S only after K/K*C pooling.  The
     # opt-in target-prior mode moves direct target identity to the spatial
     # address, shared over semantic and geometry readers, while W retains
@@ -468,6 +470,21 @@ class TopConfig:
     instruction_reference_mode: str = "none"
 
     def validate(self) -> None:
+        if self.world_robot_condition_mode not in {"implicit_g_only_v1", "observed_state_views_v1"}:
+            raise ValueError("unknown top world_robot_condition_mode")
+        if self.world_robot_condition_mode == "observed_state_views_v1" and (
+            self.world_control_mode != "known_prefix_v1"
+            or self.world_camera_condition_mode != "coordinate_role_v1"
+            or self.entity_motion_mode != "current_entity_support_v1"
+        ):
+            raise ValueError("robot-object W requires known controls and named current-entity view geometry")
+        if self.world_control_mode not in {"legacy_extrapolation_v1", "known_prefix_v1"}:
+            raise ValueError("unknown top world_control_mode")
+        if self.world_control_mode == "known_prefix_v1" and (
+            self.world_action_condition_mode != "sequence_prefix_v1"
+            or self.world_supervision_mode != "matched_observed_sequence_v1"
+        ):
+            raise ValueError("known-prefix W requires sequence actions and matched supervision")
         if self.world_supervision_mode not in {"candidate_legacy_v1", "matched_observed_sequence_v1"}:
             raise ValueError("unknown top world_supervision_mode")
         if self.world_supervision_mode == "matched_observed_sequence_v1" and self.world_action_condition_mode != "sequence_prefix_v1":
@@ -1164,6 +1181,10 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.world_robot_condition_mode == "implicit_g_only_v1":
+            cast(dict[str, object], payload["top"]).pop("world_robot_condition_mode")
+        if self.top.world_control_mode == "legacy_extrapolation_v1":
+            cast(dict[str, object], payload["top"]).pop("world_control_mode")
         if self.top.world_supervision_mode == "candidate_legacy_v1":
             cast(dict[str, object], payload["top"]).pop("world_supervision_mode")
         if self.top.instruction_reference_mode == "none":

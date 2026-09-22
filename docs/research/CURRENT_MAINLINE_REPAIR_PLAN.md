@@ -250,3 +250,30 @@ across the two actual source trees. Future raw targets are not learned anchors.
 Full regression, source hashes and supported-runtime acceptance are distinct.
 M4c2 persistent physical association remains open, as do subsequent S/W/P tasks;
 this finite observed anchor does not silently create recurrent object states.
+
+
+## M6a/b/c source preservation and next dependency
+
+M6a pairs real controls with observed future targets without exposing them to
+online policy. M6b preserves actual candidate-control support through P2 before
+keys and common/residual pooling. M6c supplies the same current robot observation
+to candidate/supervised/refinement W and learns per-view relations BEFORE pooling.
+These subunits are source checkpoints, not whole-stage behavior acceptance.
+
+| Producer | Real consumers | Isolation/lifetime |
+|---|---|---|
+| Current authoritative history.state + compact G facts | W initial, supervised, outer refinement | Same observable feature chart, no target/goal/reference/future-state input |
+| Named per-view coordinates, positive source-gap and motion | RobotObjectRelationEncoder | Per-view nonlinear features before fusion; missing is not stationary |
+| Pooled current relation and per-view relation | Generic W interval base, typed geometry mean AND covariance | One private W1/W2 calculation, no ODE-time neural recomputation |
+| Candidate action prefix length | P2 keys, common/residual, spatial/temporal read | Unknown control does not become a zero-motion hypothesis |
+| Matched real 48-step controls | Training-only supervised W2 loss | No replacement of online candidate worlds |
+
+Next core decision: the fixed interval 16..32 cannot provide a correctly labelled
+16..24 controlled prediction. Under M6b the far W2 fields therefore have no policy
+authority for a 24-row proposal (W2 remains trained by actual future controls).
+Jointly redesign the query/control time grid and its Teacher/data/S/P consumers,
+or supply an explicitly learned longer candidate continuation with matching
+supervision; do not add zero controls, relabel timestamps, or remove the source
+domain mask. Resolve this in M6 rather than calling far-horizon planning complete.
+Persistent physical identity, S desired-operation targets and P3 execution-error
+state remain separate open design work. Do not introduce deployment-only state.

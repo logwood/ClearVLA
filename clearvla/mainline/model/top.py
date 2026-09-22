@@ -72,6 +72,7 @@ class OnlineTopContext:
     intent: ObjectIntentState
     coarse_action: CoarseActionIntentState
     candidate_world: CandidateWorld
+    current_world_belief: ObjectWorldBelief | None = None
 
     @property
     def action_condition(self) -> WorldActionCondition:
@@ -87,13 +88,20 @@ class OnlineTopContext:
 
     def deployment_cache(self) -> "DeploymentTopCache":
         return DeploymentTopCache(
-            belief=self.facts.world_belief(),
+            belief=self.facts.world_belief() if self.current_world_belief is None else self.current_world_belief,
             intent=self.intent,
             candidate_world=self.candidate_world,
         )
 
     def validate(self, *, hidden: int, horizon: int) -> None:
         self.facts.validate()
+        if self.current_world_belief is not None:
+            self.current_world_belief.validate()
+            for name in ("content", "semantic", "appearance", "geometry", "camera_coordinates",
+                         "camera_transport_prior", "camera_support", "camera_validity",
+                         "log_camera_validity", "validity", "log_validity", "latest_flow_steps"):
+                if getattr(self.current_world_belief, name) is not getattr(self.facts, name):
+                    raise ValueError("online W belief must retain the same current G evidence")
         self.intent.validate(horizon=horizon, hidden=hidden)
         self.candidate_world.validate(
             action_dim=int(self.coarse_action.action_prediction.shape[-1])
@@ -197,6 +205,9 @@ class ObjectIntentDynamicsTop(nn.Module):
         camera_names: tuple[str, ...] = ("top", "wrist"),
         world_camera_condition_mode: str = "motion_prior_only",
         world_action_condition_mode: str = "interval_mean_v1",
+        world_control_mode: str = "legacy_extrapolation_v1",
+        world_robot_condition_mode: str = "implicit_g_only_v1",
+        state_feature_mode: str = "native_affine_v1",
         p2_spatial_intent_mode: str = "post_pool_only",
         target_binding_mode: str = "reader_local_v1",
         instruction_reference_mode: str = "none",
@@ -287,6 +298,10 @@ class ObjectIntentDynamicsTop(nn.Module):
             camera_names=camera_names,
             camera_condition_mode=world_camera_condition_mode,
             action_condition_mode=self.world_action_condition_mode,
+            control_mode=world_control_mode,
+            robot_condition_mode=world_robot_condition_mode,
+            state_dim=state_dim,
+            state_feature_mode=state_feature_mode,
         )
         self.teacher = ObjectFutureTeacher(
             content_dim=content_dim,
@@ -305,6 +320,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             content_dim=content_dim,
             route_dim=route_dim,
             spatial_intent_mode=p2_spatial_intent_mode,
+            world_control_mode=world_control_mode,
             target_binding_mode=target_binding_mode,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)

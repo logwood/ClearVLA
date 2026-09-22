@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn.functional as F
@@ -20,6 +20,8 @@ from clearvla.vision.entity_history import ObservedEntityHistory
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
 
 from ..manifest import INTERVALS
+from ..world_control import CandidateControlDomain
+from ..world_robot import RobotWorldObservation
 from .target_binding import TargetBinding, TargetEvidence
 
 INTERVAL_NAMES = ("h4_8", "h8_16", "h16_32", "h32_48")
@@ -696,7 +698,7 @@ class ObjectFactSet:
             reconstruction_error=self.reconstruction_error,
         )
 
-    def world_belief(self) -> "ObjectWorldBelief":
+    def world_belief(self, *, robot_observation: RobotWorldObservation | None = None) -> "ObjectWorldBelief":
         """Export only the current object evidence needed by a W rerun.
 
         Deployment may perform one outer action-world refinement.  Retaining
@@ -707,6 +709,7 @@ class ObjectFactSet:
 
         self.validate()
         return ObjectWorldBelief(
+            robot_observation=robot_observation,
             content=self.content,
             semantic=self.semantic,
             appearance=self.appearance,
@@ -743,6 +746,7 @@ class ObjectWorldBelief:
     validity: Tensor  # [B,K,1]
     log_validity: Tensor  # [B,K,1]
     latest_flow_steps: Tensor | None = None
+    robot_observation: RobotWorldObservation | None = None
 
     @property
     def batch(self) -> int:
@@ -771,6 +775,8 @@ class ObjectWorldBelief:
         )
 
     def validate(self) -> None:
+        if self.robot_observation is not None:
+            self.robot_observation.validate(batch=self.batch, device=self.content.device)
         if self.latest_flow_steps is not None:
             validate_reference_steps(self.latest_flow_steps, batch=self.batch, device=self.content.device)
         if self.content.ndim != 3:
@@ -813,6 +819,7 @@ class ObjectWorldBelief:
             raise ValueError("world-belief permutation must contain every object")
         index = permutation.to(device=self.content.device, dtype=torch.long)
         return ObjectWorldBelief(
+            robot_observation=self.robot_observation,
             content=self.content[:, index],
             semantic=self.semantic[:, index],
             appearance=self.appearance[:, index],
@@ -2065,24 +2072,46 @@ class FutureObjectDynamics:
     camera_coordinates: Tensor  # current real camera charts [B,K,C,2]
     camera_chart_availability: Tensor  # current observable support [B,K,C,1]
     log_camera_chart_availability: Tensor  # producer-owned finite FP32 [B,K,C,1]
+    control_domain: CandidateControlDomain | None = None  # candidate control, not visibility
 
     @property
     def intervals(self) -> int:
         return int(self.semantic_delta.shape[1])
 
-    @staticmethod
-    def _common(value: Tensor) -> Tensor:
-        """Return the one protected effect shared across future intervals."""
+    def policy_view(self) -> "FutureObjectDynamics":
+        """Exclude uncontrolled extrapolation before any P2 nonlinear read.
 
+        Raw W outputs may remain available for explicitly labelled audits, but
+        unknown intervals supply neither keys nor values to action generation.
+        Current scene coordinates/availability are NOT changed by this mask.
+        """
+        domain = self.control_domain
+        if domain is None:
+            return self
+        return replace(
+            self,
+            successor_content=torch.where(
+                domain.mask_for(self.successor_content), self.successor_content,
+                self.current_reference[:, None],
+            ),
+            semantic_delta=domain.quarantine(self.semantic_delta),
+            transport_mean=domain.quarantine(self.transport_mean),
+            transport_covariance=domain.quarantine(self.transport_covariance),
+        )
+
+    def _common(self, value: Tensor) -> Tensor:
+        """Common effect over admitted intervals, never over unknown controls."""
         if value.ndim < 3:
             raise ValueError("future effect must retain an interval axis")
+        if self.control_domain is not None:
+            return self.control_domain.common(value)
         return value.float().mean(dim=1)
 
-    @classmethod
-    def _interval_innovation(cls, value: Tensor) -> Tensor:
-        """Return the exact interval coordinate around the protected common."""
-
-        common = cls._common(value)
+    def _interval_innovation(self, value: Tensor) -> Tensor:
+        common = self._common(value)
+        if self.control_domain is not None:
+            safe = self.control_domain.quarantine(value.float())
+            return self.control_domain.quarantine(safe - common[:, None])
         return value.float() - common[:, None]
 
     @property
@@ -2102,6 +2131,8 @@ class FutureObjectDynamics:
         return self._interval_innovation(self.transport_mean)
 
     def validate(self, *, expected_intervals: int = 4) -> None:
+        if self.control_domain is not None:
+            self.control_domain.validate(intervals=expected_intervals)
         if self.current_reference.ndim != 3 or self.semantic_delta.ndim != 4:
             raise ValueError("future dynamics lost object or interval identity")
         batch, intervals, objects, width = self.semantic_delta.shape
@@ -2183,6 +2214,7 @@ class FutureObjectDynamics:
             log_camera_chart_availability=(
                 self.log_camera_chart_availability[:, index]
             ),
+            control_domain=self.control_domain,
         )
 
     @classmethod
@@ -2303,6 +2335,8 @@ class SupervisedWorld:
             raise TypeError("supervised world requires observed controls")
         self.action_condition.validate(action_dim=action_dim)
         self.dynamics.validate()
+        if self.dynamics.control_domain is not None:
+            raise ValueError("supervised world cannot inherit a candidate control domain")
         if self.action_condition.batch != int(self.dynamics.current_reference.shape[0]):
             raise ValueError("supervised world batches differ")
         if self.action_condition.device != self.dynamics.semantic_delta.device:
@@ -2331,6 +2365,12 @@ class CandidateWorld:
             raise TypeError("candidate world rejects training-only observed controls")
         self.action_condition.validate(action_dim=action_dim)
         self.dynamics.validate()
+        domain = self.dynamics.control_domain
+        if domain is not None and (
+            not isinstance(self.action_condition, PhysicalActionSequenceCondition)
+            or domain.known_prefix_steps != self.action_condition.horizon
+        ):
+            raise ValueError("candidate control domain differs from actual action prefix")
         if self.action_condition.batch != int(self.dynamics.current_reference.shape[0]):
             raise ValueError("candidate world action and dynamics batches do not align")
         condition_device = (

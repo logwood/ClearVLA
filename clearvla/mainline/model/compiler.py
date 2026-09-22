@@ -238,6 +238,7 @@ class ObjectFutureEffectReader(nn.Module):
         route_dim: int,
         spatial_intent_mode: str = "post_pool_only",
         target_binding_mode: str = LOCAL_TARGET_READERS,
+        world_control_mode: str = "legacy_extrapolation_v1",
     ) -> None:
         super().__init__()
         if spatial_intent_mode not in {
@@ -248,6 +249,9 @@ class ObjectFutureEffectReader(nn.Module):
         self.hidden = int(hidden)
         if target_binding_mode not in {LOCAL_TARGET_READERS, SHARED_TARGET_BINDING}:
             raise ValueError("unknown P2 target binding mode")
+        self.world_control_mode = str(world_control_mode)
+        if self.world_control_mode not in {"legacy_extrapolation_v1", "known_prefix_v1"}:
+            raise ValueError("unknown P2 world control domain mode")
         self.target_binding_mode = target_binding_mode
         self.spatial_intent_mode = str(spatial_intent_mode)
         self.source_query = nn.ModuleList(
@@ -445,6 +449,9 @@ class ObjectFutureEffectReader(nn.Module):
         collect_diagnostics: bool,
     ) -> tuple[SelectedIntervalEvidence, dict[str, Tensor]]:
         dynamics.validate()
+        if (dynamics.control_domain is not None) != (self.world_control_mode == "known_prefix_v1"):
+            raise ValueError("P2 world control domain differs from selected mode")
+        dynamics = dynamics.policy_view()
         if action_query.ndim != 4:
             raise ValueError("P2 action query must be [B,T,Q,H]")
         batch, horizon, basis, hidden = action_query.shape
@@ -561,6 +568,10 @@ class ObjectFutureEffectReader(nn.Module):
         semantic_interval_support = semantic_support[:, None].expand(
             -1, intervals, -1
         )
+        if dynamics.control_domain is not None:
+            semantic_interval_support = semantic_interval_support & dynamics.control_domain.mask_for(
+                semantic_interval_support
+            )
         first_legal_k = semantic_interval_support.to(dtype=torch.int64).argmax(
             dim=-1, keepdim=True
         )
@@ -631,7 +642,10 @@ class ObjectFutureEffectReader(nn.Module):
             dynamics.transport_interval_innovation,
         )
         full_fields = (dynamics.semantic_delta, dynamics.transport_mean)
-        public_interval = self.public_interval_key(intent.interval_key).float()
+        public_source = intent.interval_key
+        if dynamics.control_domain is not None:
+            public_source = dynamics.control_domain.quarantine(public_source)
+        public_interval = self.public_interval_key(public_source).float()
 
         selected_keys: list[Tensor] = []
         selected_common_values: list[Tensor] = []
@@ -683,8 +697,8 @@ class ObjectFutureEffectReader(nn.Module):
                     ..., self.S_TYPE_INDEX_BY_P2[type_index], :
                 ]
             )
-            if binding is not None:
-                typed_route = torch.where(semantic_support[:, None, :, None], typed_route, torch.zeros_like(typed_route))
+            if binding is not None or dynamics.control_domain is not None:
+                typed_route = torch.where(semantic_interval_support[..., None], typed_route, torch.zeros_like(typed_route))
             typed_candidate = self.typed_intent_key[type_index](typed_route).float()
 
             if type_index == 0:
@@ -693,7 +707,7 @@ class ObjectFutureEffectReader(nn.Module):
                     query,
                     source_key,
                 )
-                support = semantic_support[:, None].expand(-1, intervals, -1)
+                support = semantic_interval_support
                 log_measure = semantic_log_measure[:, None].expand_as(support)
                 candidate_logit = temperature[0] * source_score + log_measure[
                     :, None, None
@@ -710,7 +724,7 @@ class ObjectFutureEffectReader(nn.Module):
                 )
                 support = camera_support[:, None].expand(
                     -1, intervals, -1, -1
-                )
+                ) & semantic_interval_support[..., None]
                 log_measure = geometry_log_measure[:, None].expand_as(support)
                 candidate_logit = (
                     temperature[0] * source_score
@@ -733,7 +747,11 @@ class ObjectFutureEffectReader(nn.Module):
                     # Neutralize identity only, retaining the same null mass.
                     object_mass = semantic_support.float() * object_mass.sum(-1, keepdim=True) / semantic_support.sum(-1, keepdim=True).clamp_min(1)
                 if type_index == 0:
-                    posterior = object_mass[:, None, None, None, :].expand_as(flat_logit)
+                    posterior = torch.where(
+                        flat_support,
+                        object_mass[:, None, None, None, :].expand_as(flat_logit),
+                        torch.zeros_like(flat_logit),
+                    )
                 else:
                     # Action/geometry chooses a view inside each K. It cannot
                     # move probability to another object or erase null mass.
