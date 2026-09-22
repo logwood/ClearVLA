@@ -271,7 +271,11 @@ content/semantic/appearance/geometry K memory once under producer support and
 emit one finite FP32 posterior `p_target[B,K]`. This posterior is converted
 immediately into declared physical statistics: per canonical camera,
 coordinate first/second moments, transport-prior first moment and readable
-mass, plus object-readable, existence and unresolved mass. A learned
+mass, plus object-readable, existence and unresolved mass. Identity and
+physical readability remain separate typed quantities:
+`m_object(K)=p_target(K)*validity(K)` and
+`m_camera(K,C)=p_target(K)*camera_validity(K,C)` are carried in FP32 without
+renormalization. A learned
 bias-free projection turns only these statistics into `target_summary`; raw
 content/appearance/RGB and raw K rows do not reach the full-goal action
 proposer. The exact-zero score head starts with a legal uniform posterior;
@@ -297,13 +301,17 @@ cross-read. The P1 dock binds the exact G3 chart tensor owners, not merely a
 same-shaped chart or address token; joint K relabeling remains legal, while
 foreign-observation and local-M mixing are rejected.
 
-P2 has two explicit roles and no additional learned K selector. Target semantic
-evidence is summed directly under `p_target`; target geometry uses
-`p_target(K) q(C|K)`, where action/coordinate compatibility may select a camera
-inside K but cannot move target mass between objects. For producer support
+P2 has two explicit roles and no additional learned K selector. Identity keys
+and spatial addresses use `p_target` (and `p_target(K)q(C|K)` for geometry), so
+low readability cannot silently become a new object selector. Action-facing
+semantic/geometry values, typed context and effective support use the declared
+physical masses `m_object`/`m_camera`; they attenuate unreadable evidence but
+are never renormalized. A fractional validity change can therefore reduce a
+target value to zero while leaving its identity key unchanged and its support
+closed. For producer support
 `s(K)` with `n=sum s`, the non-target scene role is the fixed complement
 `r(K)=s(K)(1-p_target(K))/(n-1)` when `n>=2`, and exact zero for `n<2`.
-Fractional validity already carried by W is not multiplied into `r` again, and
+Physical readability is not multiplied into `r` or renormalized across K, and
 missing consumer evidence removes its contribution without renormalizing mass
 onto another K. This is an expectation over the other objects under one
 uncertain primary target, not a multi-target membership model.
@@ -489,6 +497,14 @@ semantic or outlet/task condition. The t=1 read supplies retained endpoint
 motion/command state but does not update action. Execution candidates remain
 mandatory for train/eval loss forwards and disabled during ordinary deployment
 passes.
+
+The targeted CALVIN evaluator records the explicit local replan cursor
+`calvin_replan_cursor_v1`: each planned chunk carries its cumulative
+environment-step origin and each executed row carries both that origin and its
+local row. The evaluator uses the same chunk-retention/observe state machine
+for `execute_rows=1`, 8 and 24; this fixes provenance and row execution
+semantics only. It does not claim that the current policy consumes an absolute
+global phase, which remains a separate model/ABI question.
 
 An explicit deployment-only fastpath may reuse the exact block-major dwell
 prefixes and the current decision's already-computed neutral dwell-one result.
