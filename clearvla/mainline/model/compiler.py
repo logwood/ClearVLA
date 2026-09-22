@@ -1004,8 +1004,10 @@ class ObjectFutureEffectReader(nn.Module):
         geometry_k_marginal = joint_geometry_weight.sum(dim=-1)
         scene_geometry_k_marginal = scene_joint_geometry_weight.sum(dim=-1)
         expected_geometry_k = (
-            (physical_camera_mass * camera_support.float()).sum(dim=-1)
-            [:, None, None, None]
+            (
+                physical_camera_mass[:, None, None, None, :, :]
+                * camera_posterior
+            ).sum(dim=-1)
         )
         expected_scene_geometry_k = (
             scene_posterior[:, None, None, None]
