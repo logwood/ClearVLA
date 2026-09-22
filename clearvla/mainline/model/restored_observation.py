@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from clearvla.vision.candidate_support import sample_candidate_expectation
 from clearvla.vision.source_time import VisualSourceTime
 
 from ..config import ExperimentConfig
@@ -347,6 +348,37 @@ class RestoredV120ObservationCompiler(nn.Module):
         )
         if any(value is None for value in owner_logs):
             raise RuntimeError("completed G3 lost its FP32 owner log probabilities")
+        context_slots = None
+        if self.config.top.entity_context_mode == "completed_g3_v1":
+            coordinates = state.dynamic_fine_coordinates
+            probability = state.g2_geometry_probability
+            valid = state.dynamic_fine_valid
+            if coordinates is None or probability is None or valid is None:
+                raise RuntimeError("completed G3 context lost its actual candidate support")
+            safe_coordinates = torch.where(
+                valid[..., None], coordinates, torch.zeros_like(coordinates)
+            )
+            weights = torch.where(
+                valid, probability.float(), torch.zeros_like(probability, dtype=torch.float32)
+            )
+            # Read actual completed G3 values at EVERY current-camera hypothesis
+            # location before marginalizing. Never sample at the barycenter and
+            # never replace the independently observed reconstruction target.
+            context_slots = sample_candidate_expectation(
+                grounded.public_scene_base, safe_coordinates, weights
+            )
+        current_image_support = None
+        if self.config.top.entity_chart_mode == "current_image_support_v1":
+            from clearvla.vision.entity_chart import CurrentImageSupport
+
+            xy, prob, valid = state.dynamic_fine_coordinates, state.g2_geometry_probability, state.dynamic_fine_valid
+            if xy is None or prob is None or valid is None or state.fine_log_probability is None:
+                raise RuntimeError("current-image entity chart lost its full observed support")
+            # Do not reconstruct a Gaussian from moments or invent a query pixel.
+            current_image_support = CurrentImageSupport(
+                xy, torch.where(valid, prob.float(), 0.0), valid,
+                torch.where(valid, state.fine_log_probability.float(), 0.0)
+            )
         local = LocalFactSet(
             public_scene_base=grounded.public_scene_base,
             target_dino_content=target.detach(),
@@ -366,6 +398,8 @@ class RestoredV120ObservationCompiler(nn.Module):
             slot_validity=grounded.slot_validity,
             slot_transport_prior=grounded.slot_transport_prior,
             latest_flow_steps=bank.latest_flow_steps,
+            context_slots=context_slots,
+            current_image_support=current_image_support,
         )
         evidence = ObservationEvidence(
             grounding=bank,

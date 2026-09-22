@@ -32,7 +32,9 @@ choices just to preserve old golden outputs.
 | M1d visual source time | Implemented candidate; verification recorded per commit | Source gaps, repeated frames, semantic/raw flow loss support, temporal/global G reads and future queries, S/W rates and Teacher duration use one observable clock. No claim about unprovided external controllers. |
 | M2 observation/G1 | Implemented candidate; verification recorded per commit | Full FP32 G1 support in actual G2 candidate/value materialization; G3 observed-content quadrature and real per-candidate local P1 microgrids, explicit config/ABI. Deeper G2/G3 entity ownership remains M3/M4. |
 | M3 G2 local observation | Implemented candidate; verification recorded per commit | One soft FP32 location law across typed attributes, full-support G2 evidence and joint G3 local-M refinement; actual binder/Teacher/P1 consumers adapted. Global entities and temporal reassociation remain M4. |
-| M4 G3 + current Teacher identity | Not started | One entity state with per-camera support and causal association; update reconstruction and Teacher references together. |
+| M4a G3 context -> entity binder | Implemented candidate; verification recorded per commit | Completed current G3 sampled on actual support reaches real K competition; observed target/support authority unchanged; source-owned gradient and restore tests. |
+| M4b current-image entity support | Implemented candidate; verification recorded per source | Complete spatial law in actual reverse lookup/reconstruction and one geometric summary; stable log-domain conditioning; query/image identities separated. |
+| M4c remaining global/persistent identity | Open | Physical objectness, causal association and matching training/online state; do not mistake a corrected image write for persistent entity identity. |
 | M5 S/coarse | Interface adapted only | The history submodule is new; target/operation/progress decomposition, shared entity binding and recognizer supervision still require deep review. |
 | M6 W1/W2 | Not started | Match supervised action to observed outcome; separate candidate prediction from demonstration-target training; explicit robot-object relations and known control horizon. |
 | M7 P1/P2 | History context adapted only | Shared operated entity, current target facts, view-aware geometry and corresponding candidate consequences. |
@@ -119,6 +121,23 @@ mixture with aligned marginals may remain ambiguous; do not claim that M3 has
 resolved every constituent into a physical object. More hypotheses or a hard
 argmax are not automatic remedies. Keep complete observed support available
 while designing the global entity state and its training/online lifecycle.
+
+## M4a source and consumer map
+
+| Producer | Consumer | Contract |
+|---|---|---|
+| Completed current third G block | Current-support expectation | Every retained candidate, geometry-owned location measure; no barycenter substitution. |
+| Source-owned local context | Dense chart -> actual K competition | Mask before projection, no ignored feature or extra object container. |
+| Observed raw/current DINO | Reconstruction and Teacher references | Remains independent target content; updated assignments are not physical identity truth. |
+| Entity-only test objective | Third G block, context projection, binder | Verifies the new path without routing gradients through P1/decoder. |
+| Config and deployment identity | Model factory, save/exact reload | Explicit opt-in, no old migration or persistent state masquerading as compatibility. |
+
+M4a closes a concrete missing current-context edge, not the entire G3 redesign.
+M4b retains ambiguous support through the current-image write. M4c must still
+decide how entity identity is associated across actual observations. Any stateful association needs source-time
+reset semantics and matched training burn-in/unrolling; do not add a deployment-
+only recurrent cache or silently assume the same K index denotes the same entity.
+The current-only reconstruction objective is not proof of physical segmentation.
 
 ## Review and publishing gates
 

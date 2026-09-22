@@ -8,6 +8,13 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from clearvla.vision.entity_chart import (
+    CURRENT_IMAGE_CHART,
+    QUERY_CHART,
+    current_image_grid,
+    pushforward_log_to_current_image,
+)
+
 from .routing import smooth_rms_contract
 from .types import DenseFactChart, LocalFactSet, ObjectFactSet, normalized_entropy
 
@@ -163,6 +170,8 @@ def dense_chart_from_local_facts(local: LocalFactSet) -> DenseFactChart:
         geometry_log_prior = _finite_log_measure(geometry_prior)
     chart = DenseFactChart(
         public_scene_base=local.public_scene_base,
+        candidate_context=local.context_slots,
+        current_image_support=local.current_image_support,
         dino_content=dense_content,
         cell_observed=local.cell_observed,
         candidate_content=local.content_slots,
@@ -209,6 +218,8 @@ class DenseObjectGrounder(nn.Module):
         objects: int = 4,
         iterations: int = 3,
         maximum_update_rms: float = 0.35,
+        entity_context_mode: str = "candidate_only_v1",
+        entity_chart_mode: str = QUERY_CHART,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -253,6 +264,22 @@ class DenseObjectGrounder(nn.Module):
         nn.init.zeros_(self.decode_content_residual.weight)
         self.decode_position = nn.Linear(16, content_dim, bias=False)
         self.maximum_update_rms = float(maximum_update_rms)
+        if entity_context_mode not in {"candidate_only_v1", "completed_g3_v1"}:
+            raise ValueError("unknown grounder entity context mode")
+        self.entity_context_mode = entity_context_mode
+        if entity_chart_mode not in {QUERY_CHART, CURRENT_IMAGE_CHART}:
+            raise ValueError("unknown grounder entity chart mode")
+        self.entity_chart_mode = entity_chart_mode
+        # Construct only for the explicit new graph, at the end of the legacy
+        # constructor. No placeholder parameters or implicit checkpoint alias.
+        self.context_key = (
+            nn.Sequential(
+                nn.LayerNorm(hidden, elementwise_affine=False),
+                nn.Linear(hidden, hidden, bias=False),
+            )
+            if entity_context_mode == "completed_g3_v1"
+            else None
+        )
 
     def _candidate_tokens(self, chart: DenseFactChart) -> Tensor:
         """Return the exact shared V120 key/value candidate representation."""
@@ -287,7 +314,15 @@ class DenseObjectGrounder(nn.Module):
             + self.geometry_key(geometry_input)
         ) / math.sqrt(3.0)
         coordinate = self.coordinate_key(_coordinate_basis(coordinate_input, 16))
-        return self.candidate_norm(content + typed + coordinate)
+        value = content + typed + coordinate
+        if self.context_key is not None:
+            if chart.candidate_context is None:
+                raise ValueError("completed G3 grounder requires source-owned context")
+            context = _supported_values(chart.candidate_context, chart.candidate_validity)
+            value = value + self.context_key(context)
+        elif chart.candidate_context is not None:
+            raise ValueError("candidate-only grounder rejects undeclared G3 context")
+        return self.candidate_norm(value)
 
     def _competition(
         self,
@@ -377,6 +412,8 @@ class DenseObjectGrounder(nn.Module):
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectFactSet, dict[str, Tensor]]:
         chart = dense_chart_from_local_facts(local_facts)
+        if (self.entity_chart_mode == CURRENT_IMAGE_CHART) != (chart.current_image_support is not None):
+            raise ValueError("entity chart mode requires matching declared current-image support")
         candidates_structured = self._candidate_tokens(chart)
         batch = int(candidates_structured.shape[0])
         candidate_shape = candidates_structured.shape[1:-1]
@@ -705,21 +742,30 @@ class DenseObjectGrounder(nn.Module):
             )
             return result.to(dtype=output_dtype)
 
-        camera_coordinates = camera_aggregate(
-            chart.candidate_coordinates,
-            structured_geometry_read,
-        )
+        camera_read = structured_read
+        camera_geometry_read = structured_geometry_read
+        if chart.current_image_support is not None:
+            # A tiny global camera allocation is not missing observed support.
+            # Condition in log space BEFORE reducing camera-specific values.
+            camera_shape = (batch, self.objects, int(chart.dino_content.shape[1]), -1)
+            camera_read_flat, _, _ = _masked_log_softmax(
+                read_log_probability.reshape(camera_shape),
+                read_support.reshape(camera_shape), dim=-1,
+            )
+            camera_read = camera_read_flat.reshape_as(structured_read)
+            # This mode requires M3's ONE location law for every typed read.
+            camera_geometry_read = camera_read
         camera_transport_prior = camera_aggregate(
             chart.candidate_transport_prior,
-            structured_geometry_read,
+            camera_geometry_read,
         )
         camera_support = camera_aggregate(
             chart.candidate_support[..., None],
-            structured_geometry_read,
+            camera_geometry_read,
         )
         camera_validity = camera_aggregate(
             chart.candidate_validity.float(),
-            structured_read,
+            camera_read,
         ).float().clamp(0.0, 1.0)
         log_camera_validity = _finite_log_measure(camera_validity)
         # ``chart_read`` is the reverse lookup used by Teacher/P2 and is
@@ -727,30 +773,59 @@ class DenseObjectGrounder(nn.Module):
         # posterior.  The old draft used it for reconstruction, which divided
         # every object's value by the complete chart area and made the object
         # reconstruction pressure almost vanish.
-        chart_read = structured_read.sum(dim=-1)
-        coordinate_weight = torch.nan_to_num(
-            chart.candidate_validity.float()
-            * chart.candidate_owner_prior[..., None].float(),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        ).clamp_min(0.0)
-        safe_coordinates = _supported_values(
-            chart.candidate_coordinates,
-            coordinate_weight,
-        ).float()
-        chart_coordinate = (safe_coordinates * coordinate_weight).sum(dim=-2) / (
-            coordinate_weight.sum(dim=-2).clamp_min(1e-6)
-        )
-        position = _coordinate_basis(
-            chart_coordinate.to(dtype=chart.candidate_coordinates.dtype), 16
-        )
-        # Conditional K owns reconstruction assignment independently of the
-        # learned association null.  ``content`` is the only K-specific value.
-        # The retained coordinate decoder has no K input; write it explicitly
-        # as a shared spatial term behind summed observable support instead of
-        # hiding it inside K-valued prototypes.
-        reconstruction_owner = structured_reconstruction_assignment.sum(dim=-1)
+        image_measure = None
+        if chart.current_image_support is None:
+            camera_coordinates = camera_aggregate(chart.candidate_coordinates, structured_geometry_read)
+            chart_read = structured_read.sum(dim=-1)
+            coordinate_weight = torch.nan_to_num(
+                chart.candidate_validity.float()
+                * chart.candidate_owner_prior[..., None].float(),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp_min(0.0)
+            safe_coordinates = _supported_values(
+                chart.candidate_coordinates,
+                coordinate_weight,
+            ).float()
+            chart_coordinate = (safe_coordinates * coordinate_weight).sum(dim=-2) / (
+                coordinate_weight.sum(dim=-2).clamp_min(1e-6)
+            )
+            position = _coordinate_basis(
+                chart_coordinate.to(dtype=chart.candidate_coordinates.dtype), 16
+            )
+            # Conditional K owns reconstruction assignment independently of the
+            # learned association null.  ``content`` is the only K-specific value.
+            # The retained coordinate decoder has no K input; write it explicitly
+            # as a shared spatial term behind summed observable support instead of
+            # hiding it inside K-valued prototypes.
+            reconstruction_owner = structured_reconstruction_assignment.sum(dim=-1)
+        else:
+            image_rows, image_columns = chart.dino_content.shape[2:4]
+            source_supported = read_support.reshape(batch, self.objects, *candidate_shape)
+            image_measure = pushforward_log_to_current_image(
+                read_log_probability.reshape(batch, self.objects, *candidate_shape),
+                source_supported, chart.current_image_support,
+                rows=image_rows, columns=image_columns,
+            )
+            chart_read, _ = image_measure.normalized((2, 3, 4))
+            camera_coordinates = image_measure.camera_centers().to(chart.candidate_coordinates.dtype)
+            recon_log_mass = (
+                corrected_k_log_conditional.transpose(1, 2)
+                + candidate_log_prior[..., 0][:, None]
+                + _finite_log_measure(valid[..., 0])[:, None]
+            ).reshape(batch, self.objects, *candidate_shape)
+            reconstruction_measure = pushforward_log_to_current_image(
+                recon_log_mass, source_supported, chart.current_image_support,
+                rows=image_rows, columns=image_columns,
+            )
+            # Conditional K at the destination. Underflowed but supported mass
+            # retains finite derivatives; empty cells still count in the loss.
+            reconstruction_owner, _ = reconstruction_measure.normalized((1,))
+            grid = current_image_grid(image_rows, image_columns, device=content.device)
+            position = _coordinate_basis(grid.to(content.dtype), 16)[None, None].expand(
+                batch, int(chart.dino_content.shape[1]), -1, -1, -1
+            )
         shared_support = reconstruction_owner.sum(dim=1)
         decoded_position = self.decode_position(position)
         reconstructed = torch.einsum(
@@ -784,6 +859,8 @@ class DenseObjectGrounder(nn.Module):
         facts = ObjectFactSet(
             latest_flow_steps=local_facts.latest_flow_steps,
             dense_chart=chart,
+            object_chart_mode=self.entity_chart_mode,
+            current_image_measure=image_measure,
             content=content,
             semantic=semantic,
             appearance=appearance,

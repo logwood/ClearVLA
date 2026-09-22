@@ -88,9 +88,10 @@ def posterior_candidate_support(
 def sample_candidate_expectation(chart: Tensor, coordinates: Tensor, probability: Tensor) -> Tensor:
     """Read observed content at its actual support, rather than at a barycenter.
 
-    Dense DINO content is the frozen current chart. Activation recomputation
-    avoids retaining a full [B,C,Y,X,M,N,D] content expansion in training;
-    coordinate/probability gradients remain ordinary autograd paths. This is
+    The caller owns whether values are observed DINO or learned current G3
+    context. Activation recomputation avoids retaining a full
+    [B,C,Y,X,M,N,D] expansion; value, coordinate and probability gradients
+    remain ordinary autograd paths. This is
     not a second encoder call or an extra physical/ODE update.
     """
     if chart.ndim != 5 or coordinates.ndim != 7 or coordinates.shape[-1] != 2:
@@ -121,7 +122,9 @@ def sample_candidate_expectation(chart: Tensor, coordinates: Tensor, probability
     # bounds the transient full-content volume even for the real 768-D chart.
     for start in range(0, int(chart.shape[-1]), 128):
         values = chart[..., start : start + 128]
-        if torch.is_grad_enabled() and (coordinates.requires_grad or probability.requires_grad):
+        if torch.is_grad_enabled() and (
+            chart.requires_grad or coordinates.requires_grad or probability.requires_grad
+        ):
             output = checkpoint(
                 read,
                 values,

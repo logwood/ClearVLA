@@ -198,6 +198,8 @@ class ObjectIntentDynamicsTop(nn.Module):
         world_action_condition_mode: str = "interval_mean_v1",
         p2_spatial_intent_mode: str = "post_pool_only",
         history_encoding_mode: str = "paired_rows_v1",
+        entity_context_mode: str = "candidate_only_v1",
+        entity_chart_mode: str = "query_lattice_v1",
         core_config=None,
     ) -> None:
         super().__init__()
@@ -240,6 +242,8 @@ class ObjectIntentDynamicsTop(nn.Module):
             route_dim=route_dim,
             objects=objects,
             iterations=grounder_iterations,
+            entity_context_mode=entity_context_mode,
+            entity_chart_mode=entity_chart_mode,
         )
         self.intent = StatelessObjectIntentOrganizer(
             hidden=hidden,

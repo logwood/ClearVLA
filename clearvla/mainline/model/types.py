@@ -10,6 +10,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from clearvla.vision.entity_chart import (
+    CURRENT_IMAGE_CHART,
+    QUERY_CHART,
+    CurrentImageSupport,
+    ImageLogMeasure,
+)
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
 
 from ..manifest import INTERVALS
@@ -287,6 +293,8 @@ class LocalFactSet:
     semantic_owner_log_probs: Tensor | None = None  # finite FP32 [B,C,Y,X,M]
     appearance_owner_log_probs: Tensor | None = None
     geometry_owner_log_probs: Tensor | None = None
+    context_slots: Tensor | None = None  # completed current G3 at the same support [B,C,Y,X,M,H]
+    current_image_support: CurrentImageSupport | None = None
 
     @property
     def batch(self) -> int:
@@ -354,6 +362,12 @@ class LocalFactSet:
             _shape(value, prefix, f"local {name.replace('_', ' ')}")
             if value.dtype != torch.float32 or not bool(torch.isfinite(value).all()):
                 raise TypeError(f"local {name} must be finite FP32")
+        if self.current_image_support is not None:
+            self.current_image_support.validate(self.slot_validity)
+        if self.context_slots is not None:
+            _shape(self.context_slots, (*prefix, int(self.public_scene_base.shape[-1])), "local completed G3 context")
+            if self.context_slots.device != self.content_slots.device:
+                raise ValueError("local G3 context must share its candidate device")
         if tuple(self.public_scene_base.shape[:4]) != prefix[:4]:
             raise ValueError("local public scene base lost camera/spatial identity")
         _shape(
@@ -395,6 +409,8 @@ class DenseFactChart:
     candidate_appearance_log_prior: Tensor
     candidate_geometry_log_prior: Tensor
     candidate_transport_prior: Tensor  # [B,C,Y,X,M,2]
+    candidate_context: Tensor | None = None  # learned completed G3, never a reconstruction target
+    current_image_support: CurrentImageSupport | None = None
 
     def validate(self) -> None:
         if self.public_scene_base.ndim != 5 or self.dino_content.ndim != 5:
@@ -444,6 +460,12 @@ class DenseFactChart:
                 raise TypeError(f"{name} must be finite FP32")
         if tuple(self.candidate_transport_prior.shape) != (*prefix, 2):
             raise ValueError("candidate transport prior is misaligned")
+        if self.current_image_support is not None:
+            self.current_image_support.validate(self.candidate_validity)
+        if self.candidate_context is not None:
+            _shape(self.candidate_context, (*prefix, int(self.public_scene_base.shape[-1])), "dense completed G3 context")
+            if self.candidate_context.device != self.candidate_content.device:
+                raise ValueError("dense G3 context must share candidate device")
         chart_prefix = prefix[:4]
         if tuple(self.public_scene_base.shape[:4]) != chart_prefix:
             raise ValueError("public chart lost camera/spatial identity")
@@ -489,6 +511,8 @@ class ObjectFactSet:
     reconstructed_dino: Tensor  # [B,C,Y,X,D]
     reconstruction_error: Tensor  # scalar, not weighted here
     latest_flow_steps: Tensor | None = None  # [B], producer time, not model confidence
+    object_chart_mode: str = QUERY_CHART
+    current_image_measure: ImageLogMeasure | None = None
 
     @property
     def batch(self) -> int:
@@ -580,6 +604,15 @@ class ObjectFactSet:
         chart = self.dense_chart.dino_content
         expected_chart = (batch, objects, *chart.shape[1:4])
         _shape(self.object_to_chart, expected_chart, "object-to-chart posterior")
+        if self.object_chart_mode not in {QUERY_CHART, CURRENT_IMAGE_CHART}:
+            raise ValueError("unknown object-to-chart coordinate semantics")
+        if (self.object_chart_mode == CURRENT_IMAGE_CHART) != (self.dense_chart.current_image_support is not None):
+            raise ValueError("object chart mode and actual support disagree")
+        if (self.object_chart_mode == CURRENT_IMAGE_CHART) != (self.current_image_measure is not None):
+            raise ValueError("object chart mode and authoritative image measure disagree")
+        if self.current_image_measure is not None:
+            if self.current_image_measure.log_mass.shape != self.object_to_chart.shape:
+                raise ValueError("object image measure has different axes")
         candidates = self.dense_chart.candidate_content
         _shape(
             self.candidate_assignment,
@@ -609,6 +642,11 @@ class ObjectFactSet:
         index = permutation.to(device=self.content.device, dtype=torch.long)
         return ObjectFactSet(
             dense_chart=self.dense_chart,
+            object_chart_mode=self.object_chart_mode,
+            current_image_measure=(
+                ImageLogMeasure(self.current_image_measure.log_mass[:, index], self.current_image_measure.supported[:, index])
+                if self.current_image_measure is not None else None
+            ),
             content=self.content[:, index],
             semantic=self.semantic[:, index],
             appearance=self.appearance[:, index],

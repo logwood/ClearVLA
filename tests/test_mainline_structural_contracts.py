@@ -3767,15 +3767,27 @@ def test_teacher_track_is_equivariant_to_global_object_relabeling() -> None:
         ), field.name
 
 
-def test_teacher_camera_relabeling_permutes_the_physical_geometry_axis() -> None:
+@pytest.mark.parametrize("current_image", [False, True])
+def test_teacher_camera_relabeling_permutes_the_physical_geometry_axis(current_image) -> None:
+    from clearvla.vision.entity_chart import CurrentImageSupport
+
     torch.manual_seed(261)
+    local = _local_facts(cameras=2, content=8, route=4, hidden=16)
+    if current_image:
+        local = replace(local, current_image_support=CurrentImageSupport(
+            local.slot_coordinates[..., None, :],
+            torch.ones_like(local.slot_validity),
+            local.slot_validity.bool(),
+            torch.zeros_like(local.slot_validity),
+        ))
     facts, _ = DenseObjectGrounder(
         hidden=16,
         content_dim=8,
         route_dim=4,
         objects=4,
         iterations=2,
-    )(_local_facts(cameras=2, content=8, route=4, hidden=16))
+        entity_chart_mode="current_image_support_v1" if current_image else "query_lattice_v1",
+    )(local)
     supports = torch.randn(1, 12, 2, 2, 2, 8)
     offsets = torch.arange(4, 49, 4)[None]
     teacher = ObjectFutureTeacher(content_dim=8, key_dim=4)
@@ -3786,15 +3798,34 @@ def test_teacher_camera_relabeling_permutes_the_physical_geometry_axis() -> None
     )
     camera_permutation = torch.tensor([1, 0])
     chart = facts.dense_chart
-    permuted_chart = type(chart)(
+    # Every dense tensor owns camera axis 1; optional provenance is not a
+    # tensor and must retain its typed support rather than be indexed blindly.
+    spatial = chart.current_image_support
+    permuted_spatial = None if spatial is None else replace(
+        spatial,
+        coordinates=spatial.coordinates[:, camera_permutation],
+        probability=spatial.probability[:, camera_permutation],
+        valid=spatial.valid[:, camera_permutation],
+        log_probability=spatial.log_probability[:, camera_permutation],
+    )
+    permuted_chart = replace(
+        chart,
         **{
-            field.name: getattr(chart, field.name)[:, camera_permutation]
+            field.name: value[:, camera_permutation]
             for field in fields(type(chart))
-        }
+            if isinstance(value := getattr(chart, field.name), torch.Tensor)
+        },
+        current_image_support=permuted_spatial,
     )
     permuted_facts = replace(
         facts,
         dense_chart=permuted_chart,
+        current_image_measure=(None if facts.current_image_measure is None else replace(
+            facts.current_image_measure,
+            log_mass=facts.current_image_measure.log_mass[:, :, camera_permutation],
+            supported=facts.current_image_measure.supported[:, :, camera_permutation],
+        )),
+        log_camera_validity=facts.log_camera_validity[:, :, camera_permutation],
         camera_coordinates=facts.camera_coordinates[:, :, camera_permutation],
         camera_transport_prior=facts.camera_transport_prior[:, :, camera_permutation],
         camera_support=facts.camera_support[:, :, camera_permutation],

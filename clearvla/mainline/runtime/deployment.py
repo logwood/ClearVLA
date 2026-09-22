@@ -18,6 +18,7 @@ import numpy as np
 from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.data.state_features import NATIVE_AFFINE_STATE, state_feature_metadata
 from clearvla.vision.candidate_support import MOMENT_LOCAL_SUPPORT, candidate_support_metadata
+from clearvla.vision.entity_chart import CURRENT_IMAGE_CHART, QUERY_CHART, entity_chart_metadata
 from clearvla.vision.local_ownership import INDEPENDENT_LOCAL_OWNERS, local_ownership_metadata
 from clearvla.vision.preprocessing import (
     PreprocessConfig,
@@ -341,6 +342,10 @@ def build_deployment_abi(
         "flow_schedule": flow_schedule,
         "flow_schedule_sha256": canonical_sha256(flow_schedule),
         "observation": {
+            **({"entity_chart": entity_chart_metadata(config.top.entity_chart_mode)}
+               if config.top.entity_chart_mode == CURRENT_IMAGE_CHART else {}),
+            **({"entity_context": {"schema": "completed-current-g3-v1", "read": "same-full-candidate-support", "target": "observed-dino-unchanged"}}
+               if config.top.entity_context_mode == "completed_g3_v1" else {}),
             "camera_names": list(config.data.camera_names),
             **(
                 {"history_timing_contract": HISTORY_TIMING_CONTRACT}
@@ -433,6 +438,21 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     )
     if observation.get("history_timing_contract") != expected_timing:
         raise ValueError("deployment history timing contract differs from selected graph")
+    chart_mode = graph_top.get("entity_chart_mode", QUERY_CHART)
+    if chart_mode == CURRENT_IMAGE_CHART:
+        actual_chart = _mapping(observation.get("entity_chart"), name="observation.entity_chart")
+        if canonical_sha256(actual_chart) != canonical_sha256(entity_chart_metadata(CURRENT_IMAGE_CHART)):
+            raise ValueError("deployment entity chart differs from the graph")
+    elif chart_mode != QUERY_CHART or "entity_chart" in observation:
+        raise ValueError("deployment entity chart is unknown or undeclared")
+    context_mode = graph_top.get("entity_context_mode", "candidate_only_v1")
+    if context_mode == "completed_g3_v1":
+        expected_context = {"schema": "completed-current-g3-v1", "read": "same-full-candidate-support", "target": "observed-dino-unchanged"}
+        actual_context = _mapping(observation.get("entity_context"), name="observation.entity_context")
+        if canonical_sha256(actual_context) != canonical_sha256(expected_context):
+            raise ValueError("deployment entity context differs from the graph")
+    elif context_mode != "candidate_only_v1" or "entity_context" in observation:
+        raise ValueError("deployment entity context is unknown or undeclared")
     action = _mapping(abi.get("action"), name="action")
     normalizers = _mapping(abi.get("normalizers"), name="normalizers")
     language = _mapping(abi.get("language"), name="language")

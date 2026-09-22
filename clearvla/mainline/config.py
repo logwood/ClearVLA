@@ -459,8 +459,14 @@ class TopConfig:
     # Explicit new behavior; legacy checkpoints keep their existing history chart.
     history_encoding_mode: str = "paired_rows_v1"
     state_feature_mode: str = NATIVE_AFFINE_STATE
+    entity_context_mode: str = "candidate_only_v1"
+    entity_chart_mode: str = "query_lattice_v1"
 
     def validate(self) -> None:
+        if self.entity_chart_mode not in {"query_lattice_v1", "current_image_support_v1"}:
+            raise ValueError("unknown top entity_chart_mode")
+        if self.entity_context_mode not in {"candidate_only_v1", "completed_g3_v1"}:
+            raise ValueError("unknown top entity_context_mode")
         if self.state_feature_mode not in STATE_FEATURE_MODES:
             raise ValueError("unknown top state_feature_mode")
         if self.history_encoding_mode not in {"paired_rows_v1", "timestamped_streams_v1"}:
@@ -938,6 +944,14 @@ class ExperimentConfig:
         validate_state_feature_profile(self.top.state_feature_mode, profile.name)
         if state_feature_width(self.top.state_feature_mode, len(profile.state_indices)) != self.dimensions.state_dim:
             raise ValueError("state feature chart must align with dimensions.state_dim")
+        if self.top.entity_chart_mode == "current_image_support_v1" and (
+            self.top.entity_context_mode != "completed_g3_v1"
+            or self.observation.candidate_support_mode != "full_posterior_lattice_v1"
+            or self.observation.local_ownership_mode != "coupled_observation_v1"
+        ):
+            raise ValueError("current-image entities require completed G3 and coupled full support")
+        if self.top.entity_context_mode == "completed_g3_v1" and self.observation.candidate_support_mode != "full_posterior_lattice_v1":
+            raise ValueError("completed G3 context requires actual full posterior coordinates")
         if self.observation.source_time_mode == "source_history_steps_v1" and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING:
             raise ValueError("source-timed vision requires source-owned history clocks")
         if self.top.state_feature_mode == CALVIN_ROTATION6D_STATE and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING:
@@ -1113,6 +1127,10 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.entity_chart_mode == "query_lattice_v1":
+            cast(dict[str, object], payload["top"]).pop("entity_chart_mode")
+        if self.top.entity_context_mode == "candidate_only_v1":
+            cast(dict[str, object], payload["top"]).pop("entity_context_mode")
         if self.observation.local_ownership_mode == "independent_typed_v1":
             cast(dict[str, object], payload["observation"]).pop("local_ownership_mode")
         if self.observation.candidate_support_mode == "moment_local_v1":

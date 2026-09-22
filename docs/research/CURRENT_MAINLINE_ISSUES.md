@@ -38,8 +38,9 @@ Still open before/through subsequent milestones:
   G3 current-content expectation and P1 real local patches. M3's explicit
   selection shares the local candidate and M law across distinct attribute
   values. Still open: global entity objectness, reduction of ambiguous support,
-  completed G3 block versus binder entity identity, causal entity association
-  and Teacher's dependence on current G.
+  causal entity association and Teacher's dependence on current G. M4a connects
+  the completed G3 block to the binder; M4b corrects query/image correspondence
+  and log-domain image conditioning. Neither establishes physical objectness.
   Distribution preservation is not a trained segmentation/tracking guarantee;
   production-scale memory/latency must be measured on the user's GPU.
 - S: target/operation/progress separation, object-specific change, shared
@@ -498,3 +499,12 @@ loss-to-owner-to-optimizer reverse path and the relevant matched intervention
 agree at stated coverage. A source explanation without behavior evidence
 remains open; an unusual metric without attributed responsibility does not
 authorize a structural edit.
+
+## M4a closure and remaining G3 obligations
+
+The explicit completed-G3 mode now feeds the third G block's context into the
+actual dense entity binder on the same current spatial support. The observed
+DINO target is unchanged. This closes the source-level disconnected-context
+issue, not entity objectness, calibrated visibility, persistent identity, or
+Teacher association accuracy. Those remain open and must not be inferred from
+a positive connectivity gradient or a lower reconstruction loss.

@@ -24,11 +24,14 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit candidate is
-`configs/mainline/structural_rebuild_m3_calvin.json`. Legacy and M1a/M1b/M1c/M1d/M2
+`configs/mainline/structural_rebuild_m4b_calvin.json`. Legacy and M1a/M1b/M1c/M1d/M2/M3
 configs remain reproducible controls, not automatic aliases of this candidate.
 M2 preserves full G1 support through the actual G2 sampler and G3/P1
 value consumers. M3 adds one soft local observation law for typed properties
-and their positions. Global/persistent G3 entity identity, S-task,
+and their positions. M4a connects completed G3 context to the actual K binder.
+M4b maps full candidate mass into the actual current image for entity reverse
+lookup, geometric summaries and reconstruction. This is not persistent tracking.
+Global/persistent G3 entity identity, S-task,
 W-supervision and the deeper P redesign remain open. No learned behavior
 is established by these source changes. The user-authorized rebuild may revise
 historical implementation details; accepted source semantics belong here,
@@ -187,6 +190,82 @@ for reproducibility and is checked for unchanged parameters/order and sampling.
 M4 must still address entity objectness, multimodal-support reduction into
 K facts, the third G block's entity-value role, and causal entity association.
 The shared local law is NOT persistent tracking or S's operated-target binding.
+
+## M4a completed current G3 context in the entity binder
+
+`top.entity_context_mode=completed_g3_v1` requires complete current-camera
+candidate support. It samples the completed third G block's public chart at
+those support points using the same geometry location measure as the other
+local facts. Sampling precedes expectation; a possibly empty barycenter is
+never substituted for the actual support. Current learned context remains a
+separate value from observed DINO and semantic/appearance/geometric properties.
+
+`LocalFactSet.context_slots` -> `DenseFactChart.candidate_context` -> the actual
+`DenseObjectGrounder` candidate projection carries this field into K competition
+and iterative binding. It is not a loss-private feature, a diagnostic, or a P1
+bypass. Producer-owned candidate validity quarantines missing payload before
+learned projections. The independently observed current DINO chart remains the
+reconstruction target; learned context does not declare observation support or
+become its own reconstruction truth. Teacher may see updated current assignments
+but does not gain access to online future information or learned target authority.
+
+The explicit new context projection is created only for this mode; the
+candidate-only control has no placeholder parameters and preserves constructor
+RNG/order. Missing context in the new mode, or undeclared context in the old
+mode, is an error rather than an ignored sidecar or silent fallback. Config and
+deployment ABI retain the semantic selection; new training is required. No old
+checkpoint migration is introduced. Sampling uses the existing channel-tiled
+checkpointed expectation, including when only the learned chart needs gradients.
+
+The current G chart and entity context are computed once per observation and
+read unchanged through candidate-world rebuilds and numerical solver nodes.
+This unit adds neither entity persistence nor an ODE-time state update. Its
+entity-only backward test measures the third G block without relying on P1 or
+action-decoder shortcut paths. Connectivity and source tests do not prove that
+K slots now correspond to correct physical entities. Objectness, multimodal K
+support, cross-camera association and causal entity persistence remain M4 work.
+
+## M4b current-image entity support
+
+`top.entity_chart_mode=current_image_support_v1` requires completed G3 context,
+full candidate support and the coupled local observation law. The M4a query-grid
+mode remains a separately serialized control; no old checkpoint is migrated.
+
+`CurrentImageSupport` carries actual `[B,C,Yq,Xq,M,N,2]` current-camera points,
+their FP32 conditional probability AND producer log probability, and Boolean
+source support. It is materialized from G2's existing complete law, not from a
+mean/variance Gaussian. Valid local hypotheses must have matching source support.
+`DenseFactChart` retains this reference without resampling or re-encoding.
+
+The binder's assignment tensors remain indexed by query/local hypotheses.
+Their pushforward is instead indexed by CURRENT image pixels. A bilinear
+align-corners write transports every candidate's mass, separately for K and
+camera. No top-k, predicted visibility mask or fabricated observation is used.
+`ImageLogMeasure` is the authoritative spatial measure. The public
+`object_to_chart` is its normalized probability view; camera centers come from
+conditional reads of the same log measure, not a second coordinate estimator.
+K permutation carries the log measure as well as all existing entity fields.
+
+Segmented log-sum-exp is necessary: normalizing a tiny positive image mass in
+ordinary probability space can produce NaN reverse derivatives even when the
+forward output is finite. Source logs are preserved BEFORE exponentiation;
+segment maxima are detached numerical shifts. Empty support yields finite zero
+values/gradients. Underflow is not silently reclassified as object absence.
+
+Reconstruction uses the conditional K mixture at each destination pixel, not
+source-query density. Its shared positional feature uses the destination pixel's
+coordinate. The fixed observed target/mask still owns the entire objective,
+including uncovered observed pixels; predicted coverage cannot erase a label.
+Observed DINO content remains the reconstruction/Teacher target. Teacher's typed
+current keys still integrate observed local content with query-indexed assignment;
+its camera prior and geometry now consume the current-image measure/centers.
+
+This unit adds no physical-time state, extra G/W call or new task condition. The
+support is created once per observation and is read-only throughout ODE and W
+refinement. It does not resolve global physical objectness, persistent entity
+association, cross-camera physical calibration, or later S/W/P responsibilities.
+CUDA scatter determinism, production memory/latency and learned task success
+remain hardware/behavior verification, not consequences of CPU tests.
 
 ## Agent quick contract
 
