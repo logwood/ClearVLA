@@ -1007,20 +1007,29 @@ class ObjectFutureEffectReader(nn.Module):
             dim=3,
         )
         projection_delta_terms: list[Tensor] = []
-        for spatial, terminal in zip(
-            self.source_query,
-            self.terminal_query,
-            strict=True,
+        projection_metrics: dict[str, Tensor] = {}
+        for name, spatial, terminal in zip(
+            self.TYPE_NAMES, self.source_query, self.terminal_query, strict=True
         ):
-            if not isinstance(spatial, nn.Linear) or not isinstance(
-                terminal,
-                nn.Linear,
-            ):
-                raise TypeError("P2 query projections must remain linear")
+            if not isinstance(terminal, nn.Linear):
+                raise TypeError("P2 terminal query must remain linear")
+            if isinstance(spatial, nn.Identity) and name == "semantic" and self.target_binding_mode == SHARED_TARGET_BINDING:
+                # Binding owns K selection; no independently learned semantic
+                # spatial query exists to compare against this terminal map.
+                projection_metrics["object_p2_semantic_spatial_query_present"] = action_query.new_zeros((), dtype=torch.float32)
+                projection_metrics["object_p2_semantic_terminal_query_weight_rms"] = terminal.weight.detach().float().square().mean().sqrt()
+                continue
+            if not isinstance(spatial, nn.Linear):
+                raise TypeError("P2 spatial query is not the selected schema")
             projection_delta = (
                 terminal.weight.detach().float() - spatial.weight.detach().float()
             ).square().mean().sqrt()
             projection_delta_terms.append(projection_delta)
+            projection_metrics[f"object_p2_{name}_terminal_query_delta_rms"] = projection_delta
+        projection_metrics[
+            "object_p2_terminal_query_delta_rms" if self.target_binding_mode == LOCAL_TARGET_READERS
+            else "object_p2_comparable_terminal_query_delta_rms"
+        ] = torch.stack(projection_delta_terms).mean()
         raw_effect = effect.combined()
         metrics: dict[str, Tensor] = {
             "object_p2_intent_score_abs": (
@@ -1103,11 +1112,7 @@ class ObjectFutureEffectReader(nn.Module):
                 .abs()
                 .amax(),
             ),
-            "object_p2_terminal_query_delta_rms": torch.stack(
-                projection_delta_terms
-            ).mean(),
-            "object_p2_semantic_terminal_query_delta_rms": projection_delta_terms[0],
-            "object_p2_geometry_terminal_query_delta_rms": projection_delta_terms[1],
+            **projection_metrics,
         }
         metrics.update(terminal_query_gradient_metrics)
         metrics.update(gradient_metrics)

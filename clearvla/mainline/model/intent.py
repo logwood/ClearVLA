@@ -6,8 +6,10 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
+from .instruction_progress import InstructionReferenceRead
 from .routing import register_gradient_rms_metric, smooth_rms_contract
 from .target_binding import (
     LOCAL_TARGET_READERS,
@@ -58,6 +60,58 @@ def _interval_common_residual(value: Tensor) -> tuple[Tensor, Tensor]:
     common = value.mean(dim=1)
     residual = value - common[:, None]
     return common, residual
+
+
+@torch.no_grad()
+def _diagnostic_attention_weights(
+    attention: nn.MultiheadAttention,
+    query: Tensor,
+    key: Tensor,
+    padding_mask: Tensor | None = None,
+) -> Tensor:
+    """Detached pre-dropout head-mean probabilities, never the value path.
+
+    The production readers use packed, bias-free QKV with zero dropout. Keep
+    their value kernel at need_weights=False, regardless of logging. Recompute
+    only Q/K probabilities in FP32 so neither autocast nor diagnostic gradients
+    can affect the actual prediction or optimizer update.
+    """
+    projection = attention.in_proj_weight
+    if (
+        projection is None or attention.in_proj_bias is not None
+        or attention.bias_k is not None or attention.bias_v is not None
+        or attention.add_zero_attn or attention.dropout != 0.0
+        or not attention.batch_first
+    ):
+        raise ValueError("intent diagnostics require packed bias-free zero-dropout attention")
+    width, heads = attention.embed_dim, attention.num_heads
+    if (
+        query.ndim != 3 or key.ndim != 3 or query.shape[0] != key.shape[0]
+        or query.shape[-1] != width or key.shape[-1] != width
+        or query.device != key.device or key.shape[1] < 1
+        or tuple(projection.shape) != (3 * width, width)
+    ):
+        raise ValueError("intent diagnostic query/key shape or device is invalid")
+    valid: Tensor | None = None
+    if padding_mask is not None:
+        if padding_mask.dtype != torch.bool or tuple(padding_mask.shape) != tuple(key.shape[:2]):
+            raise ValueError("intent diagnostic padding must be bool [B,K]")
+        valid = ~padding_mask.to(device=key.device)
+        key = torch.where(valid[..., None], key, torch.zeros_like(key))
+    with torch.autocast(device_type=query.device.type, enabled=False):
+        q = F.linear(query.detach().float(), projection[:width].detach().float())
+        k = F.linear(key.detach().float(), projection[width:2 * width].detach().float())
+        batch, queries = q.shape[:2]
+        head_width = width // heads
+        q = q.reshape(batch, queries, heads, head_width).transpose(1, 2)
+        k = k.reshape(batch, key.shape[1], heads, head_width).transpose(1, 2)
+        logits = torch.matmul(q, k.transpose(-2, -1)) * (head_width ** -0.5)
+        if valid is not None:
+            logits = logits.masked_fill(~valid[:, None, None], torch.finfo(logits.dtype).min)
+        weights = torch.softmax(logits, dim=-1)
+        if valid is not None:
+            weights = torch.where(valid[:, None, None], weights, torch.zeros_like(weights))
+        return weights.mean(dim=1)
 
 
 class _CrossRead(nn.Module):
@@ -116,13 +170,18 @@ class _CrossRead(nn.Module):
             effective_padding_mask[all_invalid, 0] = False
         else:
             normalized_memory = self.memory_norm(memory)
-        update, weights = self.attention(
-            self.query_norm(query),
+        normalized_query = self.query_norm(query)
+        update, _ = self.attention(
+            normalized_query,
             normalized_memory,
             normalized_memory,
             key_padding_mask=effective_padding_mask,
-            need_weights=diagnostics,
-            average_attn_weights=True,
+            need_weights=False,
+        )
+        weights = (
+            _diagnostic_attention_weights(
+                self.attention, normalized_query, normalized_memory, effective_padding_mask
+            ) if diagnostics else None
         )
         update, _ = smooth_rms_contract(update, self.maximum_rms)
         value = query + update
@@ -232,9 +291,14 @@ class StatelessObjectIntentOrganizer(nn.Module):
         target_object_address_mode: str = "post_pool_only",
         history_encoding_mode: str = LEGACY_HISTORY_ENCODING,
         target_binding_mode: str = LOCAL_TARGET_READERS,
+        instruction_reference_mode: str = "none",
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
         super().__init__()
+        if instruction_reference_mode not in {"none", INSTRUCTION_START_REFERENCE}:
+            raise ValueError("unknown instruction reference consumer")
+        if instruction_reference_mode != "none" and target_binding_mode != SHARED_TARGET_BINDING:
+            raise ValueError("instruction reference needs the shared operated-object binding")
         if target_object_address_mode not in {
             "post_pool_only",
             "shared_target_prior_v1",
@@ -331,6 +395,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
             self.target_coordinate = nn.Linear(2, hidden, bias=False)
             self.target_state = nn.Linear(state_dim, hidden, bias=False)
             self.target_view = nn.Embedding(len(camera_names), hidden)
+
+        self.instruction_progress = (
+            InstructionReferenceRead(hidden=hidden, content_dim=content_dim,
+                                     state_dim=state_dim, cameras=len(camera_names))
+            if instruction_reference_mode == INSTRUCTION_START_REFERENCE else None
+        )
 
     @staticmethod
     def _paired_history(
@@ -508,6 +578,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
         facts: ObjectFactSet,
         collect_diagnostics: bool,
         history_timing: HistoryTiming | None = None,
+        instruction_reference: InstructionReference | None = None,
+        current_dino: Tensor | None = None,
     ) -> tuple[ObjectIntentState, dict[str, Tensor]]:
         if goal_tokens.ndim != 3 or goal_mask.ndim != 2:
             raise ValueError("intent organizer requires full T5 tokens and mask")
@@ -636,6 +708,17 @@ class StatelessObjectIntentOrganizer(nn.Module):
             target_evidence = TargetEvidence(
                 torch.where(target_valid[..., None], target_tokens, torch.zeros_like(target_tokens)), target_valid
             )
+        progress = None
+        if self.instruction_progress is not None:
+            if instruction_reference is None or current_dino is None or target_binding is None:
+                raise ValueError("instruction progress requires causal reference and shared binding")
+            progress, _ = self.instruction_progress(
+                reference=instruction_reference, current_dino=current_dino,
+                current_state=state, facts=facts, binding=target_binding,
+                task_context=protected_goal.mean(1),
+            )
+        elif instruction_reference is not None:
+            raise ValueError("instruction reference consumer is not selected")
         interval_base = self.interval_identity.to(
             device=objects.device, dtype=objects.dtype
         ).expand(batch, -1, -1)
@@ -665,12 +748,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 language_object_query, interval_objects, padding_mask=~object_validity,
                 diagnostics=collect_diagnostics,
             )
-        public_intervals = self.interval_self(
-            interval_base
-            + goal_innovation
-            + history_innovation
-            + object_innovation
-        )
+        interval_source = interval_base + goal_innovation + history_innovation + object_innovation
+        if progress is not None:
+            interval_source = interval_source + progress[:, None]
+        public_intervals = self.interval_self(interval_source)
         (
             typed_relevance_mass,
             typed_relevance_value,
@@ -705,22 +786,31 @@ class StatelessObjectIntentOrganizer(nn.Module):
             rate_padding = ~rate_validity.clone()
             # Zero value sentinel for a reset with no observed state interval.
             rate_padding[no_rate, -1] = False
-        state_change_history, state_change_attention = self.state_change_read(
-            self.state_change_query_norm(
-                self.state_change_query.to(device=history.device, dtype=history.dtype).expand(
-                    batch, -1, -1
-                )
-            ),
-            self.state_change_key_norm(history),
+        state_query = self.state_change_query_norm(
+            self.state_change_query.to(device=history.device, dtype=history.dtype).expand(
+                batch, -1, -1
+            )
+        )
+        state_key = self.state_change_key_norm(history)
+        state_change_history, _ = self.state_change_read(
+            state_query,
+            state_key,
             state_change_values,
             key_padding_mask=rate_padding,
-            need_weights=collect_diagnostics,
-            average_attn_weights=True,
+            need_weights=False,
+        )
+        state_change_attention = (
+            _diagnostic_attention_weights(
+                self.state_change_read, state_query, state_key, rate_padding
+            ) if collect_diagnostics else None
         )
         if state_change_attention is None:
             state_change_attention = history.new_zeros(batch, 1, history.shape[1])
         state_change_history = state_change_history[:, 0]
         if no_rate is not None:
+            state_change_attention = torch.where(
+                no_rate[:, None, None], torch.zeros_like(state_change_attention), state_change_attention
+            )
             state_change_history = torch.where(
                 no_rate[:, None], torch.zeros_like(state_change_history), state_change_history
             )
@@ -735,6 +825,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 transport_prior,
                 torch.zeros_like(transport_prior),
             )
+            observed_transport_for_diagnostics = transport_prior
             transport_tokens = self.state_change_transport(transport_prior)
             transport_validity = validity_values.to(
                 device=transport_tokens.device, dtype=transport_tokens.dtype
@@ -748,6 +839,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             view_valid = (facts.camera_validity[..., 0] > 0) & object_validity[..., None]
             motion = facts.camera_transport_prior if facts.latest_flow_steps is None else facts.camera_transport_rate
             motion = torch.where(view_valid[..., None], motion, torch.zeros_like(motion))
+            observed_transport_for_diagnostics = motion
             view_ids = torch.arange(len(self.camera_names), device=motion.device)
             # Map each view into a role-aware feature BEFORE view reduction;
             # a view embedding alone cannot manufacture motion when rate=0.
@@ -835,7 +927,6 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 / object_validity.detach().float().sum(dim=1)[:, None].clamp_min(1.0)
             ).abs().amax(),
             "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
-            "object_intent_observed_transport_rms": transport_prior.detach().float().square().mean().sqrt(),
             "object_intent_state_change_history_rms": state_change_history.detach().float().square().mean().sqrt(),
             "object_intent_state_change_transport_rms": state_change_transport.detach().float().square().mean().sqrt(),
             "object_intent_state_change_evidence_rms": state_change_evidence.detach().float().square().mean().sqrt(),
@@ -843,6 +934,13 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 state_change_attention, dim=-1
             ).detach().mean(),
         }
+        # Shared-target mode retains each camera chart; do not relabel its
+        # per-view magnitude as the legacy cross-camera-averaged vector RMS.
+        transport_metric = (
+            "object_intent_observed_transport_rms" if target_binding is None
+            else "object_intent_observed_transport_per_view_rms"
+        )
+        metrics[transport_metric] = observed_transport_for_diagnostics.detach().float().square().mean().sqrt()
         if self.timed_history is not None:
             # A physical-step rate is not the legacy paired-row displacement.
             metrics["object_intent_observed_state_rate_per_step_rms"] = metrics.pop(

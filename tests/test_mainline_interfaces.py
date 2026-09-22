@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from clearvla.mainline.config import ExperimentConfig
+from clearvla.mainline.instruction_reference import InstructionReference
 from clearvla.mainline.interfaces import (
     ActionSupervision,
     AuditMetadata,
@@ -80,8 +81,13 @@ def _batch(batch: int = 2) -> TrainingBatch:
 
 def test_online_input_cannot_carry_future_or_action_target() -> None:
     names = {field.name for field in fields(OnlinePolicyInput)}
-    assert names == {"observation", "history", "goal"}
-    assert not names & {
+    assert names == {"observation", "history", "goal", "instruction_reference"}
+    # This typed field contains only a declared causal starting observation.
+    # Do not admit future state/actions/labels under a generic context payload.
+    reference_names = {field.name for field in fields(InstructionReference)}
+    assert reference_names == {"dino", "state", "observed", "age_steps"}
+    assert OnlinePolicyInput.__dataclass_fields__["instruction_reference"].default is None
+    assert not (names | reference_names) & {
         "future",
         "future_training_pack",
         "target_visual",

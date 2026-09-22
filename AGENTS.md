@@ -24,3 +24,12 @@ Keep repository memory lightweight. Do not copy checkpoints, tensor caches,
 raw attached logs, full probe dumps, contact sheets, or generated binary
 artifacts into the architecture-memory documents. Record only decision-making
 statistics, source references, contracts, and reproducible probe commands.
+
+## Subunit preservation (2026-09-22 user instruction)
+
+Save each Mxa/Mxb as a real source commit promptly; push on the isolated rebuild
+branch or retain a verified nonempty source archive if the write channel fails.
+A source checkpoint may have pending or failed CI. Keep those results visible
+and resolve them at the whole-M milestone; do not make full CI a prerequisite
+for preserving progress. Keep existing workflows, avoid repeated payload
+uploads, and focus on model/data-flow work. No master change or force-push.

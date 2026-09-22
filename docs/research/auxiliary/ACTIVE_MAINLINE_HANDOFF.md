@@ -1,5 +1,64 @@
 # ClearVLA structural rebuild handoff
 
+## Current checkpoint policy — 2026-09-22 12:35 UTC
+
+The user requests saving each small source unit before whole-milestone CI
+acceptance. This overrides older below-text requirements to wait for full CI
+before source publication. The existing publisher now saves the exact source
+before installing/running the same full checks; failed checks stay failed.
+No new workflow or stage-tag mechanism is added.
+
+This checkpoint preserves the repaired M5b instruction reference and diagnostic
+noninterference code recovered at tree 603919f3716450e42aeec76e9a857e380e76c9e2.
+The archive's 51 focused cases are prior local results, not a full milestone
+pass. M5 acceptance and M6+ implementation remain open. The unarchived M6a
+draft was not recovered. Do not treat a saved source checkpoint as acceptance.
+
+
+## Recovery and diagnostic noninterference repair — 2026-09-22 12:03 UTC continuation
+
+The previous unpacked workspace was absent. The complete M5b implementation
+archive was recovered into a new directory: all 1,099 manifest entries and all
+785 source files matched SHA-256, and Git reconstructed source tree
+`2b15240df87713fc99b5d72da13fe964b1d792c8` exactly. This recovery's Git history
+is synthetic, not the remote branch ancestry. No M6a source was found in the
+available workspaces or archives; prior descriptions/tests are not substitutes
+for the missing source.
+
+Remote HEAD at recovery was transport commit
+`ecf3f6ff9c164f179e8acb7933f7078a7eeae5fb`; the last accepted source was M5a
+`115b91c7edd5717de46e980652ab2ed1d8bc8e1d`. M5b publisher run `35721596456`
+failed. Its recovered artifact matches the same M5b candidate tree; the real
+failure was exact diagnostic-loss parity (one FP32 ULP), not publication I/O.
+The synthetic process-error entry reports that same pytest-file failure and
+must not be counted as a second independent neural failure.
+
+The test initially mixed autograd modes. Holding modes equal reproduced the
+fault and traced it to both `_CrossRead` and S's state-change reader selecting
+`need_weights` from the diagnostic switch. Both production value calls now
+always use `need_weights=False`; detached, autocast-disabled FP32 Q/K-only
+probabilities supply logging. All-invalid/no-rate sentinels own no diagnostic
+mass. No new parameters, value-path dropout, ODE calls or W calls are added.
+No tolerance is relaxed. History-only inactive copies were not edited.
+
+Completed checks on Python 3.13.5 / PyTorch 2.10.0 CPU: the entire instruction
+reference file passes 38 cases; the new diagnostic file passes 13 cases.
+The four diagnostic value/gradient/RNG parity cases are INCLUDED in 38, not
+additional cases. Changed-three-file Ruff is clean and differential Pyright
+introduces no errors or missing imports. The original and repaired M5b have
+exact parameter/buffer hashes, parameter order/flags and same-noise sampled
+actions at seeds 0 and 71. The four control reports finished before an enclosing
+shell timed out; their complete outputs were compared separately. Early failed
+and memory-killed trial logs remain outside the source, not renamed passes.
+
+This is a locally verified correction, not a new supported-runtime CI pass or
+a full selected-inventory acceptance. The remote branch was NOT changed in
+this continuation. Re-run the corrected exact source through the full gate
+before M5b publication. Then reconstruct/verify M6a from the accepted source
+rather than assuming the unsaved draft survived. Remaining M4c2 and M5--M11
+semantic work remains open. No formal training or physical rollout was run.
+
+
 Updated: 2026-09-22. This records source work, not user-server job state.
 
 ## Verified starting point and recovery correction
@@ -90,26 +149,88 @@ or physical closed-loop evaluation has run. CPU BF16 is not CUDA BF16.
 The direct current-target path does not mathematically guarantee the trained
 network will use it well, and no learned success is claimed.
 
+## Verified M5a and current M5b source
+
+M5a has been independently published as
+`115b91c7edd5717de46e980652ab2ed1d8bc8e1d`, complete source tree
+`7c47b3ac2236db511fa686f7901ef42b0ff7a459`. Corrected publisher run
+`35708590933` completed successfully on Python 3.12.14 / Torch 2.11.0 CPU:
+724 collected, 723 passed, one CUDA-only skip, zero failures/errors; scoped Ruff
+zero diagnostics, zero added Pyright errors. Its archive digest and recreated
+Git tree exactly matched the local frozen source. The preceding failed CI is
+retained, not renamed a successful attempt.
+
+Current local M5b source is a separate worktree based on that exact M5a tree.
+`structural_rebuild_m5b_calvin.json` admits one causal instruction-start DINO/state
+reference with source support and admission-only age. Real dataset/cache read,
+training input, S, optimizer ownership, ordinary checkpoint/deployment and online
+lifecycle are connected. Read the architecture section and producer map.
+Local Git ancestry is synthetic; published SHA must be checked separately.
+
+The 32-case focused file passed locally on Python 3.13.5 / Torch 2.10.0 CPU:
+real mid/tail/reset optimizer steps, policy-only gradients in FP32/CPU BF16,
+source-mask/NaN separation, object permutation/null, no age-to-phase shortcut,
+actual online/offline instruction origin equality, explicit same-instruction
+restart and returned-reference mutation isolation, one observation read rather
+than one per ODE node, ordinary exact checkpoint/deployment action equality and
+reference-ABI rejection, half-cache train/inference, and future-target isolation.
+External DINO/image/T5 I/O uses named fixtures; real neural code runs.
+
+An initial adapter fixture lacked its declared model field; it was corrected,
+not a production assertion relaxed. A subsequent half-cache case exposed an
+upstream G FP16-storage/FP32-projection mismatch; the neural ingress cast is now
+explicit and tested without mutating caller input. A tool timeout interrupted a
+preliminary focused run before JUnit, so it is NOT counted as a pass. Logs from
+failed, superseded and interrupted runs remain in the actual recovery archive.
+The first broad inventory caught an old exact three-field online-input test.
+It now explicitly admits only the typed causal reference and its four fields,
+retaining the future/action-target exclusions and no-oracle audit assertion.
+That failed partial inventory is invalidated, not counted as acceptance.
+Source includes later comment/config/docs changes; the final full inventory and
+static/parity results must be read from the exact-source verification artifacts.
+
 ## Next source work (open)
 
-M4c2: physical objectness and persistent/cross-window association remain open.
-Do not turn a K slot into a physical ID. Finite causal grouping is available.
-
-M5b: instruction-start observation and desired/current relation must be carried
-by the real dataset and online policy, with identical causal initialization and
-reset. Do not use the sliding history start, episode progress scalar, future
-labels or unchanged slot indices as a task reference. Audit the actual labelled
-start in virtualized CALVIN records before implementation. No task-reference
-source draft is included or claimed here.
-
-M6: demonstration-action-matched W supervision versus policy candidate W,
-robot-object relations, known control horizon and future recognizer targets.
-M7: deeper target-local P1 spatial reads and view-aware physical consequences.
-M8: execution feedback for the actually executed prefix, once per observation.
-M9-11: bottom/outlet, complete train/deploy/restore agreement and final audit.
-Interface migration is not completion of those structural reviews.
+Finish M5b broad regression and source-preserving publication. Do not substitute
+M5a's successful artifact for M5b acceptance. M4c2 physical objectness and cross-
+window/persistent association are still open. No K-ID locking or deployment-
+only recurrence. M5b is current/reference representation, not proven completion.
+Then review desired-operation/future-recognizer supervision with M6's matched
+real-action W targets, robot-object relations and known control horizon. Deeper
+M7 spatial/physical reads, M8 actual-prefix feedback and M9--M11 remain open.
+No CUDA, formal dataset training, production memory/latency benchmark or physical
+closed-loop success is claimed by these CPU structural tests.
 
 Do not modify master/historical branches, server jobs or checkpoints. No formal
 training. If publication fails, preserve actual nonempty source, diff, hashes
 and test records and continue source work rather than repeating opaque payloads.
 A transport commit is not a verified source release.
+
+
+### Post-inventory diagnostic-path correction
+
+The first complete M5b inventory collected 756 cases (755 passed, one skip).
+A subsequent real training call with `collect_diagnostics=True` exposed an
+M5a-introduced unbound legacy transport variable in S's shared-target branch.
+This is corrected without changing the neural calculation: shared mode reports
+per-view observed motion RMS explicitly, legacy mode retains its old metric.
+Two new production tests require diagnostics-on/off equal losses and finite
+backward in M5a and M5b. The 756-case inventory is superseded for final acceptance;
+rerun the full final exact source and scoped static gate. The original failure
+is retained, not mistaken for an environment error or waived as optional logs.
+
+The same diagnostics test also caught P2 requiring a linear semantic spatial
+query although shared binding correctly removes that independent query. It now
+reports the terminal weight and explicit absence, not a fabricated zero query
+difference. Comparable geometry and all legacy query metrics remain unchanged.
+The first diagnostic test retained two full backward graphs and hit the 4 GiB
+limit; its no-grad control avoids that retention. Neither interrupted attempt
+counts as test acceptance. Production neural arithmetic is unchanged.
+
+Full optimizer logging also had an R2 gradient registry entry for the removed
+semantic spatial query. The selected shared-target mode now explicitly checks
+that this owner is absent, reports absence separately, and retains fail-closed
+checks for every other expected owner. Two further tests exercise ordinary
+`train_step(..., collect_diagnostics=True)` including gradient diagnostics and
+optimizer updates in M5a/M5b. Earlier partial full runs are invalidated before
+source mutation; final release uses the subsequent exact frozen inventory.

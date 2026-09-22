@@ -38,7 +38,7 @@ choices just to preserve old golden outputs.
 | M4c2 remaining global/persistent identity | Open | Physical objectness, cross-window association and any matching recurrent training/online state; do not mistake finite-window grouping for persistent K identity. |
 | M4d entity-motion chart | Implemented candidate; validation per source | Shared current-image spatial law for position and motion; includes earlier-source status correction. No extra parameters or world calls; view-aware downstream reasoning remains open. |
 | M5a S/shared target | Implemented; exact-source acceptance recorded in artifacts | One soft K-plus-null binding consumed by real S/coarse/P1/P2, post-read mass, current spatial evidence, registered optimizer/checkpoint owners. Not task progress or persistent physical identity. |
-| M5b S task reference/operation/progress | Open | Causal instruction-start observation with matching dataset and runtime lifecycle; cross-time reassociation, desired relation and recognizer targets. No fabricated previous draft is a baseline. |
+| M5b S causal instruction reference | Implemented candidate; acceptance per exact source | Actual labelled origin in dataset, immutable runtime anchor, same-query per-view reference/current comparison consumed by S and real policy. No phase timer or persistent K-ID. Desired-relation/recognizer objectives remain for subsequent S/W supervision review. |
 | M6 W1/W2 | Not started | Match supervised action to observed outcome; separate candidate prediction from demonstration-target training; explicit robot-object relations and known control horizon. |
 | M7 P1/P2 | M5a target marginal/current-evidence seam implemented | Deeper target-local precision, view-aware future geometry and physical consequence semantics remain open; shared binding alone does not close them. |
 | M8 P3 | Not started | Task-related local coordination and actual-prefix execution feedback; no task-clock or oracle state machine. |
@@ -221,3 +221,22 @@ The previous M5 recovery ZIP contained zero source files. This unit was rebuilt
 from the independently verified M4d archive; earlier unarchived M5 claims are
 not used as test evidence. Final artifacts record executed checks, source hash,
 unsupported-runtime versus supported CI, and whether publication occurred.
+
+
+## M5b producer-consumer closure
+
+| Producer | Consumer | State and supervision boundary |
+|---|---|---|
+| CALVIN declared source/context start | Native state encoder and grouped DINO cache read | One causal instruction origin; independent of random/sliding center and future-support rows. |
+| Instruction event and current observation | Online owned reference | New reference on reset/new event, not each action or ODE node; unchanged instruction can be explicitly restarted. |
+| Current G entity/query and same camera charts | S `InstructionReferenceRead` | Shared query for current/start; visual difference separate from missing/uncertain match status; no old K IDs. |
+| Per-view relation and same-chart robot state change | Shared target marginal -> S intervals | No raw cross-camera vector average, no real-mass renormalization, no reference-age neural feature. |
+| Real S intervals | Existing coarse/P1/P2/P3/bottom | Actual policy-only gradients and optimizer ownership required, not merely fields/logs. |
+| Reference schema and graph selection | Config, dataset, checkpoint/deployment | Explicit new source identity; undeclared or incompatible reference contracts rejected. |
+
+Half-storage regression exposed an existing G FP16/FP32 boundary mismatch.
+The neural observation ingress owns the cast once; old FP32 behavior is checked
+across the two actual source trees. Future raw targets are not learned anchors.
+Full regression, source hashes and supported-runtime acceptance are distinct.
+M4c2 persistent physical association remains open, as do subsequent S/W/P tasks;
+this finite observed anchor does not silently create recurrent object states.

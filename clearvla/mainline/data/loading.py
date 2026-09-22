@@ -64,6 +64,7 @@ from clearvla.vision.preprocessing import PreprocessConfig
 
 from ..config import ExperimentConfig
 from ..gripper_contract import is_binary_gripper_mode
+from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..interfaces import (
     ActionSupervision,
     AuditMetadata,
@@ -519,6 +520,7 @@ def _load_mainline_data(
     profile = resolve_action_state_profile(data.data_profile)
     strict_dataset_config = ObservedStateDatasetConfig(
         emit_history_timing=config.top.history_encoding_mode == TIMED_HISTORY_ENCODING,
+        instruction_reference_mode=config.top.instruction_reference_mode,
         state_feature_mode=config.top.state_feature_mode,
         state_profile=profile.name,
         world_horizon=48,
@@ -1122,7 +1124,16 @@ def to_training_batch(
             device=dino_history.device,
             strict=True,
         )
+    instruction_reference = None
+    if config.top.instruction_reference_mode == INSTRUCTION_START_REFERENCE:
+        instruction_reference = InstructionReference(
+            dino=_device_tensor(batch, "instruction_reference_dino", device=device),
+            state=_device_tensor(batch, "instruction_reference_state", device=device, dtype=torch.float32),
+            observed=_device_tensor(batch, "instruction_reference_observed", device=device),
+            age_steps=_device_tensor(batch, "instruction_reference_age", device=device),
+        )
     online = OnlinePolicyInput(
+        instruction_reference=instruction_reference,
         observation=CurrentObservation(
             dino_history=dino_history,
             raw_rgb=_device_tensor(batch, "history_obs_image", device=device, dtype=torch.float32),

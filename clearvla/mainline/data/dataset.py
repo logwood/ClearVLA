@@ -38,6 +38,7 @@ from clearvla.data.window_boundaries import (
 from clearvla.vision.decoded_image_store import DecodedImageStore
 from clearvla.vision.online_store import OnlineVisualStore
 
+from ..instruction_reference import INSTRUCTION_START_REFERENCE
 from .normalizer import ArrayNormalizer
 from .token_store import DinoV2TokenStore
 
@@ -56,12 +57,19 @@ class ObservedStateDatasetConfig:
     stride: int = 1
     causal_reset_padding: bool = False
     emit_history_timing: bool = False
+    instruction_reference_mode: str = "none"
     state_feature_mode: str = NATIVE_AFFINE_STATE
     state_profile: str = "identity_7d_pen"
     window_boundary_contract: str = STRICT_COMPLETE_V1
 
     def validate(self) -> None:
         validate_state_feature_profile(self.state_feature_mode, self.state_profile)
+        if self.instruction_reference_mode not in {"none", INSTRUCTION_START_REFERENCE}:
+            raise ValueError("unknown instruction reference producer")
+        if self.instruction_reference_mode != "none" and (
+            self.state_profile != "calvin_relative_7d_v1" or not self.emit_history_timing
+        ):
+            raise ValueError("instruction reference requires declared, aligned CALVIN source times")
         if self.state_feature_mode != NATIVE_AFFINE_STATE and not self.emit_history_timing:
             raise ValueError("state feature chart requires source-timed history")
         if type(self.emit_history_timing) is not bool:
@@ -192,6 +200,7 @@ class ObservedStateWindowDataset(Dataset):
             self.allowed_boundary_regions = None
         self.refs: list[ObservedWindowRef] = []
         self.boundary_plans: dict[int, WindowBoundaryPlan] = {}
+        self.instruction_starts: dict[int, int] = {}
 
         min_rel = min(
             min(config.visual_history_offsets) + config.image_offset,
@@ -211,6 +220,13 @@ class ObservedStateWindowDataset(Dataset):
                 if episode.states_raw is None:
                     raise ValueError("state feature chart requires native observed state")
                 state_feature_width(config.state_feature_mode, int(episode.states_raw.shape[-1]))
+            if config.instruction_reference_mode == INSTRUCTION_START_REFERENCE:
+                if episode.source_start is None or episode.context_start is None:
+                    raise ValueError("instruction reference needs declared source_start/context_start")
+                start = int(episode.source_start) - int(episode.context_start)
+                if not 0 <= start < episode.length:
+                    raise ValueError("declared instruction start is outside causal source rows")
+                self.instruction_starts[episode_idx] = start
             image_store.validate_episode(episode)
             complete_history_start = max(0, -int(min_rel))
             strict_computed_start = (
@@ -253,6 +269,8 @@ class ObservedStateWindowDataset(Dataset):
                 stride=config.stride,
                 allowed_regions=self.allowed_boundary_regions,
             ):
+                if episode_idx in self.instruction_starts and center < self.instruction_starts[episode_idx]:
+                    raise ValueError("training center precedes its declared instruction")
                 self.refs.append(ObservedWindowRef(episode_idx, center, region))
         if not self.refs:
             raise ValueError("mainline dataset has no valid 48-frame windows")
@@ -618,7 +636,19 @@ class ObservedStateWindowDataset(Dataset):
             # is still missing data, so quarantine AFTER the nonlinear chart
             # as well as before it. Never export invented terminal targets.
             future_state_features[~future_support["future_state_observed"].numpy()] = 0.0
+        reference_fields: dict[str, torch.Tensor] = {}
+        if cfg.instruction_reference_mode == INSTRUCTION_START_REFERENCE:
+            start = self.instruction_starts[ref.episode_idx]
+            reference_fields = {
+                "instruction_reference_key": torch.tensor([[ref.episode_idx, start]], dtype=torch.long),
+                "instruction_reference_age": torch.tensor(center - start, dtype=torch.long),
+                "instruction_reference_state": torch.from_numpy(encode_state_features(
+                    np.asarray(states_raw[start], dtype=np.float32), self.state_normalizer,
+                    mode=cfg.state_feature_mode, profile=cfg.state_profile,
+                )),
+            }
         return {
+            **reference_fields,
             **future_support,
             **(
                 {
@@ -731,10 +761,16 @@ class CachedTokenPolicyWindowDataset(Dataset):
         # grouped read avoids allocating and dispatching two independent
         # result buffers in every DataLoader sample while preserving the
         # exact current/future ownership split in the returned mapping.
-        token_rows = self.token_store.load_batch(torch.cat((history_keys, future_keys), dim=0))
+        reference_key = sample.pop("instruction_reference_key", None)
+        keys = (history_keys, future_keys) if reference_key is None else (history_keys, future_keys, reference_key)
+        token_rows = self.token_store.load_batch(torch.cat(keys, dim=0))
         history_rows = int(history_keys.shape[0])
+        future_end = history_rows + int(future_keys.shape[0])
         sample["history_dinov2_tokens"] = token_rows[:history_rows]
-        sample["target_future_dinov2_tokens"] = token_rows[history_rows:]
+        sample["target_future_dinov2_tokens"] = token_rows[history_rows:future_end]
+        if reference_key is not None:
+            sample["instruction_reference_dino"] = token_rows[future_end]
+            sample["instruction_reference_observed"] = torch.ones(token_rows[future_end].shape[:-1], dtype=torch.bool)
         sample["target_future_offsets"] = sample.pop("future_offsets")
         return sample
 

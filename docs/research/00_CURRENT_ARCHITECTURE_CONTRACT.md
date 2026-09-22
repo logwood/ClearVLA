@@ -1264,3 +1264,85 @@ encoder calls, W builds, ODE evaluations or mutable physical state. S/W receive
 the ordinary exported entity motion through existing consumers; their current
 cross-camera summaries are NOT certified as common-world vectors and remain
 part of their deeper review. This unit does not establish physical object IDs.
+
+
+## M5b causal instruction-start observation and current relation
+
+Explicit candidate: `structural_rebuild_m5b_calvin.json`, with
+`top.instruction_reference_mode=instruction_start_observation_v1` and M5a's
+shared operation binding. Omitted mode remains `none`; undeclared references
+are rejected. This unit is admitted only for the source-timed CALVIN profile,
+whose instruction origin is actually available. It does not guess origins for
+other datasets or retrofit old checkpoint identities.
+
+`InstructionReference` is an online causal input, not future supervision. It
+owns frozen observed DINO tokens per camera, the same ten-dimensional robot
+state feature chart, a Boolean source support, and a nonnegative physical age.
+Age is admission/provenance only: no numerical age, episode fraction, timer or
+oracle progress enters the neural reader. The real dataset uses
+`source_start-context_start`, never the sampled window center or the causal
+prefix start. The reference may legitimately be older than the rolling history.
+The cached loader groups its read with existing requests but explicitly splits
+reference rows from all 12 future-support rows. Missing declared origins and
+centers earlier than the instruction are errors, not fabricated start labels.
+
+The online policy owns one reference per instruction. Episode reset clears it;
+`begin_instruction(text)` explicitly starts a new instance, including repeated
+identical text, without resetting the action RNG. Text changes also start a new
+instance at the current real observation. Callers must signal a repeated same-
+text instruction or reset; elapsed steps do not infer an instruction boundary.
+The reference uses the existing current DINO encode, not another encoder run.
+Returned diagnostic/input tensors are owned copies, not aliases through which
+external callers can mutate the stored anchor. Time rollback without reset is
+rejected. Weight checkpoint restore is supported; an in-flight episode anchor
+is not a secretly serialized checkpoint state. A new runtime must reset/start.
+
+S uses a current entity/task query to read both current and start patch charts
+with the same key/value maps. No old K index is compared to the current K index:
+no persistent IDs are invented. Coordinates are values within each view, not
+cross-world coordinates or location-only matching keys. Visual difference is
+zero for identical images under the same query. Full match distributions are
+retained until value reads; entropy, source availability and patch coverage are
+separate status features. An unavailable reference is not encoded as confident
+zero motion. Per-view features receive a role-aware map before view reduction.
+The shared operated-object mass is applied after these reads without dividing
+by real-versus-null mass. Full null contributes no reference context, which is
+not a robot stop command. Robot feature-state change is a separate same-chart
+value; it is never subtracted from an image coordinate.
+
+The compact reference context enters the actual S interval source before its
+self block. Real coarse, factual and policy consumers subsequently use those
+intervals. Comparison happens once in `encode_online`, not on W rebuilds or ODE
+nodes. Dense start/current correspondence remains outside the compact numerical
+cache. New parameters belong to the existing intent optimizer/ownership group;
+ordinary training and checkpoint paths update/save/restore them.
+
+Cached DINO is FP16 storage; raw G's learned projections cannot assume that this
+is their parameter dtype. The observation compiler now casts source values once
+to its neural parameter dtype without mutating the caller. FP32 source/model is
+a no-op; autocast still controls operations. New reference reads make the same
+storage/compute distinction. Future Teacher targets remain observed targets.
+The source identity records the change; ABI records the exact instruction
+reference chart. Failed numerical or type checks are never bypassed by a new
+fallback mode.
+
+This is a causal comparison representation, not a calibrated 3D displacement,
+a learned completion certificate, a phase controller or persistent tracking.
+Richer desired-relation supervision, FuturePlanRecognizer ownership, matched-
+action W, deeper view-aware P geometry and actual execution error feedback are
+still separate work. Source-only tests use declared external transport fixtures
+and real G/S/W/P/bottom, optimizer and checkpoint implementations.
+
+## Diagnostic noninterference in intent and coarse readers
+
+The S/coarse attention value path does not depend on logging. `_CrossRead`
+and the S state-change read always execute with `need_weights=False`.
+Optional weights are detached FP32 pre-dropout head means computed from the
+same normalized Q/K and packed bias-free projection, with autocast disabled.
+This observer supports only the actual zero-dropout reader topology and
+rejects incompatible variants instead of reporting invented attention.
+All-invalid keys and no-observed-rate sentinels produce zero diagnostic mass.
+The observer does not write cache/state, own losses, consume random numbers,
+or change parameter registration. Attention/value gradient parity is checked
+with the same autograd mode on both sides; no cross-kernel bit-equivalence or
+learned-behavior guarantee is implied.

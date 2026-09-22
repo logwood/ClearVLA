@@ -114,6 +114,12 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
         "future.action": batch.future.action_sequence,
         "future.state": batch.future.state_sequence,
     }
+    if batch.online.instruction_reference is not None:
+        reference = batch.online.instruction_reference
+        values["online.instruction_reference.state"] = reference.state
+        values["online.instruction_reference.dino"] = torch.where(
+            reference.observed[..., None], reference.dino, torch.zeros_like(reference.dino)
+        )
     support = batch.future.support
     if support is not None:
         support.validate(
@@ -330,6 +336,14 @@ class MainlineTrainingEngine:
         }
         metrics: dict[str, Tensor] = {}
         for parameter_name, metric_name in _R2_PARAMETER_GRADIENT_METRICS:
+            if (self.config.top.target_binding_mode == "shared_operation_v1"
+                    and parameter_name == "top.effect_reader.source_query.0.weight"):
+                if parameter_name in parameters:
+                    raise RuntimeError("shared target binding unexpectedly retained a semantic spatial query")
+                # Absence of a selected owner is not a measured zero gradient.
+                reference = parameters["top.effect_reader.terminal_query.0.weight"]
+                metrics["gradient_parameter_p2_semantic_spatial_query_present"] = reference.new_zeros((), dtype=torch.float32)
+                continue
             try:
                 parameter = parameters[parameter_name]
             except KeyError as error:

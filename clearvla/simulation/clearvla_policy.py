@@ -15,6 +15,10 @@ from clearvla.mainline.gripper_contract import (
     VALID_GRIPPER_OUTPUT_MODES,
     is_binary_gripper_mode,
 )
+from clearvla.mainline.instruction_reference import (
+    INSTRUCTION_START_REFERENCE,
+    InstructionReference,
+)
 from clearvla.mainline.interfaces import (
     CurrentObservation,
     GoalCondition,
@@ -104,8 +108,26 @@ class ClearVLACheckpointPolicy:
         self._generator.manual_seed(self._seed)
         self._last_input_shapes: dict[str, object] | None = None
         self._last_action_audit: dict[str, object] | None = None
+        self._instruction_anchor: InstructionReference | None = None
+        self._instruction_anchor_step: int | None = None
+        self._instruction_anchor_text: str | None = None
+        self._instruction_last_step: int | None = None
+
+    def begin_instruction(self, instruction: str) -> None:
+        """Explicitly restart even the same instruction; do not reset action RNG."""
+        text = normalize_instruction(instruction)
+        if not text:
+            raise ValueError("instruction must be non-empty")
+        self._instruction_anchor = None
+        self._instruction_anchor_step = None
+        self._instruction_last_step = None
+        self._instruction_anchor_text = text
 
     def reset(self) -> None:
+        self._instruction_anchor = None
+        self._instruction_anchor_step = None
+        self._instruction_last_step = None
+        self._instruction_anchor_text = None
         self._generator.manual_seed(self._seed)
         self._last_input_shapes = None
         self._last_action_audit = None
@@ -226,13 +248,37 @@ class ClearVLACheckpointPolicy:
                 device=action_state.device,
                 strict=True,
             )
+        instruction_reference = None
+        current_state = self._normal(history.state[None], action=False)
+        if config.top.instruction_reference_mode == INSTRUCTION_START_REFERENCE:
+            text = normalize_instruction(instruction)
+            if self._instruction_anchor_text != text:
+                self.begin_instruction(text)
+            if self._instruction_last_step is not None and history.time_index < self._instruction_last_step:
+                raise ValueError("history restarted without resetting instruction reference")
+            if self._instruction_anchor is None:
+                self._instruction_anchor_step = history.time_index
+                self._instruction_anchor = InstructionReference(
+                    dino=dino[-1:].detach().clone(), state=current_state.detach().clone(),
+                    observed=torch.ones(dino[-1:].shape[:-1], dtype=torch.bool, device=self.device),
+                    age_steps=torch.zeros(1, dtype=torch.long, device=self.device),
+                )
+            if self._instruction_anchor_step is None or history.time_index < self._instruction_anchor_step:
+                raise ValueError("history restarted without resetting instruction reference")
+            self._instruction_last_step = history.time_index
+            owned = self._instruction_anchor.owned_copy()
+            instruction_reference = InstructionReference(
+                owned.dino, owned.state, owned.observed,
+                torch.tensor([history.time_index - self._instruction_anchor_step], dtype=torch.long, device=self.device),
+            )
         online = OnlinePolicyInput(
+            instruction_reference=instruction_reference,
             observation=CurrentObservation(
                 dino_history=dino.unsqueeze(0),
                 raw_rgb=raw_rgb,
             ),
             history=ObservableHistory(
-                state=self._normal(history.state[None], action=False),
+                state=current_state,
                 action_state=action_state,
                 timing=timing,
                 codec_gripper_boundary=codec_gripper_boundary,

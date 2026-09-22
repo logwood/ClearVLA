@@ -149,6 +149,15 @@ class RestoredV120ObservationCompiler(nn.Module):
     ) -> _PreparedV120Observation:
         del geometry_supervision  # V120 constructs both directed pair objectives together.
         observation.validate(self.config)
+        # Cached DINO precision is a storage contract, not the dtype of learned
+        # G projections. Cast once at the neural ingress; keep the caller's
+        # observation untouched and allow autocast to choose operation dtype.
+        # This is a no-op for the ordinary FP32 path. Without this boundary,
+        # FP16 cache cells reach FP32 Linear layers during CPU/no-autocast use.
+        observation = replace(
+            observation,
+            dino_history=observation.dino_history.to(dtype=next(self.encoder.parameters()).dtype),
+        )
         if source_offsets is not None:
             time = VisualSourceTime(source_offsets)
             time.validate(batch=observation.batch, frames=int(observation.dino_history.shape[1]), device=observation.dino_history.device, strict=True)

@@ -464,8 +464,13 @@ class TopConfig:
     entity_history_mode: str = "current_only_v1"
     entity_motion_mode: str = "query_anchor_v1"
     target_binding_mode: str = "reader_local_v1"
+    instruction_reference_mode: str = "none"
 
     def validate(self) -> None:
+        if self.instruction_reference_mode not in {"none", "instruction_start_observation_v1"}:
+            raise ValueError("unknown top instruction_reference_mode")
+        if self.instruction_reference_mode != "none" and self.target_binding_mode != "shared_operation_v1":
+            raise ValueError("instruction reference requires one shared operated-object binding")
         if self.target_binding_mode not in {"reader_local_v1", "shared_operation_v1"}:
             raise ValueError("unknown top target_binding_mode")
         if self.target_binding_mode == "shared_operation_v1":
@@ -977,6 +982,8 @@ class ExperimentConfig:
             raise ValueError("current-image entities require completed G3 and coupled full support")
         if self.top.entity_context_mode == "completed_g3_v1" and self.observation.candidate_support_mode != "full_posterior_lattice_v1":
             raise ValueError("completed G3 context requires actual full posterior coordinates")
+        if self.top.instruction_reference_mode != "none" and self.data.data_profile != "calvin_relative_7d_v1":
+            raise ValueError("instruction reference requires a declared CALVIN instruction-start producer")
         if self.observation.source_time_mode == "source_history_steps_v1" and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING:
             raise ValueError("source-timed vision requires source-owned history clocks")
         if self.top.state_feature_mode == CALVIN_ROTATION6D_STATE and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING:
@@ -1152,6 +1159,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.instruction_reference_mode == "none":
+            cast(dict[str, object], payload["top"]).pop("instruction_reference_mode")
         if self.top.target_binding_mode == "reader_local_v1":
             cast(dict[str, object], payload["top"]).pop("target_binding_mode")
         if self.top.entity_motion_mode == "query_anchor_v1":

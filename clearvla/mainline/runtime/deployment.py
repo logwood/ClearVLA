@@ -45,6 +45,7 @@ from ..gripper_contract import (
     MANISKILL_BINARY_GRIPPER_OUTPUT_MODE,
     VALID_GRIPPER_OUTPUT_MODES,
 )
+from ..instruction_reference import INSTRUCTION_START_REFERENCE, instruction_reference_metadata
 from ..model.target_binding import (
     LOCAL_TARGET_READERS,
     SHARED_TARGET_BINDING,
@@ -357,6 +358,8 @@ def build_deployment_abi(
         "flow_schedule": flow_schedule,
         "flow_schedule_sha256": canonical_sha256(flow_schedule),
         "observation": {
+            **({"instruction_reference": instruction_reference_metadata()}
+               if config.top.instruction_reference_mode == INSTRUCTION_START_REFERENCE else {}),
             **({"operated_target": target_binding_metadata()}
                if config.top.target_binding_mode == SHARED_TARGET_BINDING else {}),
             **({"entity_motion": entity_motion_metadata(config.top.entity_motion_mode)}
@@ -459,6 +462,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     )
     if observation.get("history_timing_contract") != expected_timing:
         raise ValueError("deployment history timing contract differs from selected graph")
+    reference_mode = graph_top.get("instruction_reference_mode", "none")
+    if reference_mode == INSTRUCTION_START_REFERENCE:
+        if observation.get("instruction_reference") != instruction_reference_metadata():
+            raise ValueError("deployment instruction reference differs from selected graph")
+    elif reference_mode != "none" or "instruction_reference" in observation:
+        raise ValueError("undeclared deployment instruction reference")
     target_mode = graph_top.get("target_binding_mode", LOCAL_TARGET_READERS)
     if target_mode == SHARED_TARGET_BINDING:
         if observation.get("operated_target") != target_binding_metadata():

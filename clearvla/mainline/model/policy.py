@@ -229,6 +229,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             world_action_condition_mode=top.world_action_condition_mode,
             p2_spatial_intent_mode=top.p2_spatial_intent_mode,
             target_binding_mode=top.target_binding_mode,
+            instruction_reference_mode=top.instruction_reference_mode,
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,
@@ -529,6 +530,8 @@ class ClearVLAMainlinePolicy(nn.Module):
             state=conditioned_policy_input.history.state,
             executed_history=conditioned_policy_input.history.executed_action_history,
             history_timing=conditioned_policy_input.history.timing,
+            instruction_reference=conditioned_policy_input.instruction_reference,
+            current_dino=conditioned_policy_input.observation.dino_history[:, -1],
             facts=facts,
             collect_diagnostics=collect_diagnostics,
         )

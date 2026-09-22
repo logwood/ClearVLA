@@ -47,9 +47,13 @@ Still open before/through subsequent milestones:
   Distribution preservation is not a trained segmentation/tracking guarantee;
   production-scale memory/latency must be measured on the user's GPU.
 - S: M5a implements a shared K-plus-null operation binding with current-value
-  consumers, and target-related recent motion. Instruction-start references,
-  cumulative/relational progress, richer operation context and future recognizer
-  objectives remain open. A current K number is not a persistent entity ID.
+  consumers, and target-related recent motion. M5b implements the causal
+  instruction-start observation and current/reference relation consumed by S.
+  Learned cumulative progress, richer desired-operation relations and future
+  recognizer targets remain open. A current K number is not a persistent ID.
+  Repeated identical instructions require an explicit start event or reset;
+  time alone cannot distinguish a new instance from continuation. Unprovided
+  external evaluators have not been certified for that event contract.
 - W: candidate-action versus demonstration-future target mismatch, missing
   explicit robot-object relations, and control support past the known 24 rows.
 - P/bottom: M5a closes the same-target marginal/current-fact seam; deeper

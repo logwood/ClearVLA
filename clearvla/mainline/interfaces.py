@@ -22,6 +22,7 @@ from torch import Tensor
 from clearvla.data.window_boundaries import OBSERVED_TAIL_V1
 
 from .config import ExperimentConfig
+from .instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from .supervision import FutureLabelSupport
 from .temporal import TIMED_HISTORY_ENCODING, HistoryTiming
 
@@ -201,6 +202,7 @@ class OnlinePolicyInput:
     observation: CurrentObservation
     history: ObservableHistory
     goal: GoalCondition
+    instruction_reference: InstructionReference | None = None
 
     @property
     def batch(self) -> int:
@@ -214,6 +216,12 @@ class OnlinePolicyInput:
         self.observation.validate(config)
         self.history.validate(config)
         self.goal.validate(config)
+        if config.top.instruction_reference_mode == INSTRUCTION_START_REFERENCE:
+            if self.instruction_reference is None:
+                raise ValueError("selected graph requires the causal instruction-start reference")
+            self.instruction_reference.validate(config, batch=self.batch, device=self.device)
+        elif self.instruction_reference is not None:
+            raise ValueError("instruction reference supplied to an unselected graph")
         if self.history.batch != self.batch or self.goal.batch != self.batch:
             raise ValueError("online input components must share a batch size")
         if not (
