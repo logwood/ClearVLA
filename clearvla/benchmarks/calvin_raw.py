@@ -87,11 +87,18 @@ def _load_object_npy(path: Path) -> object:
 
 
 def _frame_pattern(root: Path) -> tuple[str, int, str]:
-    candidates = sorted((*root.glob("*.npz"), *root.glob("*.pkl")))
-    for path in candidates:
-        match = re.match(r"^(.*?)(\d+)(\.(?:npz|pkl))$", path.name)
-        if match:
-            return match.group(1), len(match.group(2)), match.group(3)
+    # The raw CALVIN frame directory can contain millions of indexed files.
+    # Materialising and sorting both globs makes loader construction scan the
+    # entire directory before it can read even one episode.  Naming is a
+    # directory-level ABI (all frames use one prefix/width/suffix), so the
+    # first matching entry is sufficient; keep npz preference identical to
+    # the previous implementation and only fall back to pkl when no npz is
+    # present.  Path.glob is intentionally consumed lazily here.
+    for pattern in ("*.npz", "*.pkl"):
+        for path in root.glob(pattern):
+            match = re.match(r"^(.*?)(\d+)(\.(?:npz|pkl))$", path.name)
+            if match:
+                return match.group(1), len(match.group(2)), match.group(3)
     raise FileNotFoundError(f"no indexed CALVIN frame files found under {root}")
 
 
