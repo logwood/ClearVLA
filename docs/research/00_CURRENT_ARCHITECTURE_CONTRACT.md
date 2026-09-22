@@ -24,7 +24,7 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit source candidate is
-`configs/mainline/structural_rebuild_m6h_calvin.json` (validation scope in handoff).
+`configs/mainline/structural_rebuild_m6i_calvin.json` (validation scope in handoff).
 M5a adds one soft operated-
 object distribution across actual S/coarse/P1/P2 readers; its detailed contract
 is below. M5b adds a causal instruction reference; M6a/b/c separate action-matched W
@@ -42,6 +42,66 @@ W-supervision and the deeper P redesign remain open. No learned behavior
 is established by these source changes. The user-authorized rebuild may revise
 historical implementation details; accepted source semantics belong here,
 future work in the repair plan, and test/publish status in the handoff.
+
+## M6i source-supervised object operation expectations
+
+`top.operation_intent_mode=object_outcome_v1` requires shared K-plus-null
+binding, the control-aligned 24-step physical grid and typed-horizon P3. Default
+`posterior_distillation_v1` leaves the complete old constructor RNG stream,
+registered parameter set and arithmetic unchanged and is omitted from serialized
+legacy graph config. New modes are explicit graph/ABI identities, not migration.
+
+S owns `OperationExpectation`: FP32 semantic/DINO deltas [B,4,K,D], named-view
+image displacement [B,4,K,C,2], and robot state-feature deltas [B,4,S]. A current
+G object-content/state and causal S interval query predicts all supported K
+outcomes; there is no candidate action or future-label input. W separately
+predicts effects of a PARTICULAR action. S expectations estimate demonstrated
+instruction-conditioned outcomes, not measured change, terminal goals or an oracle.
+
+For this mode the trainable whole-scene FuturePlanRecognizer is REPLACED by
+`OperationExpectationSupervisor`, which has no parameters. Supervision is direct
+Huber error against the existing detached Teacher per-K semantic/per-view image
+statistics and per-interval successor robot feature means minus current state.
+Errors are reduced AFTER preserving object/view identities: opposite objects
+cannot cancel before loss. Current source support and each label source's
+availability determine loss entries. Target/null probabilities and future match
+confidence do not weight or erase losses. Robot labels survive absent visual
+supports; observed visual effects do not need future action labels for this
+instruction-conditioned expectation (unlike action-conditioned W supervision).
+All required samples of a visual/state interval must be available; missing rows
+are quarantined before arithmetic. All-missing labels yield attached zero loss.
+The previous .35 online + .20 posterior scaffold budget becomes .55 direct
+operation expectation; the .25 reconstruction and .20 coarse budgets are unchanged.
+The direct objective is the mean of independently supported semantic, image and
+robot errors. Source counts and per-type terms are exported; no success loss is
+added and there is no moving learned latent target encoder to collapse jointly.
+
+Distinct bias-free value projections interpret content, per-camera image
+movement and robot features before view/object fusion. Named-view conditioning
+precedes view pooling, and the same K-plus-null mass is applied AFTER within-K
+reads without real-mass renormalization. S consumes these expectation values in
+its public carrier, reaching coarse/P1/P2 and temporal contexts. P3 owns a separate
+typed read into its PLAN lane, not the observed-change lane. Physical-center
+interpolation supplies plan features for action rows, not simulated endpoint
+states. Zero expectation yields zero additional read and no plan-context gradient.
+
+`OperationExpectation` retains current state/content, camera names, grid and the
+shared target binding. Cache admission checks identical source owners; the K
+permutation and policy dock preserve binding/evidence together. Online encoding
+builds expectations once. All ODE/refinement calls read them without another S/G/W
+pass or mutable state. Teacher receives explicit named cameras in this mode;
+its numeric target construction is unchanged. New expectation losses train S,
+not the detached Teacher, source labels or the online candidate W.
+
+**Limits:** current G entities and Teacher correspondences remain learned and
+fallible; their per-object deltas are not physical IDs. Demonstrator continuations
+are not normative terminal goals or success labels. Expected future interval
+statistics are NOT subtracted from instruction-start-to-current change or from
+one-step robot feedback: these have different time and feature semantics. This
+source unit does not establish calibrated progress, contact, risk, end-state
+goals, physical tracking, CUDA speed or successful robot behavior. S outcome
+calibration, W/observation correspondence and complete bottom/transition review
+remain open. Existing regression failures remain failures until resolved.
 
 ## M6h typed instruction-reference change
 

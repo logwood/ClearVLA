@@ -1,5 +1,35 @@
 # ClearVLA structural rebuild handoff
 
+## Current M6i source checkpoint — 2026-09-22
+
+Recovered all 814 M6h source files and verified all 919 archive manifest entries.
+The restored source tree exactly equals `f790e2eeddf173ad3534504200bf9b5f07016733`;
+remote base read at `991879fd7b8a47d69adb2ad9bfd89181d5d1c9b4`.
+Local ancestry is synthetic recovery; never force-push it over the real branch.
+
+M6i implements S per-K/per-named-view expected demonstration outcomes and a
+parameter-free direct supervisor replacing the old trainable scene-pooled latent
+recognizer in the new mode. S public/coarse consumers and independent P3 plan
+values use the same declared expectation record; current observation and real
+candidate W are separate. Read the architecture M6i section for exact semantics.
+
+Initial final-scope tests reached 41 passed, including actual optimizer steps,
+row-zero gradients to every new parameter group, independent label supports,
+null-invariant supervision, no target pooling, diagnostics, checkpoint/deployment
+reload and ABI rejection. Two more whole-loss-ledger diagnostic tests were then
+added; the final expanded inventory and static status are in checkpoint reports,
+not inferred from intermediate logs. Earlier interrupted/failed test invocations
+are preserved as such. Initial errors were fixture widths/field names and type
+narrowing; no production tolerance was relaxed. Exact M6h legacy controls at
+seeds 0,71 match parameter/buffer order and values, config/RNG and same-noise actions.
+
+Save this subunit before full milestone CI, using the existing workflow or a
+verified complete archive. No workflow/master changes, formal training or CUDA
+acceptance. Next reconcile milestone legacy failures and inspect downstream
+ControlledTransition/bottom/command consumers. Persistent physical association,
+true expected-terminal-goal/progress semantics and broad resource cost remain
+open; do not equate this demonstrated-outcome objective with those achievements.
+
 ## Current M6h source checkpoint — 2026-09-22
 
 Recovered M6g source tree `b0b1494d3a9bc746b4ef8e85d313cd3cf22af7c2`

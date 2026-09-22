@@ -2406,9 +2406,15 @@ def compose_losses(
         + objective.physical_delta_consistency * action["physical_delta_consistency"]
         + objective.proposal * top_targets.history_proposal_loss
     )
+    object_operation = config.top.operation_intent_mode == "object_outcome_v1"
+    if object_operation != (top_targets.operation_terms is not None):
+        raise ValueError("operation objective differs from selected S graph")
+    if object_operation and (top_targets.plan_recognition is not None or top_targets.plan_recognition_loss.detach().item() != 0):
+        raise ValueError("new operation supervision cannot retain latent-posterior loss")
+    intent_weight = 0.55 if object_operation else 0.35
     intent_structure_core = (
         0.25 * top_targets.object_reconstruction_loss
-        + 0.35 * top_targets.online_intent_loss
+        + intent_weight * top_targets.online_intent_loss
         + 0.20 * top_targets.plan_recognition_loss
         + 0.20 * top_targets.coarse_action_loss
     )
@@ -2479,7 +2485,7 @@ def compose_losses(
         "intent_online": (
             objective.intent_structure
             * 0.50
-            * 0.35
+            * intent_weight
             * top_targets.online_intent_loss
         ),
         "intent_recognizer": (
@@ -2519,6 +2525,8 @@ def compose_losses(
         "coarse_action": top_targets.coarse_action_loss,
         "history_action_proposal": top_targets.history_proposal_loss,
     }
+    if top_targets.operation_terms is not None:
+        terms.update(top_targets.operation_terms)
     if response is not None:
         contributions["robot_response"] = objective.robot_response * response
         terms["robot_response"] = response

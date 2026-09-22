@@ -14,12 +14,14 @@ from ..instruction_change import (
     MIXED_REFERENCE_CHANGE,
     TYPED_REFERENCE_CHANGE,
 )
+from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from ..robot_execution import RobotResponseFeedback
 from .action_codec import ACTION_BAND_ENDS
 from .horizon_coordination import P3HorizonContext, TypedHorizonCoordinator
 from .instruction_change import InstructionChangePlanRead
+from .operation_expectation import OperationExpectationPlanRead
 from .robot_execution import RobotExecutionObserver
 from .routing import (
     PolicyRoleDeltaBank,
@@ -1461,6 +1463,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
                  coordination_mode: str = POINTWISE_PLAN, heads: int = 1,
                  robot_feedback_mode: str = "none", state_dim: int = 7, action_dim: int = 7,
                  instruction_change_mode: str = MIXED_REFERENCE_CHANGE, content_dim: int = 768,
+                 operation_intent_mode: str = POSTERIOR_INTENT,
                  camera_names: tuple[str, ...] = ("top", "wrist")) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
@@ -1474,6 +1477,14 @@ class ObjectPolicyPlanCompiler(nn.Module):
             raise ValueError("unknown instruction change P3 consumer")
         if instruction_change_mode == TYPED_REFERENCE_CHANGE and coordination_mode != TYPED_HORIZON_PLAN:
             raise ValueError("typed instruction change requires typed P3")
+        self.operation_read = None
+        if operation_intent_mode == OBJECT_OUTCOME_INTENT:
+            if coordination_mode != TYPED_HORIZON_PLAN:
+                raise ValueError("operation expectation requires typed plan consumer")
+            self.operation_read = OperationExpectationPlanRead(
+                hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
+        elif operation_intent_mode != POSTERIOR_INTENT:
+            raise ValueError("unknown operation expectation consumer")
         self.instruction_change_read = (
             InstructionChangePlanRead(hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
             if instruction_change_mode == TYPED_REFERENCE_CHANGE else None
@@ -1565,6 +1576,12 @@ class ObjectPolicyPlanCompiler(nn.Module):
             state_change_raw = self.state_change_lane(
                 state_change_source * state_change_modulation
             )
+        if self.operation_read is not None:
+            if intent.operation_expectation is None:
+                raise ValueError("P3 operation expectation is required")
+            temporal_raw = temporal_raw + self.operation_read(intent.operation_expectation, temporal_private)
+        elif intent.operation_expectation is not None:
+            raise ValueError("unexpected operation expectation in legacy P3")
         if self.instruction_change_read is not None:
             if intent.instruction_change is None:
                 raise ValueError("P3 requires the typed instruction observation change")

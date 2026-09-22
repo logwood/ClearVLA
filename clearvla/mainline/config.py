@@ -43,6 +43,7 @@ from .instruction_change import (
     TYPED_REFERENCE_CHANGE,
 )
 from .manifest import ARCHITECTURE_MANIFEST
+from .operation_expectation import OBJECT_OUTCOME_INTENT, OPERATION_INTENT_MODES, POSTERIOR_INTENT
 from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from .p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from .temporal import TIMED_HISTORY_ENCODING
@@ -481,8 +482,17 @@ class TopConfig:
     target_binding_mode: str = "reader_local_v1"
     instruction_reference_mode: str = "none"
     instruction_change_mode: str = MIXED_REFERENCE_CHANGE
+    operation_intent_mode: str = POSTERIOR_INTENT
 
     def validate(self) -> None:
+        if self.operation_intent_mode not in OPERATION_INTENT_MODES:
+            raise ValueError("unknown operation_intent_mode")
+        if self.operation_intent_mode == OBJECT_OUTCOME_INTENT and (
+            self.target_binding_mode != "shared_operation_v1"
+            or self.future_time_grid_mode != "control_aligned_24_v1"
+            or self.p3_coordination_mode != TYPED_HORIZON_PLAN
+        ):
+            raise ValueError("object operation outcomes require shared target, aligned time and typed P3")
         if self.instruction_change_mode not in INSTRUCTION_CHANGE_MODES:
             raise ValueError("unknown instruction_change_mode")
         if self.instruction_change_mode == TYPED_REFERENCE_CHANGE and (
@@ -1237,6 +1247,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.operation_intent_mode == POSTERIOR_INTENT:
+            cast(dict[str, object], payload["top"]).pop("operation_intent_mode")
         if self.top.instruction_change_mode == MIXED_REFERENCE_CHANGE:
             cast(dict[str, object], payload["top"]).pop("instruction_change_mode")
         if self.top.robot_feedback_mode == "none":

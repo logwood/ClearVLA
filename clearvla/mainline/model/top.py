@@ -27,6 +27,7 @@ from torch import Tensor, nn
 
 from ..future_time import LEGACY_FUTURE_TIME
 from ..instruction_reference import InstructionReference
+from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..temporal import HistoryTiming
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
 from ..v120_core.role_delta_attnres import AffineVarianceFlooredCenteredNorm
@@ -46,6 +47,7 @@ from .intent import (
     FuturePlanRecognizer,
     StatelessObjectIntentOrganizer,
 )
+from .operation_expectation import OperationExpectationSupervisor
 from .routing import smooth_rms_contract
 from .teacher import ObjectFutureTeacher
 from .types import (
@@ -221,6 +223,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         target_binding_mode: str = "reader_local_v1",
         instruction_reference_mode: str = "none",
         instruction_change_mode: str = "mixed_reference_v1",
+        operation_intent_mode: str = POSTERIOR_INTENT,
         history_encoding_mode: str = "paired_rows_v1",
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = "query_lattice_v1",
@@ -286,6 +289,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             target_object_address_mode=p2_spatial_intent_mode,
             target_binding_mode=target_binding_mode,
             instruction_reference_mode=instruction_reference_mode,
+            operation_intent_mode=operation_intent_mode,
             instruction_change_mode=instruction_change_mode,
             camera_names=camera_names,
             history_encoding_mode=history_encoding_mode,
@@ -318,12 +322,13 @@ class ObjectIntentDynamicsTop(nn.Module):
             state_feature_mode=state_feature_mode,
         )
         self.teacher = ObjectFutureTeacher(
+            camera_names=tuple(camera_names) if operation_intent_mode == OBJECT_OUTCOME_INTENT else (),
             future_time_grid_mode=future_time_grid_mode,
             content_dim=content_dim,
             key_dim=teacher_key_dim,
             flow_reference_frames=flow_reference_frames,
         )
-        self.recognizer = FuturePlanRecognizer(
+        self.recognizer = OperationExpectationSupervisor() if operation_intent_mode == OBJECT_OUTCOME_INTENT else FuturePlanRecognizer(
             future_time_grid_mode=future_time_grid_mode,
             hidden=hidden,
             action_dim=action_dim,
@@ -347,6 +352,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             future_time_grid_mode=future_time_grid_mode,
             coordination_mode=p3_coordination_mode, heads=heads,
             robot_feedback_mode=robot_feedback_mode, state_dim=state_dim, action_dim=action_dim,
+            operation_intent_mode=operation_intent_mode,
             instruction_change_mode=instruction_change_mode, content_dim=content_dim,
             camera_names=camera_names,
             hidden=hidden,
@@ -719,16 +725,29 @@ class ObjectIntentDynamicsTop(nn.Module):
             context.facts.validity,
             context.facts.camera_validity,
         )
-        recognition = self.recognizer(
-            future_action=future_action,
-            future_state=future_state,
-            teacher=teacher,
-            current_loss_support=current_loss_support,
-        )
-        online_intent_loss = F.smooth_l1_loss(
-            context.intent.public_interval_carrier.float(),
-            recognition.interval_targets.detach().float(),
-        )
+        operation_terms = None
+        if isinstance(self.recognizer, OperationExpectationSupervisor):
+            expectation = context.intent.operation_expectation
+            if expectation is None:
+                raise ValueError("direct operation supervision lost S prediction")
+            operation_terms = self.recognizer(
+                expectation=expectation, teacher=teacher, current_loss_support=current_loss_support,
+                future_state=future_state)
+            online_intent_loss = operation_terms["operation_total"]
+            recognition = None
+            recognition_loss = online_intent_loss.new_zeros(())
+        else:
+            recognition = self.recognizer(
+                future_action=future_action,
+                future_state=future_state,
+                teacher=teacher,
+                current_loss_support=current_loss_support,
+            )
+            online_intent_loss = F.smooth_l1_loss(
+                context.intent.public_interval_carrier.float(),
+                recognition.interval_targets.detach().float(),
+            )
+            recognition_loss = recognition.reconstruction_loss
         supervised_coarse = self.coarse_action(
             context.intent.action_dock(),
             # The runtime action condition is a deterministic projection of
@@ -744,7 +763,8 @@ class ObjectIntentDynamicsTop(nn.Module):
             current_loss_support=current_loss_support,
             plan_recognition=recognition,
             online_intent_loss=online_intent_loss,
-            plan_recognition_loss=recognition.reconstruction_loss,
+            plan_recognition_loss=recognition_loss,
+            operation_terms=operation_terms,
             coarse_action_loss=coarse_loss,
             history_proposal_loss=coarse_loss.new_zeros(()),
             object_reconstruction_loss=context.facts.reconstruction_error,
@@ -754,7 +774,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         metrics = {
             **teacher_metrics,
             "object_intent_online_match_loss": online_intent_loss.detach(),
-            "object_plan_recognition_loss": recognition.reconstruction_loss.detach(),
+            "object_plan_recognition_loss": recognition_loss.detach(),
             "object_coarse_action_loss": coarse_loss.detach(),
         }
         return targets, metrics

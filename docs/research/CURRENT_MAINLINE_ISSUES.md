@@ -612,3 +612,15 @@ The repository rollout passes clipped controller commands to CausalHistory;
 external evaluators not supplied with this source still require that contract.
 One-step state features omit hidden actuator/velocity state, so the prediction
 is a learned conditional mean under partial observability, not exact physics.
+
+
+### M6i addressed: latent posterior supervision erased object identity
+
+The old future plan recognizer pooled Teacher semantic deltas across K before
+reconstruction and online distillation. New explicit `object_outcome_v1` keeps
+all K/view targets, directly supervises S outcomes, and removes the trainable
+pooled posterior in that graph. Source-supported labels survive null binding;
+robot and visual labels have independent support. Numeric prediction and direct
+P3/S use are now testable in declared feature charts, not an arbitrary detached
+latent. This does NOT resolve imperfect G/Teacher correspondence, missing world
+calibration, or physical task-progress/success identification. Those remain open.

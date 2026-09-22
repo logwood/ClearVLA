@@ -40,6 +40,7 @@ from .component_contracts import OutletActionOutput
 from .grounding import DenseObjectGrounder
 from .intent import CoarseActionIntent, FuturePlanRecognizer, StatelessObjectIntentOrganizer
 from .observation_contract import GroundingObservationBank, ObservationEvidence
+from .operation_expectation import OperationExpectationSupervisor
 from .proposal import HistoryActionProposal
 from .restored_observation import (
     RestoredV120ObservationCompiler,
@@ -965,7 +966,7 @@ class TrainingTargetsStage(nn.Module):
         self,
         *,
         teacher: ObjectFutureTeacher,
-        recognizer: FuturePlanRecognizer,
+        recognizer: FuturePlanRecognizer | OperationExpectationSupervisor,
         hidden: int,
         horizon: int,
         action_dim: int,
@@ -1009,25 +1010,38 @@ class TrainingTargetsStage(nn.Module):
             context.facts.validity,
             context.facts.camera_validity,
         )
-        recognition = self.recognizer(
-            future_action=future_action,
-            future_state=future_state,
-            teacher=teacher,
-            current_loss_support=current_loss_support,
-            **(
-                {"label_support": label_support, "future_interval_valid": interval_valid}
-                if label_support is not None
-                else {}
-            ),
-        )
-        online_intent_loss = supported_mean(
-            F.smooth_l1_loss(
-                context.intent.public_interval_carrier.float(),
-                recognition.interval_targets.detach().float(),
-                reduction="none",
-            ),
-            recognition.interval_valid,
-        )
+        operation_terms = None
+        if isinstance(self.recognizer, OperationExpectationSupervisor):
+            expectation = context.intent.operation_expectation
+            if expectation is None:
+                raise ValueError("direct operation supervision lost S prediction")
+            operation_terms = self.recognizer(
+                expectation=expectation, teacher=teacher, current_loss_support=current_loss_support,
+                future_state=future_state, label_support=label_support, future_interval_valid=interval_valid)
+            online_intent_loss = operation_terms["operation_total"]
+            recognition = None
+            recognition_loss = online_intent_loss.new_zeros(())
+        else:
+            recognition = self.recognizer(
+                future_action=future_action,
+                future_state=future_state,
+                teacher=teacher,
+                current_loss_support=current_loss_support,
+                **(
+                    {"label_support": label_support, "future_interval_valid": interval_valid}
+                    if label_support is not None
+                    else {}
+                ),
+            )
+            online_intent_loss = supported_mean(
+                F.smooth_l1_loss(
+                    context.intent.public_interval_carrier.float(),
+                    recognition.interval_targets.detach().float(),
+                    reduction="none",
+                ),
+                recognition.interval_valid,
+            )
+            recognition_loss = recognition.reconstruction_loss
         supervised_coarse = coarse_action(
             context.intent.action_dock(),
             future_action=future_action[:, : self.horizon],
@@ -1044,18 +1058,19 @@ class TrainingTargetsStage(nn.Module):
             current_loss_support=current_loss_support,
             plan_recognition=recognition,
             online_intent_loss=online_intent_loss,
-            plan_recognition_loss=recognition.reconstruction_loss,
+            plan_recognition_loss=recognition_loss,
             coarse_action_loss=coarse_loss,
             history_proposal_loss=coarse_loss.new_zeros(()),
             object_reconstruction_loss=context.facts.reconstruction_error,
             future_interval_valid=interval_valid,
+            operation_terms=operation_terms,
         )
         if not collect_diagnostics:
             return targets, {}
         return targets, {
             **teacher_metrics,
             "object_intent_online_match_loss": online_intent_loss.detach(),
-            "object_plan_recognition_loss": recognition.reconstruction_loss.detach(),
+            "object_plan_recognition_loss": recognition_loss.detach(),
             "object_coarse_action_loss": coarse_loss.detach(),
         }
 

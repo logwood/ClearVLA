@@ -33,9 +33,11 @@ class ObjectFutureTeacher(nn.Module):
         future_time_grid_mode: str = LEGACY_FUTURE_TIME,
         key_dim: int = 64,
         flow_reference_frames: int = 4,
+        camera_names: tuple[str, ...] = (),
     ) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
+        self.camera_names = tuple(camera_names)
         self.content_dim = int(content_dim)
         self.key_dim = int(key_dim)
         self.flow_reference_frames = int(flow_reference_frames)
@@ -460,7 +462,10 @@ class ObjectFutureTeacher(nn.Module):
         successor = torch.stack(successor_rows, dim=1)
         transport = torch.stack(transport_rows, dim=1)
         covariance = torch.stack(covariance_rows, dim=1)
+        if self.camera_names and len(self.camera_names) != cameras:
+            raise ValueError("Teacher camera names lost current source axes")
         target = FutureObjectDynamics(
+            camera_names=self.camera_names,
             time_grid_mode=self.time_grid.mode,
             current_reference=current_reference[:, 0],
             successor_content=successor,

@@ -22,6 +22,7 @@ from clearvla.vision.source_time import displacement_rate, validate_reference_st
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import InstructionChangeEvidence
 from ..manifest import INTERVALS
+from ..operation_expectation import OperationExpectation
 from ..world_control import CandidateControlDomain
 from ..world_robot import RobotWorldObservation
 from .target_binding import TargetBinding, TargetEvidence
@@ -1018,6 +1019,7 @@ class PolicyIntentDock:
     typed_interval_residual_value: Tensor  # [B,I,K,3,R]
     target_binding: TargetBinding | None = None
     instruction_change: InstructionChangeEvidence | None = None
+    operation_expectation: OperationExpectation | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
 
@@ -1040,6 +1042,12 @@ class PolicyIntentDock:
         ) != (batch,):
             raise ValueError("policy-intent typed common value must be [B,K,3,R]")
         objects = int(self.typed_common_value.shape[1])
+        if self.operation_expectation is not None:
+            self.operation_expectation.validate()
+            if self.operation_expectation.binding is not self.target_binding:
+                raise ValueError("operation expectation cannot reselect the target")
+            if self.operation_expectation.time_grid_mode != self.time_grid_mode:
+                raise ValueError("operation expectation/intent time chart mismatch")
         if self.instruction_change is not None:
             self.instruction_change.validate()
             if self.instruction_change.binding is not self.target_binding:
@@ -1094,6 +1102,7 @@ class ObjectIntentState:
     target_binding: TargetBinding | None = None
     target_evidence: TargetEvidence | None = None
     instruction_change: InstructionChangeEvidence | None = None
+    operation_expectation: OperationExpectation | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
 
@@ -1161,6 +1170,7 @@ class ObjectIntentState:
             temporal_control=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
             instruction_change=self.instruction_change,
+            operation_expectation=self.operation_expectation,
             target_object_address_logit=self.target_object_address_logit,
             typed_common_value=self.typed_common_value,
             target_binding=self.target_binding,
@@ -1171,6 +1181,12 @@ class ObjectIntentState:
         resolve_future_time(self.time_grid_mode)
         batch = int(self.public_interval_carrier.shape[0])
         _shape(self.protected_goal_set, (batch, 4, hidden), "protected goal set")
+        if self.operation_expectation is not None:
+            self.operation_expectation.validate()
+            if self.operation_expectation.binding is not self.target_binding:
+                raise ValueError("operation expectation cannot reselect the target")
+            if self.operation_expectation.time_grid_mode != self.time_grid_mode:
+                raise ValueError("operation expectation/intent time chart mismatch")
         if self.instruction_change is not None:
             self.instruction_change.validate()
             if self.instruction_change.binding is not self.target_binding:
@@ -1261,6 +1277,11 @@ class ObjectIntentState:
         )
         binding = None if self.target_binding is None else self.target_binding.permute(index)
         change = None
+        operation = None
+        if self.operation_expectation is not None:
+            if binding is None:
+                raise ValueError("operation expectation permutation lost shared target")
+            operation = self.operation_expectation.permute(index, binding)
         if self.instruction_change is not None:
             if binding is None:
                 raise ValueError("instruction change cannot lose target law during permutation")
@@ -1273,6 +1294,7 @@ class ObjectIntentState:
             object_tokens=self.object_tokens[:, index],
             target_binding=binding,
             instruction_change=change,
+            operation_expectation=operation,
             target_evidence=None if self.target_evidence is None else self.target_evidence.permute(index),
             public_interval_carrier=self.public_interval_carrier,
             policy_interval_context=self.policy_interval_context,
@@ -2467,6 +2489,7 @@ class ObjectTopTrainingTargets:
     future_interval_valid: Tensor | None = None  # dataset-owned, never a predicted confidence
     supervised_world: SupervisedWorld | None = None  # training plane only
     robot_response_loss: Tensor | None = None  # past-to-current observed response
+    operation_terms: dict[str, Tensor] | None = None  # supervised expectations, never observed progress
 
     @property
     def total_unweighted(self) -> Tensor:

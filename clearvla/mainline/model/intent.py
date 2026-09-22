@@ -13,10 +13,12 @@ from ..instruction_change import (
     TYPED_REFERENCE_CHANGE,
 )
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
+from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
 from .instruction_change import TypedInstructionReferenceRead
 from .instruction_progress import InstructionReferenceRead
+from .operation_expectation import ObjectOperationPredictor, OperationExpectationRead
 from .routing import register_gradient_rms_metric, smooth_rms_contract
 from .target_binding import (
     LOCAL_TARGET_READERS,
@@ -301,6 +303,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         target_binding_mode: str = LOCAL_TARGET_READERS,
         instruction_reference_mode: str = "none",
         instruction_change_mode: str = MIXED_REFERENCE_CHANGE,
+        operation_intent_mode: str = POSTERIOR_INTENT,
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
         super().__init__()
@@ -423,6 +426,18 @@ class StatelessObjectIntentOrganizer(nn.Module):
                                         state_dim=state_dim, cameras=len(camera_names))
                 if instruction_reference_mode == INSTRUCTION_START_REFERENCE else None
             )
+
+        self.operation_predictor = None
+        self.operation_read = None
+        if operation_intent_mode == OBJECT_OUTCOME_INTENT:
+            if not self.time_grid.aligned or target_binding_mode != SHARED_TARGET_BINDING:
+                raise ValueError("operation predictor needs shared target and aligned physical time")
+            self.operation_predictor = ObjectOperationPredictor(
+                hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
+            self.operation_read = OperationExpectationRead(
+                hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
+        elif operation_intent_mode != POSTERIOR_INTENT:
+            raise ValueError("unknown operation intent")
 
     @staticmethod
     def _paired_history(
@@ -785,6 +800,15 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if progress is not None:
             interval_source = interval_source + progress[:, None]
         public_intervals = self.interval_self(interval_source)
+        operation_expectation = None
+        if self.operation_predictor is not None:
+            if target_binding is None or self.operation_read is None:
+                raise ValueError("operation expectation lost binding or consumer")
+            operation_expectation = self.operation_predictor(
+                task_intervals=public_intervals, facts=facts, state=state, binding=target_binding)
+            # Prediction and task remain distinguishable; the expected values
+            # serve actual coarse/P1/P2/time consumers instead of a logging head.
+            public_intervals = public_intervals + self.operation_read(operation_expectation)
         (
             typed_relevance_mass,
             typed_relevance_value,
@@ -900,6 +924,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             temporal_queries=temporal,
             state_change_evidence=state_change_evidence,
             instruction_change=instruction_change,
+            operation_expectation=operation_expectation,
             target_object_address_logit=target_object_address_logit,
             typed_common_mass=typed_common_mass,
             typed_common_value=typed_common_value,

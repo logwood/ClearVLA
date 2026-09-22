@@ -349,3 +349,19 @@ transition/codec/Q5 or M10 full-stage validation. Next object feedback must use
 a real matching endpoint (not an interval mean), actual executed control prefix,
 and a trustworthy correspondence across observations/camera charts. Do not add
 an oracle contact/success field or a task-phase timer as a shortcut.
+
+
+### M6i source closure: structured instruction-conditioned outcomes
+
+Implemented per-object/per-view/robot outcome targets and actual S/coarse/P3
+consumers. Replaced rather than stacked the scene-pooled latent recognizer in
+`object_outcome_v1`. Retain W matched-action supervision, known-prefix chart and
+separate observed-change/robot-error owners. Target binding may condition S but
+cannot alter supervision weights/counts. Full acceptance is still open.
+
+Next bounded reviews: (1) close the recorded whole-M6 regression/type debt under
+the configured runtime, without losing subunit work; (2) inspect transition and
+bottom protection/value/delta/outlet paths with the new task/observed/expected
+owners; (3) preserve actual-command and physical entity provenance when improving
+progress or endpoint feedback. Do not indefinitely grow additional parallel
+heads that reproduce an existing owner's role. Restore/push small units promptly.

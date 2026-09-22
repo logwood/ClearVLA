@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from ..config import ExperimentConfig
 from ..instruction_reference import InstructionReference
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
+from ..operation_expectation import OBJECT_OUTCOME_INTENT
 from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT
 from ..robot_execution import RobotResponseFeedback
 from ..supervision import quarantine, supported_mean
@@ -33,6 +34,7 @@ from .components import (
 )
 from .intent import FuturePlanRecognizer
 from .observation_contract import ObservationEvidence
+from .operation_expectation import OperationExpectationSupervisor
 from .proposal import HistoryActionProposal
 from .restored_bottom import RestoredV120EvidenceBottom
 from .restored_observation import RestoredV120ObservationCompiler
@@ -135,6 +137,15 @@ class OnlinePolicyCache:
 
     def validate(self, config: ExperimentConfig) -> None:
         self.history.validate(config)
+        op = self.top.intent.operation_expectation
+        if (op is not None) != (config.top.operation_intent_mode == OBJECT_OUTCOME_INTENT):
+            raise ValueError("operation expectation cache differs from configured mode")
+        if op is not None:
+            op.validate()
+            if op.current_state is not self.history.state or op.current_content is not self.top.belief.content:
+                raise ValueError("operation expectation belongs to another current observation")
+            if op.binding is not self.top.intent.target_binding or op.camera_names != tuple(config.data.camera_names):
+                raise ValueError("operation expectation target or named camera provenance differs")
         change = self.top.intent.instruction_change
         if (change is not None) != (config.top.instruction_change_mode == "typed_reference_v1"):
             raise ValueError("instruction change cache differs from configured mode")
@@ -302,6 +313,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             target_binding_mode=top.target_binding_mode,
             instruction_reference_mode=top.instruction_reference_mode,
             instruction_change_mode=top.instruction_change_mode,
+            operation_intent_mode=top.operation_intent_mode,
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,
@@ -392,7 +404,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         dynamics = _detach_registered(raw_top, "dynamics")
         teacher = _detach_registered(raw_top, "teacher")
         recognizer = _detach_registered(raw_top, "recognizer")
-        if not isinstance(teacher, ObjectFutureTeacher) or not isinstance(recognizer, FuturePlanRecognizer):
+        if not isinstance(teacher, ObjectFutureTeacher) or not isinstance(recognizer, (FuturePlanRecognizer, OperationExpectationSupervisor)):
             raise TypeError("training target owners must implement the declared physical time grid")
         effect_reader = _detach_registered(raw_top, "effect_reader")
         consequence = _detach_registered(raw_top, "consequence")

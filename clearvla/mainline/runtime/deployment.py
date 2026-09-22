@@ -57,6 +57,11 @@ from ..model.target_binding import (
     SHARED_TARGET_BINDING,
     target_binding_metadata,
 )
+from ..operation_expectation import (
+    OBJECT_OUTCOME_INTENT,
+    POSTERIOR_INTENT,
+    operation_expectation_metadata,
+)
 from ..p2_geometry import POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, p2_geometry_metadata
 from ..p3_coordination import POINTWISE_PLAN, TYPED_HORIZON_PLAN, p3_coordination_metadata
 from ..robot_execution import robot_execution_metadata
@@ -362,6 +367,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"operation_expectation": operation_expectation_metadata(tuple(config.data.camera_names))}
+           if config.top.operation_intent_mode == OBJECT_OUTCOME_INTENT else {}),
         **({"instruction_change": instruction_change_metadata(tuple(config.data.camera_names))}
            if config.top.instruction_change_mode == TYPED_REFERENCE_CHANGE else {}),
         **({"robot_execution": robot_execution_metadata()} if config.top.robot_feedback_mode != "none" else {}),
@@ -485,6 +492,15 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     graph_top = _mapping(
         _mapping(abi.get("graph_config"), name="graph_config").get("top"), name="graph_config.top"
     )
+    operation_mode = graph_top.get("operation_intent_mode", POSTERIOR_INTENT)
+    if operation_mode == OBJECT_OUTCOME_INTENT:
+        cameras = observation.get("camera_names")
+        if not isinstance(cameras, list) or not all(isinstance(n, str) for n in cameras):
+            raise ValueError("operation expectation ABI requires named cameras")
+        if abi.get("operation_expectation") != operation_expectation_metadata(tuple(cameras)):
+            raise ValueError("operation expectation ABI semantics mismatch")
+    elif operation_mode != POSTERIOR_INTENT or "operation_expectation" in abi:
+        raise ValueError("unexpected operation expectation ABI")
     change_mode = graph_top.get("instruction_change_mode", MIXED_REFERENCE_CHANGE)
     if change_mode == TYPED_REFERENCE_CHANGE:
         cameras = observation.get("camera_names")
