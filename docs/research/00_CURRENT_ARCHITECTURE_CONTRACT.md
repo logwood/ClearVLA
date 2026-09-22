@@ -24,7 +24,7 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit source candidate is
-`configs/mainline/structural_rebuild_m6d_calvin.json` (validation scope in handoff).
+`configs/mainline/structural_rebuild_m6e_calvin.json` (validation scope in handoff).
 M5a adds one soft operated-
 object distribution across actual S/coarse/P1/P2 readers; its detailed contract
 is below. M5b adds a causal instruction reference; M6a/b/c separate action-matched W
@@ -1532,3 +1532,43 @@ latent dependency is still not a compositional physical simulator. Precise
 contact/support relations, persistent physical entity identity, S's desired
 operation supervision, P2 camera-aware downstream value design and P3 matched
 executed-prefix feedback remain open. Source checks are not robot success.
+
+
+## M6e named-view W consequence read
+
+`top.p2_geometry_mode=view_conditioned_transport_v1` in the explicit M6e config
+requires the shared target, observed W views and aligned 24-step clock. Legacy
+`pooled_transport_v1` remains omitted from old serialization. W now exports its
+actual ordered camera names; P2 and caches reject a missing/relabelled chart.
+No camera role is inferred from an axis number or an object's colour.
+
+P2 forms context from each camera's current normalized image xy, predicted
+within-support correspondence covariance and canonical named role. The existing
+transport/key projections run on [B,I,K,C,2] BEFORE spatial pooling. A learned
+context-dependent linear interaction interprets each displacement locally:
+`E_c = L(d_c) + J(L(d_c) * tanh(context_c))`. All terms vanish for zero displacement;
+position, role and covariance alone cannot create motion effects. Displacement
+VJP remains available at zero. A learned named-role modulation also makes each
+image's spatial query distinct; it is not a calibrated robot projection.
+
+Shared K mass (including null) is applied AFTER view-internal conditional reads.
+P2 can select an informative camera inside a target, not pick a different target
+or renormalize away null. Unknown-control and source-invalid payload is masked
+before context, projection, nonlinear keys or common/residual decomposition.
+Feature-space fusion can still learn cancellations; the structure removes the
+mandatory cancellation of raw vectors expressed in unrelated camera charts.
+
+SelectedIntervalEvidence carries its geometry mode: legacy xy has width 2,
+new geometry features have width H. The temporal terminal rejects incompatible
+semantics, uses the feature value directly and does not project it a second
+time. P3/consequence consume hidden effects, NOT physical coordinates. New
+metrics label feature norms as features, not physical displacement. The ABI
+records camera roles, input units, target statistic, query and value semantics.
+The new parameters belong to the existing P2 optimizer group/source closure.
+
+W transport remains the uniform mean at declared sparse successor supports;
+covariance remains the mean within-support correspondence covariance. Neither
+is a single-step endpoint, total temporal mixture variance, calibrated confidence
+or a task-risk score. No observed-target, loss, W call count, ODE step count or
+persistent state is changed. P3 executed-prefix comparison is still open and
+cannot subtract these interval features from a newly observed physical state.

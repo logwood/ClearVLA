@@ -558,3 +558,17 @@ checks, not an object manipulation claim. Old grid masks remain required in old
 configs. Earlier fallback/clipping semantics remain only in their declared old
 mode. A learned whole physical transition, longer controlled prediction and
 matched one-step execution-error signal are still not supplied by this unit.
+
+
+## M6e current W-to-P2 view boundary
+
+The new opt-in view-conditioned reader resolves current image displacement in
+named camera context before pooling; old mandatory raw-vector cancellation and
+one-coordinate-query-for-all-views are no longer part of this selected path.
+Zero displacement/null effects, real action VJP, invalid-source isolation and
+legacy controls are source-tested, not evidence of learned physical correctness.
+W remains sparse-support interval-mean prediction with within-support covariance;
+P3 cannot use it as next-observation error. Teacher physical association,
+calibrated 3D/contact state, persistent object identity, desired operation and
+executed-prefix feedback remain open. Existing numerical failures stay recorded
+until the full milestone audit; they are not waived by this source save.

@@ -10,6 +10,7 @@ from torch import Tensor, nn
 
 from ..config import ExperimentConfig
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
+from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT
 from ..supervision import quarantine, supported_mean
 from ..world_robot import OBSERVED_ROBOT_VIEWS, RobotWorldObservation
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
@@ -135,6 +136,8 @@ class OnlinePolicyCache:
             horizon=config.dimensions.action_horizon,
         )
         _validate_configured_world_action_condition(self.top.action_condition, config)
+        if config.top.p2_geometry_mode == VIEW_CONDITIONED_TRANSPORT and self.top.predicted_dynamics.camera_names != tuple(config.data.camera_names):
+            raise ValueError("cached W camera charts differ from P2 configuration")
         if self.top.predicted_dynamics.time_grid_mode != config.top.future_time_grid_mode or self.top.intent.time_grid_mode != config.top.future_time_grid_mode:
             raise ValueError("cached intent/world time grid differs from selected graph")
         has_domain = self.top.predicted_dynamics.control_domain is not None
@@ -181,6 +184,8 @@ class OnlineTrainingState:
             horizon=config.dimensions.action_horizon,
         )
         _validate_configured_world_action_condition(self.top.action_condition, config)
+        if config.top.p2_geometry_mode == VIEW_CONDITIONED_TRANSPORT and self.top.predicted_dynamics.camera_names != tuple(config.data.camera_names):
+            raise ValueError("cached W camera charts differ from P2 configuration")
         if self.top.predicted_dynamics.time_grid_mode != config.top.future_time_grid_mode or self.top.intent.time_grid_mode != config.top.future_time_grid_mode:
             raise ValueError("cached intent/world time grid differs from selected graph")
         has_domain = self.top.predicted_dynamics.control_domain is not None
@@ -260,6 +265,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             world_robot_condition_mode=top.world_robot_condition_mode,
             state_feature_mode=top.state_feature_mode,
             p2_spatial_intent_mode=top.p2_spatial_intent_mode,
+            p2_geometry_mode=top.p2_geometry_mode,
             target_binding_mode=top.target_binding_mode,
             instruction_reference_mode=top.instruction_reference_mode,
             history_encoding_mode=top.history_encoding_mode,

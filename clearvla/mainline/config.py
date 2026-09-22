@@ -38,6 +38,7 @@ from .gripper_contract import (
     VALID_GRIPPER_OUTPUT_MODES,
 )
 from .manifest import ARCHITECTURE_MANIFEST
+from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from .temporal import TIMED_HISTORY_ENCODING
 from .v120_core.bspine import (
     BSPINE0_BASIS_DIGEST,
@@ -461,6 +462,7 @@ class TopConfig:
     # address, shared over semantic and geometry readers, while W retains
     # value/support authority and the geometry reader retains its camera axis.
     p2_spatial_intent_mode: str = "post_pool_only"
+    p2_geometry_mode: str = POOLED_TRANSPORT
     # Explicit new behavior; legacy checkpoints keep their existing history chart.
     history_encoding_mode: str = "paired_rows_v1"
     state_feature_mode: str = NATIVE_AFFINE_STATE
@@ -473,6 +475,14 @@ class TopConfig:
 
     def validate(self) -> None:
         grid = resolve_future_time(self.future_time_grid_mode)
+        if self.p2_geometry_mode not in P2_GEOMETRY_MODES:
+            raise ValueError("unknown top p2_geometry_mode")
+        if self.p2_geometry_mode == VIEW_CONDITIONED_TRANSPORT and (
+            self.target_binding_mode != "shared_operation_v1"
+            or self.world_robot_condition_mode != "observed_state_views_v1"
+            or not grid.aligned
+        ):
+            raise ValueError("view-conditioned P2 requires shared target, named observed W views and aligned time")
         if grid.aligned and (self.world_control_mode != "known_prefix_v1" or self.world_supervision_mode != "matched_observed_sequence_v1"):
             raise ValueError("aligned future time requires known sequence controls and matched supervision")
         if self.world_robot_condition_mode not in {"implicit_g_only_v1", "observed_state_views_v1"}:
@@ -1189,6 +1199,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.p2_geometry_mode == POOLED_TRANSPORT:
+            cast(dict[str, object], payload["top"]).pop("p2_geometry_mode")
         if self.top.future_time_grid_mode == LEGACY_FUTURE_TIME:
             cast(dict[str, object], payload["top"]).pop("future_time_grid_mode")
         if self.top.world_robot_condition_mode == "implicit_g_only_v1":

@@ -52,6 +52,7 @@ from ..model.target_binding import (
     SHARED_TARGET_BINDING,
     target_binding_metadata,
 )
+from ..p2_geometry import POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, p2_geometry_metadata
 from ..temporal import HISTORY_TIMING_CONTRACT, TIMED_HISTORY_ENCODING
 from ..world_control import KNOWN_PREFIX_WORLD_CONTROL, LEGACY_WORLD_CONTROL, world_control_metadata
 from ..world_robot import NO_ROBOT_WORLD, OBSERVED_ROBOT_VIEWS, world_robot_metadata
@@ -354,6 +355,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"p2_geometry": p2_geometry_metadata(tuple(config.data.camera_names))}
+           if config.top.p2_geometry_mode == VIEW_CONDITIONED_TRANSPORT else {}),
         **({"world_robot": world_robot_metadata(state_mode=config.top.state_feature_mode,
                                                state_dim=config.dimensions.state_dim)}
            if config.top.world_robot_condition_mode == OBSERVED_ROBOT_VIEWS else {}),
@@ -470,6 +473,15 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     graph_top = _mapping(
         _mapping(abi.get("graph_config"), name="graph_config").get("top"), name="graph_config.top"
     )
+    geometry_mode = graph_top.get("p2_geometry_mode", POOLED_TRANSPORT)
+    if geometry_mode == VIEW_CONDITIONED_TRANSPORT:
+        camera_names = observation.get("camera_names")
+        if not isinstance(camera_names, list) or not all(isinstance(n, str) for n in camera_names):
+            raise ValueError("P2 geometry requires declared deployment camera names")
+        if abi.get("p2_geometry") != p2_geometry_metadata(tuple(camera_names)):
+            raise ValueError("deployment P2 geometry value semantics differ from trained graph")
+    elif geometry_mode != POOLED_TRANSPORT or "p2_geometry" in abi:
+        raise ValueError("unknown or undeclared deployment P2 geometry mode")
     robot_mode = graph_top.get("world_robot_condition_mode", NO_ROBOT_WORLD)
     if robot_mode == OBSERVED_ROBOT_VIEWS:
         graph = _mapping(abi.get("graph_config"), name="graph_config")

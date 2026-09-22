@@ -301,3 +301,19 @@ persistent IDs or deployment-only recurrence. S desired-operation targets,
 P3 execution feedback and M9--M11 are separate unfinished work. Before any
 feedback memory, distinguish sparse-interval-mean targets from endpoint state
 predictions and match error comparisons to the actually executed prefix.
+
+
+## M6e W-to-policy view semantics — source unit
+
+| Producer | Consumer changed with it | Acceptance evidence |
+|---|---|---|
+| W named camera chart | online/training cache and real P2 ingress | mismatch rejection; same named chart on refinement |
+| per-view transport/key projection | within-object view read, shared K law | real parameter action VJP; null and missing-source quarantine |
+| feature-valued SelectedIntervalEvidence | temporal terminal/consequence/P3 seam | no second xy projection; field-mode rejection; diagnostic identity |
+| P2 geometry mode | config/ABI/source closure/optimizer | exact checkpoint reload; legacy-mode control |
+
+Implemented source mechanics do not close M6/M7 overall. Remaining work includes
+Teacher physical association, W uncertainty interpretation and phase/contact
+relations, S desired-operation objectives, P3 actually-executed-prefix feedback,
+M4c2 physical identity, and the M9--M11 bottom/training/full-graph review. No
+single-step predictor has been fabricated from the interval-mean field.

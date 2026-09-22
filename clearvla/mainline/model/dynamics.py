@@ -1196,6 +1196,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             torch.zeros_like(camera_coordinates),
         )
         field = FutureObjectDynamics(
+            camera_names=self.camera_names,
             time_grid_mode=self.time_grid.mode,
             current_reference=current_reference,
             successor_content=current_reference[:, None] + semantic_delta,

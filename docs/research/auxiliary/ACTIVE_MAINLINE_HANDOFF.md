@@ -1,5 +1,42 @@
 # ClearVLA structural rebuild handoff
 
+## Current M6e source continuation
+
+Recovered all 798 files from the M6d archive, reproducing remote source tree
+`562b4d3137d67d4d27c3b2bb453198c173b37566`; remote base
+`f24fdaa873c9bf4138b3bd5490cd63929d8c5511` was read back before edits.
+Local history is synthetic archive recovery and must not be force-pushed.
+
+M6e implements named-view geometry in actual P2 values and spatial queries,
+with producer-owned W chart names, cached/configured identity, typed selected
+features, existing optimizer ownership, deployment ABI and current tests. Read
+the M6e architecture section. Shared target/null and known-control support stay
+unchanged. This is a new explicit training configuration, not weight migration.
+
+Initial production smoke completed diagnostics-enabled optimizer update and
+two-pass action sampling. The initial 30-test focused inventory passed on
+Python 3.13.5 / Torch 2.10 CPU; later cache/all-invalid guards have a separately
+tracked final inventory. Source hash, static delta, parity and final test counts
+belong to the external checkpoint logs, not an inferred CI pass. A failed
+streaming launch did not execute; a first runner lacked its smoke script and
+returned exit 2. Both are retained as failed setup attempts, not neural passes.
+
+Save this small source unit before whole-milestone CI. Do not change workflows
+or master. Continue P3 matched executed-prefix/goal-progress semantics and the
+remaining W/S/physical-entity obligations. Interval means are NOT one-step
+endpoints. No CUDA, real-data training, robot success or whole-stage acceptance
+has been established.
+
+M6e final focused inventory: 32 passed, exit 0; ten-file static delta has zero
+Ruff diagnostics, no new type errors/missing imports and 38 inherited errors.
+Two legacy seeds (0,71) exactly match the M6d parameters/buffers/order, config,
+RNG and same-noise actions. The new candidate adds 791,040 trainable parameters
+at H=512/C=2; no extra W or ODE evaluations. P2 evaluates its view-conditioned
+features within each existing P2 call; cross-node value precomputation and GPU
+latency have not been measured. Eight-file joint regression is tracked
+externally, including the two previously recorded legacy exact-equality failures.
+This final paragraph changes documentation only, not the tested Python source.
+
 ## M6a source checkpoint — 2026-09-22 continuation
 
 Repaired M5b is saved on the remote branch at

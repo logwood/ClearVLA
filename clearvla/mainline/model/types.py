@@ -2080,7 +2080,13 @@ class ControlledTransitionSource:
 
 @dataclass(frozen=True)
 class FutureObjectDynamics:
-    """The only W value object visible to P2."""
+    """The only W value object visible to P2.
+
+    In control_aligned_24_v1 these are uniform means at the declared sparse
+    successor supports, NOT instantaneous/endpoint states. Transport is image
+    displacement from the current reference. Covariance is a mean of within-
+    support correspondence covariances, not task risk or total temporal spread.
+    """
 
     current_reference: Tensor  # [B,K,D]
     successor_content: Tensor  # [B,I,K,D]
@@ -2093,6 +2099,7 @@ class FutureObjectDynamics:
     camera_chart_availability: Tensor  # current observable support [B,K,C,1]
     log_camera_chart_availability: Tensor  # producer-owned finite FP32 [B,K,C,1]
     control_domain: CandidateControlDomain | None = None  # candidate control, not visibility
+    camera_names: tuple[str, ...] = ()  # W-owned chart order, not guessed from axis length
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
 
@@ -2175,6 +2182,10 @@ class FutureObjectDynamics:
             (batch, objects, cameras, 2),
             "future camera coordinates",
         )
+        if self.camera_names and (len(self.camera_names) != cameras
+                or len(set(self.camera_names)) != cameras
+                or any(not name for name in self.camera_names)):
+            raise ValueError("future named camera charts must be unique and match C")
         _shape(
             self.transport_mean,
             (batch, intervals, objects, cameras, 2),
@@ -2227,6 +2238,7 @@ class FutureObjectDynamics:
             dtype=torch.long,
         )
         return FutureObjectDynamics(
+            camera_names=self.camera_names,
             time_grid_mode=self.time_grid_mode,
             current_reference=self.current_reference[:, index],
             successor_content=self.successor_content[:, :, index],

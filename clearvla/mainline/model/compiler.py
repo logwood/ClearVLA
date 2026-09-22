@@ -9,6 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
+from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from .action_codec import ACTION_BAND_ENDS
 from .routing import (
     PolicyRoleDeltaBank,
@@ -24,11 +25,15 @@ from .types import (
     PolicyIntentDock,
     normalized_entropy,
 )
+from .view_geometry import ViewConditionedTransport
 
 
 @dataclass(frozen=True)
 class ObjectTypedEffect:
-    """Semantic and physical-geometry P2 values before parameter-free fusion."""
+    """Semantic and geometry-derived FEATURE effects before final fusion.
+
+    Neither hidden vector is an endpoint pose or a one-step observation error.
+    """
 
     semantic: Tensor
     geometry: Tensor
@@ -130,12 +135,13 @@ class SelectedIntervalEvidence:
     semantic_value: Tensor  # [B,T,Q,I,D]
     semantic_common_value: Tensor  # [B,T,Q,I,D]
     semantic_residual_value: Tensor  # [B,T,Q,I,D]
-    geometry_value: Tensor  # [B,T,Q,I,2]
-    geometry_common_value: Tensor  # [B,T,Q,I,2]
-    geometry_residual_value: Tensor  # [B,T,Q,I,2]
+    geometry_value: Tensor  # legacy xy [B,T,Q,I,2] or named-view features [B,T,Q,I,H]
+    geometry_common_value: Tensor
+    geometry_residual_value: Tensor
     selected_s_context: Tensor  # [B,T,Q,I,Z,H]
     support: Tensor  # bool [B,I,Z]
     time_grid_mode: str = LEGACY_FUTURE_TIME
+    geometry_mode: str = POOLED_TRANSPORT
 
     def validate(self) -> None:
         resolve_future_time(self.time_grid_mode)
@@ -148,6 +154,9 @@ class SelectedIntervalEvidence:
             raise ValueError("selected P2 support must be [B,I,2]")
         if self.support.dtype != torch.bool:
             raise TypeError("selected P2 support must be boolean")
+        if self.geometry_mode not in P2_GEOMETRY_MODES:
+            raise ValueError("unknown selected P2 geometry value semantics")
+        geometry_width = expected[-1] if self.geometry_mode == VIEW_CONDITIONED_TRANSPORT else 2
         value_prefix = expected[:4]
         for name in (
             "semantic_value",
@@ -163,8 +172,8 @@ class SelectedIntervalEvidence:
             "geometry_residual_value",
         ):
             value = getattr(self, name)
-            if tuple(value.shape) != (*value_prefix, 2):
-                raise ValueError(f"selected P2 {name} must retain physical 2D")
+            if tuple(value.shape) != (*value_prefix, geometry_width):
+                raise ValueError(f"selected P2 {name} differs from declared geometry value semantics")
         if not torch.equal(
             self.semantic_value,
             self.semantic_common_value + self.semantic_residual_value,
@@ -243,6 +252,8 @@ class ObjectFutureEffectReader(nn.Module):
         target_binding_mode: str = LOCAL_TARGET_READERS,
         world_control_mode: str = "legacy_extrapolation_v1",
         future_time_grid_mode: str = LEGACY_FUTURE_TIME,
+        geometry_mode: str = POOLED_TRANSPORT,
+        camera_names: tuple[str, ...] = (),
     ) -> None:
         super().__init__()
         if spatial_intent_mode not in {
@@ -290,6 +301,16 @@ class ObjectFutureEffectReader(nn.Module):
         # validation may remove one named value/address seam; ordinary
         # training and deployment keep the exact neutral string.
         self._eval_intervention = "none"
+        if geometry_mode not in P2_GEOMETRY_MODES:
+            raise ValueError("unknown P2 geometry mode")
+        self.geometry_mode = geometry_mode
+        if geometry_mode == VIEW_CONDITIONED_TRANSPORT and (
+            target_binding_mode != SHARED_TARGET_BINDING or not self.time_grid.aligned
+            or self.world_control_mode != "known_prefix_v1"
+        ):
+            raise ValueError("view-conditioned P2 needs shared target and aligned known controls")
+        self.view_geometry = (ViewConditionedTransport(hidden=hidden, camera_names=camera_names)
+                              if geometry_mode == VIEW_CONDITIONED_TRANSPORT else None)
 
     def set_eval_intervention(self, mode: str) -> None:
         """Select one matched P2 value/address counterfactual for evaluation."""
@@ -461,6 +482,9 @@ class ObjectFutureEffectReader(nn.Module):
         if (dynamics.control_domain is not None) != (self.world_control_mode == "known_prefix_v1"):
             raise ValueError("P2 world control domain differs from selected mode")
         dynamics = dynamics.policy_view()
+        view_geometry = self.view_geometry
+        if view_geometry is not None:
+            view_geometry.validate_names(dynamics.camera_names)
         if action_query.ndim != 4:
             raise ValueError("P2 action query must be [B,T,Q,H]")
         batch, horizon, basis, hidden = action_query.shape
@@ -533,7 +557,12 @@ class ObjectFutureEffectReader(nn.Module):
             torch.zeros_like(conditional_camera),
         )
 
-        coordinate_query = torch.tanh(self.coordinate_query(action_query).float())
+        if view_geometry is None:
+            coordinate_query = torch.tanh(self.coordinate_query(action_query).float())[:, :, :, None, None, None]
+        else:
+            # Separate learned addresses in each named image. These are NOT a
+            # common Cartesian xy query or calibrated TCP projections.
+            coordinate_query = view_geometry.image_queries(action_query, self.coordinate_query)[:, :, :, None, None]
         current_coordinate = dynamics.camera_coordinates[:, None].float().clamp(
             -1.0, 1.0
         )
@@ -542,7 +571,7 @@ class ObjectFutureEffectReader(nn.Module):
             + dynamics.transport_mean.float()
         ).clamp(-1.0, 1.0)
         coordinate_delta = (
-            coordinate_query[:, :, :, None, None, None]
+            coordinate_query
             - future_coordinate[:, None, None]
         )
         coordinate_distance = self._covariance_aware_distance(
@@ -551,7 +580,7 @@ class ObjectFutureEffectReader(nn.Module):
         )
         coordinate_score = (-0.25 * coordinate_distance).clamp(-1.0, 0.0)
         current_coordinate_delta = (
-            coordinate_query[:, :, :, None, None, None]
+            coordinate_query
             - current_coordinate[:, None, None]
         )
         current_coordinate_distance = self._covariance_aware_distance(
@@ -651,6 +680,27 @@ class ObjectFutureEffectReader(nn.Module):
             dynamics.transport_interval_innovation,
         )
         full_fields = (dynamics.semantic_delta, dynamics.transport_mean)
+        geometry_key: Tensor | None = None
+        if view_geometry is not None:
+            view_support = camera_support[:, None] & semantic_interval_support[..., None]
+            view_context = view_geometry.context_features(
+                dynamics.camera_coordinates, dynamics.transport_covariance, view_support
+            )
+            # The ONLY geometry value projection is here, while K and C are
+            # real axes. No raw 2D vector is pooled across different images.
+            geometry_feature = view_geometry.condition(
+                self.transport_value(dynamics.transport_mean), view_context, view_support, value=True
+            )
+            geometry_key = view_geometry.condition(
+                self.source_key[1](dynamics.transport_mean), view_context, view_support, value=False
+            )
+            domain = dynamics.control_domain
+            assert domain is not None
+            common_geometry = domain.common(geometry_feature)
+            residual_geometry = domain.quarantine(geometry_feature.float() - common_geometry[:, None])
+            common_fields = (common_fields[0], common_geometry)
+            residual_fields = (residual_fields[0], residual_geometry)
+            full_fields = (full_fields[0], geometry_feature)
         public_source = intent.interval_key
         if dynamics.control_domain is not None:
             public_source = dynamics.control_domain.quarantine(public_source)
@@ -696,7 +746,8 @@ class ObjectFutureEffectReader(nn.Module):
         for type_index in range(len(self.TYPE_NAMES)):
             query = spatial_query_by_type.select(3, type_index)
             source_key = self._bounded_unit(
-                self.source_key[type_index](full_fields[type_index])
+                geometry_key if type_index == 1 and geometry_key is not None
+                else self.source_key[type_index](full_fields[type_index])
             )
             typed_route = (
                 intent.typed_common_value[..., self.S_TYPE_INDEX_BY_P2[type_index], :][
@@ -810,6 +861,7 @@ class ObjectFutureEffectReader(nn.Module):
             source_scores.append(source_score)
 
         selected = SelectedIntervalEvidence(
+            geometry_mode=self.geometry_mode,
             time_grid_mode=self.time_grid.mode,
             key=torch.stack(selected_keys, dim=4),
             semantic_value=(
@@ -901,7 +953,8 @@ class ObjectFutureEffectReader(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "object_p2_geometry_selected_physical_rms": selected.geometry_value.detach()
+            ("object_p2_geometry_selected_feature_rms" if view_geometry is not None
+             else "object_p2_geometry_selected_physical_rms"): selected.geometry_value.detach()
             .float()
             .square()
             .mean()
@@ -936,6 +989,8 @@ class ObjectFutureEffectReader(nn.Module):
         collect_diagnostics: bool,
     ) -> tuple[ObjectTypedEffect, dict[str, Tensor]]:
         selected.validate()
+        if selected.geometry_mode != self.geometry_mode:
+            raise ValueError("P2 terminal cannot reinterpret geometry feature values as physical xy")
         if selected.time_grid_mode != self.time_grid.mode:
             raise ValueError("P2 terminal interval evidence uses a different time grid")
         batch, horizon, basis, intervals, types, hidden = selected.key.shape
@@ -1008,9 +1063,11 @@ class ObjectFutureEffectReader(nn.Module):
         )
         semantic_selected = semantic_common + semantic_residual
         geometry_selected = geometry_common + geometry_residual
+        semantic_effect = self.semantic_value(semantic_selected)
         effect = ObjectTypedEffect(
-            semantic=self.semantic_value(semantic_selected),
-            geometry=self.transport_value(geometry_selected),
+            semantic=semantic_effect,
+            geometry=(geometry_selected.to(dtype=semantic_effect.dtype)
+                      if self.view_geometry is not None else self.transport_value(geometry_selected)),
         )
         effect.validate()
         value_by_type = torch.stack((effect.semantic, effect.geometry), dim=3)
@@ -1117,7 +1174,8 @@ class ObjectFutureEffectReader(nn.Module):
             .square()
             .mean()
             .sqrt(),
-            "object_p2_geometry_terminal_physical_rms": geometry_selected.detach()
+            ("object_p2_geometry_terminal_feature_rms" if self.view_geometry is not None
+             else "object_p2_geometry_terminal_physical_rms"): geometry_selected.detach()
             .float()
             .square()
             .mean()

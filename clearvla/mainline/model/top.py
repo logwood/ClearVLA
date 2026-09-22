@@ -215,6 +215,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         world_robot_condition_mode: str = "implicit_g_only_v1",
         state_feature_mode: str = "native_affine_v1",
         p2_spatial_intent_mode: str = "post_pool_only",
+        p2_geometry_mode: str = "pooled_transport_v1",
         target_binding_mode: str = "reader_local_v1",
         instruction_reference_mode: str = "none",
         history_encoding_mode: str = "paired_rows_v1",
@@ -332,6 +333,8 @@ class ObjectIntentDynamicsTop(nn.Module):
             content_dim=content_dim,
             route_dim=route_dim,
             spatial_intent_mode=p2_spatial_intent_mode,
+            geometry_mode=p2_geometry_mode,
+            camera_names=tuple(camera_names or ()),
             world_control_mode=world_control_mode,
             target_binding_mode=target_binding_mode,
         )
