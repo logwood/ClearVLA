@@ -24,7 +24,7 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit source candidate is
-`configs/mainline/structural_rebuild_m6g_calvin.json` (validation scope in handoff).
+`configs/mainline/structural_rebuild_m6h_calvin.json` (validation scope in handoff).
 M5a adds one soft operated-
 object distribution across actual S/coarse/P1/P2 readers; its detailed contract
 is below. M5b adds a causal instruction reference; M6a/b/c separate action-matched W
@@ -42,6 +42,63 @@ W-supervision and the deeper P redesign remain open. No learned behavior
 is established by these source changes. The user-authorized rebuild may revise
 historical implementation details; accepted source semantics belong here,
 future work in the repair plan, and test/publish status in the handoff.
+
+## M6h typed instruction-reference change
+
+`top.instruction_change_mode=typed_reference_v1` requires the existing causal
+instruction-start reference, shared K-plus-null target and typed-horizon P3.
+Default `mixed_reference_v1` keeps the historical parameters, draws and outputs;
+it is omitted from the legacy serialized graph. This is an explicit new graph,
+not a checkpoint migration. Configuration, source closure and ABI own the mode.
+
+The matcher uses the SAME current object-content query in the two named raw
+DINO image charts. It has no additional task/direction query and receives no
+elapsed-task input, future label or generated action. This removes a second
+instruction-dependent identity choice after S target binding. The query itself
+is learned and does not establish physical identity or correct correspondence.
+
+`InstructionChangeEvidence` retains distinct FP32 [B,K,C,*] content differences,
+apparent image-centroid differences and correspondence status, plus [B,S] robot
+state-feature differences. Each supported comparison uses the intersection of
+raw source-observed pixel support on both sides. A missing source pixel alone
+cannot manufacture change for identical content. Status separately records
+entropy, comparable view support and current/reference/common availability;
+it is not a learned validity gate, contact probability, task risk or movement.
+Current camera availability comes from the source-derived fact chart, not a
+learned confidence threshold. Both image charts retain their named view axes.
+
+S and P3 own separate typed value readers. Each interprets content, image and
+robot differences using distinct bias-free projections; named-view modulation
+precedes view reduction. The SAME target mass is applied AFTER each within-K
+view read and is never renormalized to force a real object. Robot state change
+has its own source and cannot populate the target visual measurement fields.
+S may use correspondence status as task context; identical images do NOT imply
+that all of S, P3 or the final action must be zero.
+
+P3 directly reads the three actual change values and uses its current plan and
+correspondence status only to condition their interpretation. Zero actual
+content/image/robot differences imply exact zero from THIS contribution and
+zero plan/status derivative. No status-only bias creates a claimed movement.
+This contribution joins the existing observed-change lane before its RMS bound;
+protected current facts/precision, semantic/geometry candidate effects and the
+M6g detached one-step proprioceptive innovation retain their separate owners.
+
+The measurement is computed once per online encode and stored through the real
+S policy dock. Cache admission checks the identical current-state, instruction-
+reference and target-binding sources. K permutation updates evidence and binding
+together; camera/feature charts are validated. ODE calls only interpret this
+read-only evidence; no recurrent task memory, extra DINO/W pass, extra solver
+step or future-target dependence is added. Consumers quarantine unavailable
+values before learned operations. Existing optimizer groups include all new
+parameters; no external loss fabricates progress labels.
+
+**Limits:** these are learned soft visual comparisons and proprioceptive feature
+differences, not calibrated world displacement, goal completion, contact or
+persistent object identity. Ego-camera motion and ambiguous objects remain real
+limitations. The comparison is not a W endpoint prediction error; W continues
+to supply interval statistics. Desired-task-relation supervision, physical
+association and complete transition/bottom review remain open. Extra value
+projections run per P3 call; production GPU cost has not been measured.
 
 ## M6g matched one-step proprioceptive response
 

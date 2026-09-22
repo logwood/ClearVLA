@@ -1,5 +1,35 @@
 # ClearVLA structural rebuild handoff
 
+## Current M6h source checkpoint — 2026-09-22
+
+Recovered M6g source tree `b0b1494d3a9bc746b4ef8e85d313cd3cf22af7c2`
+from the complete archive; all 810 source files and 904 manifest entries matched.
+Remote base was read at `89c05aea1f994548c4238a2dc9b3d0c3496f2934`.
+Local ancestry is synthetic recovery: never force-push it to the real branch.
+
+M6h implements typed instruction-reference comparison through actual S/P3,
+config, cache provenance, K permutation, optimizer ownership and deployment ABI.
+Read the architecture section and structural_rebuild_m6h_calvin.json. Apparent
+image change, robot feature change and match status stay distinct. There is no
+persistent physical ID, task-progress label or W one-step error in this unit.
+
+Final dedicated production inventory: 37 passed, exit 0, on Python 3.13.5 /
+PyTorch 2.10 CPU. Ten-Python-file static delta: Ruff zero, Pyright baseline and
+current 37 errors, warnings 116 -> 135, no new errors/missing imports. Historical
+diagnostics remain visible. Seeds 0,71 match the old-mode baseline exactly for
+configuration, parameter/buffer order and values, RNG and same-noise actions.
+The earlier 36-pass inventory precedes the added cache-reference test and is
+superseded, not an extra passing total. Interrupted foreground invocations and
+setup/test typing corrections are recorded externally, not counted as passes.
+Expanded joint results and exact-source hashes belong to the checkpoint report;
+no full milestone CI, CUDA, real-data training or robot success is claimed.
+
+Save this small source unit now using the existing workflow/ordinary isolated
+branch update; do not wait on full CI or change workflows/master. Next inspect
+S desired-operation/observed-goal relation supervision and its future recognizer,
+physical correspondence/ego-view ambiguity, and transition/bottom consumers.
+Do not replace those obligations by relabeling typed apparent change as progress.
+
 ## Current M6g source checkpoint — 2026-09-22
 
 Recovered all 806 M6f source files and verified all 893 archive manifest entries.

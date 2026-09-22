@@ -7,9 +7,15 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
+from ..instruction_change import (
+    INSTRUCTION_CHANGE_MODES,
+    MIXED_REFERENCE_CHANGE,
+    TYPED_REFERENCE_CHANGE,
+)
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
+from .instruction_change import TypedInstructionReferenceRead
 from .instruction_progress import InstructionReferenceRead
 from .routing import register_gradient_rms_metric, smooth_rms_contract
 from .target_binding import (
@@ -294,10 +300,16 @@ class StatelessObjectIntentOrganizer(nn.Module):
         history_encoding_mode: str = LEGACY_HISTORY_ENCODING,
         target_binding_mode: str = LOCAL_TARGET_READERS,
         instruction_reference_mode: str = "none",
+        instruction_change_mode: str = MIXED_REFERENCE_CHANGE,
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
+        if instruction_change_mode not in INSTRUCTION_CHANGE_MODES:
+            raise ValueError("unknown instruction change consumer")
+        if instruction_change_mode == TYPED_REFERENCE_CHANGE and instruction_reference_mode != INSTRUCTION_START_REFERENCE:
+            raise ValueError("typed change requires an instruction observation reference")
+        self.instruction_change_mode = instruction_change_mode
         if instruction_reference_mode not in {"none", INSTRUCTION_START_REFERENCE}:
             raise ValueError("unknown instruction reference consumer")
         if instruction_reference_mode != "none" and target_binding_mode != SHARED_TARGET_BINDING:
@@ -401,11 +413,16 @@ class StatelessObjectIntentOrganizer(nn.Module):
             self.target_state = nn.Linear(state_dim, hidden, bias=False)
             self.target_view = nn.Embedding(len(camera_names), hidden)
 
-        self.instruction_progress = (
-            InstructionReferenceRead(hidden=hidden, content_dim=content_dim,
-                                     state_dim=state_dim, cameras=len(camera_names))
-            if instruction_reference_mode == INSTRUCTION_START_REFERENCE else None
-        )
+        self.instruction_progress: InstructionReferenceRead | TypedInstructionReferenceRead | None
+        if instruction_change_mode == TYPED_REFERENCE_CHANGE:
+            self.instruction_progress = TypedInstructionReferenceRead(
+                hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
+        else:
+            self.instruction_progress = (
+                InstructionReferenceRead(hidden=hidden, content_dim=content_dim,
+                                        state_dim=state_dim, cameras=len(camera_names))
+                if instruction_reference_mode == INSTRUCTION_START_REFERENCE else None
+            )
 
     @staticmethod
     def _paired_history(
@@ -714,14 +731,21 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 torch.where(target_valid[..., None], target_tokens, torch.zeros_like(target_tokens)), target_valid
             )
         progress = None
+        instruction_change = None
         if self.instruction_progress is not None:
             if instruction_reference is None or current_dino is None or target_binding is None:
                 raise ValueError("instruction progress requires causal reference and shared binding")
-            progress, _ = self.instruction_progress(
-                reference=instruction_reference, current_dino=current_dino,
-                current_state=state, facts=facts, binding=target_binding,
-                task_context=protected_goal.mean(1),
-            )
+            if isinstance(self.instruction_progress, TypedInstructionReferenceRead):
+                progress, instruction_change = self.instruction_progress(
+                    reference=instruction_reference, current_dino=current_dino,
+                    current_state=state, facts=facts, binding=target_binding,
+                )
+            else:
+                progress, _ = self.instruction_progress(
+                    reference=instruction_reference, current_dino=current_dino,
+                    current_state=state, facts=facts, binding=target_binding,
+                    task_context=protected_goal.mean(1),
+                )
         elif instruction_reference is not None:
             raise ValueError("instruction reference consumer is not selected")
         interval_identity = self.interval_identity
@@ -875,6 +899,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             policy_interval_context=policy_intervals,
             temporal_queries=temporal,
             state_change_evidence=state_change_evidence,
+            instruction_change=instruction_change,
             target_object_address_logit=target_object_address_logit,
             typed_common_mass=typed_common_mass,
             typed_common_value=typed_common_value,

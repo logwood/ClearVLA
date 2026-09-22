@@ -20,6 +20,7 @@ from clearvla.vision.entity_history import ObservedEntityHistory
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
 
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
+from ..instruction_change import InstructionChangeEvidence
 from ..manifest import INTERVALS
 from ..world_control import CandidateControlDomain
 from ..world_robot import RobotWorldObservation
@@ -1016,6 +1017,7 @@ class PolicyIntentDock:
     typed_common_value: Tensor  # [B,K,3,R]
     typed_interval_residual_value: Tensor  # [B,I,K,3,R]
     target_binding: TargetBinding | None = None
+    instruction_change: InstructionChangeEvidence | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
 
@@ -1038,6 +1040,10 @@ class PolicyIntentDock:
         ) != (batch,):
             raise ValueError("policy-intent typed common value must be [B,K,3,R]")
         objects = int(self.typed_common_value.shape[1])
+        if self.instruction_change is not None:
+            self.instruction_change.validate()
+            if self.instruction_change.binding is not self.target_binding:
+                raise ValueError("policy instruction change cannot reselect the target")
         if int(self.typed_common_value.shape[2]) != 3:
             raise ValueError("policy-intent typed common value lost type identity")
         _shape(
@@ -1087,6 +1093,7 @@ class ObjectIntentState:
     history_validity: Tensor | None = None  # bool [B,L]
     target_binding: TargetBinding | None = None
     target_evidence: TargetEvidence | None = None
+    instruction_change: InstructionChangeEvidence | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
 
@@ -1153,6 +1160,7 @@ class ObjectIntentState:
             interval_key=self.policy_interval_context,
             temporal_control=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
+            instruction_change=self.instruction_change,
             target_object_address_logit=self.target_object_address_logit,
             typed_common_value=self.typed_common_value,
             target_binding=self.target_binding,
@@ -1163,6 +1171,10 @@ class ObjectIntentState:
         resolve_future_time(self.time_grid_mode)
         batch = int(self.public_interval_carrier.shape[0])
         _shape(self.protected_goal_set, (batch, 4, hidden), "protected goal set")
+        if self.instruction_change is not None:
+            self.instruction_change.validate()
+            if self.instruction_change.binding is not self.target_binding:
+                raise ValueError("instruction change must share the current target law")
         _shape(
             self.public_interval_carrier,
             (batch, 4, hidden),
@@ -1247,13 +1259,20 @@ class ObjectIntentState:
             device=self.object_tokens.device,
             dtype=torch.long,
         )
+        binding = None if self.target_binding is None else self.target_binding.permute(index)
+        change = None
+        if self.instruction_change is not None:
+            if binding is None:
+                raise ValueError("instruction change cannot lose target law during permutation")
+            change = self.instruction_change.permute(index, binding)
         return ObjectIntentState(
             time_grid_mode=self.time_grid_mode,
             protected_goal_set=self.protected_goal_set,
             history_tokens=self.history_tokens,
             history_validity=self.history_validity,
             object_tokens=self.object_tokens[:, index],
-            target_binding=None if self.target_binding is None else self.target_binding.permute(index),
+            target_binding=binding,
+            instruction_change=change,
             target_evidence=None if self.target_evidence is None else self.target_evidence.permute(index),
             public_interval_carrier=self.public_interval_carrier,
             policy_interval_context=self.policy_interval_context,

@@ -37,6 +37,11 @@ from .gripper_contract import (
     MANISKILL_BINARY_GRIPPER_OUTPUT_MODE,
     VALID_GRIPPER_OUTPUT_MODES,
 )
+from .instruction_change import (
+    INSTRUCTION_CHANGE_MODES,
+    MIXED_REFERENCE_CHANGE,
+    TYPED_REFERENCE_CHANGE,
+)
 from .manifest import ARCHITECTURE_MANIFEST
 from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from .p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
@@ -475,8 +480,17 @@ class TopConfig:
     entity_motion_mode: str = "query_anchor_v1"
     target_binding_mode: str = "reader_local_v1"
     instruction_reference_mode: str = "none"
+    instruction_change_mode: str = MIXED_REFERENCE_CHANGE
 
     def validate(self) -> None:
+        if self.instruction_change_mode not in INSTRUCTION_CHANGE_MODES:
+            raise ValueError("unknown instruction_change_mode")
+        if self.instruction_change_mode == TYPED_REFERENCE_CHANGE and (
+            self.instruction_reference_mode != "instruction_start_observation_v1"
+            or self.target_binding_mode != "shared_operation_v1"
+            or self.p3_coordination_mode != TYPED_HORIZON_PLAN
+        ):
+            raise ValueError("typed instruction change requires reference, shared target and typed P3")
         if self.robot_feedback_mode not in {"none", "one_step_proprioceptive_v1"}:
             raise ValueError("unknown robot_feedback_mode")
         if self.robot_feedback_mode != "none" and (
@@ -1223,6 +1237,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.instruction_change_mode == MIXED_REFERENCE_CHANGE:
+            cast(dict[str, object], payload["top"]).pop("instruction_change_mode")
         if self.top.robot_feedback_mode == "none":
             cast(dict[str, object], payload["top"]).pop("robot_feedback_mode")
         if self.objectives.robot_response == 0:

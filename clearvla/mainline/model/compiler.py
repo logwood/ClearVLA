@@ -9,11 +9,17 @@ import torch
 from torch import Tensor, nn
 
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
+from ..instruction_change import (
+    INSTRUCTION_CHANGE_MODES,
+    MIXED_REFERENCE_CHANGE,
+    TYPED_REFERENCE_CHANGE,
+)
 from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from ..robot_execution import RobotResponseFeedback
 from .action_codec import ACTION_BAND_ENDS
 from .horizon_coordination import P3HorizonContext, TypedHorizonCoordinator
+from .instruction_change import InstructionChangePlanRead
 from .robot_execution import RobotExecutionObserver
 from .routing import (
     PolicyRoleDeltaBank,
@@ -1453,7 +1459,9 @@ class ObjectPolicyPlanCompiler(nn.Module):
 
     def __init__(self, *, hidden: int, horizon: int, basis: int, future_time_grid_mode: str = LEGACY_FUTURE_TIME,
                  coordination_mode: str = POINTWISE_PLAN, heads: int = 1,
-                 robot_feedback_mode: str = "none", state_dim: int = 7, action_dim: int = 7) -> None:
+                 robot_feedback_mode: str = "none", state_dim: int = 7, action_dim: int = 7,
+                 instruction_change_mode: str = MIXED_REFERENCE_CHANGE, content_dim: int = 768,
+                 camera_names: tuple[str, ...] = ("top", "wrist")) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
         self.hidden = int(hidden)
@@ -1462,6 +1470,14 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if coordination_mode not in P3_COORDINATION_MODES:
             raise ValueError("unknown P3 coordination mode")
         self.coordination_mode = coordination_mode
+        if instruction_change_mode not in INSTRUCTION_CHANGE_MODES:
+            raise ValueError("unknown instruction change P3 consumer")
+        if instruction_change_mode == TYPED_REFERENCE_CHANGE and coordination_mode != TYPED_HORIZON_PLAN:
+            raise ValueError("typed instruction change requires typed P3")
+        self.instruction_change_read = (
+            InstructionChangePlanRead(hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
+            if instruction_change_mode == TYPED_REFERENCE_CHANGE else None
+        )
         if robot_feedback_mode not in {"none", "one_step_proprioceptive_v1"}:
             raise ValueError("unknown robot feedback mode")
         if robot_feedback_mode != "none" and coordination_mode != TYPED_HORIZON_PLAN:
@@ -1549,6 +1565,12 @@ class ObjectPolicyPlanCompiler(nn.Module):
             state_change_raw = self.state_change_lane(
                 state_change_source * state_change_modulation
             )
+        if self.instruction_change_read is not None:
+            if intent.instruction_change is None:
+                raise ValueError("P3 requires the typed instruction observation change")
+            state_change_raw = state_change_raw + self.instruction_change_read(intent.instruction_change, temporal_private)
+        elif intent.instruction_change is not None:
+            raise ValueError("typed instruction change supplied to an unselected P3")
         if self.robot_observer is not None:
             if robot_feedback is None:
                 raise ValueError("P3 robot observer requires current causal feedback")

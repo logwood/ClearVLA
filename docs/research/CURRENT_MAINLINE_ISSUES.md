@@ -49,6 +49,10 @@ Still open before/through subsequent milestones:
 - S: M5a implements a shared K-plus-null operation binding with current-value
   consumers, and target-related recent motion. M5b implements the causal
   instruction-start observation and current/reference relation consumed by S.
+  M6h separates content/image change, robot feature change and correspondence
+  status, uses one object-content query on comparable source support, and sends
+  distinct measurements directly to S and P3. This prevents source/type
+  conflation, not incorrect matching, ego-camera ambiguity or mixed G entities.
   Learned cumulative progress, richer desired-operation relations and future
   recognizer targets remain open. A current K number is not a persistent ID.
   Repeated identical instructions require an explicit start event or reset;

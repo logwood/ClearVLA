@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..config import ExperimentConfig
+from ..instruction_reference import InstructionReference
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
 from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT
 from ..robot_execution import RobotResponseFeedback
@@ -130,9 +131,24 @@ class OnlinePolicyCache:
     action_history_keep: Tensor
     role_table: Tensor
     robot_feedback: RobotResponseFeedback | None = None
+    instruction_reference: InstructionReference | None = None
 
     def validate(self, config: ExperimentConfig) -> None:
         self.history.validate(config)
+        change = self.top.intent.instruction_change
+        if (change is not None) != (config.top.instruction_change_mode == "typed_reference_v1"):
+            raise ValueError("instruction change cache differs from configured mode")
+        if (self.instruction_reference is not None) != (change is not None):
+            raise ValueError("instruction change cache lost its reference owner")
+        if change is not None:
+            if change.reference is not self.instruction_reference:
+                raise ValueError("instruction change cache belongs to another instruction reference")
+            if change.current_state is not self.history.state:
+                raise ValueError("instruction change cache belongs to another current observation")
+            if change.binding is not self.top.intent.target_binding:
+                raise ValueError("instruction change cache uses another operated-object law")
+            if change.camera_names != tuple(config.data.camera_names):
+                raise ValueError("instruction change cache camera identity mismatch")
         if (self.robot_feedback is not None) != (config.top.robot_feedback_mode != "none"):
             raise ValueError("robot feedback cache differs from configured mode")
         if self.robot_feedback is not None:
@@ -285,6 +301,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             robot_feedback_mode=top.robot_feedback_mode,
             target_binding_mode=top.target_binding_mode,
             instruction_reference_mode=top.instruction_reference_mode,
+            instruction_change_mode=top.instruction_change_mode,
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,
@@ -755,6 +772,8 @@ class ClearVLAMainlinePolicy(nn.Module):
         )
         cache = OnlinePolicyCache(
             robot_feedback=robot_feedback,
+            instruction_reference=(conditioned_policy_input.instruction_reference
+                                   if self.config.top.instruction_change_mode == "typed_reference_v1" else None),
             top=context.deployment_cache(),
             factual_dock=factual_dock,
             transition_source=transition_source,

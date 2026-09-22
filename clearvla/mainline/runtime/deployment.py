@@ -46,6 +46,11 @@ from ..gripper_contract import (
     MANISKILL_BINARY_GRIPPER_OUTPUT_MODE,
     VALID_GRIPPER_OUTPUT_MODES,
 )
+from ..instruction_change import (
+    MIXED_REFERENCE_CHANGE,
+    TYPED_REFERENCE_CHANGE,
+    instruction_change_metadata,
+)
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, instruction_reference_metadata
 from ..model.target_binding import (
     LOCAL_TARGET_READERS,
@@ -357,6 +362,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"instruction_change": instruction_change_metadata(tuple(config.data.camera_names))}
+           if config.top.instruction_change_mode == TYPED_REFERENCE_CHANGE else {}),
         **({"robot_execution": robot_execution_metadata()} if config.top.robot_feedback_mode != "none" else {}),
         **({"p3_coordination": p3_coordination_metadata()}
            if config.top.p3_coordination_mode == TYPED_HORIZON_PLAN else {}),
@@ -478,6 +485,15 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     graph_top = _mapping(
         _mapping(abi.get("graph_config"), name="graph_config").get("top"), name="graph_config.top"
     )
+    change_mode = graph_top.get("instruction_change_mode", MIXED_REFERENCE_CHANGE)
+    if change_mode == TYPED_REFERENCE_CHANGE:
+        cameras = observation.get("camera_names")
+        if not isinstance(cameras, list) or not all(isinstance(n, str) for n in cameras):
+            raise ValueError("instruction change ABI requires named cameras")
+        if abi.get("instruction_change") != instruction_change_metadata(tuple(cameras)):
+            raise ValueError("instruction change ABI semantics mismatch")
+    elif change_mode != MIXED_REFERENCE_CHANGE or "instruction_change" in abi:
+        raise ValueError("instruction change ABI is unselected or unknown")
     robot_mode = graph_top.get("robot_feedback_mode", "none")
     if robot_mode == "one_step_proprioceptive_v1":
         if abi.get("robot_execution") != robot_execution_metadata():
