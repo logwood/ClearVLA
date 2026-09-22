@@ -16,6 +16,7 @@ from typing import Mapping, cast
 import numpy as np
 
 from clearvla.data.action_chart import resolve_action_state_profile
+from clearvla.data.state_features import NATIVE_AFFINE_STATE, state_feature_metadata
 from clearvla.vision.preprocessing import (
     PreprocessConfig,
     preprocessing_identity,
@@ -290,7 +291,7 @@ def build_deployment_abi(
     _validate_normalizer_object(
         state_normalizer,
         name="state",
-        width=int(config.dimensions.state_dim),
+        width=len(resolve_action_state_profile(config.data.data_profile).state_indices),
     )
     graph = deployment_graph_config(config)
     flow_schedule = deployment_flow_schedule(config).to_dict()
@@ -355,6 +356,10 @@ def build_deployment_abi(
                 "reference_batch_size": int(config.data.dinov2_reference_batch_size),
             },
             "state_dim": int(config.dimensions.state_dim),
+            **({"state_features": state_feature_metadata(
+                config.top.state_feature_mode, config.data.data_profile,
+                len(resolve_action_state_profile(config.data.data_profile).state_indices),
+            )} if config.top.state_feature_mode != NATIVE_AFFINE_STATE else {}),
             "action_dim": int(config.dimensions.action_dim),
         },
         "action": action_contract,
@@ -425,6 +430,21 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     language = _mapping(abi.get("language"), name="language")
     profile = _mapping(action.get("data_profile"), name="action.data_profile")
     profile_name = profile.get("name")
+    state_mode = str(graph_top.get("state_feature_mode", NATIVE_AFFINE_STATE))
+    native_width = len(resolve_action_state_profile(str(profile_name)).state_indices)
+    expected_features = state_feature_metadata(state_mode, str(profile_name), native_width)
+    if state_mode != NATIVE_AFFINE_STATE:
+        features = _mapping(observation.get("state_features"), name="observation.state_features")
+        if canonical_sha256(features) != canonical_sha256(expected_features):
+            raise ValueError("deployment state feature chart differs from selected graph")
+        dimensions = _mapping(graph.get("dimensions"), name="graph_config.dimensions")
+        if (_strict_abi_int(observation.get("state_dim"), name="observation.state_dim")
+                != expected_features["feature_state_dim"]
+                or _strict_abi_int(dimensions.get("state_dim"), name="dimensions.state_dim")
+                != expected_features["feature_state_dim"]):
+            raise ValueError("deployment state feature width differs from selected chart")
+    elif "state_features" in observation:
+        raise ValueError("legacy state graph cannot silently acquire a new feature chart")
     dino = _mapping(observation.get("dinov2"), name="observation.dinov2")
     if not str(dino.get("model", "")).strip():
         raise ValueError("deployment DINO model identity is empty")

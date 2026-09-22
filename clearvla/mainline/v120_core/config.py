@@ -11,6 +11,7 @@ from ..gripper_contract import VALID_GRIPPER_OUTPUT_MODES
 class V362PolicyConfig:
     action_dim: int = 7
     state_dim: int = 7
+    state_feature_mode: str = "native_affine_v1"
     action_horizon: int = 24
     executed_history_length: int = 3
     hidden_size: int = 512
@@ -70,8 +71,14 @@ class V362PolicyConfig:
             raise ValueError("V36.2 policy dimensions must be positive")
         if self.hidden_size % self.num_heads:
             raise ValueError("hidden_size must be divisible by num_heads")
-        if self.action_dim != self.state_dim:
-            raise ValueError("action/state dimensions must match")
+        if self.state_feature_mode == "native_affine_v1":
+            if self.action_dim != self.state_dim:
+                raise ValueError("legacy action/state dimensions must match")
+        elif self.state_feature_mode == "calvin_tcp_rotation6d_v1":
+            if (self.action_dim, self.state_dim) != (7, 10):
+                raise ValueError("rotation feature chart requires action/state dimensions 7/10")
+        else:
+            raise ValueError("unknown core state feature chart")
         if not 0 <= self.proposal_dropout < 1:
             raise ValueError("proposal_dropout must be in [0,1)")
         if not 0 <= self.dropout < 1:

@@ -74,6 +74,7 @@ def _build_decoder_config(config: ExperimentConfig):
         build_v120_policy_config(),
         action_dim=dims.action_dim,
         state_dim=dims.state_dim,
+        state_feature_mode=config.top.state_feature_mode,
         action_horizon=dims.action_horizon,
         executed_history_length=dims.executed_history_length,
         hidden_size=dims.hidden_size,

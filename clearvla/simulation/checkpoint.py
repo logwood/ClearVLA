@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.mainline.checkpoint import (
     CheckpointIdentity,
     checkpoint_identity_from_mapping,
@@ -167,7 +168,7 @@ def load_deployment_checkpoint(
     state_normalizer = _normalizer(
         data_state.get("state_normalizer"),
         name="state",
-        width=dims.state_dim,
+        width=len(resolve_action_state_profile(config.data.data_profile).state_indices),
     )
     normalizer_abi = cast(Mapping[str, object], abi["normalizers"])
     action_digest = canonical_sha256(action_normalizer.to_dict())

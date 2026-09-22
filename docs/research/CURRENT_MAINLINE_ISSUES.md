@@ -1,6 +1,6 @@
 # ClearVLA current decision ledger
 
-Updated: 2026-09-21
+Updated: 2026-09-22
 
 This file contains only unresolved questions that can select the next source
 unit or change a release claim. The active graph and invariants live in
@@ -26,9 +26,12 @@ attached to either repair.
 
 Still open before/through subsequent milestones:
 
-- M1b: reset distribution; physical rotation/coordinate/normalizer units;
-  control-step versus seconds metadata; all compact downstream missing-evidence
-  representations. Existing-inventory real-tail label support is implemented,
+- M1 observation/reset: repeated source images are still interpreted using
+  fixed visual frame gaps; a source-timed visual path must update flow losses,
+  temporal reads, global G memory and Teacher extrapolation together. M1c now
+  separates CALVIN native rotation/state statistics from model features and
+  action commands; physical control steps are not assumed to be seconds. Other
+  source/controller calibrations and compact missing-evidence remain reviewable. Existing-inventory real-tail label support is implemented,
   not a claim that previously converter-excluded annotations are recovered.
   Observed-tail validation is a new coverage surface, not an old E8 score.
 - G: multi-modal positions versus moment summaries; local attributes sharing

@@ -1,6 +1,6 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-21
+Updated: 2026-09-22
 
 This is the compact source of truth for the active mainline graph. Read it
 before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
@@ -21,8 +21,9 @@ they do not define the current graph.
 `codex/structural-rebuild-20260921` is based on immutable commit
 `0f07160d692ec8c8302880420a3d93d74512c39b`. The implemented units are **M1a physical-step history** and **M1b real-tail
 current-state coverage with source-owned future-label support**.
-The complete G/S/W/P structural redesign is not implemented or behaviorally
-validated. The default old graph and the M1a config remain controls. The new
+M1c additionally implements a native-state/feature-state boundary for the
+explicit CALVIN rotation-column candidate. The complete G/S/W/P structural
+redesign is not implemented or behaviorally validated. The default old graph and the M1a config remain controls. The new
 explicit candidate is `configs/mainline/structural_rebuild_m1b_calvin.json`;
 `structural_rebuild_m1_calvin.json` remains unchanged. Future work and unresolved
 review boundaries are in the existing repair plan, not declarations of current
@@ -30,6 +31,35 @@ architecture. The 2026-09-21 user authorization permits reviewed architectural
 changes on this branch; historical exact-arithmetic rules do not prohibit a
 new, explicitly identified component. Existing experimental source and data
 remain untouched.
+
+## M1c native state and model feature boundary
+
+`configs/mainline/structural_rebuild_m1c_calvin.json` selects
+`calvin_tcp_rotation6d_v1` together with real-time history and observed-tail
+labels. It is a new-training candidate, not a checkpoint migration or a claim
+of improved task success. The M1a/M1b and legacy configurations remain controls.
+
+CALVIN source state is still seven native coordinates: world TCP xyz in metres,
+roll/pitch/yaw in radians, and gripper opening in metres. Statistics are fitted
+on the same real native state rows as before. The model input is ten values:
+affine-normalized xyz, the first two columns of `Rz(yaw) Ry(pitch) Rx(roll)`
+in column order, and affine-normalized opening. Rotation columns are never
+normalized using the Euler statistics. The shared encoder owns current,
+history, future-target and online state features; unavailable future features
+are zeroed after encoding as well as masked in every target consumer.
+
+Native action, action-state, gripper boundary, sampling labels and environment
+commands remain seven-dimensional. No action is converted to this observation
+feature chart, and no inverse-Euler decoder is introduced. History changes in
+rotation features are chord differences per physical control step, not angular
+velocity or a Cartesian twist. Seconds per step are unknown unless an actual
+source/controller declares them; no nominal frequency is fabricated.
+
+Configuration, restored visual/bottom bridges and deployment ABI carry the
+feature mode and feature width. Checkpoint state-normalizer width is derived
+from the native source profile (7), not the model feature width (10). The exact
+feature metadata is validated before inference. An old graph cannot silently
+acquire this feature chart. There is no old optimizer/weight migration allow-list.
 
 ## Agent quick contract
 

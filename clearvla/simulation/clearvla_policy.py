@@ -10,6 +10,7 @@ import torch
 
 from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.data.instructions import normalize_instruction
+from clearvla.data.state_features import encode_state_features
 from clearvla.mainline.gripper_contract import (
     VALID_GRIPPER_OUTPUT_MODES,
     is_binary_gripper_mode,
@@ -113,7 +114,10 @@ class ClearVLACheckpointPolicy:
         normalizer = (
             self.bundle.action_normalizer if action else self.bundle.state_normalizer
         )
-        encoded = normalizer.encode(np.asarray(value, dtype=np.float32))
+        encoded = normalizer.encode(np.asarray(value, dtype=np.float32)) if action else encode_state_features(
+            value, normalizer, mode=self.bundle.config.top.state_feature_mode,
+            profile=self.bundle.config.data.data_profile,
+        )
         return torch.from_numpy(np.ascontiguousarray(encoded)).to(
             device=self.device,
             dtype=torch.float32,

@@ -519,6 +519,8 @@ def _load_mainline_data(
     profile = resolve_action_state_profile(data.data_profile)
     strict_dataset_config = ObservedStateDatasetConfig(
         emit_history_timing=config.top.history_encoding_mode == TIMED_HISTORY_ENCODING,
+        state_feature_mode=config.top.state_feature_mode,
+        state_profile=profile.name,
         world_horizon=48,
         policy_horizon=dims.action_horizon,
         support_stride=4,

@@ -142,6 +142,7 @@ def build_v120_visual_config(mainline_config: Any) -> V39PolicyConfig:
         build_v120_policy_config(),
         action_dim=int(dims.action_dim),
         state_dim=int(dims.state_dim),
+        state_feature_mode=str(mainline_config.top.state_feature_mode),
         action_horizon=int(dims.action_horizon),
         executed_history_length=int(dims.executed_history_length),
         hidden_size=int(dims.hidden_size),

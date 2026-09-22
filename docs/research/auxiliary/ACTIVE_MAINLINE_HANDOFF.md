@@ -1,73 +1,74 @@
 # ClearVLA structural rebuild implementation handoff
 
-Updated: 2026-09-21. This file describes this branch, not live server state.
+Updated: 2026-09-22. This describes source work, not a live server process.
 
 ## Identity and scope
 
 - Branch: `codex/structural-rebuild-20260921`.
-- Immutable base: `0f07160d692ec8c8302880420a3d93d74512c39b`.
+- Immutable baseline: `0f07160d692ec8c8302880420a3d93d74512c39b`.
 - Read-only control: `a0e1f5d5b9736d37a51faec36039144f181d4b12`.
-- Previous implemented unit: `329819bb12008d8ccf6211350bc64a8d8a4d7de1`, M1a real-time history.
-- Current candidate: `configs/mainline/structural_rebuild_m1b_calvin.json`.
-- Current source unit: M1b real-tail current states and source-owned future-label support.
-- Still open: remaining M1b coordinate/rotation/unit/reset/seed review, then G1/G2/G3/S-task/W/P.
+- Verified previous remote unit: M1b commit
+  `12326a33bc33dad58603ddbb3cc48c892135b087`, source tree
+  `632c4c0edd41c5adc22fca3a0fe9b41e64343f13`.
+- Current source unit: M1c native/feature-state separation.
+- Candidate: `configs/mainline/structural_rebuild_m1c_calvin.json`.
+- Subsequent visual reset/time, G1/G2/G3, S-task, W and P redesign remain open.
 
-The current source commit, source-owned tests, serialized config and CI artifact
-are authoritative. Do not infer a complete rebuild from the branch name. User
-authorization covers normal pushes to this isolated branch. No master or old
-branch update, deletion, data/cache write, checkpoint migration, formal training
-or server job was performed. A CI-generated commit must be verified by its
-publisher's final source tree and test artifact, not merely by a green bootstrap
-job. Direct Git DNS in the local container is unavailable; GitHub API writes
-and downloaded workflow artifacts are available.
+The continuation archive was checked against all 756 recorded SHA-256 entries.
+The M1b tree was independently reconstructed from the published M1a archive and
+179278-byte recovery patch, producing exactly the remote tree above. The
+recovery archive lacked usable Git history; local recovery commits are not
+misrepresented as the remote source commit.
 
-## Current semantic unit
+## Current implementation
 
-Read the architecture contract's M1b section and the repair plan's map. This is
-not a dataset-only switch: the actual loader shares one source-support record
-with action/future supervision; Teacher, recognizer, W/S targets, coarse/history
-proposal, flow bridge, all formal target losses, execution value and validation
-consume it. It never enters online conditioning. Unknown flow rows remain source
-noise. Fixed W intervals require complete actual support. Validation uses real
-label denominators and reports empty-band coverage. The old M1a candidate and
-legacy defaults remain controls; source/semantic changes are not resume aliases.
+One source-profile-specific encoder maps native CALVIN xyz/rpy/opening into
+10 model features, using rotation columns before normalization. Actual affine
+arithmetic is `x * scale + offset`; it was verified, not changed to another
+normalizer convention. Dataset, future supervision and online policy share the
+encoder. Future unavailable features are neutralized after rotation conversion.
+Native statistics and seven-dimensional action/command/state boundaries remain
+unchanged. Configuration and feature metadata reject incompatible old resumes.
 
-## Verification and resource boundary
+The scoped review also traced CALVIN and ManiSkill clipping/actual-command
+feedback through repository-owned simulation paths. This does not certify an
+external evaluation script or an unknown physical controller. Visual duplicate
+reset frames and fixed flow time remain a distinct open source unit.
 
-The local execution environment is Python 3.13.5 / PyTorch 2.10.0+cpu, not the
-repository's required Python 3.12 / PyTorch 2.11.x. Local checks are supplemental.
-M1a was first rerun locally (153 focused tests). The M1b first complete-suite
-attempt was killed by the local 4 GiB cgroup memory limit (exit 137), not
-accepted as a pass. Subsequent per-file runs also exposed the large policy
-file exceeding local memory in both untouched baseline and candidate; local
-rechecks shard that same collected node inventory, not the assertions. `run_structural_tests.py` now isolates each test
-file in a fresh process without dropping tests; per-file logs and combined
-JUnit retain failures, missing results and abnormal exits explicitly.
+## Verification
 
-Final counts belong to the final commit's workflow artifacts: `runtime.json`,
-`baseline-tests.xml`, `current-tests.xml`, per-file process inventory and
-`static-delta.json`. The supported-runtime publisher reruns the untouched base
-and the complete selected current inventory before publishing. The persistent
-read-only audit explicitly selects Python 3.12. A static regression pass means
-no NEW errors in reviewed files, not zero historical repository errors.
+Local execution is Python 3.13.5 / PyTorch 2.10.0+cpu, not the required Python
+3.12 / PyTorch 2.11.x. Results are supplemental unless a matching CI artifact
+explicitly records the supported runtime. There is no CUDA/BF16 hardware run,
+formal dataset training, real checkpoint success or physical closed-loop result.
 
-Tests exercise actual production model forward/backward, target-payload
-invariance for every formal loss and parameter gradient, cached-loader mask
-transport, validation subset denominators, continuous/binary outlet loss paths,
-ordinary checkpoint save/exact reload, real deployment-checkpoint loading
-with data-only support omitted, and same-noise online independence. Additional
-CPU BF16 tail forward/backward checks are explicitly not CUDA BF16 checks.
-Only declared image/token/language/environment I/O fixtures replace external
-transport; they do not replace the neural or supervision path. CPU tests are
-not CUDA BF16 tests, formal dataset training or physical closed-loop results.
-No task-success improvement has been established by this source unit.
+M1c has 36 focused tests: legacy affine equivalence, independent rotation
+formula and equivalent Euler charts, wrap-boundary continuity, malformed-input
+admission, config/ABI identity, production dataset/online equivalence at reset
+and tail centers, actual optimizer updates with ten-dimensional states and
+seven-dimensional actions, ordinary checkpoint save/exact reload, deployment
+loader and same-noise action equality. External image/token/environment I/O is
+replaced only where explicitly declared; neural/state paths are production code.
 
-## Resume work
+Scoped Ruff reports zero diagnostics; differential Pyright reports zero new
+errors and no new missing imports. Inherited diagnostics and library-stub
+warnings remain recorded. Full selected regression results belong to the
+artifact, not an assumed pass: local runs shard the exact collected inventory
+into bounded processes because the execution container has a 4 GiB memory
+limit. Kills, timeouts and missing JUnit count as failures, not skips.
 
-Finish M1b's coordinate/rotation/action-normalizer meanings, nominal physical
-step metadata, compact downstream missing-evidence and reset distribution
-review. Then enter G1 with its producer/consumer/loss contracts. Current source
-support fixes do not close W's candidate-action/observed-future mismatch, Q5
-endpoint conditioning or future entity/task-state lifecycle. Keep each next
-semantic unit coherent; update downstream consumers and supervision with the
-producer rather than leaving silent adapters or invented labels.
+## Resume boundary
+
+Read the current architecture contract and work plan. Next inspect visual
+source-time/reset semantics end to end before using flow as physical change:
+flow objective support, temporal keys, evidence pooling, cached G reads and
+Teacher reference duration must agree. Do not mask one output and claim all
+consumers fixed. Then enter candidate-preserving G1 and subsequent entities.
+Source changes must carry their consumers, supervision and state lifecycles.
+Do not restart completed M1a/M1b work or repeat a failing publication loop;
+preserve a verified local commit/patch/source archive and continue engineering.
+
+User authorization remains ordinary fast-forward pushes to the isolated branch.
+No master/old branch modifications, deletion, old-checkpoint migration or
+formal training is authorized by this handoff. GitHub permission and actual
+published SHA must be verified separately. Local tests are not a remote CI pass.

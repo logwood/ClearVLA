@@ -1,6 +1,6 @@
 # ClearVLA structural rebuild work plan
 
-Updated: 2026-09-21
+Updated: 2026-09-22
 
 This branch is an implementation of the user's authorized, sequential
 structural rebuild. The immutable base is
@@ -28,7 +28,8 @@ choices just to preserve old golden outputs.
 | M0 source baseline | Implemented | Full base archive verified against Git blobs; final tree diff of the two experiment heads recorded; isolated branch and read-only source audit exist. Baseline test and diagnostic scope is in the handoff. |
 | M1a real history time | Implemented candidate; validation recorded per commit | Shared source clock; separate state/control encoding; padding/dropout masks through S, coarse and proposal; bounded online history; new config/components/ABI. This is not all of M1. |
 | M1b real-tail labels | Implemented candidate; validation recorded per commit | All labelled real current centers and independent action/state/visual support through loader, Teacher, auxiliary/formal losses and validation. Source files/caches and old defaults unchanged. |
-| M1b remaining ingress | Open, next unit | Rotation/coordinate/normalizer semantics; nominal control-step versus seconds metadata; downstream seed/missing-evidence and reset distribution review. M1 is not complete; do not bypass these obligations when entering G1. |
+| M1c native/feature state | Implemented candidate; validation recorded per commit | One CALVIN rotation-column encoder for current/history/future/online; native statistics and seven-dimensional commands remain separate; explicit new ABI and checkpoint checks. |
+| M1 remaining observation/reset | Open, next unit | Visual source gaps, repeated reset frames, flow/Teacher reference duration, compact downstream missing-evidence and reset distribution; then candidate-preserving G1. No all-M1 completion claim. |
 | M2 observation/G1 | Not started | Audit preprocessing/flow charts; retain distinguishable candidate modes, support and provenance rather than relying exclusively on means. |
 | M3 G2 | Not started | Entity-consistent attribute/localization refinement and bounded-error recovery/reassociation. |
 | M4 G3 + current Teacher identity | Not started | One entity state with per-camera support and causal association; update reconstruction and Teacher references together. |
@@ -62,6 +63,16 @@ choices just to preserve old golden outputs.
 | Action support | Flow bridge, action/decoded/command/motion and execution-value objectives | Missing rows remain source noise; no contribution or gradient from unavailable label payload. |
 | Metric support | All target-dependent validation errors, event/motion counts, ablation errors | Denominator is real labels; report band support; keep model-only action deltas separately defined. |
 | New config/source identity | Ordinary save/exact reload | No M1a exact-resume alias or old-weight migration exception. |
+
+## M1c source and consumer map
+
+| Producer | Consumers | Boundary |
+|---|---|---|
+| Native source profile and normalizer | Shared `data/state_features.py` encoder | Statistics retain original seven-dimensional physical state domain. |
+| Feature encoder | Dataset current/history/future and online policy | Ten-dimensional observed state, same transform and rotation convention; missing future payload remains zero. |
+| Explicit config | Component factory and restored visual/bottom configuration | State width may differ from command width only under a declared compatible chart. |
+| State feature metadata | Deployment ABI and normalizer loader | Type-sensitive exact metadata; feature width 10, native normalizer/action width 7. |
+| Source-owned tests | Actual dataset, loader, model, optimizer, checkpoint and sampling | External image/token transport may be a fixture; neural and state-conversion paths are production code. |
 
 ## Review and publishing gates
 

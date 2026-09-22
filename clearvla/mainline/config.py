@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import Mapping, TypeVar, cast
 
 from clearvla.data.action_chart import resolve_action_state_profile
+from clearvla.data.state_features import (
+    CALVIN_ROTATION6D_STATE,
+    NATIVE_AFFINE_STATE,
+    STATE_FEATURE_MODES,
+    state_feature_width,
+    validate_state_feature_profile,
+)
 from clearvla.data.window_boundaries import (
     CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
     CAUSAL_PREFIX_V1,
@@ -349,8 +356,7 @@ class ModelDimensions:
         values = asdict(self)
         if any(int(value) <= 0 for value in values.values()):
             raise ValueError("all model dimensions must be positive")
-        if self.action_dim != self.state_dim:
-            raise ValueError("the active action/state chart requires equal dimensions")
+        # Action commands and state features have independent source-owned widths.
         if self.hidden_size % self.num_heads:
             raise ValueError("hidden_size must be divisible by num_heads")
         if self.action_horizon != 24:
@@ -441,8 +447,11 @@ class TopConfig:
     p2_spatial_intent_mode: str = "post_pool_only"
     # Explicit new behavior; legacy checkpoints keep their existing history chart.
     history_encoding_mode: str = "paired_rows_v1"
+    state_feature_mode: str = NATIVE_AFFINE_STATE
 
     def validate(self) -> None:
+        if self.state_feature_mode not in STATE_FEATURE_MODES:
+            raise ValueError("unknown top state_feature_mode")
         if self.history_encoding_mode not in {"paired_rows_v1", "timestamped_streams_v1"}:
             raise ValueError("unknown top history_encoding_mode")
         if self.world_camera_condition_mode not in {
@@ -915,8 +924,11 @@ class ExperimentConfig:
         profile = resolve_action_state_profile(self.data.data_profile)
         if profile.output_dim != self.dimensions.action_dim:
             raise ValueError("data profile width must align with dimensions.action_dim")
-        if profile.output_dim != self.dimensions.state_dim:
-            raise ValueError("data profile width must align with dimensions.state_dim")
+        validate_state_feature_profile(self.top.state_feature_mode, profile.name)
+        if state_feature_width(self.top.state_feature_mode, len(profile.state_indices)) != self.dimensions.state_dim:
+            raise ValueError("state feature chart must align with dimensions.state_dim")
+        if self.top.state_feature_mode == CALVIN_ROTATION6D_STATE and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING:
+            raise ValueError("rotation feature state requires source-timed history")
         if self.objectives.phase_control_mode != "none" and profile.name not in {
             "maniskill_pd_ee_delta_pose_7d_v1",
             "maniskill_pd_ee_delta_pose_7d_v2",
@@ -1088,6 +1100,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.state_feature_mode == NATIVE_AFFINE_STATE:
+            cast(dict[str, object], payload["top"]).pop("state_feature_mode")
         if self.top.history_encoding_mode == "paired_rows_v1":
             cast(dict[str, object], payload["top"]).pop("history_encoding_mode")
         if self.top.p2_spatial_intent_mode == "post_pool_only":

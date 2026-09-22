@@ -17,6 +17,12 @@ from torch.utils.data import Dataset
 from clearvla.data.future_clock import OBSERVED_FUTURE_CONTRACT, future_source_rows
 from clearvla.data.hdf5_episode import LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING, LoadedEpisode
 from clearvla.data.history_clock import sparse_history_clock
+from clearvla.data.state_features import (
+    NATIVE_AFFINE_STATE,
+    encode_state_features,
+    state_feature_width,
+    validate_state_feature_profile,
+)
 from clearvla.data.window_boundaries import (
     BOUNDARY_REGION_TO_INDEX,
     BOUNDARY_REGIONS,
@@ -50,9 +56,14 @@ class ObservedStateDatasetConfig:
     stride: int = 1
     causal_reset_padding: bool = False
     emit_history_timing: bool = False
+    state_feature_mode: str = NATIVE_AFFINE_STATE
+    state_profile: str = "identity_7d_pen"
     window_boundary_contract: str = STRICT_COMPLETE_V1
 
     def validate(self) -> None:
+        validate_state_feature_profile(self.state_feature_mode, self.state_profile)
+        if self.state_feature_mode != NATIVE_AFFINE_STATE and not self.emit_history_timing:
+            raise ValueError("state feature chart requires source-timed history")
         if type(self.emit_history_timing) is not bool:
             raise ValueError("emit_history_timing must be boolean")
         if self.emit_history_timing and (
@@ -194,6 +205,12 @@ class ObservedStateWindowDataset(Dataset):
         )
         for episode_idx in self.episode_ids:
             episode = episodes[episode_idx]
+            if config.state_feature_mode != NATIVE_AFFINE_STATE:
+                if episode.data_profile != config.state_profile:
+                    raise ValueError("state feature profile differs from the projected episode")
+                if episode.states_raw is None:
+                    raise ValueError("state feature chart requires native observed state")
+                state_feature_width(config.state_feature_mode, int(episode.states_raw.shape[-1]))
             image_store.validate_episode(episode)
             complete_history_start = max(0, -int(min_rel))
             strict_computed_start = (
@@ -592,6 +609,15 @@ class ObservedStateWindowDataset(Dataset):
             label_start = int(episode.valid_center_start or 0)
             label_end = int(episode.terminal_state_index or 0)
             frame_progress = float(center - label_start) / max(label_end - label_start, 1)
+        future_state_features = encode_state_features(
+            future_state_raw, self.state_normalizer,
+            mode=cfg.state_feature_mode, profile=cfg.state_profile,
+        )
+        if cfg.window_boundary_contract == OBSERVED_TAIL_V1:
+            # A zero native Euler filler encodes a real identity rotation. It
+            # is still missing data, so quarantine AFTER the nonlinear chart
+            # as well as before it. Never export invented terminal targets.
+            future_state_features[~future_support["future_state_observed"].numpy()] = 0.0
         return {
             **future_support,
             **(
@@ -616,7 +642,8 @@ class ObservedStateWindowDataset(Dataset):
                 frame_progress,
                 dtype=torch.float32,
             ),
-            "state": torch.from_numpy(self.state_normalizer.encode(state_raw)),
+            "state": torch.from_numpy(encode_state_features(state_raw, self.state_normalizer,
+                mode=cfg.state_feature_mode, profile=cfg.state_profile)),
             "state_raw": torch.from_numpy(state_raw.copy()),
             "action_state": torch.from_numpy(self.action_normalizer.encode(action_state_raw)),
             "action_state_raw": torch.from_numpy(action_state_raw.copy()),
@@ -626,7 +653,8 @@ class ObservedStateWindowDataset(Dataset):
             "gripper_transition_boundary_raw": torch.from_numpy(
                 gripper_transition_boundary_raw.copy()
             ),
-            "history_state": torch.from_numpy(self.state_normalizer.encode(history_state_raw)),
+            "history_state": torch.from_numpy(encode_state_features(history_state_raw, self.state_normalizer,
+                mode=cfg.state_feature_mode, profile=cfg.state_profile)),
             "executed_action_history": torch.from_numpy(
                 self.action_normalizer.encode(executed_action_raw)
             ),
@@ -635,7 +663,7 @@ class ObservedStateWindowDataset(Dataset):
                 self.action_normalizer.encode(future_action_raw[: cfg.policy_horizon])
             ),
             "policy_action_raw": torch.from_numpy(future_action_raw[: cfg.policy_horizon].copy()),
-            "future_state": torch.from_numpy(self.state_normalizer.encode(future_state_raw)),
+            "future_state": torch.from_numpy(future_state_features),
             "future_offsets": torch.tensor(cfg.future_offsets, dtype=torch.long),
             "history_obs_image": history_rgb,
             "history_keys": torch.from_numpy(history_keys),
