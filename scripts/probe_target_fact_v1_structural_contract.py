@@ -381,7 +381,7 @@ def _p2_contract(seed: int) -> dict[str, object]:
             dtype=torch.float32,
         ),
     )
-    fractional_bundle, fractional_metrics = reader(
+    fractional_selected, fractional_metrics = reader.spatial_select(
         action_query,
         dynamics,
         fractional_intent,
@@ -495,37 +495,37 @@ def _p2_contract(seed: int) -> dict[str, object]:
         ),
         "physical_mass_scales_target_semantic_values_only": (
             _max_delta(
-                fractional_bundle.target.semantic,
-                original_bundle.target.semantic * 0.25,
+                fractional_selected.semantic_value,
+                selected.semantic_value * 0.25,
             )
             <= 1e-6
             and _max_delta(
-                fractional_bundle.target.key[..., 0, :],
-                original_bundle.target.key[..., 0, :],
+                fractional_selected.key[..., 0, :],
+                selected.key[..., 0, :],
             )
             <= 1e-6
         ),
         "physical_camera_mass_scales_target_geometry_values_only": (
             _max_delta(
-                fractional_bundle.target.geometry,
-                original_bundle.target.geometry * 0.25,
+                fractional_selected.geometry_value,
+                selected.geometry_value * 0.25,
             )
             <= 1e-6
             and _max_delta(
-                fractional_bundle.target.key[..., 1, :],
-                original_bundle.target.key[..., 1, :],
+                fractional_selected.key[..., 1, :],
+                selected.key[..., 1, :],
             )
             <= 1e-6
         ),
         "physical_mass_does_not_renormalize_scene": (
             _max_delta(
-                fractional_bundle.scene.semantic,
-                original_bundle.scene.semantic,
+                fractional_selected.semantic_scene_value,
+                selected.semantic_scene_value,
             )
             <= 1e-6
             and _max_delta(
-                fractional_bundle.scene.geometry,
-                original_bundle.scene.geometry,
+                fractional_selected.geometry_scene_value,
+                selected.geometry_scene_value,
             )
             <= 1e-6
         ),

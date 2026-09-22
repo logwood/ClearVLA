@@ -825,7 +825,10 @@ class ObjectFutureEffectReader(nn.Module):
             physical_camera_mass = posterior[:, :, None].expand(
                 -1, -1, int(camera_posterior.shape[-1])
             )
-        joint_geometry_weight = (
+        identity_joint_geometry_weight = (
+            posterior[:, None, None, None, :, None] * camera_posterior
+        )
+        physical_joint_geometry_weight = (
             physical_camera_mass[:, None, None, None, :, :] * camera_posterior
         )
         scene_joint_geometry_weight = (
@@ -833,7 +836,7 @@ class ObjectFutureEffectReader(nn.Module):
         )
         geometry_selected_key = torch.einsum(
             "btqikc,bikch->btqih",
-            joint_geometry_weight,
+            identity_joint_geometry_weight,
             geometry_key.float(),
         )
         transport_common = supported(
@@ -848,12 +851,12 @@ class ObjectFutureEffectReader(nn.Module):
         )
         geometry_selected_common = torch.einsum(
             "btqikc,bkcv->btqiv",
-            joint_geometry_weight,
+            physical_joint_geometry_weight,
             transport_common.float(),
         )
         geometry_selected_residual = torch.einsum(
             "btqikc,bikcv->btqiv",
-            joint_geometry_weight,
+            physical_joint_geometry_weight,
             transport_residual.float(),
         )
         geometry_scene_key = torch.einsum(
@@ -1001,7 +1004,7 @@ class ObjectFutureEffectReader(nn.Module):
                 gradient_metrics,
                 "gradient_tensor_p2_target_posterior_rms",
             )
-        geometry_k_marginal = joint_geometry_weight.sum(dim=-1)
+        geometry_k_marginal = physical_joint_geometry_weight.sum(dim=-1)
         scene_geometry_k_marginal = scene_joint_geometry_weight.sum(dim=-1)
         expected_geometry_k = (
             (
