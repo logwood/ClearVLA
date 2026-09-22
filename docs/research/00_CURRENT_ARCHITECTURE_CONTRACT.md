@@ -24,12 +24,13 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit candidate is
-`configs/mainline/structural_rebuild_m2_calvin.json`. Legacy and M1a/M1b/M1c/M1d
+`configs/mainline/structural_rebuild_m3_calvin.json`. Legacy and M1a/M1b/M1c/M1d/M2
 configs remain reproducible controls, not automatic aliases of this candidate.
-M2 implements full G1 support through the actual G2 sampler and G3/P1
-value consumers. G2 attribute/entity consistency, global/persistent G3
-identity, S-task, W-supervision and the deeper P redesign are not implemented
-or behaviorally validated. The user-authorized rebuild may revise
+M2 preserves full G1 support through the actual G2 sampler and G3/P1
+value consumers. M3 adds one soft local observation law for typed properties
+and their positions. Global/persistent G3 entity identity, S-task,
+W-supervision and the deeper P redesign remain open. No learned behavior
+is established by these source changes. The user-authorized rebuild may revise
 historical implementation details; accepted source semantics belong here,
 future work in the repair plan, and test/publish status in the handoff.
 
@@ -145,6 +146,47 @@ their existing algorithms pending M3/M4. P1 interface adaptation is not M7's
 shared-target precision review. End-to-end action gradients to G1 establish
 connectivity, not learned task success. Revisit density/memory and localization
 choices when later consumers expose a better representation.
+
+## M3 coupled local observation identity
+
+`observation.local_ownership_mode=coupled_observation_v1` requires M2's full
+candidate support. G2 combines the three learned typed compatibility scores
+and the normalized G1 parent measure into one FP32 soft location posterior.
+Semantic, appearance and geometry values remain separately encoded but are
+read using that same location law. G2 integrates its candidate law to one
+local-M hypothesis measure; G3's three existing correction heads jointly
+refine that measure instead of defining three unrelated M identities.
+
+The combination is an energy-based learned compatibility model, not a claim
+that its sources are calibrated independent sensor likelihoods. It adds no
+hard winner, target color, entropy quota, or visibility prediction. Conflicting
+local evidence may remain ambiguous: sharing a law is not hard selection and
+does not turn a multimodal mean into a uniquely localized physical entity.
+M2's candidate support and P1 local quadrature remain intact.
+
+Fine and M posteriors remain FP32 under autocast. The typed fields retained by
+the legacy interfaces refer to the same law; they are not separate trainable
+owners. The dense global binder consequently receives the same local prior
+for every attribute, while retaining sole control of real-versus-null mass.
+All-invalid fine rows have zero observable mass and zero payload gradients;
+an all-invalid M row retains a neutral prior so absence is routed to null
+rather than destroying mixture mass. Invalid candidate values are quarantined
+before projections, aggregation or the local correction.
+
+Existing three G2 query projections and three G3 correction heads remain
+active evidence producers. In connectivity tests, nondegenerate observation
+features are necessary: the state-chart fixture's channel-constant DINO rows
+correctly normalize to zero and cannot measure semantic-query connectivity.
+Tests must not modify trained parameters or force a gain to obtain gradients.
+A nonzero test gradient proves connectivity only, not useful learned influence.
+
+Config, restored core, progressive state and deployment metadata carry this
+new selection explicitly. Missing or wrong ABI fields are rejected; there is
+no old-checkpoint migration. The independent-typed control remains available
+for reproducibility and is checked for unchanged parameters/order and sampling.
+M4 must still address entity objectness, multimodal-support reduction into
+K facts, the third G block's entity-value role, and causal entity association.
+The shared local law is NOT persistent tracking or S's operated-target binding.
 
 ## Agent quick contract
 

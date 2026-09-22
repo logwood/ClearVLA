@@ -35,9 +35,11 @@ Still open before/through subsequent milestones:
   excluded by earlier conversion. Observed-tail validation is not an old E8
   metric alias.
 - G: M2's explicit candidate consumes full G1 support in actual G2 sampling,
-  G3 current-content expectation and P1 real local patches. Still open: local
-  attributes sharing entity support; completed G3 block versus binder entity
-  identity; causal entity association and Teacher's dependence on current G.
+  G3 current-content expectation and P1 real local patches. M3's explicit
+  selection shares the local candidate and M law across distinct attribute
+  values. Still open: global entity objectness, reduction of ambiguous support,
+  completed G3 block versus binder entity identity, causal entity association
+  and Teacher's dependence on current G.
   Distribution preservation is not a trained segmentation/tracking guarantee;
   production-scale memory/latency must be measured on the user's GPU.
 - S: target/operation/progress separation, object-specific change, shared

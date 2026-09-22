@@ -108,15 +108,44 @@ recorded separately in the runtime artifact; do not infer their completion
 from this focused result. GPU/CUDA BF16, full-data training, memory/latency at
 production batch sizes and physical closed-loop behavior remain unrun.
 
+## Current M3 unit and publication separation
+
+M1d is remotely published as `18b0e5dffdca687025cd3bdf39a96cf1cb82cecf`,
+with source tree `5c9a4b8fa9cac9c30466b9eaa7b1a573ffdd35e3` and retained-CI
+remote tree `2b45471d5df3ec9e421cbba2a181c38475e8ae16`. Workflow
+`35674979805` completed source verification and normal publication on Python
+3.12.14 / PyTorch 2.11.0 CPU: 580 cases, 579 passed, one skipped, zero failures
+or errors; scoped Ruff clean and zero newly introduced Pyright errors.
+
+M2 is a separately frozen local unit; consult its test artifacts and remote
+publication before assigning a remote SHA. M3 is the next local candidate,
+`configs/mainline/structural_rebuild_m3_calvin.json`. It couples local location
+ownership, not global physical identity or task binding. Its exact test/static
+results belong with its source archive and workflow; do not infer publication
+or test completion from this handoff. Local runtime remains Python 3.13.5 /
+PyTorch 2.10.0 CPU. GPU and learned closed-loop behavior remain unrun.
+
+M3 tests use real production encoders, grounding, Teacher, action decoder,
+optimizer and ordinary checkpoint/deployment paths. The external cached-image
+transport remains a documented fixture. An initial test used spatially and
+channel-degenerate DINO fixture values, making the semantic key zero after
+LayerNorm. Connectivity now uses explicitly nondegenerate observation inputs,
+without editing model parameters or relaxing positive-gradient assertions.
+Failed/import-mismatched preliminary test attempts remain in external logs;
+only final exact-source runs count as verification.
+
 ## Resume boundary
 
-Read the current architecture contract and work plan. Verify M1d/M2 final test and publication status from artifacts, then continue
-M3 typed local ownership and M4 global/persistent entity review. M2 is a real
-G2/G3/P1 consumer change, not completion of the later task/entity redesign. Do not implement
-a second unused posterior container: G1 already stores its full distribution.
-The source-time and state-feature tests now become guards for later changes.
-Do not restart M1a/M1b or repeat a failing publication loop; preserve a verified
-local commit/patch/source archive and continue the next source review.
+Read the current architecture contract and work plan. M1c/M1d are published;
+verify M2/M3 exact final tests and publication from their source artifacts.
+Proceed to M4 global objectness, multimodal entity support, actual G3 value
+ownership and causal association only after M3's local-law unit is verified.
+S-task, W matched-action supervision, shared target P1/P2 and execution feedback
+remain open. They are not completed by upstream interface migration.
+Do not recreate an unused copy of the G1 posterior: its actual G2/G3/P1
+consumers now preserve full support. State/visual source-time and feature tests
+are guards for later changes. If publishing fails, preserve the local source,
+patch, checksums and verification record instead of repeating payload writes.
 
 User authorization remains ordinary fast-forward pushes to the isolated branch.
 No master/old branch modifications, deletion, old-checkpoint migration or

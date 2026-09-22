@@ -31,7 +31,7 @@ choices just to preserve old golden outputs.
 | M1c native/feature state | Implemented candidate; validation recorded per commit | One CALVIN rotation-column encoder for current/history/future/online; native statistics and seven-dimensional commands remain separate; explicit new ABI and checkpoint checks. |
 | M1d visual source time | Implemented candidate; verification recorded per commit | Source gaps, repeated frames, semantic/raw flow loss support, temporal/global G reads and future queries, S/W rates and Teacher duration use one observable clock. No claim about unprovided external controllers. |
 | M2 observation/G1 | Implemented candidate; verification recorded per commit | Full FP32 G1 support in actual G2 candidate/value materialization; G3 observed-content quadrature and real per-candidate local P1 microgrids, explicit config/ABI. Deeper G2/G3 entity ownership remains M3/M4. |
-| M3 G2 | Not started | Entity-consistent attribute/localization refinement and bounded-error recovery/reassociation. |
+| M3 G2 local observation | Implemented candidate; verification recorded per commit | One soft FP32 location law across typed attributes, full-support G2 evidence and joint G3 local-M refinement; actual binder/Teacher/P1 consumers adapted. Global entities and temporal reassociation remain M4. |
 | M4 G3 + current Teacher identity | Not started | One entity state with per-camera support and causal association; update reconstruction and Teacher references together. |
 | M5 S/coarse | Interface adapted only | The history submodule is new; target/operation/progress decomposition, shared entity binding and recognizer supervision still require deep review. |
 | M6 W1/W2 | Not started | Match supervised action to observed outcome; separate candidate prediction from demonstration-target training; explicit robot-object relations and known control horizon. |
@@ -102,6 +102,23 @@ unifying local attribute ownership and global/persistent entity identity.
 | Geometry candidate law | G3 observed DINO content | Read the content at support points before expectation; tiled exact value bandwidth. |
 | Actual candidate coordinates/RGB/detail | P1 real local microgrid | Local per-hypothesis 3x3 patches, masks and logit-space posterior conditioning. |
 | Explicit candidate-support selection | Factory, validation, deployment ABI | No silent N=49 assumptions, opaque fallback or old-checkpoint alias. |
+
+## M3 source and consumer map
+
+| Producer | Consumer | Contract |
+|---|---|---|
+| Three G2 typed compatibility queries | Joint local observation law | Attributes may differ, but their candidate location posterior is shared and soft. |
+| Full G1 parent + source validity | Candidate and local-M integration | No candidate-count reward; unsupported values cannot create mass or gradients. |
+| One G2 location law | G3 canonical typed values and observed DINO content | Same entity-hypothesis location, distinct typed values; retain M2 current-camera support. |
+| Three G3 residual heads | One refined M law | No independent reassignment of property identity; no real/null authority transfer. |
+| Local-M law | Dense K binder, Teacher's current references, P1 | One source prior; downstream deeper review is not waived by interface compatibility. |
+| Explicit local mode | Factory/state/deployment ABI/checkpoint | No silent fallback or old-checkpoint migration. |
+
+M4 still needs to review global objectness and persistent association. A soft
+mixture with aligned marginals may remain ambiguous; do not claim that M3 has
+resolved every constituent into a physical object. More hypotheses or a hard
+argmax are not automatic remedies. Keep complete observed support available
+while designing the global entity state and its training/online lifecycle.
 
 ## Review and publishing gates
 

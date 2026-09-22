@@ -145,6 +145,7 @@ def build_v120_visual_config(mainline_config: Any) -> V39PolicyConfig:
         state_feature_mode=str(mainline_config.top.state_feature_mode),
         flow_jepa_source_time_mode=str(mainline_config.observation.source_time_mode),
         flow_jepa_candidate_support_mode=str(mainline_config.observation.candidate_support_mode),
+        flow_jepa_local_ownership_mode=str(mainline_config.observation.local_ownership_mode),
         action_horizon=int(dims.action_horizon),
         executed_history_length=int(dims.executed_history_length),
         hidden_size=int(dims.hidden_size),

@@ -43,6 +43,13 @@ from clearvla.vision.candidate_support import (
     posterior_candidate_support,
     sample_candidate_expectation,
 )
+from clearvla.vision.local_ownership import (
+    COUPLED_LOCAL_OWNERS,
+    INDEPENDENT_LOCAL_OWNERS,
+    couple_local_observation,
+    local_ownership_metadata,
+    refine_local_observation,
+)
 from clearvla.vision.source_time import (
     FIXED_VISUAL_TIME,
     SOURCE_VISUAL_TIME,
@@ -426,6 +433,7 @@ class ProgressiveGroundingAddressState:
 
     bank: SoftAddressLatticeBank
     candidate_support_mode: str = MOMENT_LOCAL_SUPPORT
+    local_ownership_mode: str = INDEPENDENT_LOCAL_OWNERS
     stage: int = 0
     coarse_logits: Tensor | None = None
     coarse_probability: Tensor | None = None
@@ -4195,6 +4203,11 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
         super().__init__()
         self.candidate_support_mode = str(getattr(config, "flow_jepa_candidate_support_mode", MOMENT_LOCAL_SUPPORT))
         candidate_support_metadata(self.candidate_support_mode)
+        self.local_ownership_mode = str(getattr(config, "flow_jepa_local_ownership_mode", INDEPENDENT_LOCAL_OWNERS))
+        local_ownership_metadata(self.local_ownership_mode)
+        if self.local_ownership_mode == COUPLED_LOCAL_OWNERS and self.candidate_support_mode != FULL_POSTERIOR_SUPPORT:
+            raise ValueError("coupled local ownership requires full G1 support")
+
 
         self.hidden = int(config.hidden_size)
         self.route_dim = int(config.flow_jepa_address_route_dim)
@@ -4902,7 +4915,9 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             raise RuntimeError(
                 "progressive grounding address requires the complete observation scaffold"
             )
-        return ProgressiveGroundingAddressState(bank=bank, candidate_support_mode=self.candidate_support_mode, metrics={})
+        if self.local_ownership_mode == COUPLED_LOCAL_OWNERS and not (self.coordinate_typed_raw_detail and self.structured_ownership and self.exports_grounded_facts):
+            raise ValueError("coupled observation requires typed current-fact grounding")
+        return ProgressiveGroundingAddressState(bank=bank, candidate_support_mode=self.candidate_support_mode, local_ownership_mode=self.local_ownership_mode, metrics={})
 
     def _clean_query(self, rollout: Tensor) -> Tensor:
         expected = self.anchors * self.cameras * self.grid * self.grid
@@ -4953,6 +4968,8 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             )
         if state.candidate_support_mode != self.candidate_support_mode:
             raise ValueError("progressive state and candidate materializer contracts differ")
+        if state.local_ownership_mode != self.local_ownership_mode:
+            raise ValueError("progressive state and local identity contracts differ")
         bank = state.bank
         clean = self._clean_query(rollout)
         query = self.query_projections[stage - 1](
@@ -5171,6 +5188,19 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             )
             if not isinstance(candidates, ProgressiveFineCandidates):
                 raise TypeError("G2 candidate sampler returned an invalid contract")
+            if self.local_ownership_mode == COUPLED_LOCAL_OWNERS:
+                def supported_candidate(value: Tensor | None) -> Tensor | None:
+                    if value is None:
+                        return None
+                    return torch.where(candidates.valid[..., None], value, torch.zeros_like(value))
+                combined = supported_candidate(candidates.combined_keys)
+                detail_value = supported_candidate(candidates.learned_detail)
+                assert combined is not None and detail_value is not None
+                candidates = replace(candidates, combined_keys=combined, learned_detail=detail_value,
+                    semantic_keys=supported_candidate(candidates.semantic_keys),
+                    appearance_keys=supported_candidate(candidates.appearance_keys),
+                    geometry_keys=supported_candidate(candidates.geometry_keys),
+                    literal_rgb=supported_candidate(candidates.literal_rgb))
             dynamic_fine_keys = candidates.combined_keys
             dynamic_fine_values = candidates.learned_detail
             dynamic_fine_valid = candidates.valid
@@ -5245,19 +5275,28 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                         raise RuntimeError("G2 lost its complete G1 parent measure")
                     # Same discrete measure for every typed read; no Gaussian at E[x].
                     spatial_prior = torch.log_softmax(prior_strength[..., None] * candidates.parent_log_probability, dim=-1)
-                fine_logits = content_logits + spatial_prior
-                fine_logits = fine_logits.masked_fill(
-                    ~dynamic_fine_valid,
-                    torch.finfo(fine_logits.dtype).min,
-                )
                 any_valid = dynamic_fine_valid.any(dim=-1, keepdim=True)
-                safe_logits = torch.where(any_valid, fine_logits, torch.zeros_like(fine_logits))
-                fine_probability = torch.softmax(safe_logits, dim=-1)
-                fine_probability = fine_probability * dynamic_fine_valid.float()
-                fine_probability = fine_probability / fine_probability.sum(
-                    dim=-1, keepdim=True
-                ).clamp_min(1.0)
-                if self.structured_ownership:
+                if self.local_ownership_mode == COUPLED_LOCAL_OWNERS:
+                    law = couple_local_observation(typed_logits, spatial_prior, dynamic_fine_valid)
+                    fine_logits = law.candidate_logits
+                    safe_logits = torch.where(any_valid, fine_logits, torch.zeros_like(fine_logits))
+                    fine_probability = law.candidate_probability
+                    semantic_probability = appearance_probability = geometry_probability = fine_probability
+                    g2_slot_log_probability = {name: law.hypothesis_log_probability for name in ("semantic", "appearance", "geometry")}
+                    g2_slot_probability = {name: law.hypothesis_probability for name in ("semantic", "appearance", "geometry")}
+                else:
+                    fine_logits = content_logits + spatial_prior
+                    fine_logits = fine_logits.masked_fill(
+                        ~dynamic_fine_valid,
+                        torch.finfo(fine_logits.dtype).min,
+                    )
+                    safe_logits = torch.where(any_valid, fine_logits, torch.zeros_like(fine_logits))
+                    fine_probability = torch.softmax(safe_logits, dim=-1)
+                    fine_probability = fine_probability * dynamic_fine_valid.float()
+                    fine_probability = fine_probability / fine_probability.sum(
+                        dim=-1, keepdim=True
+                    ).clamp_min(1.0)
+                if self.local_ownership_mode != COUPLED_LOCAL_OWNERS and self.structured_ownership:
                     def owner_probability(owner_logits: Tensor) -> Tensor:
                         owner_logits = (owner_logits + spatial_prior).masked_fill(
                             ~dynamic_fine_valid,
@@ -5316,7 +5355,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                             )
                             g2_slot_log_probability[name] = slot_log_probability
                             g2_slot_probability[name] = slot_log_probability.exp()
-                else:
+                elif self.local_ownership_mode != COUPLED_LOCAL_OWNERS:
                     semantic_probability = fine_probability
                     appearance_probability = fine_probability
                     geometry_probability = fine_probability
@@ -5654,6 +5693,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                         "grounded G3 cannot inherit missing G2 FP32 slot ownership"
                     )
                 updated_log_owner: dict[str, Tensor] = {}
+                joint_residuals: dict[str, Tensor] = {}
                 for name, canonical_key in (
                     ("semantic", canonical_semantic),
                     ("appearance", canonical_appearance),
@@ -5666,11 +5706,19 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                     residual = self.g3_owner_residual[name](
                         canonical_key
                     ).squeeze(-1).float()
-                    bounded_residual = 0.50 * torch.tanh(residual)
-                    updated_log_owner[name] = torch.log_softmax(
-                        parent_log.float() + bounded_residual,
-                        dim=-1,
-                    )
+                    if self.local_ownership_mode == COUPLED_LOCAL_OWNERS:
+                        joint_residuals[name] = residual
+                    else:
+                        bounded_residual = 0.50 * torch.tanh(residual)
+                        updated_log_owner[name] = torch.log_softmax(
+                            parent_log.float() + bounded_residual, dim=-1,
+                        )
+                if self.local_ownership_mode == COUPLED_LOCAL_OWNERS:
+                    parent_log = state.g2_semantic_slot_log_probability
+                    if parent_log is None or state.dynamic_fine_valid is None:
+                        raise RuntimeError("G3 lost the joint observation owner")
+                    shared_log_owner = refine_local_observation(parent_log, joint_residuals, state.dynamic_fine_valid.any(dim=-1))
+                    updated_log_owner = {name: shared_log_owner for name in ("semantic", "appearance", "geometry")}
                 # Store log probabilities as the score interface so the
                 # downstream softmax recovers the inherited/refined posterior
                 # exactly, rather than training a second independent owner.

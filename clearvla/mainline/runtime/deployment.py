@@ -18,6 +18,7 @@ import numpy as np
 from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.data.state_features import NATIVE_AFFINE_STATE, state_feature_metadata
 from clearvla.vision.candidate_support import MOMENT_LOCAL_SUPPORT, candidate_support_metadata
+from clearvla.vision.local_ownership import INDEPENDENT_LOCAL_OWNERS, local_ownership_metadata
 from clearvla.vision.preprocessing import (
     PreprocessConfig,
     preprocessing_identity,
@@ -360,6 +361,8 @@ def build_deployment_abi(
             **({"visual_source_time": visual_time_metadata(config.observation.source_time_mode)} if config.observation.source_time_mode != FIXED_VISUAL_TIME else {}),
             **({"candidate_support": candidate_support_metadata(config.observation.candidate_support_mode)}
                if config.observation.candidate_support_mode != MOMENT_LOCAL_SUPPORT else {}),
+            **({"local_ownership": local_ownership_metadata(config.observation.local_ownership_mode)}
+               if config.observation.local_ownership_mode != INDEPENDENT_LOCAL_OWNERS else {}),
             "state_dim": int(config.dimensions.state_dim),
             **({"state_features": state_feature_metadata(
                 config.top.state_feature_mode, config.data.data_profile,
@@ -436,6 +439,13 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     profile = _mapping(action.get("data_profile"), name="action.data_profile")
     profile_name = profile.get("name")
     graph_observation = _mapping(graph.get("observation"), name="graph_config.observation")
+    owner_mode = str(graph_observation.get("local_ownership_mode", INDEPENDENT_LOCAL_OWNERS))
+    if owner_mode != INDEPENDENT_LOCAL_OWNERS:
+        owner_metadata = _mapping(observation.get("local_ownership"), name="observation.local_ownership")
+        if canonical_sha256(owner_metadata) != canonical_sha256(local_ownership_metadata(owner_mode)):
+            raise ValueError("deployment local ownership differs from the graph")
+    elif "local_ownership" in observation:
+        raise ValueError("legacy local reader cannot acquire undeclared shared ownership")
     support_mode = str(graph_observation.get("candidate_support_mode", MOMENT_LOCAL_SUPPORT))
     if support_mode != MOMENT_LOCAL_SUPPORT:
         support_metadata = _mapping(observation.get("candidate_support"), name="observation.candidate_support")
