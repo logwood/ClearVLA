@@ -1,4 +1,4 @@
-name: Verify and publish structural source unit
+name: Save and audit structural source unit
 on:
   push:
     branches: [codex/structural-rebuild-20260921]
@@ -39,7 +39,10 @@ jobs:
           for key in ('base','base_tree','source_result_tree'):
               assert re.fullmatch('[0-9a-f]{40}', manifest[key])
           base = manifest['base']
-          assert subprocess.check_output(['git','rev-parse','HEAD^'],text=True).strip() == base
+          parent = manifest.get('transport_parent', base)
+          assert re.fullmatch('[0-9a-f]{40}', parent)
+          assert subprocess.check_output(['git','rev-parse','HEAD^'],text=True).strip() == parent
+          subprocess.run(['git','merge-base','--is-ancestor',base,'HEAD'],check=True)
           assert subprocess.check_output(['git','rev-parse',base+'^{tree}'],text=True).strip() == manifest['base_tree']
           assert 1 <= len(manifest['parts']) <= 64
           transport, encoded = [manifest_path], []
@@ -51,6 +54,15 @@ jobs:
               assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest() == part['blob_sha']
               encoded.append(data)
               transport.append(path)
+          correction = None
+          if 'correction_sha256' in manifest:
+              correction_path = '.github/structural-unit/correction.patch.xz.b64'
+              extra_decoder = lzma.LZMADecompressor(memlimit=256*1024*1024)
+              correction = extra_decoder.decompress(base64.b64decode(pathlib.Path(correction_path).read_bytes(),validate=True),max_length=2000000)
+              assert extra_decoder.eof and not extra_decoder.unused_data
+              assert 0 < len(correction) == manifest['correction_bytes'] < 2000000
+              assert hashlib.sha256(correction).hexdigest() == manifest['correction_sha256']
+              transport.append(correction_path)
           changed = set(subprocess.check_output(['git','diff','--name-only',base,'HEAD'],text=True).splitlines())
           assert changed == set(transport) or changed == set(transport+[workflow])
           decoder = lzma.LZMADecompressor(memlimit=256*1024*1024)
@@ -58,16 +70,17 @@ jobs:
           assert decoder.eof and not decoder.unused_data
           assert len(patch) == manifest['patch_bytes']
           assert hashlib.sha256(patch).hexdigest() == manifest['patch_sha256']
-          for line in patch.decode('utf-8').splitlines():
-              if line.startswith('diff --git '):
-                  for name in line.split()[2:]:
-                      path = pathlib.PurePosixPath(name)
-                      assert not path.is_absolute() and '..' not in path.parts
-                      assert path.parts[0] in {'a','b'} and path.parts[1] in {'clearvla','tests','scripts','docs','configs'}
-          subprocess.run(['git','apply','--check','-'],input=patch,check=True)
-          subprocess.run(['git','apply','-'],input=patch,check=True)
+          for patch in ([patch, correction] if correction is not None else [patch]):
+              for line in patch.decode('utf-8').splitlines():
+                  if line.startswith('diff --git '):
+                      for name in line.split()[2:]:
+                          path = pathlib.PurePosixPath(name)
+                          assert not path.is_absolute() and '..' not in path.parts
+                          assert path.parts[0] in {'a','b'} and path.parts[1] in {'clearvla','tests','scripts','docs','configs','AGENTS.md'}
+              subprocess.run(['git','apply','--check','-'],input=patch,check=True)
+              subprocess.run(['git','apply','-'],input=patch,check=True)
           subprocess.run(['git','rm','--',*transport],check=True)
-          subprocess.run(['git','add','--','clearvla','tests','scripts','docs','configs'],check=True)
+          subprocess.run(['git','add','--','clearvla','tests','scripts','docs','configs','AGENTS.md'],check=True)
           subprocess.run(['git','rm','--cached','--',workflow],check=True)
           source_tree = subprocess.check_output(['git','write-tree'],text=True).strip()
           assert source_tree == manifest['source_result_tree']
@@ -77,6 +90,24 @@ jobs:
           out.joinpath('reviewed-source-tree.txt').write_text(source_tree+'\n')
           out.joinpath('verified-unit.json').write_text(json.dumps(manifest,indent=2)+'\n')
           PY
+      - name: Save source by normal fast-forward before full CI
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRANCH=refs/heads/codex/structural-rebuild-20260921
+          test "$(git ls-remote origin "$BRANCH" | cut -f1)" = "$GITHUB_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python - <<'PY'
+          import json,os,pathlib,subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'unit-report'
+          unit = json.loads(out.joinpath('verified-unit.json').read_text())['unit']
+          subprocess.run(['git','commit','-m',f'wip({unit}): preserve structural source; milestone CI pending','-m','Exact source tree saved before full CI under user instruction. Tests run afterward and their failures remain failures; this is not milestone acceptance. Temporary payload removed. No master change, checkpoint migration or formal training.'],check=True)
+          PY
+          test "$(git rev-parse HEAD^{tree})" = "$(cat "$RUNNER_TEMP/unit-report/expected-tree.txt")"
+          git push origin HEAD:"$BRANCH"
+          git rev-parse HEAD > "$RUNNER_TEMP/unit-report/published-head.txt"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/unit-report/published-source.tar.gz"
       - name: Install supported CPU verification runtime
         shell: bash
         run: |
@@ -90,28 +121,10 @@ jobs:
           bash scripts/check_structural_rebuild.sh "$RUNNER_TEMP/unit-report"
           git diff --exit-code
           test "$(git write-tree)" = "$(cat "$RUNNER_TEMP/unit-report/expected-tree.txt")"
-      - name: Publish only by normal fast-forward on the isolated branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          BRANCH=refs/heads/codex/structural-rebuild-20260921
-          test "$(git ls-remote origin "$BRANCH" | cut -f1)" = "$GITHUB_SHA"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          python - <<'PY'
-          import json,os,pathlib,subprocess
-          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'unit-report'
-          unit = json.loads(out.joinpath('verified-unit.json').read_text())['unit']
-          subprocess.run(['git','commit','-m',f'feat: publish verified {unit} structural source unit','-m','Exact reviewed source tree; source-owned supported-CPU regression and static delta. Temporary payload removed, publisher retained unchanged. No master update, checkpoint migration, formal robot training, or full-rebuild completion claim.'],check=True)
-          PY
-          test "$(git rev-parse HEAD^{tree})" = "$(cat "$RUNNER_TEMP/unit-report/expected-tree.txt")"
-          git push origin HEAD:"$BRANCH"
-          git rev-parse HEAD > "$RUNNER_TEMP/unit-report/published-head.txt"
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/unit-report/published-source.tar.gz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: verified-structural-unit-${{ github.sha }}
+          name: saved-structural-unit-${{ github.sha }}
           path: ${{ runner.temp }}/unit-report
           retention-days: 14
           if-no-files-found: error
