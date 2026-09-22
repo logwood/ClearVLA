@@ -123,6 +123,7 @@ P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS = (
     | frozenset(
         {
             "clearvla/benchmarks/calvin_raw.py",
+            "clearvla/data/hdf5_episode.py",
             "clearvla/mainline/data/loading.py",
             "clearvla/mainline/data/token_store.py",
             "clearvla/vision/decoded_image_store.py",

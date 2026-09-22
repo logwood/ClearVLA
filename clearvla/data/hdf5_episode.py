@@ -166,6 +166,43 @@ def _validate_episode_id(value: str) -> str:
     return identity
 
 
+def _manifest_hdf5_candidates(
+    root: Path,
+    pattern: str,
+    requested_values: tuple[str, ...],
+) -> list[Path] | None:
+    """Resolve an exact, flat HDF5 manifest without scanning the dataset root.
+
+    ``load_episodes`` is normally given a manifest of root-relative episode
+    identities.  For the common flat ``*.hdf5``/``*.h5`` layouts, resolving
+    those identities directly avoids enumerating tens of thousands of files.
+    Returning ``None`` deliberately keeps the old glob path for recursive or
+    otherwise ambiguous patterns (including nested identities).
+    """
+
+    if pattern not in {"*.hdf5", "*.h5"} or not requested_values:
+        return None
+
+    identities = tuple(_validate_episode_id(value) for value in requested_values)
+    # An exact non-recursive glob cannot discover nested paths.  Falling back
+    # preserves the historical missing-identity behavior for such manifests.
+    if any("/" in identity for identity in identities):
+        return None
+
+    suffix = pattern[1:]
+    paths = [root / f"{identity}{suffix}" for identity in sorted(identities)]
+    missing = [
+        identity
+        for identity, path in zip(sorted(identities), paths)
+        if not path.is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"requested HDF5 episodes are absent from {root}: {missing[:8]}"
+        )
+    return paths
+
+
 def episode_identity(root: Path, path: Path) -> tuple[str, str, str]:
     """Return ``(root-relative id, source partition, task-local id)``."""
 
@@ -537,7 +574,24 @@ def load_episodes(
     requested = None if requested_values is None else set(requested_values)
     if requested is not None and (not requested or len(requested) != len(requested_values)):
         raise ValueError("requested episode identities must be non-empty and unique")
-    for path in find_hdf5_files(root, pattern):
+    if requested_values is not None:
+        # Validate manifest identities before they can participate in path
+        # construction.  This also makes the direct path fail closed for
+        # absolute, traversal, or Windows-style identities.
+        requested_values = tuple(_validate_episode_id(value) for value in requested_values)
+        requested = set(requested_values)
+
+    direct_paths = (
+        _manifest_hdf5_candidates(root, pattern, requested_values)
+        if requested_values is not None
+        else None
+    )
+    paths = (
+        direct_paths
+        if direct_paths is not None
+        else find_hdf5_files(root, pattern)
+    )
+    for path in paths:
         identity, source_partition, task_id = episode_identity(root, path)
         if requested is None or identity in requested:
             candidates.append((path, identity, source_partition, task_id))

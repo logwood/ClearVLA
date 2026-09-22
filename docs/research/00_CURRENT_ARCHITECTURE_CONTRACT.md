@@ -278,6 +278,14 @@ candidate prefix/width/suffix, unrelated indexed archives are ignored, and a
 partially covered chart fails closed. This avoids an eager full-directory glob
 without weakening raw-frame ABI validation.
 
+When a converted HDF5 loader receives a non-empty manifest of flat,
+root-relative episode identities, the same pread migration admits an exact
+`*.hdf5`/`*.h5` path fast path. It validates every identity, resolves only the
+requested files in sorted identity order, and fails closed on a missing file;
+recursive patterns or nested identities retain the legacy discovery path. This
+changes discovery cost only and does not change episode parsing, ordering,
+duplicate-identity checks, or the model/data ABI.
+
 The explicit `target_action_bottleneck_v1` identifier names a full
 single-target factorization. It replaces the legacy language-conditioned
 interval-K reader, the coarse-action raw-K read, and P2's semantic
