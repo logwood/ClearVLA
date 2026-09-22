@@ -2215,6 +2215,101 @@ class FutureObjectDynamics:
 
 
 @dataclass(frozen=True)
+class ObservedActionSequenceCondition:
+    """Training-only physical controls through the full labelled world horizon.
+
+    Not a subtype of a deployment action condition. Known rows are a source-
+    owned prefix; missing rows are quarantined and do not advance the recurrence.
+    Time uses the same 24-control-step scale as the online sequence chart, not
+    rescaled 48-step time. Only the outlet adapter constructs canonical values.
+    """
+
+    source_action: Tensor
+    canonical_value: Tensor
+    canonical_delta: Tensor
+    observed: Tensor  # bool [B,Tw]; actual controls, not a model prediction
+    row_end: Tensor  # [B,Tw,1], control-step endpoints
+    outlet_profile: str
+    chart_version: str
+    normalizer_fingerprint: str
+    control_time_scale: int = 24
+    schema: str = "observed-world-action-sequence-v1"
+
+    @property
+    def batch(self) -> int:
+        return int(self.source_action.shape[0])
+
+    @property
+    def horizon(self) -> int:
+        return int(self.source_action.shape[1])
+
+    @property
+    def device(self) -> torch.device:
+        return self.source_action.device
+
+    @property
+    def physical_fingerprint(self) -> Tensor:
+        return torch.cat((self.canonical_value, self.canonical_delta), dim=-1)
+
+    @property
+    def interval_observed(self) -> Tensor:
+        # A future state depends on ALL earlier controls, not just controls in
+        # its interval. An unobserved earlier control cannot be filled by zero.
+        return torch.stack([
+            self.observed[:, :upper].all(dim=1) for _, upper in INTERVAL_BOUNDS
+        ], dim=1)
+
+    def validate(self, *, action_dim: int) -> None:
+        if self.schema != "observed-world-action-sequence-v1":
+            raise ValueError("unknown observed action supervision schema")
+        if self.source_action.ndim != 3:
+            raise ValueError("observed world action must be [B,Tw,A]")
+        horizon = max(upper for _, upper in INTERVAL_BOUNDS)
+        _shape(self.source_action, (self.batch, horizon, action_dim), "observed world actions")
+        _shape(self.canonical_value, tuple(self.source_action.shape), "observed action values")
+        _shape(self.canonical_delta, tuple(self.source_action.shape), "observed action deltas")
+        _shape(self.observed, (self.batch, horizon), "observed action support")
+        _shape(self.row_end, (self.batch, horizon, 1), "observed action time")
+        if self.observed.dtype != torch.bool or self.observed.device != self.device:
+            raise ValueError("observed action support must be Boolean on the action device")
+        if bool((self.observed[:, 1:] & ~self.observed[:, :-1]).any()):
+            raise ValueError("observed actions must form a causal prefix without holes")
+        if type(self.control_time_scale) is not int or self.control_time_scale != 24:
+            raise ValueError("observed controls must retain the online physical time scale")
+        if self.chart_version not in _ACTION_SEQUENCE_CHART_CODES or not self.outlet_profile or not self.normalizer_fingerprint:
+            raise ValueError("observed action chart metadata is missing or unknown")
+        for value in (self.source_action, self.canonical_value, self.canonical_delta, self.row_end):
+            if value.device != self.device or not value.is_floating_point() or value.requires_grad:
+                raise ValueError("observed actions must be detached floating labels on one device")
+            if not bool(torch.isfinite(value).all()):
+                raise ValueError("observed action labels must be finite after quarantine")
+        for value in (self.source_action, self.canonical_value, self.canonical_delta):
+            if bool((value.masked_select(~self.observed[..., None].expand_as(value)) != 0).any()):
+                raise ValueError("unobserved action payload must be quarantined")
+        expected = torch.arange(1, horizon + 1, device=self.device, dtype=self.row_end.dtype)
+        if not torch.equal(self.row_end, expected[None, :, None].expand(self.batch, -1, -1)):
+            raise ValueError("observed action time must retain actual contiguous control steps")
+
+
+@dataclass(frozen=True)
+class SupervisedWorld:
+    """Prediction used by future losses only, never admitted as CandidateWorld."""
+
+    action_condition: ObservedActionSequenceCondition
+    dynamics: FutureObjectDynamics
+
+    def validate(self, *, action_dim: int) -> None:
+        if not isinstance(self.action_condition, ObservedActionSequenceCondition):
+            raise TypeError("supervised world requires observed controls")
+        self.action_condition.validate(action_dim=action_dim)
+        self.dynamics.validate()
+        if self.action_condition.batch != int(self.dynamics.current_reference.shape[0]):
+            raise ValueError("supervised world batches differ")
+        if self.action_condition.device != self.dynamics.semantic_delta.device:
+            raise ValueError("supervised world devices differ")
+
+
+@dataclass(frozen=True)
 class CandidateWorld:
     """An action-tagged W prediction consumed by the consequence evaluator.
 
@@ -2232,6 +2327,8 @@ class CandidateWorld:
         return self.action_condition.action_fingerprint
 
     def validate(self, *, action_dim: int) -> None:
+        if not isinstance(self.action_condition, (PhysicalActionCondition, PhysicalActionSequenceCondition)):
+            raise TypeError("candidate world rejects training-only observed controls")
         self.action_condition.validate(action_dim=action_dim)
         self.dynamics.validate()
         if self.action_condition.batch != int(self.dynamics.current_reference.shape[0]):
@@ -2267,6 +2364,7 @@ class ObjectTopTrainingTargets:
     history_proposal_loss: Tensor
     object_reconstruction_loss: Tensor
     future_interval_valid: Tensor | None = None  # dataset-owned, never a predicted confidence
+    supervised_world: SupervisedWorld | None = None  # training plane only
 
     @property
     def total_unweighted(self) -> Tensor:

@@ -451,6 +451,7 @@ class TopConfig:
     # opt-in sequence mode predicts and conditions W on the complete 24-row
     # normalized physical proposal through a causal prefix encoder.
     world_action_condition_mode: str = "interval_mean_v1"
+    world_supervision_mode: str = "candidate_legacy_v1"
     # The accepted reader applies typed S only after K/K*C pooling.  The
     # opt-in target-prior mode moves direct target identity to the spatial
     # address, shared over semantic and geometry readers, while W retains
@@ -467,6 +468,10 @@ class TopConfig:
     instruction_reference_mode: str = "none"
 
     def validate(self) -> None:
+        if self.world_supervision_mode not in {"candidate_legacy_v1", "matched_observed_sequence_v1"}:
+            raise ValueError("unknown top world_supervision_mode")
+        if self.world_supervision_mode == "matched_observed_sequence_v1" and self.world_action_condition_mode != "sequence_prefix_v1":
+            raise ValueError("matched W supervision requires sequence-prefix physical actions")
         if self.instruction_reference_mode not in {"none", "instruction_start_observation_v1"}:
             raise ValueError("unknown top instruction_reference_mode")
         if self.instruction_reference_mode != "none" and self.target_binding_mode != "shared_operation_v1":
@@ -1159,6 +1164,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.world_supervision_mode == "candidate_legacy_v1":
+            cast(dict[str, object], payload["top"]).pop("world_supervision_mode")
         if self.top.instruction_reference_mode == "none":
             cast(dict[str, object], payload["top"]).pop("instruction_reference_mode")
         if self.top.target_binding_mode == "reader_local_v1":

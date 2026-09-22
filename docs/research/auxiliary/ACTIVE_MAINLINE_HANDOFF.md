@@ -1,5 +1,44 @@
 # ClearVLA structural rebuild handoff
 
+## M6a source checkpoint — 2026-09-22 continuation
+
+Repaired M5b is saved on the remote branch at
+`a9865670fed71b5c6074290bc9d724100922e436`, source tree
+`f99ed27726d96e1c93cf4457ffffae4b58c3a2f1`, independently read back. This is
+source preservation before full CI, not milestone acceptance. Existing workflow
+checks are retained; no new workflow/tag system was introduced.
+
+M6a is actual local code, not the lost earlier draft. The final focused
+inventory passes 36 distinct cases in three disjoint exit-zero runs (31+3+2)
+on Python 3.13.5 / PyTorch 2.10.0+cpu. It exercises observed-prefix provenance,
+missing-row quarantine and recurrent-state stability, full W output prefix
+causality after a real optimizer update, relative/absolute chart boundaries,
+loss/gradient ownership, real-tail action loss without invented future loss,
+ordinary optimizer training, CPU BF16 backward, exact checkpoint/deployment
+reload, ABI rejection, deployment isolation and legacy same-noise identity.
+Only external DINO/image/T5 transport is a declared fixture; model paths are
+real. Earlier interrupted runs are incomplete, not additional passing cases.
+
+Differential static review of nine Python files against saved M5b has zero
+Ruff diagnostics, zero new type errors and zero new missing imports. The
+59 inherited type errors and warnings remain visible. Initial import/style
+and test narrowing errors were corrected; no tolerance or diagnostic gate
+was relaxed. Full-stage supported-runtime CI, CUDA and learned behavior are
+not accepted by these local focused tests. Keep this source checkpoint before
+continuing; do not wait for full CI to preserve it.
+
+Crucial remaining M6 issue: true supervised controls now cover 8/16/32/48,
+but the unchanged deployed candidate still ends at 24 and uses prefixes
+8/16/24/24. Do not treat the latter far outputs as predictions under known
+48-step control. Resolve the inference horizon/unknown continuation and
+robot-object physical relationship next. M4c2 and remaining S/P/bottom review
+obligations are not closed by M6a.
+
+The current local Git lineage was reconstructed from archives. Do not
+force-push it; remote saves must use the actual remote parent. No formal
+training, GPU/CUDA validation, physical rollout or full-rebuild claim.
+
+
 ## Current checkpoint policy — 2026-09-22 12:35 UTC
 
 The user requests saving each small source unit before whole-milestone CI

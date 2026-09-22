@@ -1346,3 +1346,45 @@ The observer does not write cache/state, own losses, consume random numbers,
 or change parameter registration. Attention/value gradient parity is checked
 with the same autograd mode on both sides; no cross-kernel bit-equivalence or
 learned-behavior guarantee is implied.
+
+## M6a action-matched world supervision (explicit candidate)
+
+`top.world_supervision_mode=matched_observed_sequence_v1` keeps the online
+24-row candidate world unchanged, and reuses current G facts in one additional
+training-only W1/W2 pass. The outlet adapter canonicalizes actual labelled
+controls through the 48-step world horizon. The same 24-row chart factory is
+composed across blocks: relative arm displacement carries its prior cumulative
+value, absolute-action and gripper deltas retain the previous real boundary.
+Time remains measured on the online 24-control-step scale, never renormalized
+to make a 48-step observation look like a 24-step candidate.
+
+`ObservedActionSequenceCondition` and `SupervisedWorld` are distinct from
+`WorldActionCondition` and `CandidateWorld`. Online caches, the ordinary world
+factory, refinement and the outlet adapter reject the training-only condition.
+True future controls are detached labels and never replace online coarse
+controls, candidate worlds, noisy flow actions or observation caches. No
+second G/S encoding, extra deployment W pass or new learned parameter is added.
+
+For supervision, prefixes end at 8/16/32/48, matching their actual future
+intervals; online prefixes remain 8/16/24/24 under the existing policy ABI.
+Unavailable labels are not zero commands: quarantine precedes chart arithmetic,
+masked rows do not advance W recurrence, and a target interval is admitted only
+when every preceding control is known AND its visual/state support exists.
+The source support must be a contiguous prefix; gaps are rejected rather than
+imputed. S/recognizer/coarse target masks retain their separate ownership.
+
+Only the configured future-dynamics loss consumes the supervised prediction.
+The action loss still consumes the candidate-conditioned online graph. A
+matched-mode loss missing its supervised world is an error; a legacy loss
+receiving one is also an error. Diagnostic names distinguish the two W paths.
+The learning contract is serialized in config and deployment metadata; the
+default omission preserves legacy identity. Old weight/optimizer migration
+is not added. This mode requires fresh training or its own exact resume.
+
+This fixes action/target pairing, not every limitation of W. The online
+25-48-step control continuation is still unspecified under the legacy 24-row
+proposal: long-range matched supervision alone does not resolve that train/
+deployment conditioning mismatch or justify far-horizon planning claims. M6
+still owns control-horizon alignment, robot-object physical relationships and
+Teacher association quality. M4c2, remaining S objectives and P redesign remain
+open. Full-stage CI and learned behavior are not implied by source preservation.

@@ -751,10 +751,10 @@ class MainlineTrainingEngine:
         if batch.audit.frame_progress is None:
             return {}
         intent = encoded.training_state.top.intent
-        # The recovery path has one formal training pass, so the online cache
-        # is also the loss-owning W cache.  ``formal_cache`` remains accepted
-        # for compatibility with archived callers, but is not created by the
-        # active recovery engine.
+        # This audit describes the ONLINE candidate world. In matched-control
+        # mode future losses use a separate training-only W pass; those metrics
+        # carry a supervised_ prefix and do not redefine this diagnostic.
+        # ``formal_cache`` is retained only for archived callers.
         dynamics = (
             encoded.training_state.top.predicted_dynamics
             if formal_cache is None

@@ -756,6 +756,19 @@ class ClearVLAMainlinePolicy(nn.Module):
             None if future.support is None else future.support.action[:, : proposal_rows.shape[1]],
         )
         targets = replace(targets, history_proposal_loss=proposal_loss)
+        if self.config.top.world_supervision_mode == "matched_observed_sequence_v1":
+            controls = self.outlet_adapter.observed_world_condition(
+                source_action, training_state.top.action_condition.current_action,
+                None if future.support is None else future.support.action,
+            )
+            supervised, world_metrics = self.world.materialize_supervised(
+                belief=training_state.top.facts, action_condition=controls,
+                collect_diagnostics=collect_diagnostics,
+            )
+            targets = replace(targets, supervised_world=supervised)
+            metrics = {**metrics, **world_metrics}
+            if collect_diagnostics:
+                metrics["supervised_world_action_interval_fraction"] = controls.interval_observed.float().mean()
         if collect_diagnostics:
             metrics = {
                 **metrics,

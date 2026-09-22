@@ -21,6 +21,16 @@ that consumer's deeper structural review. Revisit upstream decisions when a
 later consumer exposes missing information. Do not freeze implementation
 choices just to preserve old golden outputs.
 
+## M6a saved-source boundary
+
+An explicit action-matched supervision branch is now implemented on repaired
+M5b. It uses labelled 8/16/32/48-step control prefixes, detached source masks,
+shared W weights and separate training-only types/loss routing. The online
+24-row action graph is unchanged. Targeted tests and source checks are recorded
+per checkpoint; full M6 acceptance is pending. Do not omit the remaining
+online far-control mismatch, physical interaction and entity-association work
+merely because this subunit is saved.
+
 ## Status and dependencies
 
 | Unit | Status | Completion boundary / next obligation |

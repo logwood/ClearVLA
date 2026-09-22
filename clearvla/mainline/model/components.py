@@ -64,9 +64,11 @@ from .types import (
     ObjectIntentState,
     ObjectTopTrainingTargets,
     ObjectWorldBelief,
+    ObservedActionSequenceCondition,
     OutletPhysicalActionCondition,
     PhysicalActionCondition,
     PhysicalActionSequenceCondition,
+    SupervisedWorld,
     WorldActionCondition,
     intersect_object_camera_validity,
     physical_action_normalizer_fingerprint,
@@ -476,6 +478,8 @@ class WorldStage(nn.Module):
         collect_diagnostics: bool = False,
     ) -> tuple[CandidateWorld, dict[str, Tensor]]:
         belief.validate()
+        if not isinstance(action_condition, (PhysicalActionCondition, PhysicalActionSequenceCondition)):
+            raise TypeError("online world rejects training-only observed controls")
         action_condition.validate(action_dim=self.action_dim)
         _, w1_state, w1_metrics = self.dynamics.forward_w1(
             facts=belief,
@@ -495,6 +499,28 @@ class WorldStage(nn.Module):
         if not collect_diagnostics:
             return world, {}
         return world, self._merge_world_diagnostics(w1_metrics, w2_metrics)
+
+    def materialize_supervised(
+        self, *, belief: ObjectFactSet | ObjectWorldBelief,
+        action_condition: ObservedActionSequenceCondition,
+        collect_diagnostics: bool = False,
+    ) -> tuple[SupervisedWorld, dict[str, Tensor]]:
+        """Share W parameters, not the online candidate's physical controls."""
+        if not isinstance(action_condition, ObservedActionSequenceCondition):
+            raise TypeError("supervised world requires source-observed controls")
+        belief.validate()
+        action_condition.validate(action_dim=self.action_dim)
+        _, state, near_metrics = self.dynamics.forward_w1(
+            facts=belief, action=action_condition, collect_diagnostics=collect_diagnostics,
+        )
+        prediction, far_metrics = self.dynamics.forward_w2(
+            facts=belief, w1_state=state, collect_diagnostics=collect_diagnostics,
+        )
+        result = SupervisedWorld(action_condition, prediction)
+        result.validate(action_dim=self.action_dim)
+        metrics = self._merge_world_diagnostics(near_metrics, far_metrics) if collect_diagnostics else {}
+        # Keep observed-control and candidate-control diagnostics distinct.
+        return result, {"supervised_" + key: value for key, value in metrics.items()}
 
     def refine_deployment_world(
         self,
@@ -1736,6 +1762,67 @@ class OutletAdapter(nn.Module):
         if condition.normalizer_fingerprint != normalizer_identity:
             raise RuntimeError("sequence action normalizer identity changed in factory")
         self.validate_world_condition(condition)
+        return condition
+
+    @torch.no_grad()
+    def observed_world_condition(
+        self, action: Tensor, current_action: Tensor, observed: Tensor | None = None,
+    ) -> ObservedActionSequenceCondition:
+        """Canonicalize labelled controls using the SAME outlet's 24-row chart.
+
+        Compose complete chart blocks with the previous physical boundary.
+        Joining relative-command blocks also carries the cumulative arm value;
+        it does not restart the displacement at row 24. This is supervision,
+        not an extension of the 24-row deployment proposal contract.
+        """
+        if self.world_action_condition_mode != "sequence_prefix_v1":
+            raise ValueError("observed W supervision requires sequence-prefix mode")
+        horizon = max(upper for _, upper in INTERVAL_BOUNDS)
+        if action.ndim != 3 or action.shape[1] < horizon or action.shape[2] != self.action_dim:
+            raise ValueError("observed W labels must cover the full world horizon")
+        if observed is None:
+            observed = torch.ones(action.shape[:2], device=action.device, dtype=torch.bool)
+        if observed.dtype != torch.bool or observed.device != action.device or tuple(observed.shape) != tuple(action.shape[:2]):
+            raise ValueError("observed W control support must be bool [B,Tw]")
+        mask = observed[:, :horizon].detach().clone()
+        if bool((mask[:, 1:] & ~mask[:, :-1]).any()):
+            raise ValueError("observed W controls require a causal prefix without holes")
+        labels = action[:, :horizon].detach()
+        if not bool(torch.isfinite(labels[mask]).all()) or not bool(torch.isfinite(current_action).all()):
+            raise ValueError("observed W source controls/boundary must be finite")
+        offset, _ = self._normalizer_chart(labels, dtype=torch.float32)
+        # Native-zero padding is only an arithmetic placeholder. It is never
+        # declared executed and cannot advance the masked W recurrence.
+        safe = torch.where(mask[..., None], labels, offset.to(dtype=labels.dtype)).clone()
+        values: list[Tensor] = []
+        deltas: list[Tensor] = []
+        identity: PhysicalActionSequenceCondition | None = None
+        for start in range(0, horizon, self.horizon):
+            chunk = safe[:, start:start + self.horizon]
+            if chunk.shape[1] != self.horizon:
+                raise ValueError("world horizon must compose full outlet chart blocks")
+            boundary = current_action.detach() if start == 0 else safe[:, start - 1]
+            identity = self._sequence_condition_from_horizon_action(chunk, boundary)
+            value = identity.canonical_value
+            if start and self.is_relative_command:
+                value = torch.cat((
+                    value[..., :self.arm_dim] + values[-1][:, -1:, :self.arm_dim],
+                    value[..., self.arm_dim:],
+                ), dim=-1)
+            values.append(value)
+            deltas.append(identity.canonical_delta)
+        assert identity is not None
+        keep = mask[..., None]
+        condition = ObservedActionSequenceCondition(
+            source_action=torch.where(keep, safe, torch.zeros_like(safe)),
+            canonical_value=torch.where(keep, torch.cat(values, dim=1), torch.zeros_like(safe)),
+            canonical_delta=torch.where(keep, torch.cat(deltas, dim=1), torch.zeros_like(safe)),
+            observed=mask,
+            row_end=torch.arange(1, horizon + 1, device=action.device, dtype=action.dtype)[None, :, None].expand(action.shape[0], -1, -1),
+            outlet_profile=identity.outlet_profile, chart_version=identity.chart_version,
+            normalizer_fingerprint=identity.normalizer_fingerprint,
+        )
+        condition.validate(action_dim=self.action_dim)
         return condition
 
     def world_condition_action_from_deployed(

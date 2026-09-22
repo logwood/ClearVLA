@@ -16,9 +16,11 @@ from .routing import (
     smooth_rms_contract,
 )
 from .types import (
+    INTERVAL_BOUNDS,
     FutureObjectDynamics,
     ObjectFactSet,
     ObjectWorldBelief,
+    ObservedActionSequenceCondition,
     PhysicalActionCondition,
     PhysicalActionSequenceCondition,
     WorldActionCondition,
@@ -680,7 +682,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     def _base(
         self,
         facts: ObjectFactSet | ObjectWorldBelief,
-        action: WorldActionCondition,
+        action: WorldActionCondition | ObservedActionSequenceCondition,
         *,
         collect_diagnostics: bool,
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
@@ -693,7 +695,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 raise TypeError("interval-mean W requires PhysicalActionCondition")
             action.validate(action_dim=action_dim)
         else:
-            if not isinstance(action, PhysicalActionSequenceCondition):
+            if not isinstance(action, (PhysicalActionSequenceCondition, ObservedActionSequenceCondition)):
                 raise TypeError(
                     "sequence-prefix W requires PhysicalActionSequenceCondition"
                 )
@@ -709,7 +711,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             safe_transport_prior.to(dtype=facts.content.dtype)
         )
         gradient_metrics: dict[str, Tensor] = {}
-        if isinstance(action, PhysicalActionSequenceCondition):
+        if isinstance(action, (PhysicalActionSequenceCondition, ObservedActionSequenceCondition)):
             if (
                 self.sequence_time_condition is None
                 or self.sequence_action_recurrence is None
@@ -729,7 +731,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             )
             row_time = (
                 action.row_end.to(device=objects.device, dtype=objects.dtype)
-                / float(action.horizon)
+                / float(action.control_time_scale if isinstance(action, ObservedActionSequenceCondition) else action.horizon)
             )
             time_carrier = self.sequence_time_condition(row_time)
             recurrent_input, _ = smooth_rms_contract(
@@ -739,15 +741,23 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             recurrent_state = torch.zeros_like(recurrent_input[:, 0])
             prefix_states: list[Tensor] = []
             for row_index in range(action.horizon):
-                recurrent_state = self.sequence_action_recurrence(
+                next_state = self.sequence_action_recurrence(
                     recurrent_input[:, row_index],
                     recurrent_state,
+                )
+                recurrent_state = (
+                    torch.where(action.observed[:, row_index, None], next_state, recurrent_state)
+                    if isinstance(action, ObservedActionSequenceCondition) else next_state
                 )
                 prefix_states.append(recurrent_state)
             action_carrier = torch.stack(
                 [
                     prefix_states[prefix_end - 1]
-                    for prefix_end in self.SEQUENCE_PREFIX_ENDPOINTS
+                    for prefix_end in (
+                        tuple(upper for _, upper in INTERVAL_BOUNDS)
+                        if isinstance(action, ObservedActionSequenceCondition)
+                        else self.SEQUENCE_PREFIX_ENDPOINTS
+                    )
                 ],
                 dim=1,
             )
@@ -844,7 +854,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .mean()
             .sqrt(),
         }
-        if isinstance(action, PhysicalActionSequenceCondition):
+        if isinstance(action, (PhysicalActionSequenceCondition, ObservedActionSequenceCondition)):
             metrics.update(
                 {
                     "object_w_physical_action_sequence_source_rms": action.source_action.detach()
@@ -1226,7 +1236,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self,
         *,
         facts: ObjectFactSet | ObjectWorldBelief,
-        action: WorldActionCondition,
+        action: WorldActionCondition | ObservedActionSequenceCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics | None, ObjectW1WorkingState, dict[str, Tensor]]:
         base, raw_common, raw_interval, base_metrics = self._base(
@@ -1246,7 +1256,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             object_support=object_support,
         )
         common_before = common_batch[:, 0]
-        if isinstance(action, PhysicalActionSequenceCondition):
+        if isinstance(action, (PhysicalActionSequenceCondition, ObservedActionSequenceCondition)):
             # A shared action-dependent common would let W1 interval 1's
             # <=16-row prefix leak back into interval 0.  Keep common factual
             # in sequence mode; the per-interval typed path remains action

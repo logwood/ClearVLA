@@ -2371,11 +2371,22 @@ def compose_losses(
     geometry = flow_geometry_terms(observation)
     if top_targets.teacher_dynamics is None:
         raise ValueError("formal training requires future teacher dynamics")
+    interval_valid = top_targets.future_interval_valid
+    if config.top.world_supervision_mode == "matched_observed_sequence_v1":
+        supervised = top_targets.supervised_world
+        if supervised is None:
+            raise ValueError("matched W loss requires the observed-control supervision branch")
+        supervised.validate(action_dim=config.dimensions.action_dim)
+        predicted_dynamics = supervised.dynamics
+        controls_known = supervised.action_condition.interval_observed
+        interval_valid = controls_known if interval_valid is None else (interval_valid & controls_known)
+    elif top_targets.supervised_world is not None:
+        raise ValueError("undeclared observed-control supervision in legacy W loss")
     future = future_dynamics_terms(
         predicted_dynamics,
         top_targets.teacher_dynamics,
         current_loss_support=top_targets.current_loss_support,
-        interval_valid=top_targets.future_interval_valid,
+        interval_valid=interval_valid,
         collect_diagnostics=collect_diagnostics,
     )
     objective = config.objectives

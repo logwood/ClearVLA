@@ -352,6 +352,11 @@ def build_deployment_abi(
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
         "source_config_digest": identity.config_digest,
+        **({"world_supervision": {
+            "schema": "matched-observed-world-v1", "source": "training-only-observed-controls",
+            "prefix_endpoints": [8, 16, 32, 48], "online_known_prefix": 24,
+            "missing_controls": "no-recurrence-update-and-no-target",
+        }} if config.top.world_supervision_mode == "matched_observed_sequence_v1" else {}),
         "architecture_manifest": dict(identity.manifest),
         "graph_config": graph,
         "graph_config_sha256": canonical_sha256(graph),
@@ -455,6 +460,17 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     graph_top = _mapping(
         _mapping(abi.get("graph_config"), name="graph_config").get("top"), name="graph_config.top"
     )
+    world_mode = graph_top.get("world_supervision_mode", "candidate_legacy_v1")
+    expected_world: dict[str, object] = {
+        "schema": "matched-observed-world-v1", "source": "training-only-observed-controls",
+        "prefix_endpoints": [8, 16, 32, 48], "online_known_prefix": 24,
+        "missing_controls": "no-recurrence-update-and-no-target",
+    }
+    if world_mode == "matched_observed_sequence_v1":
+        if abi.get("world_supervision") != expected_world:
+            raise ValueError("deployment W supervision contract differs from trained graph")
+    elif world_mode != "candidate_legacy_v1" or "world_supervision" in abi:
+        raise ValueError("unknown or undeclared W supervision contract")
     expected_timing = (
         HISTORY_TIMING_CONTRACT
         if graph_top.get("history_encoding_mode") == TIMED_HISTORY_ENCODING
