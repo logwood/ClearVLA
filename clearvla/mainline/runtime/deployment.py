@@ -39,6 +39,7 @@ from clearvla.vision.source_time import FIXED_VISUAL_TIME, visual_time_metadata
 from ..checkpoint import CheckpointIdentity
 from ..config import DataConfig, ExperimentConfig, config_from_mapping
 from ..data.normalizer import ArrayNormalizer
+from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
     CONTINUOUS_GRIPPER_OUTPUT_MODE,
@@ -357,11 +358,13 @@ def build_deployment_abi(
                                                state_dim=config.dimensions.state_dim)}
            if config.top.world_robot_condition_mode == OBSERVED_ROBOT_VIEWS else {}),
         "source_config_digest": identity.config_digest,
-        **({"world_control": world_control_metadata()}
+        **({"future_time_grid": resolve_future_time(config.top.future_time_grid_mode).metadata()}
+           if config.top.future_time_grid_mode != LEGACY_FUTURE_TIME else {}),
+        **({"world_control": world_control_metadata(config.top.future_time_grid_mode)}
            if config.top.world_control_mode == KNOWN_PREFIX_WORLD_CONTROL else {}),
         **({"world_supervision": {
             "schema": "matched-observed-world-v1", "source": "training-only-observed-controls",
-            "prefix_endpoints": [8, 16, 32, 48], "online_known_prefix": 24,
+            "prefix_endpoints": list(resolve_future_time(config.top.future_time_grid_mode).endpoints), "online_known_prefix": 24,
             "missing_controls": "no-recurrence-update-and-no-target",
         }} if config.top.world_supervision_mode == "matched_observed_sequence_v1" else {}),
         "architecture_manifest": dict(identity.manifest),
@@ -480,16 +483,25 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
             raise ValueError("deployment W robot observation contract differs from trained graph")
     elif robot_mode != NO_ROBOT_WORLD or "world_robot" in abi:
         raise ValueError("unknown or undeclared W robot observation")
+    time_grid = resolve_future_time(str(graph_top.get("future_time_grid_mode", LEGACY_FUTURE_TIME)))
+    if time_grid.aligned:
+        if abi.get("future_time_grid") != time_grid.metadata():
+            raise ValueError("deployment future time grid differs from trained graph")
+        manifest = _mapping(abi.get("architecture_manifest"), name="architecture_manifest")
+        if manifest.get("intervals") != [list(pair) for pair in time_grid.bounds]:
+            raise ValueError("deployment manifest future intervals differ from trained graph")
+    elif "future_time_grid" in abi:
+        raise ValueError("undeclared deployment future time grid")
     control_mode = graph_top.get("world_control_mode", LEGACY_WORLD_CONTROL)
     if control_mode == KNOWN_PREFIX_WORLD_CONTROL:
-        if abi.get("world_control") != world_control_metadata():
+        if abi.get("world_control") != world_control_metadata(time_grid.mode):
             raise ValueError("deployment world control domain differs from trained graph")
     elif control_mode != LEGACY_WORLD_CONTROL or "world_control" in abi:
         raise ValueError("unknown or undeclared world control domain")
     world_mode = graph_top.get("world_supervision_mode", "candidate_legacy_v1")
     expected_world: dict[str, object] = {
         "schema": "matched-observed-world-v1", "source": "training-only-observed-controls",
-        "prefix_endpoints": [8, 16, 32, 48], "online_known_prefix": 24,
+        "prefix_endpoints": list(time_grid.endpoints), "online_known_prefix": 24,
         "missing_controls": "no-recurrence-update-and-no-target",
     }
     if world_mode == "matched_observed_sequence_v1":

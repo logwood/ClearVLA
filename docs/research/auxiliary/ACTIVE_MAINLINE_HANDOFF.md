@@ -336,3 +336,59 @@ its interim progress is not a pass. Save the small source unit before waiting
 for that run, per user instruction. Continue the fixed 16..32 interval versus
 24-row candidate issue and S/P consumption as described in the repair plan;
 physical cross-window association and full P3 feedback are not solved here.
+
+
+## 2026-09-22 M6d continuation checkpoint
+
+Recovered all 795 M6c source files from the supplied archive and reproduced the
+exact tree `05a66a7cc7d069481d1c26a63a48c15da54ad791`. Remote baseline was re-read
+as `c5f5074a9dada72c84bd9b962874421faffa4e16`. Local Git recovery has synthetic
+ancestry and must never be force-pushed as real remote ancestry.
+
+Current candidate: `configs/mainline/structural_rebuild_m6d_calvin.json`.
+Read the M6d physical clock contract and producer/consumer table. This source
+unit aligns dataset/preflight, S/coarse, W1/W2, Teacher/recognizer, P2/P3 and
+extracted visual/bottom profiles with the actual 24-row control horizon. The
+source file `future_time.py` belongs to checkpoint/deployment closure.
+
+Production smoke completed batch validation, online encoding, supervised W,
+full sampling and a real diagnostics-enabled optimizer step. Independent sparse
+support interventions only change their own Teacher bins. After a real optimizer
+step (not manually changed output heads), all four candidate/observed worlds
+with matching controls agree exactly; later controls do not change earlier
+outputs; both W2 bins influence the first action and loss reaches W2's internal
+attention parameter. Exact checkpoint/deployment reload and CPU BF16 are covered
+by the new focused tests. Test fixtures replace external image/DINO/T5 transport,
+not neural modules, loss, optimizer, ODE or deployment loaders.
+
+Supplementary environment: Python 3.13.5 / PyTorch 2.10.0 CPU; not project CI.
+Two-seed legacy controls compare parameters, buffers, ordering, configuration,
+RNG and same-noise sampled commands across the exact M6c and current trees.
+Runtime results, full process exits, static delta and final source identities
+are preserved outside source in each checkpoint archive. Intermediate pytest
+failures were wrong test-fixture attribute names/type-exception expectations,
+not waived production checks. The first smoke found a real preflight hard-coded
+48-step support lattice; it now resolves the declared grid. Static errors were
+fixed with actual owner types and non-null assertions, not ignores or a changed
+diagnostic gate. No failed/interrupted run is counted as a pass.
+
+Save source before whole-milestone CI, per user instruction. No workflow change,
+no master/old-branch modification, no old-weight migration, no formal training,
+no CUDA or behavior acceptance. Source-wide milestone validation remains open.
+Continue remaining W-state and downstream P2/P3 data semantics; this unit does
+not declare M6 or the complete rebuild finished. The recoverable source and its
+manifest, not an unarchived scratch draft, define the next starting point.
+
+
+M6d local preservation result: 36 new focused cases passed, including both
+normal and last-real-action current states in FP32/CPU BF16. Seven-file joint
+inventory completed 187 cases: 185 passed, 2 FAILED, no skips or process errors.
+Both failures are the legacy 24-vs-48 equal-near-fields exact-equality assertions;
+the untouched M6c archive reproduces both with identical mismatch counts and
+maximum absolute differences (2.91e-11 and 2.96e-12). No tolerance or old test
+was changed. They remain milestone debt. In the new aligned mode equal complete
+controls produce bit-identical four-bin fields. Differential 24-file static
+review is clean for changed-file Ruff and adds no Pyright errors/imports against
+M6c; inherited diagnostics and the failed preliminary attempts are preserved.
+Final two-seed old-mode parity passed. This is a source checkpoint, not complete
+M6/GPU/behavior validation. Existing CI will evaluate it separately.

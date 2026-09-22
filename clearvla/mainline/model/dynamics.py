@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..world_control import (
     KNOWN_PREFIX_WORLD_CONTROL,
     LEGACY_WORLD_CONTROL,
@@ -23,7 +24,6 @@ from .routing import (
     smooth_rms_contract,
 )
 from .types import (
-    INTERVAL_BOUNDS,
     FutureObjectDynamics,
     ObjectFactSet,
     ObjectWorldBelief,
@@ -45,6 +45,7 @@ class ObjectW1WorkingState:
     far_interval_innovation: Tensor  # raw W2-owned input [B,2,K,3,H]
     control_domain: CandidateControlDomain | None = None
     robot_relation: RobotObjectRelation | None = None
+    time_grid_mode: str = LEGACY_FUTURE_TIME
 
 
 class _ObjectIntervalBlock(nn.Module):
@@ -428,11 +429,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         camera_condition_mode: str = "motion_prior_only",
         action_condition_mode: str = "interval_mean_v1",
         control_mode: str = LEGACY_WORLD_CONTROL,
+        future_time_grid_mode: str = LEGACY_FUTURE_TIME,
         robot_condition_mode: str = NO_ROBOT_WORLD,
         state_dim: int | None = None,
         state_feature_mode: str = "native_affine_v1",
     ) -> None:
         super().__init__()
+        self.time_grid = resolve_future_time(future_time_grid_mode)
         self.hidden = int(hidden)
         self.content_dim = int(content_dim)
         self.normalization_floor = float(normalization_floor)
@@ -516,6 +519,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             finally:
                 torch.set_rng_state(retained_rng_state)
         self.interval_identity = nn.Parameter(torch.randn(1, 4, 1, hidden) * 0.02)
+        self.interval_clock_code: Tensor | None
+        self.register_buffer("interval_clock_code", self.time_grid.interval_encoding(hidden)[None, :, None] if self.time_grid.aligned else None)
         self.w1 = _ObjectIntervalBlock(
             hidden,
             heads,
@@ -744,6 +749,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     "sequence-prefix W requires PhysicalActionSequenceCondition"
                 )
             action.validate(action_dim=action_dim)
+            if isinstance(action, ObservedActionSequenceCondition) and action.time_grid_mode != self.time_grid.mode:
+                raise ValueError("W supervision action uses a different time grid")
         validity = self._safe_object_validity(facts).to(device=facts.content.device)
         safe_content = self._supported_object_values(facts.content, validity)
         objects = self.object_content(safe_content)
@@ -802,9 +809,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 [
                     prefix_states[prefix_end - 1]
                     for prefix_end in (
-                        tuple(upper for _, upper in INTERVAL_BOUNDS)
+                        self.time_grid.endpoints
                         if isinstance(action, ObservedActionSequenceCondition)
-                        else self.SEQUENCE_PREFIX_ENDPOINTS
+                        else tuple(min(end, action.horizon) for end in self.time_grid.endpoints)
                     )
                 ],
                 dim=1,
@@ -832,7 +839,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 gradient_metrics,
                 "gradient_tensor_w_physical_action_carrier_rms",
             )
-        interval = action_carrier + self.interval_identity.to(
+        interval_identity = self.interval_identity
+        if self.time_grid.aligned:
+            assert self.interval_clock_code is not None
+            interval_identity = interval_identity + self.interval_clock_code.to(interval_identity)
+        interval = action_carrier + interval_identity.to(
             device=objects.device,
             dtype=objects.dtype,
         )[:, :, 0]
@@ -1185,6 +1196,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             torch.zeros_like(camera_coordinates),
         )
         field = FutureObjectDynamics(
+            time_grid_mode=self.time_grid.mode,
             current_reference=current_reference,
             successor_content=current_reference[:, None] + semantic_delta,
             semantic_delta=semantic_delta,
@@ -1384,6 +1396,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         return (
             field,
             ObjectW1WorkingState(
+                time_grid_mode=self.time_grid.mode,
                 robot_relation=relation,
                 near=near,
                 far_base=base[:, 2:],
@@ -1391,7 +1404,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 near_interval_innovation=near_typed,
                 far_interval_innovation=raw_interval[:, 2:],
                 control_domain=(
-                    CandidateControlDomain(action.horizon)
+                    CandidateControlDomain(action.horizon, interval_bounds=self.time_grid.bounds)
                     if self.control_mode == KNOWN_PREFIX_WORLD_CONTROL
                     and isinstance(action, PhysicalActionSequenceCondition) else None
                 ),
@@ -1406,6 +1419,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         w1_state: ObjectW1WorkingState,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics, dict[str, Tensor]]:
+        if w1_state.time_grid_mode != self.time_grid.mode:
+            raise ValueError("W2 cannot consume W1 from a different physical time grid")
         if tuple(w1_state.near.shape[1:3]) != (2, facts.objects) or tuple(
             w1_state.far_base.shape[1:3]
         ) != (2, facts.objects):

@@ -22,6 +22,7 @@ from torch import Tensor
 from clearvla.data.window_boundaries import OBSERVED_TAIL_V1
 
 from .config import ExperimentConfig
+from .future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from .instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from .supervision import FutureLabelSupport
 from .temporal import TIMED_HISTORY_ENCODING, HistoryTiming
@@ -241,6 +242,7 @@ class FutureSupervision:
     state_sequence: Tensor  # float32 [B,Tw,S]
     offsets: Tensor  # int64 [B,F]
     support: FutureLabelSupport | None = None
+    time_grid_mode: str = LEGACY_FUTURE_TIME
 
     @property
     def batch(self) -> int:
@@ -251,6 +253,8 @@ class FutureSupervision:
         return int(self.dino_supports.shape[1])
 
     def validate(self, config: ExperimentConfig) -> None:
+        if self.time_grid_mode != config.top.future_time_grid_mode:
+            raise ValueError("future label time grid differs from selected graph")
         dims = config.dimensions
         if self.dino_supports.ndim != 5:
             raise ValueError("future DINO supports must be [B,F,C,P,D]")
@@ -266,8 +270,9 @@ class FutureSupervision:
         if self.action_sequence.ndim != 3 or tuple(self.action_sequence.shape[:1]) != (batch,):
             raise ValueError("future action sequence must be [B,Tw,A]")
         world_horizon = int(self.action_sequence.shape[1])
-        if world_horizon < 48 or int(self.action_sequence.shape[-1]) != dims.action_dim:
-            raise ValueError("future action sequence must cover at least 48 action steps")
+        grid = resolve_future_time(config.top.future_time_grid_mode)
+        if world_horizon < grid.horizon or (grid.aligned and world_horizon != grid.horizon) or int(self.action_sequence.shape[-1]) != dims.action_dim:
+            raise ValueError("future action sequence must cover its declared physical time grid")
         _shape(
             self.state_sequence,
             (batch, world_horizon, dims.state_dim),
@@ -276,6 +281,7 @@ class FutureSupervision:
         _shape(self.offsets, (batch, supports), "future support offsets")
         if self.offsets.dtype != torch.long:
             raise TypeError("future support offsets must be int64")
+        grid.validate_offsets(self.offsets)
         if self.dino_supports.dtype not in {torch.float16, torch.bfloat16, torch.float32}:
             raise TypeError("future DINO supports must use a floating cache dtype")
         for name in ("action_sequence", "state_sequence"):

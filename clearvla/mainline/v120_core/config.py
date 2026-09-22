@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..future_time import CONTROL_ALIGNED_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import VALID_GRIPPER_OUTPUT_MODES
 
 
@@ -1716,29 +1717,41 @@ class V39PolicyConfig(V38PolicyConfig):
                 raise ValueError(
                     "interval boundaries must contain future_anchors + 1 entries"
                 )
-            if (
-                tuple(sorted(set(boundaries))) != boundaries
-                or tuple(sorted(set(supports))) != supports
-                or boundaries[0] <= 0
-            ):
-                raise ValueError(
-                    "interval boundaries/support offsets must be strictly "
-                    "increasing and positive"
-                )
-            support_set = set(supports)
-            for start, end in self.flow_jepa_interval_windows:
-                interval_support = tuple(
-                    value for value in supports if start <= value <= end
-                )
+            # The active mainline resolves this exact new physical grid.  The
+            # extracted legacy profile keeps its original inclusive rule.
+            aligned_grid = resolve_future_time(CONTROL_ALIGNED_FUTURE_TIME)
+            aligned = boundaries == (0, *aligned_grid.endpoints)
+            if aligned:
+                if supports != aligned_grid.support_offsets:
+                    raise ValueError("aligned intervals need their exact successor support lattice")
+                if self.flow_jepa_effective_window_offsets != aligned_grid.endpoints:
+                    raise ValueError("aligned intervals and window endpoints disagree")
+                if int(self.target_future_count) != len(supports):
+                    raise ValueError("aligned future count and support lattice disagree")
+            else:
                 if (
-                    start not in support_set
-                    or end not in support_set
-                    or len(interval_support) < 2
+                    tuple(sorted(set(boundaries))) != boundaries
+                    or tuple(sorted(set(supports))) != supports
+                    or boundaries[0] <= 0
                 ):
                     raise ValueError(
-                        "every interval stage requires both boundaries and at "
-                        "least two real support frames"
+                        "interval boundaries/support offsets must be strictly "
+                        "increasing and positive"
                     )
+                support_set = set(supports)
+                for start, end in self.flow_jepa_interval_windows:
+                    interval_support = tuple(
+                        value for value in supports if start <= value <= end
+                    )
+                    if (
+                        start not in support_set
+                        or end not in support_set
+                        or len(interval_support) < 2
+                    ):
+                        raise ValueError(
+                            "every interval stage requires both boundaries and at "
+                            "least two real support frames"
+                        )
         if int(self.flow_jepa_interval_stage_typed_value) and not (
             int(self.flow_jepa_interval_stage_delta)
             and int(self.role_attnres_world_to_policy)

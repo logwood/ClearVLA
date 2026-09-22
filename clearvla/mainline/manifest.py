@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass
 from typing import Mapping, cast
 
+from .future_time import CONTROL_INTERVALS, LEGACY_INTERVALS
 from .v120_core.bspine import (
     BSPINE0_IMPLEMENTATION,
     BSPINE_ARM_COARSE_CONTEXT_IMPLEMENTATION,
@@ -30,7 +31,7 @@ LAYOUT_NAME = "clearvla_mainline"
 LAYOUT_SCHEMA = 2
 LEGACY_LAYOUT_SCHEMAS = frozenset({1})
 TOPOLOGY = (3, 2, 3)
-INTERVALS = ((4, 8), (8, 16), (16, 32), (32, 48))
+INTERVALS = LEGACY_INTERVALS
 
 
 @dataclass(frozen=True)
@@ -98,8 +99,8 @@ class ArchitectureManifest:
             raise ValueError("mainline code-layout identity is incompatible")
         if tuple(self.topology) != TOPOLOGY:
             raise ValueError("mainline topology must be G3/W2/P3")
-        if tuple(self.intervals) != INTERVALS:
-            raise ValueError("mainline requires the four canonical future intervals")
+        if tuple(self.intervals) not in (INTERVALS, CONTROL_INTERVALS):
+            raise ValueError("mainline requires a declared four-interval physical time grid")
         if int(self.object_slots) != 4:
             raise ValueError("mainline requires four global object slots")
         if not bool(self.language_required):

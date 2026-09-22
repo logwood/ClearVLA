@@ -6,11 +6,12 @@ import ast
 import hashlib
 import json
 import subprocess
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Mapping, cast
 
 from .config import ExperimentConfig
+from .future_time import resolve_future_time
 from .manifest import (
     architecture_manifest_for_bspine_implementation,
     manifest_from_mapping,
@@ -326,6 +327,7 @@ def build_checkpoint_identity(
     manifest = architecture_manifest_for_bspine_implementation(
         config.bottom.bspine_implementation
     )
+    manifest = replace(manifest, intervals=resolve_future_time(config.top.future_time_grid_mode).bounds)
     manifest.validate()
     identity = CheckpointIdentity(
         manifest=manifest.as_dict(),

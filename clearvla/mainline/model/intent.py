@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
@@ -288,6 +289,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         route_dim: int,
         horizon: int,
         heads: int,
+        future_time_grid_mode: str = LEGACY_FUTURE_TIME,
         target_object_address_mode: str = "post_pool_only",
         history_encoding_mode: str = LEGACY_HISTORY_ENCODING,
         target_binding_mode: str = LOCAL_TARGET_READERS,
@@ -295,6 +297,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
         super().__init__()
+        self.time_grid = resolve_future_time(future_time_grid_mode)
         if instruction_reference_mode not in {"none", INSTRUCTION_START_REFERENCE}:
             raise ValueError("unknown instruction reference consumer")
         if instruction_reference_mode != "none" and target_binding_mode != SHARED_TARGET_BINDING:
@@ -340,6 +343,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
         self.object_geometry = nn.Linear(route_dim, hidden, bias=False)
         self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
+        self.interval_clock_code: Tensor | None
+        self.register_buffer("interval_clock_code", self.time_grid.interval_encoding(hidden)[None] if self.time_grid.aligned else None)
         self.interval_goal = _CrossRead(hidden, heads)
         self.interval_history = _CrossRead(hidden, heads)
         self.interval_object = (
@@ -719,7 +724,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
             )
         elif instruction_reference is not None:
             raise ValueError("instruction reference consumer is not selected")
-        interval_base = self.interval_identity.to(
+        interval_identity = self.interval_identity
+        if self.time_grid.aligned:
+            assert self.interval_clock_code is not None
+            interval_identity = interval_identity + self.interval_clock_code.to(interval_identity)
+        interval_base = interval_identity.to(
             device=objects.device, dtype=objects.dtype
         ).expand(batch, -1, -1)
         _, goal_innovation, interval_goal_attention = self.interval_goal(
@@ -855,6 +864,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             0.20,
         )
         state_out = ObjectIntentState(
+            time_grid_mode=self.time_grid.mode,
             protected_goal_set=protected_goal,
             history_tokens=history,
             history_validity=history_validity,
@@ -1033,14 +1043,18 @@ class FuturePlanRecognizer(nn.Module):
         state_dim: int,
         content_dim: int,
         heads: int,
+        future_time_grid_mode: str = LEGACY_FUTURE_TIME,
     ) -> None:
         super().__init__()
+        self.time_grid = resolve_future_time(future_time_grid_mode)
         self.hidden = int(hidden)
         self.content_dim = int(content_dim)
         self.action_input = nn.Linear(action_dim, hidden, bias=False)
         self.state_input = nn.Linear(state_dim, hidden, bias=False)
         self.effect_input = nn.Linear(content_dim, hidden, bias=False)
         self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
+        self.interval_clock_code: Tensor | None
+        self.register_buffer("interval_clock_code", self.time_grid.interval_encoding(hidden)[None] if self.time_grid.aligned else None)
         self.block = _SelfBlock(hidden, heads)
         self.action_reconstruction = nn.Linear(hidden, action_dim, bias=False)
         self.state_reconstruction = nn.Linear(hidden, state_dim, bias=False)
@@ -1059,7 +1073,9 @@ class FuturePlanRecognizer(nn.Module):
         if future_action.ndim != 3 or future_state.ndim != 3:
             raise ValueError("plan recognizer requires full future action/state sequences")
         length = min(int(future_action.shape[1]), int(future_state.shape[1]))
-        slices = _interval_slices(length)
+        slices = self.time_grid.action_slices(length)
+        if teacher is not None and teacher.time_grid_mode != self.time_grid.mode:
+            raise ValueError("recognizer and Teacher time grid differ")
         interval_valid = None
         if label_support is not None:
             future_action = quarantine(future_action, label_support.action)
@@ -1117,11 +1133,15 @@ class FuturePlanRecognizer(nn.Module):
             state_summary = quarantine(state_summary, interval_valid)
             effect_summary = quarantine(effect_summary, interval_valid)
             teacher_valid = quarantine(teacher_valid, interval_valid)
+        interval_identity = self.interval_identity
+        if self.time_grid.aligned:
+            assert self.interval_clock_code is not None
+            interval_identity = interval_identity + self.interval_clock_code.to(interval_identity)
         token = (
             self.action_input(action_summary)
             + self.state_input(state_summary)
             + self.effect_input(effect_summary)
-            + self.interval_identity.to(
+            + interval_identity.to(
                 device=future_action.device, dtype=future_action.dtype
             )
         )
@@ -1145,6 +1165,7 @@ class FuturePlanRecognizer(nn.Module):
             + 0.25 * effect_error
         )
         result = FuturePlanRecognition(
+            time_grid_mode=self.time_grid.mode,
             interval_targets=token.detach(),
             action_summary=action_summary.detach(),
             state_summary=state_summary.detach(),
@@ -1165,11 +1186,13 @@ class CoarseActionIntent(nn.Module):
         hidden: int,
         action_dim: int,
         heads: int,
+        future_time_grid_mode: str = LEGACY_FUTURE_TIME,
         horizon: int = 24,
         action_condition_mode: str = "interval_mean_v1",
         target_binding_mode: str = LOCAL_TARGET_READERS,
     ) -> None:
         super().__init__()
+        self.time_grid = resolve_future_time(future_time_grid_mode)
         self.horizon = int(horizon)
         if self.horizon != 24:
             raise ValueError("the active coarse action contract requires 24 rows")
@@ -1180,6 +1203,8 @@ class CoarseActionIntent(nn.Module):
         }:
             raise ValueError("unknown coarse action condition mode")
         self.query = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
+        self.row_clock_interpolation: Tensor | None
+        self.register_buffer("row_clock_interpolation", self.time_grid.row_interpolation() if self.time_grid.aligned else None)
         # Keep the trained four-query basis as the shared temporal scaffold.
         # The new zero-initialized row offsets add row-specific capacity
         # without replacing or resetting the existing action head/query.
@@ -1206,17 +1231,20 @@ class CoarseActionIntent(nn.Module):
         collect_diagnostics: bool = False,
     ) -> CoarseActionIntentState:
         intent.validate(hidden=int(self.query.shape[-1]))
+        if intent.time_grid_mode != self.time_grid.mode:
+            raise ValueError("coarse proposal and S time grid differ")
         batch = int(intent.public_interval_carrier.shape[0])
         query_seed = self.query
         if self.action_condition_mode == "sequence_prefix_v1":
             if self.sequence_row_offset is None:
                 raise RuntimeError("sequence coarse action has no row offsets")
-            query_seed = F.interpolate(
-                self.query.transpose(1, 2),
-                size=self.horizon,
-                mode="linear",
-                align_corners=True,
-            ).transpose(1, 2) + self.sequence_row_offset
+            if self.time_grid.aligned:
+                assert self.row_clock_interpolation is not None
+                query_seed = torch.einsum("ti,bih->bth", self.row_clock_interpolation.to(self.query), self.query) + self.sequence_row_offset
+            else:
+                query_seed = F.interpolate(
+                    self.query.transpose(1, 2), size=self.horizon, mode="linear", align_corners=True,
+                ).transpose(1, 2) + self.sequence_row_offset
         query = query_seed.to(
             device=intent.public_interval_carrier.device,
             dtype=intent.public_interval_carrier.dtype,

@@ -8,9 +8,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..supervision import quarantine, supported_mean
 from .types import (
-    INTERVAL_BOUNDS,
     FutureObjectDynamics,
     ObjectFactSet,
     intersect_object_camera_validity,
@@ -30,10 +30,12 @@ class ObjectFutureTeacher(nn.Module):
         self,
         *,
         content_dim: int,
+        future_time_grid_mode: str = LEGACY_FUTURE_TIME,
         key_dim: int = 64,
         flow_reference_frames: int = 4,
     ) -> None:
         super().__init__()
+        self.time_grid = resolve_future_time(future_time_grid_mode)
         self.content_dim = int(content_dim)
         self.key_dim = int(key_dim)
         self.flow_reference_frames = int(flow_reference_frames)
@@ -176,6 +178,8 @@ class ObjectFutureTeacher(nn.Module):
         )
         if not bool(torch.isfinite(offsets.float()).all()):
             raise ValueError("Teacher future offsets contain non-finite values")
+        if self.time_grid.aligned:
+            self.time_grid.validate_offsets(offsets)
         objects = facts.objects
         # ``DenseObjectGrounder`` quarantines invalid candidate rows before its
         # learned projections, but the complete dense chart intentionally keeps
@@ -416,19 +420,19 @@ class ObjectFutureTeacher(nn.Module):
         covariance_rows: list[Tensor] = []
         support_counts: list[Tensor] = []
         interval_observed_rows: list[Tensor] = []
-        for lower, upper in INTERVAL_BOUNDS:
-            selected = ((offsets >= lower) & (offsets <= upper)).float()
-            # Configured support sets normally cover every interval.  The
-            # fallback selects the nearest support deterministically without
-            # creating a zero/random target.
-            midpoint = 0.5 * float(lower + upper)
-            nearest = (offsets.float() - midpoint).abs().argmin(dim=1)
-            fallback = F.one_hot(nearest, num_classes=supports).float()
-            selected = torch.where(
-                (selected.sum(dim=1, keepdim=True) > 0.0),
-                selected,
-                fallback,
-            )
+        for interval_index, (lower, upper) in enumerate(self.time_grid.bounds):
+            selected = self.time_grid.selection(offsets)[:, interval_index].float()
+            # Only the legacy layout admits an irregular support fallback.
+            # Aligned supports are validated against the exact declared lattice.
+            if not self.time_grid.aligned:
+                midpoint = 0.5 * float(lower + upper)
+                nearest = (offsets.float() - midpoint).abs().argmin(dim=1)
+                fallback = F.one_hot(nearest, num_classes=supports).float()
+                selected = torch.where(
+                    (selected.sum(dim=1, keepdim=True) > 0.0),
+                    selected,
+                    fallback,
+                )
             interval_observed = torch.ones(batch, device=offsets.device, dtype=torch.bool)
             if future_observed is not None:
                 interval_observed = ((selected == 0) | future_observed).all(dim=1)
@@ -457,6 +461,7 @@ class ObjectFutureTeacher(nn.Module):
         transport = torch.stack(transport_rows, dim=1)
         covariance = torch.stack(covariance_rows, dim=1)
         target = FutureObjectDynamics(
+            time_grid_mode=self.time_grid.mode,
             current_reference=current_reference[:, 0],
             successor_content=successor,
             semantic_delta=(successor - current_reference),
@@ -568,7 +573,7 @@ class ObjectFutureTeacher(nn.Module):
                 variance.sqrt(), observed_intervals.any(dim=1)
             )
         successor_innovation = successor - target.current_reference[:, None]
-        for index in range(len(INTERVAL_BOUNDS)):
+        for index in range(len(self.time_grid.bounds)):
             row = f"object_teacher_interval_{index}"
             metrics[f"{row}_successor_innovation_rms"] = (
                 successor_innovation[:, index].square().mean().sqrt()

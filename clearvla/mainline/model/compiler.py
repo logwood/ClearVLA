@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 import torch
 from torch import Tensor, nn
 
+from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from .action_codec import ACTION_BAND_ENDS
 from .routing import (
     PolicyRoleDeltaBank,
@@ -134,8 +135,10 @@ class SelectedIntervalEvidence:
     geometry_residual_value: Tensor  # [B,T,Q,I,2]
     selected_s_context: Tensor  # [B,T,Q,I,Z,H]
     support: Tensor  # bool [B,I,Z]
+    time_grid_mode: str = LEGACY_FUTURE_TIME
 
     def validate(self) -> None:
+        resolve_future_time(self.time_grid_mode)
         if self.key.ndim != 6 or int(self.key.shape[-2]) != 2:
             raise ValueError("selected P2 evidence must be [B,T,Q,I,2,H]")
         expected = tuple(self.key.shape)
@@ -239,6 +242,7 @@ class ObjectFutureEffectReader(nn.Module):
         spatial_intent_mode: str = "post_pool_only",
         target_binding_mode: str = LOCAL_TARGET_READERS,
         world_control_mode: str = "legacy_extrapolation_v1",
+        future_time_grid_mode: str = LEGACY_FUTURE_TIME,
     ) -> None:
         super().__init__()
         if spatial_intent_mode not in {
@@ -246,6 +250,7 @@ class ObjectFutureEffectReader(nn.Module):
             "shared_target_prior_v1",
         }:
             raise ValueError("unknown P2 spatial intent mode")
+        self.time_grid = resolve_future_time(future_time_grid_mode)
         self.hidden = int(hidden)
         if target_binding_mode not in {LOCAL_TARGET_READERS, SHARED_TARGET_BINDING}:
             raise ValueError("unknown P2 target binding mode")
@@ -271,6 +276,8 @@ class ObjectFutureEffectReader(nn.Module):
             )
         )
         self.public_interval_key = nn.Linear(hidden, hidden, bias=False)
+        self.interval_clock_code: Tensor | None
+        self.register_buffer("interval_clock_code", self.time_grid.interval_encoding(hidden)[None, None, None, :, None] if self.time_grid.aligned else None)
         self.typed_intent_key = nn.ModuleList(
             nn.Linear(route_dim, hidden, bias=False) for _ in self.TYPE_NAMES
         )
@@ -449,6 +456,8 @@ class ObjectFutureEffectReader(nn.Module):
         collect_diagnostics: bool,
     ) -> tuple[SelectedIntervalEvidence, dict[str, Tensor]]:
         dynamics.validate()
+        if dynamics.time_grid_mode != self.time_grid.mode or intent.time_grid_mode != self.time_grid.mode:
+            raise ValueError("P2/S/W physical time grid mismatch")
         if (dynamics.control_domain is not None) != (self.world_control_mode == "known_prefix_v1"):
             raise ValueError("P2 world control domain differs from selected mode")
         dynamics = dynamics.policy_view()
@@ -801,6 +810,7 @@ class ObjectFutureEffectReader(nn.Module):
             source_scores.append(source_score)
 
         selected = SelectedIntervalEvidence(
+            time_grid_mode=self.time_grid.mode,
             key=torch.stack(selected_keys, dim=4),
             semantic_value=(
                 selected_common_values[0] + selected_residual_values[0]
@@ -926,6 +936,8 @@ class ObjectFutureEffectReader(nn.Module):
         collect_diagnostics: bool,
     ) -> tuple[ObjectTypedEffect, dict[str, Tensor]]:
         selected.validate()
+        if selected.time_grid_mode != self.time_grid.mode:
+            raise ValueError("P2 terminal interval evidence uses a different time grid")
         batch, horizon, basis, intervals, types, hidden = selected.key.shape
         if tuple(action_query.shape) != (batch, horizon, basis, hidden):
             raise ValueError("P2 terminal action query lost [B,T,Q,H]")
@@ -947,7 +959,11 @@ class ObjectFutureEffectReader(nn.Module):
                 ),
                 dim=3,
             )
-        selected_key = self._bounded_unit(selected.key)
+        if self.time_grid.aligned:
+            assert self.interval_clock_code is not None
+            selected_key = self._bounded_unit(selected.key + self.interval_clock_code.to(selected.key))
+        else:
+            selected_key = self._bounded_unit(selected.key)
         s_context = torch.tanh(self._bounded_unit(selected.selected_s_context))
         conditioned_key = selected_key + selected_key * s_context
         interval_score = torch.einsum(
@@ -1373,8 +1389,9 @@ class ZeroPreservingObjectConsequence(nn.Module):
 class ObjectPolicyPlanCompiler(nn.Module):
     """Compile the two P3 innovations without duplicating protected owners."""
 
-    def __init__(self, *, hidden: int, horizon: int, basis: int) -> None:
+    def __init__(self, *, hidden: int, horizon: int, basis: int, future_time_grid_mode: str = LEGACY_FUTURE_TIME) -> None:
         super().__init__()
+        self.time_grid = resolve_future_time(future_time_grid_mode)
         self.hidden = int(hidden)
         self.horizon = int(horizon)
         self.basis = int(basis)
@@ -1412,6 +1429,8 @@ class ObjectPolicyPlanCompiler(nn.Module):
             if tuple(getattr(consequence, name).shape) != expected:
                 raise ValueError(f"P3 consequence {name} lost [B,T,Q,H]")
         intent.validate(horizon=self.horizon, hidden=self.hidden)
+        if intent.time_grid_mode != self.time_grid.mode:
+            raise ValueError("P3 cannot consume S from a different physical time grid")
         temporal_context = intent.temporal_control[:, :, None].expand(
             -1, -1, self.basis, -1
         )

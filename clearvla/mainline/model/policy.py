@@ -28,12 +28,14 @@ from .components import (
     TrainingTargetsStage,
     WorldStage,
 )
+from .intent import FuturePlanRecognizer
 from .observation_contract import ObservationEvidence
 from .proposal import HistoryActionProposal
 from .restored_bottom import RestoredV120EvidenceBottom
 from .restored_observation import RestoredV120ObservationCompiler
 from .routing import register_gradient_rms_metric
 from .target_binding import SHARED_TARGET_BINDING, BoundTargetRead
+from .teacher import ObjectFutureTeacher
 from .top import (
     CompiledPolicyState,
     DeploymentTopCache,
@@ -133,6 +135,8 @@ class OnlinePolicyCache:
             horizon=config.dimensions.action_horizon,
         )
         _validate_configured_world_action_condition(self.top.action_condition, config)
+        if self.top.predicted_dynamics.time_grid_mode != config.top.future_time_grid_mode or self.top.intent.time_grid_mode != config.top.future_time_grid_mode:
+            raise ValueError("cached intent/world time grid differs from selected graph")
         has_domain = self.top.predicted_dynamics.control_domain is not None
         if has_domain != (config.top.world_control_mode == "known_prefix_v1"):
             raise ValueError("policy cache control domain differs from configured world mode")
@@ -177,6 +181,8 @@ class OnlineTrainingState:
             horizon=config.dimensions.action_horizon,
         )
         _validate_configured_world_action_condition(self.top.action_condition, config)
+        if self.top.predicted_dynamics.time_grid_mode != config.top.future_time_grid_mode or self.top.intent.time_grid_mode != config.top.future_time_grid_mode:
+            raise ValueError("cached intent/world time grid differs from selected graph")
         has_domain = self.top.predicted_dynamics.control_domain is not None
         if has_domain != (config.top.world_control_mode == "known_prefix_v1"):
             raise ValueError("policy cache control domain differs from configured world mode")
@@ -249,6 +255,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             camera_names=config.data.camera_names,
             world_camera_condition_mode=top.world_camera_condition_mode,
             world_action_condition_mode=top.world_action_condition_mode,
+            future_time_grid_mode=top.future_time_grid_mode,
             world_control_mode=top.world_control_mode,
             world_robot_condition_mode=top.world_robot_condition_mode,
             state_feature_mode=top.state_feature_mode,
@@ -331,6 +338,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             raw_codec,
             selection=selection.outlet_adapter,
             world_action_condition_mode=top.world_action_condition_mode,
+            future_time_grid_mode=top.future_time_grid_mode,
         )
         # Move every top child without constructing a second parameterized
         # implementation.  Direct parameters are detached from the temporary
@@ -344,6 +352,8 @@ class ClearVLAMainlinePolicy(nn.Module):
         dynamics = _detach_registered(raw_top, "dynamics")
         teacher = _detach_registered(raw_top, "teacher")
         recognizer = _detach_registered(raw_top, "recognizer")
+        if not isinstance(teacher, ObjectFutureTeacher) or not isinstance(recognizer, FuturePlanRecognizer):
+            raise TypeError("training target owners must implement the declared physical time grid")
         effect_reader = _detach_registered(raw_top, "effect_reader")
         consequence = _detach_registered(raw_top, "consequence")
         plan_compiler = _detach_registered(raw_top, "plan_compiler")

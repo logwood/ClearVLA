@@ -544,3 +544,17 @@ not metres, forces or world-frame velocity. Existing S/W cross-camera averaging
 and relation modeling require their own redesign. Temporal correspondence
 confidence is read on its forward producer's earlier-source chart. Neither
 fix guarantees objectness, persistent association or learned task performance.
+
+
+## M6d: formerly uncontrolled W2 policy bins
+
+Under M6b/c a 24-step candidate did not fully cover the 16..32 and 32..48 bins.
+Keeping those bins masked was correct isolation, but also prevented W2 from
+influencing current policy. The explicit M6d grid trains NEW 8..16 / 16..24
+W2 targets and propagates their identities through all consumers. It does not
+reinterpret weights trained at 32/48 steps. Sparse Teacher boundary ownership,
+real control-prefix causality and first-row action/W2 gradients are acceptance
+checks, not an object manipulation claim. Old grid masks remain required in old
+configs. Earlier fallback/clipping semantics remain only in their declared old
+mode. A learned whole physical transition, longer controlled prediction and
+matched one-step execution-error signal are still not supplied by this unit.

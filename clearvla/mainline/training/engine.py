@@ -144,15 +144,12 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
         values["target.action"], values["future.action"][:, : values["target.action"].shape[1]]
     ):
         raise ValueError("policy and world supervision disagree on observed source actions")
-    expected_offsets = torch.arange(
-        4,
-        49,
-        4,
-        device=batch.future.offsets.device,
-        dtype=torch.long,
-    )[None].expand(batch.future.batch, -1)
+    from ..future_time import resolve_future_time
+    grid = resolve_future_time(batch.future.time_grid_mode)
+    expected_offsets = batch.future.offsets.new_tensor(grid.support_offsets)[None].expand(batch.future.batch, -1)
     if not torch.equal(batch.future.offsets, expected_offsets):
-        raise ValueError("future teacher offsets must be exactly 4,8,...,48")
+        raise ValueError("future teacher offsets must match the declared physical time grid")
+
 
 
 @dataclass(frozen=True)
@@ -774,7 +771,9 @@ class MainlineTrainingEngine:
         interval_energy = (
             intent.public_interval_carrier.detach().float().square().mean(dim=-1).sqrt()
         )
-        centers = interval_energy.new_tensor((6.0, 12.0, 24.0, 40.0)) / 48.0
+        from ..future_time import resolve_future_time
+        grid = resolve_future_time(intent.time_grid_mode)
+        centers = interval_energy.new_tensor(grid.centers) / float(grid.horizon)
         energy_total = interval_energy.sum(dim=1)
         centroid = (interval_energy * centers[None]).sum(dim=1) / energy_total.clamp_min(1e-8)
         centroid = torch.where(energy_total > 1e-8, centroid, centroid.new_zeros(centroid.shape))

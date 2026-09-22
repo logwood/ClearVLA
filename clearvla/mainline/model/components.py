@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import is_binary_gripper_selection
 from ..interfaces import CurrentObservation, ObservableHistory, OnlinePolicyInput
 from ..supervision import FutureLabelSupport, supported_mean
@@ -36,7 +37,7 @@ from .compiler import (
 )
 from .component_contracts import OutletActionOutput
 from .grounding import DenseObjectGrounder
-from .intent import CoarseActionIntent, StatelessObjectIntentOrganizer
+from .intent import CoarseActionIntent, FuturePlanRecognizer, StatelessObjectIntentOrganizer
 from .observation_contract import GroundingObservationBank, ObservationEvidence
 from .proposal import HistoryActionProposal
 from .restored_observation import (
@@ -45,6 +46,7 @@ from .restored_observation import (
 )
 from .routing import smooth_rms_contract
 from .target_binding import BoundTargetRead, TargetBinding, TargetEvidence
+from .teacher import ObjectFutureTeacher
 from .top import (
     CompiledPolicyState,
     DeploymentTopCache,
@@ -52,7 +54,6 @@ from .top import (
 )
 from .types import (
     ABSOLUTE_ACTION_SEQUENCE_CHART,
-    INTERVAL_BOUNDS,
     RELATIVE_COMMAND_SEQUENCE_CHART,
     CandidateWorld,
     CompletedP1PolicyState,
@@ -956,8 +957,8 @@ class TrainingTargetsStage(nn.Module):
     def __init__(
         self,
         *,
-        teacher: nn.Module,
-        recognizer: nn.Module,
+        teacher: ObjectFutureTeacher,
+        recognizer: FuturePlanRecognizer,
         hidden: int,
         horizon: int,
         action_dim: int,
@@ -990,10 +991,12 @@ class TrainingTargetsStage(nn.Module):
             **({"future_observed": label_support.visual} if label_support is not None else {}),
             collect_diagnostics=collect_diagnostics,
         )
+        if context.intent.time_grid_mode != self.teacher.time_grid.mode or self.recognizer.time_grid.mode != self.teacher.time_grid.mode:
+            raise ValueError("training S/Teacher/recognizer time grid mismatch")
         interval_valid = (
             None
             if label_support is None
-            else label_support.interval_observed(future_offsets, INTERVAL_BOUNDS)
+            else self.teacher.time_grid.interval_observed(future_offsets, label_support.visual)
         )
         current_loss_support = intersect_object_camera_validity(
             context.facts.validity,
@@ -1472,8 +1475,10 @@ class OutletAdapter(nn.Module):
         *,
         selection: str,
         world_action_condition_mode: str = "interval_mean_v1",
+        future_time_grid_mode: str = LEGACY_FUTURE_TIME,
     ) -> None:
         super().__init__()
+        self.time_grid = resolve_future_time(future_time_grid_mode)
         self.codec = codec
         self.selection = str(selection)
         self.world_action_condition_mode = str(world_action_condition_mode)
@@ -1777,7 +1782,7 @@ class OutletAdapter(nn.Module):
         """
         if self.world_action_condition_mode != "sequence_prefix_v1":
             raise ValueError("observed W supervision requires sequence-prefix mode")
-        horizon = max(upper for _, upper in INTERVAL_BOUNDS)
+        horizon = self.time_grid.horizon
         if action.ndim != 3 or action.shape[1] < horizon or action.shape[2] != self.action_dim:
             raise ValueError("observed W labels must cover the full world horizon")
         if observed is None:
@@ -1814,6 +1819,7 @@ class OutletAdapter(nn.Module):
         assert identity is not None
         keep = mask[..., None]
         condition = ObservedActionSequenceCondition(
+            time_grid_mode=self.time_grid.mode,
             source_action=torch.where(keep, safe, torch.zeros_like(safe)),
             canonical_value=torch.where(keep, torch.cat(values, dim=1), torch.zeros_like(safe)),
             canonical_delta=torch.where(keep, torch.cat(deltas, dim=1), torch.zeros_like(safe)),

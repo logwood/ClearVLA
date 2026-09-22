@@ -2,7 +2,8 @@
 
 Only values consumed by :class:`TrainingBatch` are materialized.  Future RGB,
 target-history tensors and ancestry-only descriptor views are deliberately
-absent: the teacher consumes twelve cached DINO supports at offsets 4..48.
+absent: the teacher consumes source-declared cached DINO supports every four
+steps (4..48 in the legacy layout, 4..24 in the control-aligned layout).
 """
 
 from __future__ import annotations

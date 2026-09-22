@@ -672,6 +672,8 @@ def future_dynamics_terms(
     interval_valid: Tensor | None = None,
     collect_diagnostics: bool = False,
 ) -> dict[str, Tensor]:
+    if prediction.time_grid_mode != target.time_grid_mode:
+        raise ValueError("world prediction and target physical time grids differ")
     prediction.validate()
     target.validate()
     batch, intervals, objects = prediction.semantic_delta.shape[:3]

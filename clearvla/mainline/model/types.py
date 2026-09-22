@@ -19,6 +19,7 @@ from clearvla.vision.entity_chart import (
 from clearvla.vision.entity_history import ObservedEntityHistory
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
 
+from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..manifest import INTERVALS
 from ..world_control import CandidateControlDomain
 from ..world_robot import RobotWorldObservation
@@ -941,7 +942,10 @@ class ActionIntentDock:
     target_binding: TargetBinding | None = None
     target_evidence: TargetEvidence | None = None
 
+    time_grid_mode: str = LEGACY_FUTURE_TIME
+
     def validate(self, *, hidden: int) -> None:
+        resolve_future_time(self.time_grid_mode)
         batch = int(self.public_interval_carrier.shape[0])
         _shape(
             self.public_interval_carrier,
@@ -986,7 +990,10 @@ class FactualIntentDock:
     target_binding: TargetBinding | None = None
     target_evidence: TargetEvidence | None = None
 
+    time_grid_mode: str = LEGACY_FUTURE_TIME
+
     def validate(self, *, hidden: int) -> None:
+        resolve_future_time(self.time_grid_mode)
         batch = int(self.phase_context.shape[0])
         expected = (batch, 4, hidden)
         _shape(self.phase_context, expected, "factual-intent phase context")
@@ -1010,7 +1017,10 @@ class PolicyIntentDock:
     typed_interval_residual_value: Tensor  # [B,I,K,3,R]
     target_binding: TargetBinding | None = None
 
+    time_grid_mode: str = LEGACY_FUTURE_TIME
+
     def validate(self, *, horizon: int, hidden: int) -> None:
+        resolve_future_time(self.time_grid_mode)
         batch = int(self.interval_key.shape[0])
         _shape(self.interval_key, (batch, 4, hidden), "policy-intent interval key")
         _shape(
@@ -1078,6 +1088,8 @@ class ObjectIntentState:
     target_binding: TargetBinding | None = None
     target_evidence: TargetEvidence | None = None
 
+    time_grid_mode: str = LEGACY_FUTURE_TIME
+
     @property
     def interval_queries(self) -> Tensor:
         """Compatibility name for the S-owned consumer-specific context."""
@@ -1110,6 +1122,7 @@ class ObjectIntentState:
 
     def action_dock(self) -> ActionIntentDock:
         return ActionIntentDock(
+            time_grid_mode=self.time_grid_mode,
             public_interval_carrier=self.public_interval_carrier,
             history_memory=self.history_tokens,
             public_object_memory=self.object_tokens,
@@ -1122,6 +1135,7 @@ class ObjectIntentState:
     def factual_dock(self) -> FactualIntentDock:
         batch = int(self.policy_interval_context.shape[0])
         return FactualIntentDock(
+            time_grid_mode=self.time_grid_mode,
             phase_context=self.policy_interval_context,
             target_binding=self.target_binding,
             target_evidence=self.target_evidence,
@@ -1135,6 +1149,7 @@ class ObjectIntentState:
 
     def policy_dock(self) -> PolicyIntentDock:
         return PolicyIntentDock(
+            time_grid_mode=self.time_grid_mode,
             interval_key=self.policy_interval_context,
             temporal_control=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
@@ -1145,6 +1160,7 @@ class ObjectIntentState:
         )
 
     def validate(self, *, horizon: int, hidden: int) -> None:
+        resolve_future_time(self.time_grid_mode)
         batch = int(self.public_interval_carrier.shape[0])
         _shape(self.protected_goal_set, (batch, 4, hidden), "protected goal set")
         _shape(
@@ -1232,6 +1248,7 @@ class ObjectIntentState:
             dtype=torch.long,
         )
         return ObjectIntentState(
+            time_grid_mode=self.time_grid_mode,
             protected_goal_set=self.protected_goal_set,
             history_tokens=self.history_tokens,
             history_validity=self.history_validity,
@@ -1274,7 +1291,10 @@ class FuturePlanRecognition:
     reconstruction_loss: Tensor
     interval_valid: Tensor | None = None
 
+    time_grid_mode: str = LEGACY_FUTURE_TIME
+
     def validate(self, *, hidden: int) -> None:
+        resolve_future_time(self.time_grid_mode)
         if self.interval_targets.ndim != 3:
             raise ValueError("recognizer interval target must be [B,4,H]")
         batch = int(self.interval_targets.shape[0])
@@ -2074,6 +2094,8 @@ class FutureObjectDynamics:
     log_camera_chart_availability: Tensor  # producer-owned finite FP32 [B,K,C,1]
     control_domain: CandidateControlDomain | None = None  # candidate control, not visibility
 
+    time_grid_mode: str = LEGACY_FUTURE_TIME
+
     @property
     def intervals(self) -> int:
         return int(self.semantic_delta.shape[1])
@@ -2131,8 +2153,11 @@ class FutureObjectDynamics:
         return self._interval_innovation(self.transport_mean)
 
     def validate(self, *, expected_intervals: int = 4) -> None:
+        grid = resolve_future_time(self.time_grid_mode)
         if self.control_domain is not None:
             self.control_domain.validate(intervals=expected_intervals)
+            if self.control_domain.interval_bounds != grid.bounds:
+                raise ValueError("world prediction and candidate time grid disagree")
         if self.current_reference.ndim != 3 or self.semantic_delta.ndim != 4:
             raise ValueError("future dynamics lost object or interval identity")
         batch, intervals, objects, width = self.semantic_delta.shape
@@ -2202,6 +2227,7 @@ class FutureObjectDynamics:
             dtype=torch.long,
         )
         return FutureObjectDynamics(
+            time_grid_mode=self.time_grid_mode,
             current_reference=self.current_reference[:, index],
             successor_content=self.successor_content[:, :, index],
             semantic_delta=self.semantic_delta[:, :, index],
@@ -2267,6 +2293,8 @@ class ObservedActionSequenceCondition:
     control_time_scale: int = 24
     schema: str = "observed-world-action-sequence-v1"
 
+    time_grid_mode: str = LEGACY_FUTURE_TIME
+
     @property
     def batch(self) -> int:
         return int(self.source_action.shape[0])
@@ -2288,7 +2316,7 @@ class ObservedActionSequenceCondition:
         # A future state depends on ALL earlier controls, not just controls in
         # its interval. An unobserved earlier control cannot be filled by zero.
         return torch.stack([
-            self.observed[:, :upper].all(dim=1) for _, upper in INTERVAL_BOUNDS
+            self.observed[:, :upper].all(dim=1) for _, upper in resolve_future_time(self.time_grid_mode).bounds
         ], dim=1)
 
     def validate(self, *, action_dim: int) -> None:
@@ -2296,7 +2324,7 @@ class ObservedActionSequenceCondition:
             raise ValueError("unknown observed action supervision schema")
         if self.source_action.ndim != 3:
             raise ValueError("observed world action must be [B,Tw,A]")
-        horizon = max(upper for _, upper in INTERVAL_BOUNDS)
+        horizon = max(upper for _, upper in resolve_future_time(self.time_grid_mode).bounds)
         _shape(self.source_action, (self.batch, horizon, action_dim), "observed world actions")
         _shape(self.canonical_value, tuple(self.source_action.shape), "observed action values")
         _shape(self.canonical_delta, tuple(self.source_action.shape), "observed action deltas")
@@ -2335,6 +2363,8 @@ class SupervisedWorld:
             raise TypeError("supervised world requires observed controls")
         self.action_condition.validate(action_dim=action_dim)
         self.dynamics.validate()
+        if self.dynamics.time_grid_mode != self.action_condition.time_grid_mode:
+            raise ValueError("supervised world action and prediction time grids differ")
         if self.dynamics.control_domain is not None:
             raise ValueError("supervised world cannot inherit a candidate control domain")
         if self.action_condition.batch != int(self.dynamics.current_reference.shape[0]):

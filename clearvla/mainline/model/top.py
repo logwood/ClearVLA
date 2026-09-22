@@ -25,6 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..future_time import LEGACY_FUTURE_TIME
 from ..instruction_reference import InstructionReference
 from ..temporal import HistoryTiming
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
@@ -103,6 +104,8 @@ class OnlineTopContext:
                 if getattr(self.current_world_belief, name) is not getattr(self.facts, name):
                     raise ValueError("online W belief must retain the same current G evidence")
         self.intent.validate(horizon=horizon, hidden=hidden)
+        if self.intent.time_grid_mode != self.predicted_dynamics.time_grid_mode:
+            raise ValueError("top S/W time grid mismatch")
         self.candidate_world.validate(
             action_dim=int(self.coarse_action.action_prediction.shape[-1])
         )
@@ -155,6 +158,8 @@ class DeploymentTopCache:
     def validate(self, *, hidden: int, horizon: int) -> None:
         self.belief.validate()
         self.intent.validate(horizon=horizon, hidden=hidden)
+        if self.intent.time_grid_mode != self.predicted_dynamics.time_grid_mode:
+            raise ValueError("top S/W time grid mismatch")
         self.candidate_world.validate(
             action_dim=int(self.candidate_world.action_condition.action_dim)
         )
@@ -205,6 +210,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         camera_names: tuple[str, ...] = ("top", "wrist"),
         world_camera_condition_mode: str = "motion_prior_only",
         world_action_condition_mode: str = "interval_mean_v1",
+        future_time_grid_mode: str = LEGACY_FUTURE_TIME,
         world_control_mode: str = "legacy_extrapolation_v1",
         world_robot_condition_mode: str = "implicit_g_only_v1",
         state_feature_mode: str = "native_affine_v1",
@@ -264,6 +270,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             entity_motion_mode=entity_motion_mode,
         )
         self.intent = StatelessObjectIntentOrganizer(
+            future_time_grid_mode=future_time_grid_mode,
             hidden=hidden,
             goal_dim=goal_dim,
             state_dim=state_dim,
@@ -279,6 +286,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             history_encoding_mode=history_encoding_mode,
         )
         self.coarse_action = CoarseActionIntent(
+            future_time_grid_mode=future_time_grid_mode,
             hidden=hidden,
             action_dim=action_dim,
             heads=heads,
@@ -287,6 +295,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             target_binding_mode=target_binding_mode,
         )
         self.dynamics = ObjectFutureDynamicsCompiler(
+            future_time_grid_mode=future_time_grid_mode,
             hidden=hidden,
             content_dim=content_dim,
             route_dim=route_dim,
@@ -304,11 +313,13 @@ class ObjectIntentDynamicsTop(nn.Module):
             state_feature_mode=state_feature_mode,
         )
         self.teacher = ObjectFutureTeacher(
+            future_time_grid_mode=future_time_grid_mode,
             content_dim=content_dim,
             key_dim=teacher_key_dim,
             flow_reference_frames=flow_reference_frames,
         )
         self.recognizer = FuturePlanRecognizer(
+            future_time_grid_mode=future_time_grid_mode,
             hidden=hidden,
             action_dim=action_dim,
             state_dim=state_dim,
@@ -316,6 +327,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             heads=heads,
         )
         self.effect_reader = ObjectFutureEffectReader(
+            future_time_grid_mode=future_time_grid_mode,
             hidden=hidden,
             content_dim=content_dim,
             route_dim=route_dim,
@@ -325,6 +337,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)
         self.plan_compiler = ObjectPolicyPlanCompiler(
+            future_time_grid_mode=future_time_grid_mode,
             hidden=hidden,
             horizon=horizon,
             basis=basis,

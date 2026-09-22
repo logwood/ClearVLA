@@ -30,6 +30,7 @@ from clearvla.data.window_boundaries import (
     WINDOW_BOUNDARY_CONTRACTS,
 )
 
+from .future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from .gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
     CONTINUOUS_GRIPPER_OUTPUT_MODE,
@@ -369,8 +370,8 @@ class ModelDimensions:
             raise ValueError("the active state history owns three causal rows")
         if self.executed_history_length != 8:
             raise ValueError("the active executed-action history owns eight causal rows")
-        if self.future_supports != 12:
-            raise ValueError("the teacher contract requires supports at offsets 4..48")
+        if self.future_supports not in {6, 12}:
+            raise ValueError("future support count must match a supported physical time grid")
 
 
 @dataclass(frozen=True)
@@ -451,6 +452,7 @@ class TopConfig:
     # opt-in sequence mode predicts and conditions W on the complete 24-row
     # normalized physical proposal through a causal prefix encoder.
     world_action_condition_mode: str = "interval_mean_v1"
+    future_time_grid_mode: str = LEGACY_FUTURE_TIME
     world_supervision_mode: str = "candidate_legacy_v1"
     world_control_mode: str = "legacy_extrapolation_v1"
     world_robot_condition_mode: str = "implicit_g_only_v1"
@@ -470,6 +472,9 @@ class TopConfig:
     instruction_reference_mode: str = "none"
 
     def validate(self) -> None:
+        grid = resolve_future_time(self.future_time_grid_mode)
+        if grid.aligned and (self.world_control_mode != "known_prefix_v1" or self.world_supervision_mode != "matched_observed_sequence_v1"):
+            raise ValueError("aligned future time requires known sequence controls and matched supervision")
         if self.world_robot_condition_mode not in {"implicit_g_only_v1", "observed_state_views_v1"}:
             raise ValueError("unknown top world_robot_condition_mode")
         if self.world_robot_condition_mode == "observed_state_views_v1" and (
@@ -970,6 +975,9 @@ class ExperimentConfig:
             self.runtime,
         ):
             section.validate()
+        grid = resolve_future_time(self.top.future_time_grid_mode)
+        if self.dimensions.future_supports != len(grid.support_offsets):
+            raise ValueError("future support count and time grid disagree")
         native_side = round(self.dimensions.patches_per_camera**0.5)
         if native_side * native_side != self.dimensions.patches_per_camera:
             raise ValueError("patches_per_camera must form one square native chart")
@@ -1181,6 +1189,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.future_time_grid_mode == LEGACY_FUTURE_TIME:
+            cast(dict[str, object], payload["top"]).pop("future_time_grid_mode")
         if self.top.world_robot_condition_mode == "implicit_g_only_v1":
             cast(dict[str, object], payload["top"]).pop("world_robot_condition_mode")
         if self.top.world_control_mode == "legacy_extrapolation_v1":

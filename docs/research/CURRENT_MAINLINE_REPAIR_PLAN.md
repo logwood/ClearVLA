@@ -277,3 +277,27 @@ supervision; do not add zero controls, relabel timestamps, or remove the source
 domain mask. Resolve this in M6 rather than calling far-horizon planning complete.
 Persistent physical identity, S desired-operation targets and P3 execution-error
 state remain separate open design work. Do not introduce deployment-only state.
+
+
+## M6d source unit and next core dependency
+
+Choose an explicit controlled-24 future grid, not a fabricated zero-action
+continuation. Previous M6b/c layouts stay named controls. Producer/consumer closure:
+
+| Producer | Actual consumer | Required correspondence |
+|---|---|---|
+| FutureTimeGrid bounds/supports | dataset loader, finite preflight, typed future batch | 24 real control/successor rows, six observed supports; exact declared clock |
+| Dense controls/successor states | S training recognizer, coarse target | disjoint rows 0:4 / 4:8 / 8:16 / 16:24 |
+| Sparse observed DINO/flow | Teacher and label-support reducers | open-left/closed-right physical windows; no future observation double counted |
+| Endpoint code + actual bin centers | S, coarse, W, P2 terminal | irregular physical spacing; not ordinal array position or task age |
+| 24-step candidate prefix | W1/W2 and CandidateControlDomain | all four bins admitted from actual controls; no fake horizon extension |
+| Explicit clock identities | docks, policy/training caches, preselected P2, P3, loss, manifest/ABI | same shape does not authorize a different physical meaning |
+
+After preservation, continue the remaining M6 physical-state/read contracts,
+not workflow expansion. In particular audit whether scalar covariance/reliability
+and per-camera effects preserve units into P2 and whether W1-to-W2 state really
+represents an interpretable successor. Do not introduce contact ground truth,
+persistent IDs or deployment-only recurrence. S desired-operation targets,
+P3 execution feedback and M9--M11 are separate unfinished work. Before any
+feedback memory, distinguish sparse-interval-mean targets from endpoint state
+predictions and match error comparisons to the actually executed prefix.

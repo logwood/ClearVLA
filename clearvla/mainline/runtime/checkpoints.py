@@ -148,6 +148,7 @@ LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/checkpoint.py",
         "clearvla/mainline/manifest.py",
+        "clearvla/mainline/future_time.py",
         "clearvla/mainline/model/__init__.py",
         "clearvla/mainline/model/component_contracts.py",
         "clearvla/mainline/model/components.py",

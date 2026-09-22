@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from ..future_time import resolve_future_time
 from .config import V39PolicyConfig
 
 V120_REFERENCE_SOURCE_COMMIT = "0b92d35"
@@ -155,6 +156,10 @@ def build_v120_visual_config(mainline_config: Any) -> V39PolicyConfig:
         num_cameras=int(dims.num_cameras),
         patches_per_camera=int(dims.patches_per_camera),
         target_future_count=int(dims.future_supports),
+        **({"flow_jepa_window_offsets": resolve_future_time(mainline_config.top.future_time_grid_mode).endpoints,
+            "flow_jepa_interval_boundaries": (0, *resolve_future_time(mainline_config.top.future_time_grid_mode).endpoints),
+            "flow_jepa_interval_support_offsets": resolve_future_time(mainline_config.top.future_time_grid_mode).support_offsets}
+           if resolve_future_time(mainline_config.top.future_time_grid_mode).aligned else {}),
         action_basis_tokens=int(dims.action_basis_tokens),
         goal_language_dim=int(dims.goal_token_dim),
         # Outlet source semantics must never replace the restored V120 core

@@ -24,11 +24,12 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit source candidate is
-`configs/mainline/structural_rebuild_m6c_calvin.json` (validation scope in handoff).
+`configs/mainline/structural_rebuild_m6d_calvin.json` (validation scope in handoff).
 M5a adds one soft operated-
 object distribution across actual S/coarse/P1/P2 readers; its detailed contract
 is below. M5b adds a causal instruction reference; M6a/b/c separate action-matched W
-supervision, known-control evidence and current robot/view relations. Learned
+supervision, known-control evidence and current robot/view relations. M6d
+resolves the same physical 24-step future grid through all active consumers. Learned
 progress, physical object identity and deeper downstream redesign remain open. Legacy and M1a/M1b/M1c/M1d/M2/M3/M4b
 configs remain reproducible controls, not automatic aliases of this candidate.
 M2 preserves full G1 support through the actual G2 sampler and G3/P1
@@ -1477,3 +1478,57 @@ A learned encoder may still rely on shortcuts. Lack of calibrated 3D/contact
 state, physical cross-window entity association, 16..24 control-grid resolution,
 S desired-operation supervision and P3 executed-prefix feedback remain open.
 Do not claim successful manipulation or whole-M6 acceptance from these checks.
+
+
+## M6d physical control-aligned future clock
+
+Explicit `top.future_time_grid_mode=control_aligned_24_v1` is selected by
+`structural_rebuild_m6d_calvin.json`, with six visual supports and the M6a/b/c
+contracts. `legacy_48_v1` remains the default omitted from old serialization;
+old experiments are not silently relabelled. New training/checkpoint identity
+includes the exact grid, target convention and manifest intervals.
+
+`FutureTimeGrid` is the authoritative physical-step resolver. The four control
+intervals are [0,4), [4,8), [8,16), [16,24). Given o[t] before a[t], target
+successor observations are (0,4], (4,8], (8,16], (16,24]. Dense action/state
+summaries use rows 0:4, 4:8, 8:16, 16:24, with state row j representing
+observed o[t+j+1]. Sparse visual supports are exactly 4,8,12,16,20,24. A visual
+boundary belongs to one interval, never both. Teacher targets are means over
+these declared sparse observed supports: not dense-time integrals, and not
+endpoint states for the last two intervals. Missing supports invalidate the
+whole affected interval; no nearest-frame substitute or shortened target is
+permitted in this mode. Policy row-zero labels survive incomplete world labels.
+
+W1 owns intervals 0/1; W2 owns 2/3. Both candidate and observed-supervision W use
+causal control prefixes ending 4/8/16/24, with the existing 24-step action-time
+unit. The real dataset produces 24 future action/state rows and six visual
+supports; preflight explicitly checks this clock instead of assuming 48 rows.
+All four candidate intervals are fully controlled and admitted in P2. The
+source-owned control-domain quarantine remains in place and is not replaced
+by a predicted confidence or an all-true hard-coded mask.
+
+S and the training-only recognizer receive deterministic physical endpoint
+codes in addition to their learned interval features. Coarse row queries
+interpolate knots at physical centers 2/6/12/20 rather than treating unequal
+intervals as uniformly spaced. Learned 24-row detail remains. W interval and
+P2 terminal keys use the same endpoint code; P3 consumes S's matching grid.
+This is relative FUTURE CONTROL time, not elapsed task phase or numerical ODE
+time. The extracted visual AND action decoder profiles carry matching window
+endpoints, interval boundaries and future-support offsets. Unused historical
+V120 graph code does not define the current Teacher target convention.
+
+Typed S/docks, W fields, supervised controls and preselected P2 evidence retain
+clock identity. Cache, loss, Teacher/recognizer, P2 spatial/terminal, P3 and ABI
+boundaries reject same-shaped evidence from a different clock. No new trainable
+parameters, no extra W/G/S evaluations, no new ODE steps or persistent state
+are introduced. Legacy-mode parameters/buffers and same-noise output remain a
+separate exact control, not a compatibility promise for the new graph.
+
+This chooses a complete current-action support over an untrained artificial
+48-step continuation. The candidate does not claim controlled forecasts after
+24 steps; longer task intent/reference remains S's responsibility. W2 is now
+usable for 8..24 control consequences, not a relabelled 32/48 prediction. W2's
+latent dependency is still not a compositional physical simulator. Precise
+contact/support relations, persistent physical entity identity, S's desired
+operation supervision, P2 camera-aware downstream value design and P3 matched
+executed-prefix feedback remain open. Source checks are not robot success.

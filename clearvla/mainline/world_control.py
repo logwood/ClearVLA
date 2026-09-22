@@ -11,18 +11,19 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from .future_time import CONTROL_INTERVALS, LEGACY_FUTURE_TIME, resolve_future_time
 from .manifest import INTERVALS
 
 LEGACY_WORLD_CONTROL = "legacy_extrapolation_v1"
 KNOWN_PREFIX_WORLD_CONTROL = "known_prefix_v1"
 
 
-def world_control_metadata() -> dict[str, object]:
+def world_control_metadata(time_grid_mode: str = LEGACY_FUTURE_TIME) -> dict[str, object]:
     return {
         "schema": "candidate-control-domain-v1",
         "mode": KNOWN_PREFIX_WORLD_CONTROL,
         "source": "candidate-action-prefix",
-        "interval_bounds": [list(pair) for pair in INTERVALS],
+        "interval_bounds": [list(pair) for pair in resolve_future_time(time_grid_mode).bounds],
         "online_known_prefix": 24,
         "admission": "all-controls-through-interval-upper-known",
         "unknown": "excluded-before-value-key-and-common-reduction",
@@ -45,7 +46,7 @@ class CandidateControlDomain:
     def validate(self, *, intervals: int = 4) -> None:
         if type(self.known_prefix_steps) is not int or self.known_prefix_steps < 0:
             raise ValueError("candidate known control prefix must be a nonnegative integer")
-        if self.interval_bounds != INTERVALS or len(self.interval_bounds) != intervals:
+        if self.interval_bounds not in (INTERVALS, CONTROL_INTERVALS) or len(self.interval_bounds) != intervals:
             raise ValueError("candidate control domain must retain physical interval bounds")
 
     @property

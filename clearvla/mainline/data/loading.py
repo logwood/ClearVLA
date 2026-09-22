@@ -63,6 +63,7 @@ from clearvla.vision.online_store import OnlineVisualStore
 from clearvla.vision.preprocessing import PreprocessConfig
 
 from ..config import ExperimentConfig
+from ..future_time import resolve_future_time
 from ..gripper_contract import is_binary_gripper_mode
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..interfaces import (
@@ -523,7 +524,7 @@ def _load_mainline_data(
         instruction_reference_mode=config.top.instruction_reference_mode,
         state_feature_mode=config.top.state_feature_mode,
         state_profile=profile.name,
-        world_horizon=48,
+        world_horizon=resolve_future_time(config.top.future_time_grid_mode).horizon,
         policy_horizon=dims.action_horizon,
         support_stride=4,
         state_history_offsets=(-8, -4, 0),
@@ -1168,6 +1169,7 @@ def to_training_batch(
             strict=True,
         )
     future = FutureSupervision(
+        time_grid_mode=config.top.future_time_grid_mode,
         dino_supports=_device_tensor(
             batch,
             "target_future_dinov2_tokens",

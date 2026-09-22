@@ -25,6 +25,7 @@ import torch
 from torch import Tensor, nn
 
 from ..config import ExperimentConfig
+from ..future_time import resolve_future_time
 from ..interfaces import ObservableHistory
 from ..v120_core.bspine import (
     BSPINE0_IMPLEMENTATION,
@@ -82,6 +83,10 @@ def _build_decoder_config(config: ExperimentConfig):
         visual_token_dim=dims.visual_token_dim,
         patches_per_camera=dims.patches_per_camera,
         target_future_count=dims.future_supports,
+        **({"flow_jepa_window_offsets": resolve_future_time(config.top.future_time_grid_mode).endpoints,
+            "flow_jepa_interval_boundaries": (0, *resolve_future_time(config.top.future_time_grid_mode).endpoints),
+            "flow_jepa_interval_support_offsets": resolve_future_time(config.top.future_time_grid_mode).support_offsets}
+           if resolve_future_time(config.top.future_time_grid_mode).aligned else {}),
         action_basis_tokens=dims.action_basis_tokens,
         gripper_field_dim=bottom.gripper_field_dim,
         gripper_output_mode=bottom.gripper_output_mode,
