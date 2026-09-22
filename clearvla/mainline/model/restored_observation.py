@@ -249,6 +249,9 @@ class RestoredV120ObservationCompiler(nn.Module):
             observed_history = ObservedEntityHistory(
                 content=content, observed=observed, source_time=time,
                 backward_flow=pack.patch_flow_backward * (2.0 / float(side - 1)),
+                # _RawPyramidFlow derives these from forward uncertainty/cycle
+                # error; they are indexed on the earlier frame, unlike inverse
+                # displacement. The history record declares that chart.
                 confidence=pack.flow_confidence, occlusion=pack.flow_occlusion,
             )
             observed_history.validate()

@@ -563,3 +563,54 @@ def test_real_gap_changes_evidence_without_rescaling_the_spatial_correspondence(
         rtol=0,
         atol=0,
     )
+
+
+def test_forward_flow_status_is_read_on_earlier_chart_after_inverse_step():
+    """Independent affine-field oracle: nonuniform status exposes frame swaps."""
+    h = _history(side=5)
+    xy = current_image_grid(5, 5, device=h.content.device)
+    flow = h.backward_flow.clone()
+    flow[:, 1, :, 0] = 0.5  # current (0,0) -> previous (0.5,0)
+    flow[:, 0, :, 1] = 0.5  # previous (0.5,0) -> earlier (0.5,0.5)
+    confidence = h.confidence.clone()
+    confidence[:, 1, :, 0] = (xy[..., 0] + 1) / 2
+    confidence[:, 0, :, 0] = (xy[..., 1] + 1) / 2
+    occlusion = 1 - confidence
+    h = replace(h, backward_flow=flow, confidence=confidence, occlusion=occlusion)
+    out = pull_causal_history(h, h.content)
+    # Both actual earlier-source samples are 0.75. Later-source reads instead
+    # produce 0.5 and 0.5 and therefore cannot satisfy either assertion.
+    torch.testing.assert_close(out.confidence[0, 1, :, 2, 2, 0], torch.full((2,), 0.75))
+    torch.testing.assert_close(out.confidence[0, 0, :, 2, 2, 0], torch.full((2,), 0.75**2))
+    torch.testing.assert_close(out.occlusion[0, 1, :, 2, 2, 0], torch.full((2,), 0.25))
+    torch.testing.assert_close(out.occlusion[0, 0, :, 2, 2, 0], torch.full((2,), 1 - 0.75**2))
+    assert (out.coverage[0, :, :, 2, 2, 0] == 1).all()
+
+
+def test_status_chart_is_typed_and_protected_by_deployment_identity():
+    from clearvla.vision.entity_history import EARLIER_SOURCE_STATUS
+
+    h = _history()
+    assert h.status_chart == EARLIER_SOURCE_STATUS
+    with pytest.raises(ValueError, match="earlier-source"):
+        replace(h, status_chart="later_source").validate()
+    metadata = entity_history_metadata(CAUSAL_ENTITY_HISTORY)
+    assert metadata["flow_status_chart"] == EARLIER_SOURCE_STATUS
+    assert metadata["flow_status_read"] == "after_inverse_step_at_earlier_source_coordinate"
+
+
+def test_nonuniform_status_has_flow_gradient_without_changing_source_authority():
+    h = _history(offsets=(-4, 0), side=5)
+    xy = current_image_grid(5, 5, device=h.content.device)
+    flow = torch.full_like(h.backward_flow, 0.1, requires_grad=True)
+    confidence = h.confidence.clone()
+    confidence[:, 0, :, 0] = (xy[..., 0] + 1) / 2
+    h = replace(h, backward_flow=flow, confidence=confidence)
+    out = pull_causal_history(h, h.content)
+    out.confidence[0, 0, :, 2, 2, 0].sum().backward()
+    assert flow.grad is not None and torch.isfinite(flow.grad).all()
+    # Inverse displacement owns the earlier lookup coordinate. The derivative
+    # of the independent confidence ramp with respect to x displacement is 1/2.
+    torch.testing.assert_close(flow.grad[0, 0, :, 0, 2, 2], torch.full((2,), 0.5))
+    assert h.observed.all()
+    assert (out.coverage[0, 0, :, 2, 2] == 1).all()

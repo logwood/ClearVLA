@@ -24,7 +24,7 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit candidate is
-`configs/mainline/structural_rebuild_m4c_calvin.json`. Legacy and M1a/M1b/M1c/M1d/M2/M3/M4b
+`configs/mainline/structural_rebuild_m4d_calvin.json`. Legacy and M1a/M1b/M1c/M1d/M2/M3/M4b
 configs remain reproducible controls, not automatic aliases of this candidate.
 M2 preserves full G1 support through the actual G2 sampler and G3/P1
 value consumers. M3 adds one soft local observation law for typed properties
@@ -280,7 +280,12 @@ the existing two directed flow estimates, actual frame offsets and the exact
 context-dropout/source masks. It reuses the current-observation content grid's
 full-width normalization; it does not call a future-target API. Backward flow
 is indexed on the later SOURCE image and converts from chart-cell displacement
-to normalized xy once. Earlier coordinates compose the two adjacent maps at
+to normalized xy once. The RGB producer's confidence and occlusion are instead
+FORWARD-flow quantities on the EARLIER source image. Read these after each
+inverse step at the updated earlier-frame coordinate; reading all fields on
+the later chart is wrong. The status chart is explicit in the history record
+and deployment ABI. They remain predicted features, not observed support.
+Earlier coordinates compose the two adjacent maps at
 the appropriate intermediate location; multiplying the latest flow by age is
 not equivalent and is not used. Current-observation aliases at reset are counted
 once. Leaving the image cannot manufacture an observation by reentering later.
@@ -1166,3 +1171,27 @@ Historical replay provenance is indexed by
 [archive/replay/README.md](archive/replay/README.md). Open it only for ancestry,
 an old log or the reason behind a past repair; never reconstruct the current
 graph from the ledger.
+
+## M4d current-entity motion law
+
+`top.entity_motion_mode=current_entity_support_v1` reads estimated current-minus-
+previous displacement at the same current-image entity measure used for camera
+centers and reverse lookup. The latest inverse map is indexed by current cells;
+its negative is integrated under each K/camera conditional law. Conditioning is
+performed in FP32 log space before exponentiation. No query-anchor flow, mean
+position lookup or cross-camera vector average enters this G3 export. Source
+clock gaps remain the sole conversion to per-control-step rate; a missing pair
+is zero with zero duration, not an observed static scene. Confidence and
+occlusion cannot change current validity or reweight the spatial entity law.
+An estimated inverse location outside the older image remains an estimate, not
+an admitted historical correspondence. The finite causal evidence path separately
+checks correspondence coverage.
+
+The corrected M4c status reader samples forward confidence/occlusion on earlier
+source cells after each inverse step. Its explicit metadata rejects first-M4c
+chart assumptions on exact deployment loading. Old query-anchor motion is an
+explicit control, not a fallback. The motion selection adds no parameters,
+encoder calls, W builds, ODE evaluations or mutable physical state. S/W receive
+the ordinary exported entity motion through existing consumers; their current
+cross-camera summaries are NOT certified as common-world vectors and remain
+part of their deeper review. This unit does not establish physical object IDs.

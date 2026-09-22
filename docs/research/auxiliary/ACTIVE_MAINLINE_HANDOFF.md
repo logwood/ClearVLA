@@ -7,7 +7,7 @@ Updated: 2026-09-22. Source implementation, not user-server job state.
 - Branch: `codex/structural-rebuild-20260921`; ordinary fast-forward only.
 - Architectural base: `0f07160d692ec8c8302880420a3d93d74512c39b`.
 - Read-only experiment: `a0e1f5d5b9736d37a51faec36039144f181d4b12`.
-- Verified remote starting point: M4a/M4b
+- Earlier verified remote starting point: M4a/M4b
   `57974b37a2639efa4b5e882b95799ca26f2b9a85`, complete remote tree
   `e713fbe252e1a087128de5f52aadb9a0e8f0ea0a`.
 - That published artifact was independently extracted and reconstructed to the
@@ -19,6 +19,14 @@ Updated: 2026-09-22. Source implementation, not user-server job state.
   SHA and source tree are tracked separately, not misrepresented as one commit.
 
 ## Current source unit
+
+Initial M4c1 is now published as `6f74b432a66aacc7f3ff9cd05eaa7591839c32bf`,
+full tree `88742456555550c50de1de8f3fed39602d804fcb`, publisher run
+`35688670562`. Its artifact must not be mistaken for the corrected status chart.
+The current source is the M4d candidate:
+`configs/mainline/structural_rebuild_m4d_calvin.json`. It includes both the
+post-freeze confidence-chart correction and current-entity motion reads.
+
 
 M4c1 adds flow-pulled causal observed temporal evidence to the real entity
 binder. Candidate config: `configs/mainline/structural_rebuild_m4c_calvin.json`.
@@ -32,6 +40,24 @@ content and loss masks are not replaced by historical guesses. Temporal keys
 are consumed in K competition and its iterative update, and all S/W/P paths
 receive the resulting ordinary entity facts. Dense history does not enter the
 compact W/ODE belief. This is finite-window grouping, not persistent object IDs.
+
+## Post-freeze source-chart correction
+
+The frozen M4c1 tree `88742456555550c50de1de8f3fed39602d804fcb` passed
+675 local cases (one skip), but a further producer-to-consumer review found a
+confidence/occlusion chart mismatch. Its publisher is separately tracked; do
+not infer the corrected property from that artifact. `_RawPyramidFlow` emits
+forward confidence on earlier-source cells; only inverse flow is later-source
+indexed. The correction reads status after taking the inverse step, adds an
+explicit status chart and ABI fields, and uses nonuniform spatial fixtures and
+an independent flow-gradient oracle. The corrected focused inventory has
+33 passing cases, including production optimizer/CPU-BF16/checkpoint paths.
+The correction-only local full inventory completed: 679 collected, 678 passed,
+one skipped, zero failures/errors. Scoped Ruff is clean, Pyright has no added
+errors/imports, and two-seed old-mode parity passed. Its complete remote result
+must still be read from the subsequent corrected source artifact.
+A complete frozen-source backup records this known defect, so it cannot be
+mistaken for the final corrected acceptance. No existing source mask is changed.
 
 ## Verification and preservation
 
@@ -79,3 +105,16 @@ Do not change master, historical branches, checkpoints, user-server jobs or
 formal training. If Git publication fails, save complete source, patch, hashes
 and logs locally and proceed with source work. Never repeatedly regenerate an
 opaque upload or confuse its transport commit with published verified source.
+
+## Current M4d acceptance boundary
+
+Production G3 exports motion from its current image measure and latest inverse
+flow, retaining K/camera/source-time axes. Real S/W input hooks and an old-anchor
+intervention verify consumption, not only field existence. No extra parameters
+are added. Preliminary focused motion cases passed; acceptance is the final
+exact-source inventory and independent supported-runtime artifact. Initial
+import-fixture failures and superseded runs remain in external logs, not renamed
+passes. Dense correspondence/history stays out of numerical solver caches.
+Source masks and the independent observed reconstruction target are unchanged.
+After acceptance, review S's target/operation/progress and downstream view-aware
+geometry. Cross-window physical identity is still open; K numbers are not IDs.

@@ -462,8 +462,11 @@ class TopConfig:
     entity_context_mode: str = "candidate_only_v1"
     entity_chart_mode: str = "query_lattice_v1"
     entity_history_mode: str = "current_only_v1"
+    entity_motion_mode: str = "query_anchor_v1"
 
     def validate(self) -> None:
+        if self.entity_motion_mode not in {"query_anchor_v1", "current_entity_support_v1"}:
+            raise ValueError("unknown top entity_motion_mode")
         if self.entity_history_mode not in {"current_only_v1", "flow_pulled_history_v1"}:
             raise ValueError("unknown top entity_history_mode")
         if self.entity_chart_mode not in {"query_lattice_v1", "current_image_support_v1"}:
@@ -947,6 +950,12 @@ class ExperimentConfig:
         validate_state_feature_profile(self.top.state_feature_mode, profile.name)
         if state_feature_width(self.top.state_feature_mode, len(profile.state_indices)) != self.dimensions.state_dim:
             raise ValueError("state feature chart must align with dimensions.state_dim")
+        if self.top.entity_motion_mode == "current_entity_support_v1" and (
+            self.top.entity_history_mode != "flow_pulled_history_v1"
+            or self.top.entity_chart_mode != "current_image_support_v1"
+            or self.observation.source_time_mode != "source_history_steps_v1"
+        ):
+            raise ValueError("current-entity motion requires the actual causal history and image chart")
         if self.top.entity_history_mode == "flow_pulled_history_v1" and (
             self.top.entity_chart_mode != "current_image_support_v1"
             or self.observation.source_time_mode != "source_history_steps_v1"
@@ -1135,6 +1144,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.entity_motion_mode == "query_anchor_v1":
+            cast(dict[str, object], payload["top"]).pop("entity_motion_mode")
         if self.top.entity_history_mode == "current_only_v1":
             cast(dict[str, object], payload["top"]).pop("entity_history_mode")
         if self.top.entity_chart_mode == "query_lattice_v1":

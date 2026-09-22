@@ -24,6 +24,11 @@ from clearvla.vision.entity_history import (
     NO_ENTITY_HISTORY,
     entity_history_metadata,
 )
+from clearvla.vision.entity_motion import (
+    CURRENT_ENTITY_MOTION,
+    QUERY_ANCHOR_MOTION,
+    entity_motion_metadata,
+)
 from clearvla.vision.local_ownership import INDEPENDENT_LOCAL_OWNERS, local_ownership_metadata
 from clearvla.vision.preprocessing import (
     PreprocessConfig,
@@ -347,6 +352,8 @@ def build_deployment_abi(
         "flow_schedule": flow_schedule,
         "flow_schedule_sha256": canonical_sha256(flow_schedule),
         "observation": {
+            **({"entity_motion": entity_motion_metadata(config.top.entity_motion_mode)}
+               if config.top.entity_motion_mode == CURRENT_ENTITY_MOTION else {}),
             **({"entity_history": entity_history_metadata(config.top.entity_history_mode)}
                if config.top.entity_history_mode == CAUSAL_ENTITY_HISTORY else {}),
             **({"entity_chart": entity_chart_metadata(config.top.entity_chart_mode)}
@@ -445,6 +452,13 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     )
     if observation.get("history_timing_contract") != expected_timing:
         raise ValueError("deployment history timing contract differs from selected graph")
+    motion_mode = graph_top.get("entity_motion_mode", QUERY_ANCHOR_MOTION)
+    if motion_mode == CURRENT_ENTITY_MOTION:
+        actual_motion = _mapping(observation.get("entity_motion"), name="observation.entity_motion")
+        if canonical_sha256(actual_motion) != canonical_sha256(entity_motion_metadata(CURRENT_ENTITY_MOTION)):
+            raise ValueError("deployment entity motion differs from the graph")
+    elif motion_mode != QUERY_ANCHOR_MOTION or "entity_motion" in observation:
+        raise ValueError("deployment entity motion is unknown or undeclared")
     history_mode = graph_top.get("entity_history_mode", NO_ENTITY_HISTORY)
     if history_mode == CAUSAL_ENTITY_HISTORY:
         actual_history = _mapping(observation.get("entity_history"), name="observation.entity_history")

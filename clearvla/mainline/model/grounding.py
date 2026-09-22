@@ -19,6 +19,11 @@ from clearvla.vision.entity_history import (
     NO_ENTITY_HISTORY,
     CausalEntityEvidence,
 )
+from clearvla.vision.entity_motion import (
+    CURRENT_ENTITY_MOTION,
+    QUERY_ANCHOR_MOTION,
+    current_entity_motion,
+)
 
 from .routing import smooth_rms_contract
 from .types import DenseFactChart, LocalFactSet, ObjectFactSet, normalized_entropy
@@ -226,6 +231,7 @@ class DenseObjectGrounder(nn.Module):
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = QUERY_CHART,
         entity_history_mode: str = NO_ENTITY_HISTORY,
+        entity_motion_mode: str = QUERY_ANCHOR_MOTION,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -291,6 +297,13 @@ class DenseObjectGrounder(nn.Module):
             raise ValueError("unknown entity history mode")
         if entity_history_mode == CAUSAL_ENTITY_HISTORY and entity_chart_mode != CURRENT_IMAGE_CHART:
             raise ValueError("causal entity history requires current image coordinates")
+        if entity_motion_mode not in (QUERY_ANCHOR_MOTION, CURRENT_ENTITY_MOTION):
+            raise ValueError("unknown entity motion mode")
+        if entity_motion_mode == CURRENT_ENTITY_MOTION and (
+            entity_chart_mode != CURRENT_IMAGE_CHART or entity_history_mode != CAUSAL_ENTITY_HISTORY
+        ):
+            raise ValueError("current-entity motion requires causal history and current image support")
+        self.entity_motion_mode = entity_motion_mode
         self.entity_history_mode = entity_history_mode
         self.history_evidence = (
             CausalEntityEvidence(content_dim, route_dim)
@@ -843,6 +856,12 @@ class DenseObjectGrounder(nn.Module):
             )
             chart_read, _ = image_measure.normalized((2, 3, 4))
             camera_coordinates = image_measure.camera_centers().to(chart.candidate_coordinates.dtype)
+            if self.entity_motion_mode == CURRENT_ENTITY_MOTION:
+                if local_facts.observed_history is None:
+                    raise ValueError("current-entity motion lost its source history")
+                camera_transport_prior = current_entity_motion(
+                    image_measure, local_facts.observed_history
+                ).to(dtype=chart.candidate_transport_prior.dtype)
             recon_log_mass = (
                 corrected_k_log_conditional.transpose(1, 2)
                 + candidate_log_prior[..., 0][:, None]

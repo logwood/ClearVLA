@@ -511,3 +511,30 @@ DINO target is unchanged. This closes the source-level disconnected-context
 issue, not entity objectness, calibrated visibility, persistent identity, or
 Teacher association accuracy. Those remain open and must not be inferred from
 a positive connectivity gradient or a lower reconstruction loss.
+
+## M4c1 follow-up: flow-status source chart
+
+Post-freeze producer-to-consumer review found that `_RawPyramidFlow` derives
+confidence/occlusion from the forward flow on the earlier frame. The first
+M4c1 history consumer incorrectly sampled these on later-source coordinates,
+although its inverse displacement and observation pulls used the correct map.
+Constant status fixtures missed the defect. The corrected helper samples
+status AFTER each inverse displacement. Explicit earlier-source status metadata
+rejects chart drift in ordinary deployment reloads. Spatial affine-field and
+flow-VJP tests cover this difference; confidence/occlusion still cannot alter
+source observation masks. Original accepted tests remain valid only for their
+recorded source tree and do not establish this subsequently corrected property.
+Final correction verification and remote publication belong to their artifacts.
+
+## M4d follow-up: entity position and motion had different supports
+
+The raw adapter's `slot_transport_prior` repeats an earlier coarse-query motion
+anchor across local hypotheses. After M4b moved entity coordinates to current
+image support, this old anchor still supplied the exported motion prior. The
+new explicit mode integrates the latest inverse-flow displacement under the
+SAME current image measure as entity geometry. This closes the G3 spatial-read
+inconsistency only. Optical flow is an estimate; image vectors are camera local,
+not metres, forces or world-frame velocity. Existing S/W cross-camera averaging
+and relation modeling require their own redesign. Temporal correspondence
+confidence is read on its forward producer's earlier-source chart. Neither
+fix guarantees objectness, persistent association or learned task performance.

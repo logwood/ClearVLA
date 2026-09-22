@@ -36,6 +36,7 @@ choices just to preserve old golden outputs.
 | M4b current-image entity support | Implemented candidate; verification recorded per source | Complete spatial law in actual reverse lookup/reconstruction and one geometric summary; stable log-domain conditioning; query/image identities separated. |
 | M4c1 causal observed entity evidence | Implemented candidate; verification per source | Existing inverse flows compose observed past onto current pixels; actual full-candidate evidence reaches K competition. Same finite window in training and online, no deployment-only state. |
 | M4c2 remaining global/persistent identity | Open | Physical objectness, cross-window association and any matching recurrent training/online state; do not mistake finite-window grouping for persistent K identity. |
+| M4d entity-motion chart | Implemented candidate; validation per source | Shared current-image spatial law for position and motion; includes earlier-source status correction. No extra parameters or world calls; view-aware downstream reasoning remains open. |
 | M5 S/coarse | Interface adapted only | The history submodule is new; target/operation/progress decomposition, shared entity binding and recognizer supervision still require deep review. |
 | M6 W1/W2 | Not started | Match supervised action to observed outcome; separate candidate prediction from demonstration-target training; explicit robot-object relations and known control horizon. |
 | M7 P1/P2 | History context adapted only | Shared operated entity, current target facts, view-aware geometry and corresponding candidate consequences. |
@@ -176,6 +177,7 @@ phase timer or arbitrary extra solver pass substitutes for a sound dataflow.
 |---|---|---|
 | Prepared causal image packet | `ObservedEntityHistory` | Exact source offsets/context masks; current content normalization reused, no future argument. |
 | Existing inverse flow on later cells | `pull_causal_history` | Compose maps at intermediate coordinates; image-chart units, duplicate step is identity. |
+| Earlier-source forward confidence/occlusion | History inverse composition | Read after inverse displacement on its actual source chart; neither is a validity mask. |
 | Source-mask interpolation | Temporal relation features | Partial coverage is retained, never tiny-mass normalized or promoted to physical visibility. |
 | Camera-local temporal features | Full current-candidate quadrature | Project before expansion; no barycenter or top-k support collapse. |
 | Temporal candidate context | Real K competition and slot updates | Alter the actual exported entity law, not an unused metric; independent current target unchanged. |
@@ -186,3 +188,19 @@ M4c1 chooses a bounded observation-derived association path before considering
 persistent recurrent identities. Global physical objectness and cross-window
 re-identification are NOT declared complete. Do not promote a new field, an
 action gradient, or a passing structural test into a learned tracking claim.
+
+## M4d producer/consumer closure
+
+The observed-history packet owns the latest inverse flow and its physical source
+gap. `ImageLogMeasure` owns the current per-entity/per-camera spatial law. Their
+expectation replaces the stale anchor in `DenseObjectGrounder`, `ObjectFactSet`
+and compact `ObjectWorldBelief`; actual S/W consumers see that same exported
+value. Ordinary source/config/deployment identities record the new read. Tests
+perturb old anchors, verify spatial gradients and action-only gradients, check
+real S/W hooks, reset, CPU BF16 and exact checkpoint/deployment reload. The raw
+old anchor remains available only to old-mode controls. No source observation
+is erased because correspondence confidence, coverage or camera mass is small.
+
+The corrected M4c focused file has 33 cases; its full local inventory finished
+with 678 passes and one skip, no failures/errors. The additional M4d acceptance
+belongs to its own exact-source report, not this preceding correction result.

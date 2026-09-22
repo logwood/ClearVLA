@@ -201,6 +201,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = "query_lattice_v1",
         entity_history_mode: str = "current_only_v1",
+        entity_motion_mode: str = "query_anchor_v1",
         core_config=None,
     ) -> None:
         super().__init__()
@@ -246,6 +247,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             entity_context_mode=entity_context_mode,
             entity_chart_mode=entity_chart_mode,
             entity_history_mode=entity_history_mode,
+            entity_motion_mode=entity_motion_mode,
         )
         self.intent = StatelessObjectIntentOrganizer(
             hidden=hidden,

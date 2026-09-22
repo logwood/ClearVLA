@@ -20,6 +20,7 @@ from .source_time import VisualSourceTime
 
 NO_ENTITY_HISTORY = "current_only_v1"
 CAUSAL_ENTITY_HISTORY = "flow_pulled_history_v1"
+EARLIER_SOURCE_STATUS = "forward_pair_earlier_source_v1"
 
 
 def entity_history_metadata(mode: str) -> dict[str, object]:
@@ -29,6 +30,8 @@ def entity_history_metadata(mode: str) -> dict[str, object]:
         "mode": mode,
         "identity": "current_entities_with_finite_causal_window_not_persistent_ids",
         "flow": "current_source_to_previous_normalized_image_coordinates",
+        "flow_status_chart": EARLIER_SOURCE_STATUS,
+        "flow_status_read": "after_inverse_step_at_earlier_source_coordinate",
         "time": "actual_control_steps_not_seconds_or_solver_nodes",
         "observed_authority": "source_clock_and_context_mask_only",
         "consumer": "K_competition_keys_and_slot_updates",
@@ -44,10 +47,13 @@ class ObservedEntityHistory:
     observed: Tensor  # bool [B,T,C,Y,X], source clock AND context-dropout support
     source_time: VisualSourceTime
     backward_flow: Tensor  # [B,T-1,C,2,Y,X], on later SOURCE cells, normalized xy
-    confidence: Tensor  # [B,T-1,C,1,Y,X], inferred, never observational validity
-    occlusion: Tensor  # same shape; not a source mask
+    confidence: Tensor  # [B,T-1,C,1,Y,X], on EARLIER source cells of forward flow
+    occlusion: Tensor  # same earlier-source chart; inferred, not a source mask
+    status_chart: str = EARLIER_SOURCE_STATUS
 
     def validate(self) -> None:
+        if self.status_chart != EARLIER_SOURCE_STATUS:
+            raise ValueError("entity history status must declare its earlier-source chart")
         if self.content.ndim != 6:
             raise ValueError("entity history content must be [B,T,C,Y,X,D]")
         b, t, c, y, x, d = self.content.shape
@@ -134,12 +140,16 @@ def pull_causal_history(history: ObservedEntityHistory, projected: Tensor) -> Pu
         conf = torch.where(real_pair, history.confidence[:, i], 0.0).permute(0, 1, 3, 4, 2)
         occ = torch.where(real_pair, history.occlusion[:, i], 0.0).permute(0, 1, 3, 4, 2)
         safe_coordinates = torch.where(alive, coordinates, 0.0)
-        # All of these fields are indexed on the LATER frame of this pair.
+        # Inverse displacement is LATER-source indexed, but the RGB producer's
+        # confidence/occlusion describe FORWARD correspondence on EARLIER cells.
+        # First move to that frame, then read status there. Constant-status
+        # fixtures cannot detect reversing this order; retain spatial tests.
         step = _pull(flow, safe_coordinates)
-        step_confidence = _pull(conf, safe_coordinates).clamp(0.0, 1.0)
-        step_occlusion = _pull(occ, safe_coordinates).clamp(0.0, 1.0)
         coordinates = torch.where(real_pair, safe_coordinates + step, safe_coordinates)
         alive = alive & (coordinates.abs() <= 1.0).all(-1, keepdim=True)
+        status_coordinates = torch.where(alive, coordinates, 0.0)
+        step_confidence = _pull(conf, status_coordinates).clamp(0.0, 1.0)
+        step_occlusion = _pull(occ, status_coordinates).clamp(0.0, 1.0)
         path_confidence = path_confidence * torch.where(real_pair, step_confidence, 1.0)
         path_survival = path_survival * torch.where(real_pair, 1.0 - step_occlusion, 1.0)
         frame = history.source_time.frame_observed[:, i, None, None, None, None]
