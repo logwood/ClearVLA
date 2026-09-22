@@ -29,8 +29,8 @@ choices just to preserve old golden outputs.
 | M1a real history time | Implemented candidate; validation recorded per commit | Shared source clock; separate state/control encoding; padding/dropout masks through S, coarse and proposal; bounded online history; new config/components/ABI. This is not all of M1. |
 | M1b real-tail labels | Implemented candidate; validation recorded per commit | All labelled real current centers and independent action/state/visual support through loader, Teacher, auxiliary/formal losses and validation. Source files/caches and old defaults unchanged. |
 | M1c native/feature state | Implemented candidate; validation recorded per commit | One CALVIN rotation-column encoder for current/history/future/online; native statistics and seven-dimensional commands remain separate; explicit new ABI and checkpoint checks. |
-| M1 remaining observation/reset | Open, next unit | Visual source gaps, repeated reset frames, flow/Teacher reference duration, compact downstream missing-evidence and reset distribution; then candidate-preserving G1. No all-M1 completion claim. |
-| M2 observation/G1 | Not started | Audit preprocessing/flow charts; retain distinguishable candidate modes, support and provenance rather than relying exclusively on means. |
+| M1d visual source time | Implemented candidate; verification recorded per commit | Source gaps, repeated frames, semantic/raw flow loss support, temporal/global G reads and future queries, S/W rates and Teacher duration use one observable clock. No claim about unprovided external controllers. |
+| M2 observation/G1 | Static source review started; redesign not implemented | Raw/DINO source clocks are repaired. G1 already retains the full coarse posterior, but G2 localization consumes moment-based centers; next change must preserve modes in the real candidate materializer, not add an unused copy. |
 | M3 G2 | Not started | Entity-consistent attribute/localization refinement and bounded-error recovery/reassociation. |
 | M4 G3 + current Teacher identity | Not started | One entity state with per-camera support and causal association; update reconstruction and Teacher references together. |
 | M5 S/coarse | Interface adapted only | The history submodule is new; target/operation/progress decomposition, shared entity binding and recognizer supervision still require deep review. |
@@ -73,6 +73,23 @@ choices just to preserve old golden outputs.
 | Explicit config | Component factory and restored visual/bottom configuration | State width may differ from command width only under a declared compatible chart. |
 | State feature metadata | Deployment ABI and normalizer loader | Type-sensitive exact metadata; feature width 10, native normalizer/action width 7. |
 | Source-owned tests | Actual dataset, loader, model, optimizer, checkpoint and sampling | External image/token transport may be a fixture; neural and state-conversion paths are production code. |
+
+## M1d source and consumer map
+
+| Producer | Consumers | Boundary |
+|---|---|---|
+| Source history offsets | Observation preparation and raw encoder | Strict ordered causal clock; duplicated pixels/masks share latest real copy before projection. |
+| `VisualSourceTime` | Semantic/raw flow, dense temporal organizer, future queries, G blocks | Same known frame/pair support across objectives, keys, values, reductions and backpropagation. |
+| Prepared visual packet | Grounding bank -> local facts -> global object facts -> world belief | Retain actual latest-pair duration as metadata; K permutations preserve it. |
+| Observable displacement and duration | S/W feature rates and Teacher geometric prior | Rates and displacements are separate values. Missing observed motion is not proof of stationary physics. |
+| New config | Factory/core bridge/checkpoint/deployment ABI | No silent fixed-gap fallback, fixed-FPS assumption or old checkpoint migration. |
+
+The production candidate continues to use the real current image at reset.
+A source-time support mask must never become a global visibility/success gate.
+M2 must consider how G1's full posterior is consumed by G2's actual resampler;
+retaining logits in a sidecar alone does not preserve mode information in the
+positions used for candidate values. Any next candidate-mode change must also
+review fine-count assumptions, P1/P2 reads, property support and Teacher.
 
 ## Review and publishing gates
 

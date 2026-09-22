@@ -895,6 +895,7 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         slices: dict[str, slice],
         *,
         visual_value_memory: Tensor | None = None,
+        visual_key_padding_mask: Tensor | None = None,
         rollout_query_context: Tensor | None = None,
         collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor]]:
@@ -1127,6 +1128,13 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
         g_ca = torch.sigmoid(ca_g)
         if self.visual_cross_enabled:
             query = self.modulate(normalize(self.n2, canvas), ca_s, ca_c)
+            if visual_key_padding_mask is not None:
+                if tuple(visual_key_padding_mask.shape) != tuple(visual_memory.shape[:2]) or visual_key_padding_mask.dtype != torch.bool:
+                    raise ValueError("visual key padding mask must be Boolean [B,N]")
+                support = ~visual_key_padding_mask[..., None]
+                visual_memory = torch.where(support, visual_memory, torch.zeros_like(visual_memory))
+                if visual_value_memory is not None:
+                    visual_value_memory = torch.where(support, visual_value_memory, torch.zeros_like(visual_value_memory))
             memory_key = normalize(self.mem_norm, visual_memory)
             memory_value = normalize(
                 self.mem_norm,
@@ -1134,7 +1142,7 @@ class TemporalDynamicsBoundDiTBlock(nn.Module):
             )
             if tuple(memory_key.shape) != tuple(memory_value.shape):
                 raise ValueError("visual selector and value memories must be shape-aligned")
-            update, _ = self.cross(query, memory_key, memory_value, need_weights=False)
+            update, _ = self.cross(query, memory_key, memory_value, key_padding_mask=visual_key_padding_mask, need_weights=False)
             update = self._structure_world_canvas_update(self.drop(update), slices)
             if self.residual_contract_after_gate:
                 update = stabilize(

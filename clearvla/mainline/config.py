@@ -375,6 +375,7 @@ class ModelDimensions:
 
 @dataclass(frozen=True)
 class ObservationConfig:
+    source_time_mode: str = "fixed_history_steps_v1"
     grid_size: int = 8
     local_hypotheses: int = 4
     feature_dim: int = 96
@@ -390,6 +391,8 @@ class ObservationConfig:
     microgrid_side: int = 3
 
     def validate(self) -> None:
+        if self.source_time_mode not in {"fixed_history_steps_v1", "source_history_steps_v1"}:
+            raise ValueError("unknown observation source_time_mode")
         integer_fields = (
             self.grid_size,
             self.local_hypotheses,
@@ -927,6 +930,8 @@ class ExperimentConfig:
         validate_state_feature_profile(self.top.state_feature_mode, profile.name)
         if state_feature_width(self.top.state_feature_mode, len(profile.state_indices)) != self.dimensions.state_dim:
             raise ValueError("state feature chart must align with dimensions.state_dim")
+        if self.observation.source_time_mode == "source_history_steps_v1" and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING:
+            raise ValueError("source-timed vision requires source-owned history clocks")
         if self.top.state_feature_mode == CALVIN_ROTATION6D_STATE and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING:
             raise ValueError("rotation feature state requires source-timed history")
         if self.objectives.phase_control_mode != "none" and profile.name not in {
@@ -1100,6 +1105,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.observation.source_time_mode == "fixed_history_steps_v1":
+            cast(dict[str, object], payload["observation"]).pop("source_time_mode")
         if self.top.state_feature_mode == NATIVE_AFFINE_STATE:
             cast(dict[str, object], payload["top"]).pop("state_feature_mode")
         if self.top.history_encoding_mode == "paired_rows_v1":

@@ -13,11 +13,13 @@ set after G3. Camera, 8x8 cell and M=4 axes are never pooled or recreated.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+
+from clearvla.vision.source_time import VisualSourceTime
 
 from ..config import ExperimentConfig
 from ..interfaces import CurrentObservation
@@ -138,12 +140,17 @@ class RestoredV120ObservationCompiler(nn.Module):
         observation: CurrentObservation,
         *,
         context_mask: Tensor | None = None,
+        source_offsets: Tensor | None = None,
         training_mask: bool = False,
         geometry_supervision: bool = True,
         collect_diagnostics: bool = False,
     ) -> _PreparedV120Observation:
         del geometry_supervision  # V120 constructs both directed pair objectives together.
         observation.validate(self.config)
+        if source_offsets is not None:
+            time = VisualSourceTime(source_offsets)
+            time.validate(batch=observation.batch, frames=int(observation.dino_history.shape[1]), device=observation.dino_history.device, strict=True)
+            observation = replace(observation, dino_history=time.canonicalize(observation.dino_history), raw_rgb=time.canonicalize(observation.raw_rgb))
         if context_mask is not None:
             raise ValueError(
                 "the restored V120 compiler owns its early mask; an arbitrary post-hoc "
@@ -159,6 +166,7 @@ class RestoredV120ObservationCompiler(nn.Module):
             pack = self.encoder(
                 observation.dino_history,
                 raw_visual=observation.raw_rgb,
+                source_offsets=source_offsets,
             )
         finally:
             self.encoder.training = previous_training
@@ -243,6 +251,8 @@ class RestoredV120ObservationCompiler(nn.Module):
             earlier_flow=_v120_flow_field(pack, 0),
             context_mask=pack.context_dropout_mask[:, -1],
             native_flow_losses=pack.losses,
+            visual_memory_observed=pack.memory_observed,
+            latest_flow_steps=None if pack.visual_source_time is None else pack.visual_source_time.pair_steps[:, -1],
         )
         grounding.validate()
         if not collect_diagnostics:
@@ -355,6 +365,7 @@ class RestoredV120ObservationCompiler(nn.Module):
             slot_support=grounded.slot_support,
             slot_validity=grounded.slot_validity,
             slot_transport_prior=grounded.slot_transport_prior,
+            latest_flow_steps=bank.latest_flow_steps,
         )
         evidence = ObservationEvidence(
             grounding=bank,

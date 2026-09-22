@@ -782,6 +782,7 @@ class DenseObjectGrounder(nn.Module):
         )
         reconstruction_error = reconstruction_per_cell.sum() / observed.sum().clamp_min(1.0)
         facts = ObjectFactSet(
+            latest_flow_steps=local_facts.latest_flow_steps,
             dense_chart=chart,
             content=content,
             semantic=semantic,

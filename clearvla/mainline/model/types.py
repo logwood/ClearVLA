@@ -10,6 +10,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from clearvla.vision.source_time import displacement_rate, validate_reference_steps
+
 from ..manifest import INTERVALS
 
 INTERVAL_NAMES = ("h4_8", "h8_16", "h16_32", "h32_48")
@@ -281,6 +283,7 @@ class LocalFactSet:
     slot_support: Tensor  # [B,C,Y,X,M]
     slot_validity: Tensor  # [B,C,Y,X,M,1]
     slot_transport_prior: Tensor | None = None  # [B,C,Y,X,M,2]
+    latest_flow_steps: Tensor | None = None  # [B], zero means no observed temporal pair
     semantic_owner_log_probs: Tensor | None = None  # finite FP32 [B,C,Y,X,M]
     appearance_owner_log_probs: Tensor | None = None
     geometry_owner_log_probs: Tensor | None = None
@@ -302,6 +305,8 @@ class LocalFactSet:
         return int(self.content_slots.shape[-1])
 
     def validate(self) -> None:
+        if self.latest_flow_steps is not None:
+            validate_reference_steps(self.latest_flow_steps, batch=self.batch, device=self.content_slots.device)
         if self.public_scene_base.ndim != 5:
             raise ValueError("local public scene base must be [B,C,Y,X,H]")
         if self.content_slots.ndim != 6 or self.semantic_slots.ndim != 6:
@@ -483,6 +488,7 @@ class ObjectFactSet:
     null_assignment: Tensor  # joint local-prior null mass [B,C,Y,X,M]
     reconstructed_dino: Tensor  # [B,C,Y,X,D]
     reconstruction_error: Tensor  # scalar, not weighted here
+    latest_flow_steps: Tensor | None = None  # [B], producer time, not model confidence
 
     @property
     def batch(self) -> int:
@@ -503,6 +509,16 @@ class ObjectFactSet:
         )
 
     @property
+    def camera_transport_rate(self) -> Tensor:
+        if self.latest_flow_steps is None:
+            raise ValueError("observed motion rate requires explicit source duration")
+        return displacement_rate(self.camera_transport_prior, self.latest_flow_steps)
+
+    @property
+    def transport_rate(self) -> Tensor:
+        return _camera_weighted_mean(self.camera_transport_rate, self.camera_validity, self.camera_support)
+
+    @property
     def transport_prior(self) -> Tensor:
         """V120 object transport prior reduced only over valid cameras."""
 
@@ -513,6 +529,8 @@ class ObjectFactSet:
         )
 
     def validate(self) -> None:
+        if self.latest_flow_steps is not None:
+            validate_reference_steps(self.latest_flow_steps, batch=self.batch, device=self.content.device)
         self.dense_chart.validate()
         if self.content.ndim != 3:
             raise ValueError("object content must be [B,K,D]")
@@ -596,6 +614,7 @@ class ObjectFactSet:
             appearance=self.appearance[:, index],
             geometry=self.geometry[:, index],
             camera_coordinates=self.camera_coordinates[:, index],
+            latest_flow_steps=self.latest_flow_steps,
             camera_transport_prior=self.camera_transport_prior[:, index],
             camera_support=self.camera_support[:, index],
             camera_validity=self.camera_validity[:, index],
@@ -630,6 +649,7 @@ class ObjectFactSet:
             appearance=self.appearance,
             geometry=self.geometry,
             camera_coordinates=self.camera_coordinates,
+            latest_flow_steps=self.latest_flow_steps,
             camera_transport_prior=self.camera_transport_prior,
             camera_support=self.camera_support,
             camera_validity=self.camera_validity,
@@ -659,6 +679,7 @@ class ObjectWorldBelief:
     log_camera_validity: Tensor  # [B,K,C,1]
     validity: Tensor  # [B,K,1]
     log_validity: Tensor  # [B,K,1]
+    latest_flow_steps: Tensor | None = None
 
     @property
     def batch(self) -> int:
@@ -669,6 +690,16 @@ class ObjectWorldBelief:
         return int(self.content.shape[1])
 
     @property
+    def camera_transport_rate(self) -> Tensor:
+        if self.latest_flow_steps is None:
+            raise ValueError("observed motion rate requires explicit source duration")
+        return displacement_rate(self.camera_transport_prior, self.latest_flow_steps)
+
+    @property
+    def transport_rate(self) -> Tensor:
+        return _camera_weighted_mean(self.camera_transport_rate, self.camera_validity, self.camera_support)
+
+    @property
     def transport_prior(self) -> Tensor:
         return _camera_weighted_mean(
             self.camera_transport_prior,
@@ -677,6 +708,8 @@ class ObjectWorldBelief:
         )
 
     def validate(self) -> None:
+        if self.latest_flow_steps is not None:
+            validate_reference_steps(self.latest_flow_steps, batch=self.batch, device=self.content.device)
         if self.content.ndim != 3:
             raise ValueError("world belief content must be [B,K,D]")
         batch, objects = self.content.shape[:2]
@@ -722,6 +755,7 @@ class ObjectWorldBelief:
             appearance=self.appearance[:, index],
             geometry=self.geometry[:, index],
             camera_coordinates=self.camera_coordinates[:, index],
+            latest_flow_steps=self.latest_flow_steps,
             camera_transport_prior=self.camera_transport_prior[:, index],
             camera_support=self.camera_support[:, index],
             camera_validity=self.camera_validity[:, index],

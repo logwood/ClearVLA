@@ -21,6 +21,7 @@ from clearvla.vision.preprocessing import (
     PreprocessConfig,
     preprocessing_identity,
 )
+from clearvla.vision.source_time import FIXED_VISUAL_TIME, visual_time_metadata
 
 from ..checkpoint import CheckpointIdentity
 from ..config import DataConfig, ExperimentConfig, config_from_mapping
@@ -355,6 +356,7 @@ def build_deployment_abi(
                 "compute_dtype": str(config.runtime.compute_dtype),
                 "reference_batch_size": int(config.data.dinov2_reference_batch_size),
             },
+            **({"visual_source_time": visual_time_metadata(config.observation.source_time_mode)} if config.observation.source_time_mode != FIXED_VISUAL_TIME else {}),
             "state_dim": int(config.dimensions.state_dim),
             **({"state_features": state_feature_metadata(
                 config.top.state_feature_mode, config.data.data_profile,
@@ -430,6 +432,14 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     language = _mapping(abi.get("language"), name="language")
     profile = _mapping(action.get("data_profile"), name="action.data_profile")
     profile_name = profile.get("name")
+    graph_observation = _mapping(graph.get("observation"), name="graph_config.observation")
+    visual_mode = str(graph_observation.get("source_time_mode", FIXED_VISUAL_TIME))
+    if visual_mode != FIXED_VISUAL_TIME:
+        visual_metadata = _mapping(observation.get("visual_source_time"), name="observation.visual_source_time")
+        if canonical_sha256(visual_metadata) != canonical_sha256(visual_time_metadata(visual_mode)):
+            raise ValueError("deployment visual source-time contract differs from graph")
+    elif "visual_source_time" in observation:
+        raise ValueError("legacy visual graph cannot acquire an undeclared source clock")
     state_mode = str(graph_top.get("state_feature_mode", NATIVE_AFFINE_STATE))
     native_width = len(resolve_action_state_profile(str(profile_name)).state_indices)
     expected_features = state_feature_metadata(state_mode, str(profile_name), native_width)

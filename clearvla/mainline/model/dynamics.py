@@ -701,7 +701,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         validity = self._safe_object_validity(facts).to(device=facts.content.device)
         safe_content = self._supported_object_values(facts.content, validity)
         safe_transport_prior = self._supported_object_values(
-            facts.transport_prior.to(device=facts.content.device),
+            (facts.transport_prior if facts.latest_flow_steps is None else facts.transport_rate).to(device=facts.content.device),
             validity,
         )
         objects = self.object_content(safe_content)
@@ -926,11 +926,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             (camera_validity > 0.0)
             & (validity[:, :, None, :] > 0.0)
         )
+        camera_motion = facts.camera_transport_prior if facts.latest_flow_steps is None else facts.camera_transport_rate
         safe_camera_transport = torch.where(
             object_camera_support,
-            facts.camera_transport_prior.to(device=typed_geometry.device),
+            camera_motion.to(device=typed_geometry.device),
             torch.zeros_like(
-                facts.camera_transport_prior.to(device=typed_geometry.device)
+                camera_motion.to(device=typed_geometry.device)
             ),
         )
         camera_context = self.object_transport_prior(

@@ -295,6 +295,7 @@ class V39PolicyConfig(V38PolicyConfig):
     flow_jepa_fine_radius: int = 2
     flow_jepa_reader_radius: int = 1
     flow_jepa_reader_heads: int = 2
+    flow_jepa_source_time_mode: str = "fixed_history_steps_v1"
     flow_jepa_raw_image_enabled: int = 0
     flow_jepa_role_hierarchy: int = 0
     flow_jepa_raw_base_channels: int = 32

@@ -26,15 +26,17 @@ attached to either repair.
 
 Still open before/through subsequent milestones:
 
-- M1 observation/reset: repeated source images are still interpreted using
-  fixed visual frame gaps; a source-timed visual path must update flow losses,
-  temporal reads, global G memory and Teacher extrapolation together. M1c now
-  separates CALVIN native rotation/state statistics from model features and
-  action commands; physical control steps are not assumed to be seconds. Other
-  source/controller calibrations and compact missing-evidence remain reviewable. Existing-inventory real-tail label support is implemented,
-  not a claim that previously converter-excluded annotations are recovered.
-  Observed-tail validation is a new coverage surface, not an old E8 score.
-- G: multi-modal positions versus moment summaries; local attributes sharing
+- M1 boundary scope: M1c separates native state statistics, model features and
+  native actions. M1d now carries source visual gaps through motion objectives,
+  all identified temporal/global visual reads and Teacher extrapolation. Actual
+  seconds, calibration and controller semantics must still come from each
+  source/outlet; local tests do not certify unprovided external evaluation
+  scripts. Existing-inventory real-tail coverage does not recover annotations
+  excluded by earlier conversion. Observed-tail validation is not an old E8
+  metric alias.
+- G: full coarse posterior already exists, but G2 sampling is centered on its
+  moments; keeping another posterior field alone would not solve this. Review
+  distinguishable candidate modes in the actual resampler; local attributes sharing
   entity support; completed G3 block versus binder entity identity; causal
   entity association and Teacher's dependence on current G.
 - S: target/operation/progress separation, object-specific change, shared

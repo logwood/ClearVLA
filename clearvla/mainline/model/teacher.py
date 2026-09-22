@@ -67,10 +67,13 @@ class ObjectFutureTeacher(nn.Module):
         # synchronization without protecting an actual semantic invariant.
         return offsets
 
-    def _flow_horizon_scale(self, offsets: Tensor) -> Tensor:
+    def _flow_horizon_scale(self, offsets: Tensor, source_steps: Tensor | None = None) -> Tensor:
         """Convert a raw-pair displacement into each future support horizon."""
 
-        return offsets.float() / float(self.flow_reference_frames)
+        if source_steps is None:
+            return offsets.float() / float(self.flow_reference_frames)
+        # No motion observation is not a zero-duration division or a future label.
+        return torch.where(source_steps[:, None] > 0, offsets.float() / source_steps[:, None].clamp_min(1), torch.zeros_like(offsets, dtype=torch.float32))
 
     @staticmethod
     def _supported_finite(
@@ -255,7 +258,10 @@ class ObjectFutureTeacher(nn.Module):
         # image, so constant-velocity extrapolation uses offset/reference,
         # not offset/max_future.  The latter silently shrank the H4 prior by
         # 12x and still supplied only one four-frame displacement at H48.
-        fraction = self._flow_horizon_scale(offsets)
+        fraction = self._flow_horizon_scale(offsets, facts.latest_flow_steps)
+        # Spatial search uncertainty grows with future time even at reset.
+        # It is not the displacement-extrapolation denominator.
+        search_fraction = self._flow_horizon_scale(offsets)
         # This is the explicit previous->current displacement exported by G3,
         # indexed on the current fact chart and already expressed in true
         # normalized-coordinate units.  It is only a prior: semantic matching
@@ -309,7 +315,7 @@ class ObjectFutureTeacher(nn.Module):
             / (
                 support_width[..., 0][:, None, :, :, None, None].square()
                 + 0.08
-                + 0.20 * fraction[:, :, None, None, None, None]
+                + 0.20 * search_fraction[:, :, None, None, None, None]
             )
         )
         geometry = geometry.clamp(-8.0, 0.0)

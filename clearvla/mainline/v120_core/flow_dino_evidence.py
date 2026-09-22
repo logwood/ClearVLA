@@ -36,6 +36,14 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
+from clearvla.vision.source_time import (
+    FIXED_VISUAL_TIME,
+    SOURCE_VISUAL_TIME,
+    VisualSourceTime,
+    pair_mask,
+    pair_mean,
+)
+
 from .differential_intent_effect import (
     DifferentialWindowEffectBank,
     DifferentialWindowRouteCompiler,
@@ -636,6 +644,8 @@ class FlowDINOEvidencePack:
     flow_occlusion: Tensor
     losses: dict[str, Tensor]
     metrics: dict[str, Tensor]
+    visual_source_time: VisualSourceTime | None = None
+    memory_observed: Tensor | None = None
     raw_context: RawGroundingContext | None = None
     late_raw_detail: LateRawDetailEvidence | None = None
     late_raw_detail_metrics: dict[str, Tensor] | None = None
@@ -1288,7 +1298,7 @@ class _DenseDINOOrganizer(nn.Module):
         self.temporal_scale = nn.Parameter(torch.tensor(0.10))
         self.camera_scale = nn.Parameter(torch.tensor(0.10))
 
-    def forward(self, visual: Tensor, mask: Tensor | None = None) -> Tensor:
+    def forward(self, visual: Tensor, mask: Tensor | None = None, *, frame_observed: Tensor | None = None, source_identity: Tensor | None = None) -> Tensor:
         if visual.ndim != 6:
             raise ValueError("dense DINO organizer expects [B,T,C,S,S,D]")
         batch, history, cameras, side, side_b, _ = visual.shape
@@ -1315,8 +1325,19 @@ class _DenseDINOOrganizer(nn.Module):
             batch * cameras * side * side, history, self.hidden
         )
         temporal_n = self.temporal_norm(temporal)
+        padding = None
+        if frame_observed is not None:
+            if tuple(frame_observed.shape) != (batch, history) or frame_observed.dtype != torch.bool:
+                raise ValueError("temporal visual support must be Boolean [B,T]")
+            padding = (~frame_observed[:, None, None, None]).expand(-1, cameras, side, side, -1).reshape(-1, history)
+        temporal_qk = temporal_n
+        if source_identity is not None:
+            if tuple(source_identity.shape) != (batch, history, self.hidden):
+                raise ValueError("visual time identity must be [B,T,H]")
+            time_keys = source_identity[:, None, None, None].expand(-1, cameras, side, side, -1, -1).reshape_as(temporal_n)
+            temporal_qk = temporal_n + time_keys.to(dtype=temporal_n.dtype)
         temporal_update, _ = self.temporal(
-            temporal_n, temporal_n, temporal_n, need_weights=False
+            temporal_qk, temporal_qk, temporal_n, key_padding_mask=padding, need_weights=False
         )
         temporal = temporal + self.temporal_scale.tanh().to(
             device=value.device, dtype=value.dtype
@@ -1832,14 +1853,14 @@ class _RawPyramidFlow(nn.Module):
         )
 
     @staticmethod
-    def _smoothness(flow: Tensor, feature: Tensor) -> Tensor:
+    def _smoothness(flow: Tensor, feature: Tensor, support: Tensor | None = None) -> Tensor:
         dx = flow[..., :, 1:] - flow[..., :, :-1]
         dy = flow[..., 1:, :] - flow[..., :-1, :]
         fx = feature[..., :, 1:] - feature[..., :, :-1]
         fy = feature[..., 1:, :] - feature[..., :-1, :]
         wx = torch.exp(-fx.float().abs().mean(dim=1, keepdim=True))
         wy = torch.exp(-fy.float().abs().mean(dim=1, keepdim=True))
-        return (dx.float().abs() * wx).mean() + (dy.float().abs() * wy).mean()
+        return pair_mean(dx.float().abs() * wx, support) + pair_mean(dy.float().abs() * wy, support)
 
     @staticmethod
     def _paired_mean(
@@ -1899,6 +1920,7 @@ class _RawPyramidFlow(nn.Module):
         coarse_backward: Tensor,
         coarse_reliability_forward: Tensor,
         coarse_reliability_backward: Tensor,
+        *, pair_observed: Tensor | None = None,
     ) -> tuple[RawGroundingContext, dict[str, Tensor], dict[str, Tensor]]:
         if raw_visual.ndim != 6 or int(raw_visual.shape[3]) != 3:
             raise ValueError("raw_visual must be [B,T,C,3,R,R]")
@@ -1930,6 +1952,11 @@ class _RawPyramidFlow(nn.Module):
             fixed_mid_u = None
         pair_count = history - 1
         pair_batch = batch * pair_count * cameras
+        source_support = None
+        if pair_observed is not None:
+            if tuple(pair_observed.shape) != (batch, pair_count) or pair_observed.dtype != torch.bool:
+                raise ValueError("raw flow source support must be [B,T-1]")
+            source_support = pair_observed[:, :, None].expand(-1, -1, cameras).reshape(-1)
         coarse_shape = (
             pair_batch,
             2,
@@ -1984,6 +2011,9 @@ class _RawPyramidFlow(nn.Module):
         margin_f, margin_b = split(joined_high.correlation_margin)
         warped_backward, forward_cycle_valid = warp_patch_grid(backward, forward)
         warped_forward, backward_cycle_valid = warp_patch_grid(forward, backward)
+        if source_support is not None:
+            forward_cycle_valid = forward_cycle_valid & source_support[:, None, None, None]
+            backward_cycle_valid = backward_cycle_valid & source_support[:, None, None, None]
         forward_cycle = forward + warped_backward
         backward_cycle = backward + warped_forward
         forward_cycle_error = _stable_vector_norm(forward_cycle, dim=1, keepdim=True)
@@ -2008,6 +2038,9 @@ class _RawPyramidFlow(nn.Module):
             observable_motion = None
         warped_second, forward_warp_valid = warp_patch_grid(warp_target, forward)
         warped_first, backward_warp_valid = warp_patch_grid(warp_source, backward)
+        if source_support is not None:
+            forward_warp_valid = forward_warp_valid & source_support[:, None, None, None]
+            backward_warp_valid = backward_warp_valid & source_support[:, None, None, None]
         forward_warp_error = (
             warp_source.float() - warped_second.float()
         ).square().mean(dim=1, keepdim=True)
@@ -2117,8 +2150,8 @@ class _RawPyramidFlow(nn.Module):
             backward_cycle_valid,
         )
         boundary_penalty = 0.5 * unit_scale * (
-            self._boundary_excess(forward).mean()
-            + self._boundary_excess(backward).mean()
+            pair_mean(self._boundary_excess(forward), source_support)
+            + pair_mean(self._boundary_excess(backward), source_support)
         )
         # Boundary escape used to disappear behind the validity mask.  Keep the
         # historical loss key but make its raw-path geometry explicit: core
@@ -2127,8 +2160,8 @@ class _RawPyramidFlow(nn.Module):
         smooth_source = first_fixed_h if first_fixed_h is not None else first_h
         smooth_target = second_fixed_h if second_fixed_h is not None else second_h
         smoothness = 0.5 * unit_scale * (
-            self._smoothness(forward, smooth_source)
-            + self._smoothness(backward, smooth_target)
+            self._smoothness(forward, smooth_source, source_support)
+            + self._smoothness(backward, smooth_target, source_support)
         )
         uncertainty_nll = self._paired_mean(
             forward_warp_error.detach().sqrt() / uncertainty_f.clamp_min(1e-4)
@@ -2153,6 +2186,9 @@ class _RawPyramidFlow(nn.Module):
         mid_error_b = _stable_sqrt(
             (mid_target.float() - mid_first.float()).square().mean(dim=1, keepdim=True)
         )
+        if source_support is not None:
+            mid_valid_f = mid_valid_f & source_support[:, None, None, None]
+            mid_valid_b = mid_valid_b & source_support[:, None, None, None]
         sequence_loss = self._paired_mean(
             mid_error_f, mid_valid_f, mid_error_b, mid_valid_b
         )
@@ -2199,7 +2235,7 @@ class _RawPyramidFlow(nn.Module):
         )
 
         def unflatten(value: Tensor) -> Tensor:
-            return value.reshape(batch, pair_count, cameras, *value.shape[1:])
+            return pair_mask(value, source_support).reshape(batch, pair_count, cameras, *value.shape[1:])
 
         context = RawGroundingContext(
             # Only the last observed pair is needed by the post-grounding raw
@@ -8775,6 +8811,20 @@ class FlowDINOEvidenceEncoder(nn.Module):
             # returned evidence bank or an active objective.
             self.context_mask_token.requires_grad_(False)
         self.history_type = nn.Parameter(torch.randn(1, self.history, 1, 1, 1, h) * 0.02)
+        self.source_time_mode = getattr(config, "flow_jepa_source_time_mode", FIXED_VISUAL_TIME)
+        if self.source_time_mode not in (FIXED_VISUAL_TIME, SOURCE_VISUAL_TIME):
+            raise ValueError("unknown visual source-time mode")
+        if self.source_time_mode == SOURCE_VISUAL_TIME:
+            if not self.raw_enabled:
+                raise ValueError("source-timed vision requires the current raw grounding path")
+            self.history_type.requires_grad_(False)
+            self.source_time_projection: nn.Linear | None = nn.Linear(1, h, bias=False)
+            if self.coarse_organizer is None:
+                raise ValueError("source time requires the dense visual organizer")
+            self.source_organizer_time_projection: nn.Linear | None = nn.Linear(1, self.coarse_organizer.hidden, bias=False)
+        else:
+            self.source_time_projection = None
+            self.source_organizer_time_projection = None
         self.camera_type = nn.Parameter(torch.randn(1, 1, self.cameras, 1, 1, h) * 0.02)
         self.spatial_type = nn.Parameter(
             torch.randn(1, 1, 1, self.grid_size, self.grid_size, h) * 0.02
@@ -9135,6 +9185,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
         identity_queries: Tensor,
         motion_history: Tensor,
         context_seed: Tensor,
+        source_time: VisualSourceTime | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Build future anchors from observation-only perceptual history.
 
@@ -9188,6 +9239,10 @@ class FlowDINOEvidenceEncoder(nn.Module):
         ):
             raise ValueError("future context seed does not match future geometry")
 
+        pair_support = None
+        if source_time is not None:
+            pair_support = source_time.pair_observed[:, :, None, None, None, None]
+            motion_history = torch.where(pair_support, motion_history, torch.zeros_like(motion_history))
         if not self.sequential_horizon_memory:
             latest_motion = motion_history[:, -1]
             latest_dt = float(
@@ -9201,14 +9256,13 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 device=identity_queries.device,
                 dtype=identity_queries.dtype,
             )[None, :, None, None, None, None]
-            queries = (
-                identity_queries
-                + anchor_scale
-                * self.future_motion(
-                    latest_motion.to(dtype=identity_queries.dtype)
-                )[:, None]
-                + 0.10 * context_seed
-            )
+            motion_value = self.future_motion(latest_motion.to(dtype=identity_queries.dtype))[:, None]
+            if source_time is not None:
+                duration = source_time.pair_steps[:, -1].clamp_min(1).to(dtype=identity_queries.dtype)
+                future_steps = torch.as_tensor(self.window_offsets, device=duration.device, dtype=duration.dtype)
+                anchor_scale = torch.sqrt(future_steps[None] / duration[:, None])[:, :, None, None, None, None]
+                motion_value = torch.where(source_time.pair_observed[:, -1, None, None, None, None, None], motion_value, torch.zeros_like(motion_value))
+            queries = identity_queries + anchor_scale * motion_value + 0.10 * context_seed
             zero = queries.new_zeros((), dtype=torch.float32)
             return queries, {
                 "flow_jepa_sequential_horizon_memory": zero,
@@ -9229,14 +9283,22 @@ class FlowDINOEvidenceEncoder(nn.Module):
         motion_features = self.future_motion(
             motion_history.to(dtype=identity_queries.dtype)
         )
-        motion_features = motion_features + self.future_history_encoding.to(
-            device=motion_features.device,
-            dtype=motion_features.dtype,
-        )
+        if source_time is None:
+            history_identity = self.future_history_encoding.to(device=motion_features.device, dtype=motion_features.dtype)
+        else:
+            if self.source_time_projection is None:
+                raise RuntimeError("future history lost its source-time encoder")
+            midpoints = 0.5 * (source_time.frame_offsets[:, 1:] + source_time.frame_offsets[:, :-1]).float()
+            history_identity = self.source_time_projection(midpoints[..., None] / float(max(abs(self.history_offsets[0]), 1)))[:, :, None, None, None]
+        motion_features = motion_features + history_identity
         history_logits = self.future_history_score(motion_features).float()
-        history_weights = torch.softmax(history_logits, dim=1).to(
-            dtype=motion_features.dtype
-        )
+        if pair_support is not None:
+            history_logits = history_logits.masked_fill(~pair_support, -torch.inf)
+            history_logits = torch.where(pair_support.any(dim=1, keepdim=True), history_logits, torch.zeros_like(history_logits))
+        history_weights = torch.softmax(history_logits, dim=1).to(dtype=motion_features.dtype)
+        if pair_support is not None:
+            history_weights = history_weights * pair_support
+            motion_features = torch.where(pair_support, motion_features, torch.zeros_like(motion_features))
         history_state = (history_weights * motion_features).sum(dim=1)
         memory = self.future_memory_norm(
             context_seed[:, 0] + history_state
@@ -9319,17 +9381,17 @@ class FlowDINOEvidenceEncoder(nn.Module):
         return queries, metrics
 
     @staticmethod
-    def _smoothness(flow: Tensor, feature: Tensor) -> Tensor:
+    def _smoothness(flow: Tensor, feature: Tensor, support: Tensor | None = None) -> Tensor:
         dx = flow[..., :, 1:] - flow[..., :, :-1]
         dy = flow[..., 1:, :] - flow[..., :-1, :]
         fx = feature[..., :, 1:] - feature[..., :, :-1]
         fy = feature[..., 1:, :] - feature[..., :-1, :]
         wx = torch.exp(-fx.float().abs().mean(dim=-3, keepdim=True))
         wy = torch.exp(-fy.float().abs().mean(dim=-3, keepdim=True))
-        return (dx.float().abs() * wx).mean() + (dy.float().abs() * wy).mean()
+        return pair_mean(dx.float().abs() * wx, support) + pair_mean(dy.float().abs() * wy, support)
 
     def _estimate_pairs(
-        self, pooled: Tensor
+        self, pooled: Tensor, pair_observed: Tensor | None = None
     ) -> tuple[PatchFlowEstimate, PatchFlowEstimate, Tensor, Tensor, Tensor, dict[str, Tensor]]:
         if self.flow is None:
             raise RuntimeError("DINO patch flow is disabled by the raw-image flow contract")
@@ -9340,6 +9402,11 @@ class FlowDINOEvidenceEncoder(nn.Module):
         joined_second = torch.cat((second, first), dim=0)
         estimate = self.flow(joined_first, joined_second)
         pair_batch = int(first.shape[0])
+        source_support = None
+        if pair_observed is not None:
+            if tuple(pair_observed.shape) != (batch, history - 1) or pair_observed.dtype != torch.bool:
+                raise ValueError("semantic flow source support must be [B,T-1]")
+            source_support = pair_observed[:, :, None].expand(-1, -1, cameras).reshape(-1)
 
         def split(value: Tensor) -> tuple[Tensor, Tensor]:
             return value[:pair_batch], value[pair_batch:]
@@ -9435,8 +9502,8 @@ class FlowDINOEvidenceEncoder(nn.Module):
             second_value: Tensor,
             second_valid: Tensor,
         ) -> Tensor:
-            first_weight = first_valid.float()
-            second_weight = second_valid.float()
+            first_weight = pair_mask(first_valid, source_support).float()
+            second_weight = pair_mask(second_valid, source_support).float()
             numerator = (first_value * first_weight).sum() + (second_value * second_weight).sum()
             denominator = (first_weight.sum() + second_weight.sum()).clamp_min(1.0)
             return numerator / denominator
@@ -9454,8 +9521,8 @@ class FlowDINOEvidenceEncoder(nn.Module):
             backward_cycle_valid,
         )
         smoothness = 0.5 * (
-            self._smoothness(forward_flow, first_feature)
-            + self._smoothness(backward_flow, second_feature)
+            self._smoothness(forward_flow, first_feature, source_support)
+            + self._smoothness(backward_flow, second_feature, source_support)
         )
         forward_nll = (
             forward_warp_error.detach().sqrt() / forward_uncertainty.clamp_min(1e-4)
@@ -9520,6 +9587,14 @@ class FlowDINOEvidenceEncoder(nn.Module):
             "flow_jepa_uncertainty_nll": uncertainty_nll,
             "flow_jepa_refinement_sequence_loss": sequence_loss,
         }
+        if source_support is not None:
+            for estimate_row in (forward, backward):
+                for name in ("flow", "information", "uncertainty", "correlation_entropy", "correlation_margin"):
+                    setattr(estimate_row, name, pair_mask(getattr(estimate_row, name), source_support))
+                estimate_row.iterations = tuple(pair_mask(row, source_support) for row in estimate_row.iterations)
+            confidence = pair_mask(confidence, source_support)
+            occlusion = pair_mask(occlusion, source_support)
+            forward_warp_error = pair_mask(forward_warp_error, source_support)
         return forward, backward, confidence, occlusion, forward_warp_error, losses
 
     @staticmethod
@@ -9542,7 +9617,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
         return _stable_sqrt(correlation_certainty, epsilon=1e-4) * scale_certainty
 
     def _forward_raw_grounding(
-        self, visual: Tensor, raw_visual: Tensor
+        self, visual: Tensor, raw_visual: Tensor, source_time: VisualSourceTime | None = None
     ) -> FlowDINOEvidencePack:
         if any(
             module is None
@@ -9568,7 +9643,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
             coarse_occlusion,
             _,
             coarse_losses,
-        ) = self._estimate_pairs(pooled)
+        ) = self._estimate_pairs(pooled, None if source_time is None else source_time.pair_observed)
         coarse_reliability_forward = self._semantic_seed_reliability(coarse_forward)
         coarse_reliability_backward = self._semantic_seed_reliability(coarse_backward)
         raw_context, raw_losses, raw_metrics = self.raw_flow(
@@ -9577,6 +9652,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
             coarse_backward.flow,
             coarse_reliability_forward,
             coarse_reliability_backward,
+            pair_observed=None if source_time is None else source_time.pair_observed,
         )
         if (
             coarse_forward.correlation_feature_rms_min is not None
@@ -9733,6 +9809,8 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 grid,
             )
 
+        if source_time is not None:
+            context_dropout = source_time.canonicalize(context_dropout)
         early_raw_context = None
         if self.predictive_change_contract:
             if self.early_masked_raw_context is None:
@@ -9742,11 +9820,25 @@ class FlowDINOEvidenceEncoder(nn.Module):
             early_raw_context = self.early_masked_raw_context(
                 raw_visual, context_dropout
             )
-        organized = self.coarse_organizer(pooled, context_dropout)
+        source_identity = None
+        organizer_identity = None
+        if source_time is not None:
+            if self.source_time_projection is None:
+                raise RuntimeError("source time arrived without its selected encoder")
+            reference_span = float(max(abs(self.history_offsets[0]), 1))
+            normalized_source_time = source_time.frame_offsets[..., None].to(dtype=pooled.dtype) / reference_span
+            source_identity = self.source_time_projection(normalized_source_time)
+            if self.source_organizer_time_projection is None:
+                raise RuntimeError("visual organizer lost its own-width time projection")
+            organizer_identity = self.source_organizer_time_projection(normalized_source_time)
+        organized = self.coarse_organizer(pooled, context_dropout, frame_observed=None if source_time is None else source_time.frame_observed, source_identity=organizer_identity)
         content_selector = self.organized_key(organized)
         content_values = self.organized_value(organized)
+        history_identity = self.history_type.to(device=visual.device, dtype=content_selector.dtype)
+        if source_identity is not None:
+            history_identity = source_identity[:, :, None, None, None].to(dtype=content_selector.dtype)
         identity = (
-            self.history_type.to(device=visual.device, dtype=content_selector.dtype)
+            history_identity
             + self.camera_type.to(device=visual.device, dtype=content_selector.dtype)
             + self.spatial_type.to(device=visual.device, dtype=content_selector.dtype)
         )
@@ -9761,6 +9853,8 @@ class FlowDINOEvidenceEncoder(nn.Module):
             device=visual.device,
             dtype=torch.float32,
         )[None, :, None, None, None, None]
+        if source_time is not None:
+            pair_dt = source_time.pair_steps.clamp_min(1).float()[:, :, None, None, None, None]
         # Geometry stays in native/grid units for address compilation and
         # diagnostics.  The learned motion K/V lane receives a
         # resolution-independent coordinate in [-1,1], with confidence,
@@ -9823,6 +9917,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
             future_queries.expand(batch, -1, -1, -1, -1, -1),
             motion_raw,
             future_context_seed,
+            source_time=source_time,
         )
         future_queries = future_queries.flatten(1, 4)
         metrics = {
@@ -9957,6 +10052,8 @@ class FlowDINOEvidenceEncoder(nn.Module):
             losses=losses,
             metrics=metrics,
             raw_context=reader_context,
+            visual_source_time=source_time,
+            memory_observed=(None if source_time is None else source_time.memory_observed(cameras=cameras, grid=grid)),
         )
 
     def refine_raw_evidence(
@@ -11119,12 +11216,23 @@ class FlowDINOEvidenceEncoder(nn.Module):
         )
 
     def forward(
-        self, visual: Tensor, *, raw_visual: Tensor | None = None
+        self, visual: Tensor, *, raw_visual: Tensor | None = None, source_offsets: Tensor | None = None
     ) -> FlowDINOEvidencePack:
+        source_time = None
+        if self.source_time_mode == SOURCE_VISUAL_TIME:
+            if source_offsets is None:
+                raise ValueError("source-timed vision is missing actual frame offsets")
+            source_time = VisualSourceTime(source_offsets)
+            source_time.validate(batch=int(visual.shape[0]), frames=int(visual.shape[1]), device=visual.device, strict=True)
+            visual = source_time.canonicalize(visual)
+            if raw_visual is not None:
+                raw_visual = source_time.canonicalize(raw_visual)
+        elif source_offsets is not None:
+            raise ValueError("legacy visual encoder cannot silently ignore source timing")
         if self.raw_enabled:
             if raw_visual is None:
                 raise ValueError("raw-image Flow-JEPA requires raw_visual")
-            return self._forward_raw_grounding(visual, raw_visual)
+            return self._forward_raw_grounding(visual, raw_visual, source_time)
         if raw_visual is not None:
             raise ValueError("raw_visual was supplied while raw-image Flow-JEPA is disabled")
         if self.late_bottleneck:

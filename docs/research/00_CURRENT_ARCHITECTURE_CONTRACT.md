@@ -21,16 +21,15 @@ they do not define the current graph.
 `codex/structural-rebuild-20260921` is based on immutable commit
 `0f07160d692ec8c8302880420a3d93d74512c39b`. The implemented units are **M1a physical-step history** and **M1b real-tail
 current-state coverage with source-owned future-label support**.
-M1c additionally implements a native-state/feature-state boundary for the
-explicit CALVIN rotation-column candidate. The complete G/S/W/P structural
-redesign is not implemented or behaviorally validated. The default old graph and the M1a config remain controls. The new
-explicit candidate is `configs/mainline/structural_rebuild_m1b_calvin.json`;
-`structural_rebuild_m1_calvin.json` remains unchanged. Future work and unresolved
-review boundaries are in the existing repair plan, not declarations of current
-architecture. The 2026-09-21 user authorization permits reviewed architectural
-changes on this branch; historical exact-arithmetic rules do not prohibit a
-new, explicitly identified component. Existing experimental source and data
-remain untouched.
+M1c additionally implements native-state/feature-state separation; M1d adds
+source-timed visual history with one support contract through flow, G memory,
+S/W motion and Teacher. The latest explicit candidate is
+`configs/mainline/structural_rebuild_m1d_calvin.json`. Legacy and M1a/M1b/M1c
+configs remain reproducible controls, not automatic aliases of this candidate.
+The G1/G2/G3 entity redesign, S-task, W-supervision and P redesign are not
+implemented or behaviorally validated. The user-authorized rebuild may revise
+historical implementation details; accepted source semantics belong here,
+future work in the repair plan, and test/publish status in the handoff.
 
 ## M1c native state and model feature boundary
 
@@ -60,6 +59,45 @@ feature mode and feature width. Checkpoint state-normalizer width is derived
 from the native source profile (7), not the model feature width (10). The exact
 feature metadata is validated before inference. An old graph cannot silently
 acquire this feature chart. There is no old optimizer/weight migration allow-list.
+
+## M1d visual source-time and observable motion
+
+The explicit `observation.source_time_mode=source_history_steps_v1` consumes
+actual integer offsets from `ObservableHistory.timing.state_offsets`. For the
+current synchronized data/online adapters, visual and state histories share
+those source rows. No duration is inferred from RGB similarity, flow
+confidence, saved-video FPS, a future target, or an ODE iteration.
+
+`VisualSourceTime` retains the actual frame coordinates and positive pair gaps.
+At reset [0,0,0] there is one image and no motion pair; [-1,-1,0] contains two
+images and one one-step pair; [-8,-4,0] contains three images and two four-step
+pairs. Duplicate payload and context-dropout masks are canonicalized to the
+latest copy before any learned projection. This does not throw away the real
+current frame when all past slots repeat it.
+
+| Boundary | Source-time rule |
+|---|---|
+| Semantic/raw flow objectives and outputs | A zero-gap pair has no observed motion support; it owns no motion loss, value or gradient. Positive-gap pairs keep actual source displacement. |
+| Dense temporal organizer | Read each physical frame once using a key mask and actual-time Q/K features. Current visual values remain available at reset. |
+| Generic G visual read and summary | The same frame/pair support masks keys, values and the summary, before normalization/products. |
+| Perceptual future queries | Motion read uses actual pair time; missing pairs cannot re-enter through future-history attention or its learned projection. Factual context and learned future priors remain separately available. |
+| Local chart -> global facts -> world belief | `latest_flow_steps: Long[B]` survives materialization and object permutation; no duplication of camera axes. |
+| S/W motion features | Use image-chart displacement per observed control step; raw camera transport remains displacement for geometric association. |
+| Teacher extrapolation | Multiply observed displacement by future offset / actual observed gap. No pair means no observed motion prior, not a fabricated stationary target; search uncertainty still grows with the future horizon. |
+| Config/ABI | New explicit source-time selection and exact metadata; old fixed-history selection remains unchanged. |
+
+Time projections have the actual consumer's hidden width (organizer and main
+carrier differ); the clock has one source owner. The unused fixed history-type
+parameter is frozen in source-time mode. Current-validity authority is not
+transferred to a predicted visibility score, and missing flow does not remove
+current image evidence. Cached clocks/support are read-only throughout both
+ODE passes and the candidate-world rebuild. There is no new recurrent task
+state, extra W call, or cross-decision cache. Seconds per control step remain
+unknown unless declared by the source/controller.
+
+This unit does not resolve multi-camera coordinate pooling, G entity
+association, W action/target mismatch, or P3 execution feedback. M1d's passing
+boundary tests cannot be promoted to learned task success.
 
 ## Agent quick contract
 

@@ -651,7 +651,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
             state_change_history = torch.where(
                 no_rate[:, None], torch.zeros_like(state_change_history), state_change_history
             )
-        transport_prior = facts.transport_prior.to(
+        observed_motion = facts.transport_prior if facts.latest_flow_steps is None else facts.transport_rate
+        transport_prior = observed_motion.to(
             device=objects.device,
             dtype=objects.dtype,
         )

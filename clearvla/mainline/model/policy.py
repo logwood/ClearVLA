@@ -462,8 +462,15 @@ class ClearVLAMainlinePolicy(nn.Module):
                 condition_generator=condition_generator,
             )
         )
+        source_offsets = None
+        if self.config.observation.source_time_mode == "source_history_steps_v1":
+            source_clock = conditioned_policy_input.history.timing
+            if source_clock is None:
+                raise ValueError("source-timed observation requires a physical source clock")
+            source_offsets = source_clock.state_offsets
         prepared = self.observation.prepare(
             conditioned_policy_input.observation,
+            source_offsets=source_offsets,
             context_mask=context_mask,
             training_mask=training_mask,
             geometry_supervision=geometry_supervision,
@@ -489,6 +496,7 @@ class ClearVLAMainlinePolicy(nn.Module):
                 slices=grounding_slices,
                 visual_memory=grounding_bank.visual_memory,
                 visual_value_memory=grounding_bank.visual_value_memory,
+                visual_memory_observed=grounding_bank.visual_memory_observed,
                 state=progressive_state,
                 advance=self.observation.advance_progressive_grounding,
                 collect_diagnostics=collect_diagnostics,

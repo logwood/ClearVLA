@@ -102,6 +102,8 @@ class GroundingObservationBank:
     earlier_flow: PatchFlowField
     context_mask: Tensor
     native_flow_losses: dict[str, Tensor] | None = None
+    visual_memory_observed: Tensor | None = None
+    latest_flow_steps: Tensor | None = None
 
     def validate(self) -> None:
         if self.address_bank.dense_current_dino_content is None:
@@ -113,6 +115,12 @@ class GroundingObservationBank:
             self.visual_value_memory.shape
         ):
             raise ValueError("grounding selector/value memory must align as [B,N,H]")
+        if self.visual_memory_observed is not None:
+            if self.visual_memory_observed.dtype != torch.bool or tuple(self.visual_memory_observed.shape) != tuple(self.visual_memory.shape[:2]) or self.visual_memory_observed.device != self.visual_memory.device:
+                raise ValueError("visual support must retain memory shape and device")
+        if self.latest_flow_steps is not None:
+            if tuple(self.latest_flow_steps.shape) != (batch,) or self.latest_flow_steps.dtype != torch.long or self.latest_flow_steps.device != self.visual_memory.device:
+                raise ValueError("flow source duration must retain integer [B] provenance")
         if int(self.visual_memory.shape[0]) != batch:
             raise ValueError("grounding memory batch does not align with the address bank")
         if self.detail_features.ndim != 5 or tuple(self.detail_features.shape[:2]) != (

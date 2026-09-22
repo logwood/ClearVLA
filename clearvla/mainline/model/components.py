@@ -179,6 +179,7 @@ class ObservationStage(nn.Module):
         observation: CurrentObservation,
         *,
         context_mask: Tensor | None = None,
+        source_offsets: Tensor | None = None,
         training_mask: bool = False,
         geometry_supervision: bool = True,
         collect_diagnostics: bool = False,
@@ -186,6 +187,7 @@ class ObservationStage(nn.Module):
         return self.compiler.prepare(
             observation,
             context_mask=context_mask,
+            source_offsets=source_offsets,
             training_mask=training_mask,
             geometry_supervision=geometry_supervision,
             collect_diagnostics=collect_diagnostics,
@@ -335,6 +337,7 @@ class GroundingStage(nn.Module):
         slices: dict[str, slice],
         visual_memory: Tensor,
         visual_value_memory: Tensor,
+        visual_memory_observed: Tensor | None = None,
         state: ProgressiveGroundingAddressState,
         advance: Callable[..., ProgressiveGroundingAddressState],
         collect_diagnostics: bool = False,
@@ -344,7 +347,16 @@ class GroundingStage(nn.Module):
         )
         if int(clean.shape[1]) < 1:
             raise ValueError("grounding modulation requires state/register rows")
-        summary = torch.cat((clean.mean(dim=1), visual_memory.mean(dim=1)), dim=-1)
+        if visual_memory_observed is None:
+            visual_summary = visual_memory.mean(dim=1)
+        else:
+            if tuple(visual_memory_observed.shape) != tuple(visual_memory.shape[:2]) or visual_memory_observed.dtype != torch.bool:
+                raise ValueError("grounding visual support must be Boolean [B,N]")
+            if not bool(visual_memory_observed.any(dim=1).all()):
+                raise ValueError("grounding requires at least the real current observation")
+            safe = torch.where(visual_memory_observed[..., None], visual_memory, torch.zeros_like(visual_memory))
+            visual_summary = safe.sum(dim=1) / visual_memory_observed.sum(dim=1, keepdim=True).clamp_min(1)
+        summary = torch.cat((clean.mean(dim=1), visual_summary), dim=-1)
         content_delta = self.content_mod(summary)
         content_delta = content_delta * self.content_mod_scale.to(
             device=canvas.device, dtype=canvas.dtype
@@ -361,6 +373,7 @@ class GroundingStage(nn.Module):
                 modulation,
                 slices,
                 visual_value_memory=visual_value_memory,
+                visual_key_padding_mask=None if visual_memory_observed is None else ~visual_memory_observed,
                 collect_diagnostics=collect_diagnostics,
             )
             rollout = canvas[:, slices["rollout"]]

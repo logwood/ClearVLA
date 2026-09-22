@@ -33,7 +33,7 @@ python scripts/audit_structural_static.py --baseline "$BASELINE" --current "$ROO
 TESTS=(tests/test_mainline*.py tests/test_structural_static_audit.py tests/test_calvin_raw_reader.py
        tests/test_calvin_schema30_adapter.py tests/test_calvin_chunked_execution.py
        tests/test_maniskill_binary_gripper.py tests/test_maniskill_rl_admission.py
-       tests/test_libero_boundaries.py)
+       tests/test_libero_boundaries.py tests/test_camera_coordinate_role_candidate.py)
 # Run identical selected inventories in separate processes per file. This
 # bounds allocator lifetime, not test coverage. A failed/killed child is fatal.
 OLD=()
