@@ -175,6 +175,15 @@ lifecycle.  Its source-drift allow-list is exactly `config.py`, `dynamics.py`,
 `compiler.py`/`transition.py` drift is rejected rather than inherited from a
 generic initialization allowance.
 
+TargetFact currently exports its physical camera mass in sorted canonical
+camera-name order, while the live ObjectFactSet/W/P2 charts retain the
+serialized data-camera order. Until those shared C-axis owners carry one
+explicit role permutation, target-action construction therefore requires
+`data.camera_names == tuple(sorted(data.camera_names))` and fails closed for a
+non-canonical order. The formal CALVIN order is `("top", "wrist")`; this is
+an admission guard, not a claim that arbitrary camera-role permutations are
+already supported.
+
 The accepted action condition remains
 `top.world_action_condition_mode=interval_mean_v1`.  The opt-in
 `sequence_prefix_v1` unit closes the deterministic temporal blind spot of the
@@ -275,7 +284,8 @@ mass, plus object-readable, existence and unresolved mass. Identity and
 physical readability remain separate typed quantities:
 `m_object(K)=p_target(K)*validity(K)` and
 `m_camera(K,C)=p_target(K)*camera_validity(K,C)` are carried in FP32 without
-renormalization. A learned
+renormalization; the C axis is admitted only under the canonical camera-order
+guard above. A learned
 bias-free projection turns only these statistics into `target_summary`; raw
 content/appearance/RGB and raw K rows do not reach the full-goal action
 proposer. The exact-zero score head starts with a legal uniform posterior;

@@ -946,6 +946,18 @@ class ExperimentConfig:
             raise ValueError("top and execution controller head counts must align")
         if len(self.data.camera_names) != self.dimensions.num_cameras:
             raise ValueError("data camera order must align with model num_cameras")
+        if self.top.p2_spatial_intent_mode == "target_action_bottleneck_v1":
+            # TargetFact's exported physical camera mass is canonicalized,
+            # while the live ObjectFactSet/W/P2 charts retain data.camera_names
+            # order.  Do not allow a fresh run to construct a silently
+            # misaligned C axis; supporting arbitrary declared orders requires
+            # one shared role permutation at the boundary, not a local S fix.
+            if self.data.camera_names != tuple(sorted(self.data.camera_names)):
+                raise ValueError(
+                    "target_action_bottleneck_v1 requires canonical sorted "
+                    "data.camera_names until the shared camera-axis contract "
+                    "is unified"
+                )
         profile = resolve_action_state_profile(self.data.data_profile)
         if profile.output_dim != self.dimensions.action_dim:
             raise ValueError("data profile width must align with dimensions.action_dim")

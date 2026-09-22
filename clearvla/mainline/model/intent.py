@@ -244,6 +244,20 @@ class StatelessObjectIntentOrganizer(nn.Module):
             raise ValueError("intent camera names must be canonical and non-empty")
         if len(set(self.camera_names)) != len(self.camera_names):
             raise ValueError("intent camera names must be unique")
+        # TargetFact exports a per-camera physical-readability mass whose C
+        # axis is canonicalized below.  ObjectFactSet/W/P2 retain the
+        # serialized data-camera axis, so accepting a non-canonical order here
+        # would silently pair (for example) ``wrist`` mass with the ``top``
+        # dynamics chart.  The migration/checkpoint boundary already rejects
+        # such trained artifacts; reject fresh construction as well until all
+        # shared C-axis owners carry an explicit role permutation.
+        if target_object_address_mode == "target_action_bottleneck_v1" and (
+            self.camera_names != tuple(sorted(self.camera_names))
+        ):
+            raise ValueError(
+                "TargetFact requires canonical sorted camera_names; "
+                "shared ObjectFactSet/W/P2 camera axes are still in declared order"
+            )
         self.canonical_camera_names = tuple(sorted(self.camera_names))
         self.camera_canonical_permutation = tuple(
             self.camera_names.index(name) for name in self.canonical_camera_names

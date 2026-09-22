@@ -39,7 +39,10 @@ from clearvla.mainline.model.compiler import (  # noqa: E402
 from clearvla.mainline.model.component_contracts import (  # noqa: E402
     ComponentSelection,
 )
-from clearvla.mainline.model.intent import CoarseActionIntent  # noqa: E402
+from clearvla.mainline.model.intent import (  # noqa: E402
+    CoarseActionIntent,
+    StatelessObjectIntentOrganizer,
+)
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy  # noqa: E402
 from clearvla.mainline.model.types import (  # noqa: E402
     ActionIntentDock,
@@ -62,6 +65,48 @@ from clearvla.tools.mainline_equivalence import (  # noqa: E402
 )
 
 MODE = "target_action_bottleneck_v1"
+
+
+def _camera_order_contract() -> dict[str, object]:
+    """Fail closed before a noncanonical TargetFact C axis can be built."""
+
+    reversed_names = ("wrist", "top")
+    organizer_rejected = False
+    try:
+        StatelessObjectIntentOrganizer(
+            hidden=8,
+            goal_dim=5,
+            state_dim=3,
+            action_dim=7,
+            content_dim=6,
+            route_dim=4,
+            horizon=24,
+            heads=2,
+            camera_names=reversed_names,
+            target_object_address_mode=MODE,
+        )
+    except ValueError as error:
+        organizer_rejected = "canonical sorted camera_names" in str(error)
+
+    base = build_reduced_equivalence_config({"config": config_module})
+    reversed_config = replace(
+        base,
+        data=replace(base.data, camera_names=reversed_names),
+        top=replace(base.top, p2_spatial_intent_mode=MODE),
+    )
+    config_rejected = False
+    try:
+        reversed_config.validate()
+    except ValueError as error:
+        config_rejected = "canonical sorted" in str(error)
+    checks = {
+        "target_fact_organizer_rejects_noncanonical_camera_order": organizer_rejected,
+        "target_fact_config_rejects_noncanonical_camera_order": config_rejected,
+    }
+    return {
+        "camera_names": list(reversed_names),
+        "checks": checks,
+    }
 
 
 def _source_digest(rows: tuple[tuple[str, str], ...]) -> str:
@@ -915,15 +960,21 @@ def run(*, seed: int) -> dict[str, object]:
     coarse = _coarse_contract(seed)
     p2 = _p2_contract(seed + 1)
     migration = _migration_contract()
+    camera_order = _camera_order_contract()
     coarse_checks = cast(dict[str, bool], coarse["checks"])
     p2_checks = cast(dict[str, bool], p2["checks"])
     migration_checks = cast(dict[str, bool], migration["checks"])
+    camera_order_checks = cast(dict[str, bool], camera_order["checks"])
     checks = {
         **{f"coarse:{name}": value for name, value in coarse_checks.items()},
         **{f"p2:{name}": value for name, value in p2_checks.items()},
         **{
             f"migration:{name}": value
             for name, value in migration_checks.items()
+        },
+        **{
+            f"camera_order:{name}": value
+            for name, value in camera_order_checks.items()
         },
     }
     if not all(checks.values()):
@@ -936,6 +987,7 @@ def run(*, seed: int) -> dict[str, object]:
         "coarse": coarse,
         "p2": p2,
         "migration": migration,
+        "camera_order": camera_order,
         "checks": checks,
     }
 
