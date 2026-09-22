@@ -1,6 +1,6 @@
 # Current ClearVLA architecture contract
 
-Updated: 2026-09-19 UTC
+Updated: 2026-09-22 UTC
 
 This is the compact source of truth for the active mainline graph. Read it
 before changing the V96+ top representation, Flow-DINO/JEPA, role hierarchy,
@@ -74,7 +74,7 @@ and dated handoff.
 | S interval object query | `goal_history` | `history_only` is a single-edge research control |
 | W camera condition | `motion_prior_only` | `coordinate_role_v1`; separate old-checkpoint initialization migration |
 | W action condition | `interval_mean_v1`, four interval rows | `sequence_prefix_v1`, 24 source rows; separate initialization migration |
-| P2 spatial intent | `post_pool_only`; typed S selects interval after spatial pooling | `shared_target_prior_v1`; one shared S-owned target-K prior conditions semantic K and geometry K*C before pooling |
+| Target identity / P2 spatial intent | `post_pool_only`; typed S selects interval after spatial pooling | `shared_target_prior_v1` changes only P2 addressing; `target_action_bottleneck_v1` binds target identity into one supervised physical proposal before goal-free downstream physical correction |
 | Visual NPY read transport | `mmap` | `pread`; existing cache layout and logical data contract are unchanged |
 | ODE schedule | Uniform E5 proposal/refined | Registered Q5 plus its versioned flow-step context |
 | Residual RL | Absent from the mainline trainer | External frozen-base pilot in `clearvla.rl` |
@@ -221,8 +221,9 @@ rejected.  Structural admission proves row identity, prefix causality and
 train/deploy ABI consistency only; action benefit still requires matched
 training and autonomous closed-loop validation.
 
-The language/object repair is part of this existing S path, not a CALVIN
-sidecar or a second object container. S keeps two explicit K-preserving views:
+In the default/post-pool graph, the language/object repair is part of this
+existing S path, not a CALVIN sidecar or a second object container. S keeps two
+explicit K-preserving views:
 the content-only interval evidence remains the owner of the established typed
 relevance decomposition, while a bounded symmetric
 semantic/appearance/geometry-enriched public K memory supplies the coarse
@@ -261,6 +262,102 @@ language, normalizer, component and model-state identities apart from the one
 new exact-zero parameter. Both start fresh optimizer/schedule/RNG state and are
 never exact resume across modes.
 
+The explicit `target_action_bottleneck_v1` identifier names a full
+single-target factorization. It replaces the legacy language-conditioned
+interval-K reader, the coarse-action raw-K read, and P2's semantic
+action-to-K query with one observation-level TargetFact owner. Protected goal
+plus observable history query the enriched
+content/semantic/appearance/geometry K memory once under producer support and
+emit one finite FP32 posterior `p_target[B,K]`. This posterior is converted
+immediately into declared physical statistics: per canonical camera,
+coordinate first/second moments, transport-prior first moment and readable
+mass, plus object-readable, existence and unresolved mass. A learned
+bias-free projection turns only these statistics into `target_summary`; raw
+content/appearance/RGB and raw K rows do not reach the full-goal action
+proposer. The exact-zero score head starts with a legal uniform posterior;
+only the derived log-prior innovation is centred.
+
+Target mode deliberately registers neither S `scene_read/scene_pool` nor the
+coarse `object_read`. The 24-row coarse proposal A0 reads the operation
+carrier, observable history and the already materialized target physical
+summary; after that boundary it cannot reopen K or use `p_target` as a second
+selector. W remains goal/S-free and sees target intent only through the
+outlet-owned A0 physical action condition while still modelling every
+producer-valid object. The same `p_target` owns every later target-object
+marginal.
+
+P1 receives `p_target`, the exact same ObjectFactSet/G3 owner and the aligned
+24-row A0. Its target factual address and nonlinear local K/C refinement are
+A0-free. Cameras are fused inside each K and K is contracted under
+`p_target` exactly once; only this already-selected target fact is then
+modulated by the operation/A0 condition. The fourth lane is a separate
+goal-free, A0-conditioned physical coverage read and carries no target
+future-transport value. A structural 3+1 block mask forbids target/coverage
+cross-read. The P1 dock binds the exact G3 chart tensor owners, not merely a
+same-shaped chart or address token; joint K relabeling remains legal, while
+foreign-observation and local-M mixing are rejected.
+
+P2 has two explicit roles and no additional learned K selector. Target semantic
+evidence is summed directly under `p_target`; target geometry uses
+`p_target(K) q(C|K)`, where action/coordinate compatibility may select a camera
+inside K but cannot move target mass between objects. For producer support
+`s(K)` with `n=sum s`, the non-target scene role is the fixed complement
+`r(K)=s(K)(1-p_target(K))/(n-1)` when `n>=2`, and exact zero for `n<2`.
+Fractional validity already carried by W is not multiplied into `r` again, and
+missing consumer evidence removes its contribution without renormalizing mass
+onto another K. This is an expectation over the other objects under one
+uncertain primary target, not a multi-target membership model.
+
+Target and scene keep separate spatial keys, factual contexts, support and
+physical-I posteriors. They share the terminal parameters and interval
+definition, not posterior mass: a target with no readable camera cannot erase
+a readable non-target consequence. The two scene value projections start exact
+zero and are trained only by ordinary task loss. Their output remains a named
+scene effect through an independent RMS boundary and consequence/P3 interface;
+it enters the execution bottom as `p3_scene_consequence` and never rewrites the
+target effect, protected target consequence, temporal lane or state-change
+lane. Compatibility fields such as `target_object_address_logit` and interval
+attention remain derived views of `p_target`, not trainable selectors.
+Unsupported values are quarantined before learned projections and coordinate/
+covariance arithmetic; the selected-evidence admission rejects supported
+non-finite values even when diagnostics are disabled. No raw goal, color label,
+hard contact/phase rule, or direct language side channel enters W or the
+execution bottom.
+
+There is no target-binding teacher label or auxiliary target loss. Ordinary
+coarse/action/representation losses train the selector through the consumed
+P1, W, P2 and terminal paths. `target_score`, the two P2 scene value
+projections and the public CT physical readout start exact zero; target
+query/key projections and other declared physical projections retain ordinary
+initialization. The score head and zero-start terminal owners receive direct
+ordinary task-loss VJP before their upstream bases are expected to open.
+These staged openings are required training diagnostics, not separate
+objectives, gains or entropy quotas.
+
+The legacy-to-target migration adds thirteen declared states for
+`interval_mean_v1` or twelve when the source already owns the sequence row
+offset. It retires sixteen states from `post_pool_only` and seventeen from
+`shared_target_prior_v1`, including both raw-K readers, legacy typed relevance,
+legacy P1 goal/history selectors and P2's second K query. Old checkpoints may
+enter only through
+`--init-model-contract-migration target_action_bottleneck_v1`, with identical
+data, language, normalizer, camera/action ABI, objective and runtime semantics
+apart from this graph selector, and a fresh optimizer/schedule/RNG. Both
+source modes are checked by exact state-set and source allow-list; undeclared
+state or source drift is rejected.
+
+An already-trained target-action checkpoint enters the narrowed public-CT
+system only through
+`--init-model-contract-migration target_action_system_v2`. This migration
+adds exactly `transition.physical_delta_head.weight` and
+`execution_bottom.transition_delta_lift.weight`, requires the prior target
+mode with otherwise identical config/data/runtime identity, rejects a source
+whose trained camera-column order was not already canonical, and starts a
+fresh optimizer/schedule/RNG. The physical readout starts exact zero; the
+evidence lift retains its ordinary finite initialization. The formal CALVIN
+candidate uses `pread`, `coordinate_role_v1`, `interval_mean_v1` and Q5; it
+does not silently combine the separately tested sequence-W alternative.
+
 The default `top.interval_object_query_mode=goal_history` preserves this graph.
 An explicitly serialized `history_only` research control removes only the goal
 innovation from the interval K query. History, the public carrier's goal input,
@@ -290,10 +387,14 @@ observed state change + S/action context
 completed G3 rollout
   -> cached ControlledTransitionSource
 noisy action + consequence + dynamic P1
-  -> ControlledTransitionState
-all protected/optional carriers
+  -> legacy: ControlledTransitionState
+  -> target mode: private 512-row centered CT value
+                  + (action query, A0, current state) x private G3 address
+                  -> PhysicalTransitionInnovation D[B,24,18]
+all protected/optional carriers + target-mode lifted D
   -> V120 execution bottom
-  -> physical velocity, motion and optional outlet command
+  -> terminal physical velocity + target-mode D exactly once
+  -> motion and optional outlet command
 ~~~
 
 Protected consequence and raw dynamic-P1 precision are no-null carriers. Only
@@ -301,14 +402,34 @@ the temporal and state-change P3 lanes own zero-null choices. Evidence MMDiT,
 CVAE/workspace, continuous capacity and execution-value machinery remain part
 of the bottom.
 
+In `target_action_bottleneck_v1`, the completed 512-row G3 selector, private
+centered CT value and coefficient tensors never cross the CT owner boundary.
+CT uses a 24-row query derived from the noisy action representation, A0 and
+current state to address that private chart, then one bias-free exact-zero
+projection emits only `PhysicalTransitionInnovation.delta_v[B,24,18]`. The
+same physical D has two explicit consumers: a learned 18-to-hidden lift gives
+the existing evidence machinery a 24-row transition memory, and
+`TerminalActionController` adds D exactly once to every complete Q5 velocity
+read, including dynamic candidates, deployment fastpath, fixed candidates and
+diagnostics. Batch-row selection uses `index_select`; B-by-N candidate
+expansion preserves sample ownership. Continuous outlets admit all 18
+channels. Binary outlets zero compatibility-only channels 12:18 at the outlet
+boundary, and both the normal policy path and direct bottom seam fail closed
+if an unmasked or non-finite D arrives. Legacy modes retain their original
+`ControlledTransitionState` path exactly.
+
 In the default P2 reader, the per-interval semantic K and geometry K*C spatial
 posteriors are formed from the post-P1 action query, W keys, geometry address
 and producer-owned support; direct typed-S values are then read using those
 posteriors and condition the four-interval terminal. In the opt-in reader, the
 shared S target-K field conditions those two spatial posteriors first, while
 the same post-pooling typed context continues to condition only the interval
-terminal. Language still has the indirect S-to-P1 and S-to-coarse/W paths in
-both modes. W's per-camera transport values are camera-image-plane 2-vectors;
+terminal. In target-action mode, the one S-owned `p_target` fixes both target
+semantic K and target geometry K mass before P2; action/coordinate evidence
+may select C within that K but cannot move mass to another object. A fixed
+complement supplies a separately named non-target scene role. After A0, raw
+language and raw K cannot reopen target identity. W's per-camera transport
+values are camera-image-plane 2-vectors;
 P2 pools them over K*C and interval before its shared 2-to-hidden geometry
 projection. Neither this pooling nor W camera conditions imply calibrated
 world-frame geometry. These are graph contracts, not a claim that the trained
@@ -641,7 +762,9 @@ ledger and dated handoff, scoped to the selected component and checkpoint.
 4. S owns intent. It cannot manufacture W support/value or enter W through a
    hidden second path.
 5. W is the only future-world producer. ControlledTransition consumes policy
-   transition evidence and cannot create another world.
+   transition evidence and cannot create another world. In target-action mode
+   its G3/value/coefficients are private and its only public result is one
+   finite `[B,24,18]` physical innovation.
 6. Physical validity and camera support are producer-owned. Confidence or
    allocation share cannot silently replace them. Every S/coarse/W K read
    receives that support; invalid rows are quarantined before normalization
@@ -651,9 +774,11 @@ ledger and dated handoff, scoped to the selected component and checkpoint.
    value behind zero support.
 7. P1 retains N=49 and its real 3x3 detail read until factual selection is
    complete.
-8. Semantic K and geometry K*C selection are independent and complementary.
-   They do not compete in one type softmax, and physical interval selection has
-   no learned null.
+8. In compatibility readers, semantic K and geometry K*C selection remain
+   independent and complementary. In target-action mode they share exactly one
+   target-K posterior, retain separate value/camera/interval reads, and cannot
+   learn a second target selector. Physical interval selection has no learned
+   null.
 9. Neutral P2 is algebraically neutral: zero effect and interaction leave the
    protected factual consequence unchanged.
 10. The V120 seed, terminal contracts, CVAE/workspace, Evidence MMDiT,
@@ -674,6 +799,13 @@ ledger and dated handoff, scoped to the selected component and checkpoint.
     contracts. `FlowStepContext` may enter the bottom flow, while raw language,
     color/object pointers and role logits may not; object binding must be
     resolved upstream and cross the seam only as a compiled physical condition.
+17. In target-action mode, A0 is the language-to-physics boundary. P1 may use
+    A0 only after target factual K/C refinement and the one `p_target`
+    contraction; W/P2/P3/CT/bottom cannot reopen raw goal-conditioned K.
+18. A target-mode CT physical innovation is applied directly by every terminal
+    read exactly once and may enter hidden evidence only through its declared
+    lift. Binary outlet masking precedes both uses; no raw private CT chart may
+    re-enter the bottom.
 
 ## Typed boundary summary
 
@@ -692,6 +824,7 @@ ledger and dated handoff, scoped to the selected component and checkpoint.
 | CompletedP1PolicyState | Static factual base separate from dynamic action/time residual |
 | SelectedIntervalEvidence | Interval-retaining semantic/geometry values with no-null physical terminal |
 | ControlledTransitionSource | Exact completed G3 rollout, built once per observation |
+| PhysicalTransitionInnovation | Target-mode finite `[B,24,18]` CT correction only; no selector, private value or coefficient surface |
 
 ## Registered component hierarchy
 
@@ -720,9 +853,11 @@ S/P2 may use language with the language-free ObjectFactSet and must compile the
 result into the existing physical action/consequence carriers. The dynamic
 bottom accepts only the prepared physical field, flow time, bottom-local
 FlowStepContext, shared action query, compiled physical plan, V120 seed and
-transition state; goal, RGB/DINO, ObjectFactSet, raw object pointers, color
-labels and task identity cannot cross it. A physicalized consequence may cross
-because it is the execution condition, not a second semantic binding route.
+the mode-specific transition boundary; goal, RGB/DINO, ObjectFactSet, raw
+object pointers, private G3/CT value, color labels and task identity cannot
+cross it. A physicalized consequence or `PhysicalTransitionInnovation` may
+cross because it is an execution condition, not a second semantic binding
+route.
 
 TerminalActionController owns every physical-velocity candidate read, not just
 the final head. OutletAdapter owns native dimensionality, normalizer-aware

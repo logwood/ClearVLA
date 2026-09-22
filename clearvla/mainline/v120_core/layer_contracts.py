@@ -123,6 +123,8 @@ class MidcutContractHeads(nn.Module):
         self,
         canvas: Tensor,
         slices: dict[str, slice],
+        *,
+        rollout_layout: str = "spatial_anchor",
     ) -> dict[str, Tensor]:
         config = self.config
         rollout = canvas[:, slices["rollout"]]
@@ -130,7 +132,16 @@ class MidcutContractHeads(nn.Module):
         gain = self.future_gain.to(device=canvas.device, dtype=canvas.dtype)
         effect = self.rollout_effect_head(rollout) * gain
         delta = self.rollout_delta_head(rollout) * gain
-        event_context = rollout_tokens_to_action_horizon(delta, config)
+        if rollout_layout == "spatial_anchor":
+            event_context = rollout_tokens_to_action_horizon(delta, config)
+        elif rollout_layout == "action_horizon":
+            if int(delta.shape[1]) != int(config.action_horizon):
+                raise ValueError(
+                    "action-horizon rollout must have one row per deployed step"
+                )
+            event_context = delta
+        else:
+            raise ValueError("unsupported layer-contract rollout layout")
         transition = self.transition_head(delta.mean(dim=1, keepdim=True)).expand(
             -1, int(config.action_horizon), -1
         )
@@ -179,6 +190,8 @@ class LayerContractAdapterHeads(nn.Module):
         self,
         canvas: Tensor,
         slices: dict[str, slice],
+        *,
+        rollout_layout: str = "spatial_anchor",
     ) -> dict[str, Tensor]:
         scale = torch.as_tensor(
             float(self.config.layer_contract_residual_scale),
@@ -186,7 +199,11 @@ class LayerContractAdapterHeads(nn.Module):
             dtype=canvas.dtype,
         )
         adapted = canvas + scale * self.adapter(canvas)
-        mid = self.readout(adapted, slices)
+        mid = self.readout(
+            adapted,
+            slices,
+            rollout_layout=rollout_layout,
+        )
         output = {
             key[len("midcut_") :]: value
             for key, value in mid.items()

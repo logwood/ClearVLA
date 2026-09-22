@@ -27,7 +27,10 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("plan_recognizer", ("top.recognizer.",)),
     ("history_proposal", ("history_proposal.",)),
     ("dynamics", ("top.dynamics.",)),
-    ("controlled_transition", ("transition.",)),
+    (
+        "controlled_transition",
+        ("transition.", "bottom.transition_delta_lift."),
+    ),
     (
         "p1_factual",
         (

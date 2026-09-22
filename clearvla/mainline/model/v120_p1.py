@@ -21,6 +21,7 @@ from ..v120_core.role_delta_attnres import (
     VarianceFlooredCenteredNorm,
     smooth_rms_contract,
 )
+from .types import P1TargetSpatialDock
 
 
 @dataclass(frozen=True)
@@ -1083,13 +1084,19 @@ class LateRawDetailPolicyReader(nn.Module):
     the route.
     """
 
-    def __init__(self, config: V39PolicyConfig) -> None:
+    def __init__(
+        self,
+        config: V39PolicyConfig,
+        *,
+        target_fact_routing: bool = False,
+    ) -> None:
         super().__init__()
         hidden = int(config.hidden_size)
         heads = int(config.flow_jepa_raw_reader_heads)
         if hidden % heads:
             raise ValueError("late raw-detail hidden size must be divisible by heads")
         self.config = config
+        self.target_fact_routing = bool(target_fact_routing)
         self.hidden = hidden
         self.heads = heads
         self.head_dim = hidden // heads
@@ -1120,6 +1127,17 @@ class LateRawDetailPolicyReader(nn.Module):
         self.shared_factual_glimpse_bank = bool(
             int(getattr(config, "flow_jepa_shared_factual_glimpse_bank", 0))
         )
+        if self.target_fact_routing and not (
+            self.utility_precision_mainline
+            and self.shared_factual_glimpse_bank
+            and self.coordinate_typed_raw_detail
+            and self.policy_multi_glimpse_address
+            and self.heads == 4
+        ):
+            raise ValueError(
+                "TargetFact P1 routing requires the complete four-glimpse "
+                "utility/precision factual reader"
+            )
         self.g_aligned_future_effect = bool(
             int(getattr(config, "flow_jepa_g_aligned_future_effect", 0))
         )
@@ -1187,11 +1205,17 @@ class LateRawDetailPolicyReader(nn.Module):
             if int(getattr(config, "stateless_phase_enabled", 0))
             else None
         )
+        self.target_action_input = (
+            nn.Linear(int(config.action_dim), hidden, bias=False)
+            if self.target_fact_routing
+            else None
+        )
         self.condition_query_proj = (
             nn.Linear(hidden, hidden, bias=False)
             if (
                 int(getattr(config, "stateless_phase_enabled", 0))
                 and not self.differential_intent_effect_mainline
+                and not self.target_fact_routing
             )
             else None
         )
@@ -1200,6 +1224,7 @@ class LateRawDetailPolicyReader(nn.Module):
             if (
                 self.functional_mainline_routing
                 and not self.differential_intent_effect_mainline
+                and not self.target_fact_routing
             )
             else None
         )
@@ -1767,6 +1792,472 @@ class LateRawDetailPolicyReader(nn.Module):
             ),
         )
 
+    @staticmethod
+    def _safe_flat_spatial_softmax(logit: Tensor, support: Tensor) -> Tensor:
+        """Normalize one spatial axis without inventing all-invalid mass."""
+
+        if tuple(logit.shape) != tuple(support.shape):
+            raise ValueError("spatial softmax support must align with logits")
+        flat_logit = logit.reshape(*logit.shape[:3], -1).float()
+        flat_support = support.reshape(*support.shape[:3], -1)
+        legal = flat_support.any(dim=-1, keepdim=True)
+        masked = torch.where(
+            flat_support,
+            flat_logit,
+            torch.full_like(flat_logit, -torch.inf),
+        )
+        safe = torch.where(legal, masked, torch.zeros_like(masked))
+        probability = torch.softmax(safe, dim=-1)
+        probability = torch.where(legal, probability, torch.zeros_like(probability))
+        return probability.reshape_as(logit)
+
+    @staticmethod
+    def _target_object_routes(
+        dock: P1TargetSpatialDock,
+        *,
+        device: torch.device,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Return per-K chart conditionals without reallocating missing mass."""
+
+        assignment = torch.nan_to_num(
+            dock.candidate_assignment.to(device=device, dtype=torch.float32),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp_min(0.0)
+        legal_k = (
+            dock.target_support.to(device=device)
+            & (dock.object_validity[..., 0].to(device=device) > 0.0)
+        )
+        legal_camera = dock.camera_validity[..., 0].to(device=device) > 0.0
+        assignment = torch.where(
+            legal_k[:, :, None, None, None, None]
+            & legal_camera[:, :, :, None, None, None],
+            assignment,
+            torch.zeros_like(assignment),
+        )
+        object_mass = assignment.sum(dim=(2, 3, 4, 5), keepdim=True)
+        readable_k = legal_k & (object_mass[..., 0, 0, 0, 0] > 0.0)
+        safe_object_mass = torch.where(
+            readable_k[:, :, None, None, None, None],
+            object_mass,
+            torch.ones_like(object_mass),
+        )
+        object_route = torch.where(
+            readable_k[:, :, None, None, None, None],
+            assignment / safe_object_mass,
+            torch.zeros_like(assignment),
+        )
+        camera_mass = object_route.sum(dim=(3, 4, 5))
+        readable_camera = camera_mass > 0.0
+        safe_camera_mass = torch.where(
+            readable_camera,
+            camera_mass,
+            torch.ones_like(camera_mass),
+        )
+        camera_route = torch.where(
+            readable_camera[:, :, :, None, None, None],
+            object_route / safe_camera_mass[:, :, :, None, None, None],
+            torch.zeros_like(object_route),
+        )
+        posterior = dock.target_posterior.to(device=device, dtype=torch.float32)
+        unresolved = (
+            posterior * (~readable_k).float()
+        ).sum(dim=-1)
+        return camera_route, camera_mass, readable_k, unresolved
+
+    @staticmethod
+    def _target_fact_learned_autocast(reference: Tensor):
+        """Restore the learned-module precision domain inside FP32 routing.
+
+        The address probabilities and contractions around TargetFact are
+        intentionally FP32.  The local refiners and glimpse projections are
+        ordinary learned modules, however, and may receive BF16/FP16 tensors
+        produced by the enclosing training autocast.  Re-enable autocast only
+        for those calls; otherwise FP32 weights and low-precision activations
+        meet inside a disabled region and fail before the first batch.
+        """
+
+        low_precision = reference.dtype in {torch.bfloat16, torch.float16}
+        return torch.autocast(
+            device_type=reference.device.type,
+            dtype=reference.dtype if low_precision else torch.bfloat16,
+            enabled=low_precision,
+        )
+
+    @staticmethod
+    def _microgrid_by_object_camera(
+        *,
+        camera_route: Tensor,
+        fine_weights: Tensor,
+        micro_basis: Tensor,
+        value: Tensor,
+    ) -> Tensor:
+        """Read local values while retaining both object K and camera C."""
+
+        rows: list[Tensor] = []
+        basis = micro_basis.to(device=fine_weights.device, dtype=torch.float32)
+        value_f = value.float()
+        for micro_index in range(int(basis.shape[1])):
+            local = fine_weights.float() * basis[:, micro_index]
+            local = local / local.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
+            rows.append(
+                torch.einsum(
+                    "bqgcijmn,bkcijm,bcijmnv->bqgkcv",
+                    local,
+                    camera_route,
+                    value_f,
+                )
+            )
+        return torch.stack(rows, dim=-2)
+
+    @staticmethod
+    def _microgrid_by_camera(
+        *,
+        camera_route: Tensor,
+        fine_weights: Tensor,
+        micro_basis: Tensor,
+        value: Tensor,
+    ) -> Tensor:
+        """Read a goal-free scene microgrid without mixing camera coordinates."""
+
+        rows: list[Tensor] = []
+        basis = micro_basis.to(device=fine_weights.device, dtype=torch.float32)
+        value_f = value.float()
+        for micro_index in range(int(basis.shape[1])):
+            local = fine_weights.float() * basis[:, micro_index]
+            local = local / local.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
+            rows.append(
+                torch.einsum(
+                    "bqgcijmn,bqgcijm,bcijmnv->bqgcv",
+                    local,
+                    camera_route,
+                    value_f,
+                )
+            )
+        return torch.stack(rows, dim=-2)
+
+    def _target_fact_local_output(
+        self,
+        *,
+        target_spatial: P1TargetSpatialDock,
+        fine_weights: Tensor,
+        route_logits: Tensor,
+        valid_any: Tensor,
+        typed_literal_rgb: Tensor,
+        fine_values: Tensor,
+        typed_coordinates: Tensor,
+        typed_fine_keys: dict[str, Tensor],
+        query_row: Tensor,
+        p2_query_structured: Tensor,
+        target_operation_condition: Tensor,
+        start: int,
+        stop: int,
+        basis: int,
+        collect_diagnostics: bool,
+    ) -> tuple[Tensor, Tensor, dict[str, Tensor]]:
+        """Compile fixed-K target facts and an isolated goal-free scene fact."""
+
+        if self.typed_micro_basis is None or self.typed_local_refiners is None:
+            raise RuntimeError("TargetFact local reader is incomplete")
+        batch = int(fine_weights.shape[0])
+        rows = int(fine_weights.shape[1])
+        cameras = int(fine_weights.shape[3])
+        camera_route, object_camera_mass, readable_k, unresolved = (
+            self._target_object_routes(target_spatial, device=fine_weights.device)
+        )
+        target_fine = fine_weights[:, :, :3]
+        target_rgb = self._microgrid_by_object_camera(
+            camera_route=camera_route,
+            fine_weights=target_fine,
+            micro_basis=self.typed_micro_basis,
+            value=typed_literal_rgb,
+        )
+        target_detail = self._microgrid_by_object_camera(
+            camera_route=camera_route,
+            fine_weights=target_fine,
+            micro_basis=self.typed_micro_basis,
+            value=fine_values,
+        )
+        target_coordinate = self._microgrid_by_object_camera(
+            camera_route=camera_route,
+            fine_weights=target_fine,
+            micro_basis=self.typed_micro_basis,
+            value=typed_coordinates,
+        )
+        target_contexts = {
+            name: torch.einsum(
+                "bqgcijmn,bkcijm,bcijmnr->bqgkcr",
+                target_fine.float(),
+                camera_route,
+                key.float(),
+            )
+            for name, key in typed_fine_keys.items()
+        }
+        target_heads: list[Tensor] = []
+        local_metrics: dict[str, list[Tensor]] = {}
+        objects = int(camera_route.shape[1])
+        micro = int(self.raw_micro_grid**2)
+        target_posterior = target_spatial.target_posterior.to(
+            device=fine_weights.device, dtype=torch.float32
+        )
+        for glimpse_index in range(3):
+            refiner = self.typed_local_refiners[glimpse_index]
+            rgb = target_rgb[:, :, glimpse_index][:, :, None].expand(
+                -1, -1, basis, -1, -1, -1, -1
+            )
+            detail = target_detail[:, :, glimpse_index][:, :, None].expand(
+                -1, -1, basis, -1, -1, -1, -1
+            )
+            coordinate = target_coordinate[:, :, glimpse_index][:, :, None].expand(
+                -1, -1, basis, -1, -1, -1, -1
+            )
+            query = p2_query_structured[
+                :, start:stop, :, glimpse_index
+            ][:, :, :, None].expand(-1, -1, -1, objects, -1, -1)
+            contexts = {
+                name: value[:, :, glimpse_index][:, :, None].expand(
+                    -1, -1, basis, -1, -1, -1
+                )
+                for name, value in target_contexts.items()
+            }
+            flat = batch * rows * basis * objects * cameras
+            kwargs: dict[str, bool] = {}
+            if self.utility_precision_mainline:
+                kwargs["collect_diagnostics"] = collect_diagnostics
+            with self._target_fact_learned_autocast(query):
+                refined, metrics = refiner(
+                    rgb=rgb.reshape(flat, 1, micro, 3).to(dtype=query.dtype),
+                    learned_detail=detail.reshape(
+                        flat, 1, micro, self.lattice_raw_dim
+                    ).to(dtype=query.dtype),
+                    coordinates=coordinate.reshape(flat, 1, micro, 2).to(
+                        dtype=query.dtype
+                    ),
+                    query=query.reshape(flat, 1, self.lattice_route_dim),
+                    semantic=contexts["semantic"].reshape(
+                        flat, 1, self.lattice_route_dim
+                    ).to(dtype=query.dtype),
+                    appearance=contexts["appearance"].reshape(
+                        flat, 1, self.lattice_route_dim
+                    ).to(dtype=query.dtype),
+                    geometry=contexts["geometry"].reshape(
+                        flat, 1, self.lattice_route_dim
+                    ).to(dtype=query.dtype),
+                    # P1 is a current-fact reader.  A0-conditioned W transport
+                    # belongs to P2 and cannot enter a per-K value before the
+                    # single target posterior is contracted.
+                    future_transport=query.new_zeros(flat, 1, 5),
+                    intervention=None,
+                    **kwargs,
+                )
+            refined = refined[:, 0].reshape(
+                batch, rows, basis, objects, cameras, self.head_dim
+            )
+            per_object = torch.einsum(
+                "bqakcd,bkc->bqakd",
+                refined.float(),
+                object_camera_mass,
+            )
+            target_fact = torch.einsum(
+                "bqakd,bk->bqad",
+                per_object,
+                target_posterior,
+            )
+            operation_head = target_operation_condition[
+                :, start:stop
+            ].reshape(batch, rows, 4, self.head_dim)[:, :, glimpse_index]
+            # The operated-object fact is already fixed by p at this point.
+            # A0 may modulate how that fact is used, but it cannot change the
+            # relative contribution of individual K/C values.
+            target_heads.append(
+                target_fact
+                * (
+                    1.0
+                    + torch.tanh(operation_head.float())[:, :, None].to(
+                        dtype=target_fact.dtype
+                    )
+                )
+            )
+            for name, value in metrics.items():
+                local_metrics.setdefault(name, []).append(value)
+
+        scene_logit = route_logits[:, :, 3:4]
+        scene_support = valid_any[:, None, None].expand_as(scene_logit)
+        scene_route = self._safe_flat_spatial_softmax(scene_logit, scene_support)
+        scene_camera_mass = scene_route.sum(dim=(4, 5, 6))
+        safe_scene_mass = torch.where(
+            scene_camera_mass > 0.0,
+            scene_camera_mass,
+            torch.ones_like(scene_camera_mass),
+        )
+        scene_camera_route = torch.where(
+            scene_camera_mass[..., None, None, None] > 0.0,
+            scene_route / safe_scene_mass[..., None, None, None],
+            torch.zeros_like(scene_route),
+        )
+        scene_fine = fine_weights[:, :, 3:4]
+        scene_rgb = self._microgrid_by_camera(
+            camera_route=scene_camera_route,
+            fine_weights=scene_fine,
+            micro_basis=self.typed_micro_basis,
+            value=typed_literal_rgb,
+        )
+        scene_detail = self._microgrid_by_camera(
+            camera_route=scene_camera_route,
+            fine_weights=scene_fine,
+            micro_basis=self.typed_micro_basis,
+            value=fine_values,
+        )
+        scene_coordinate = self._microgrid_by_camera(
+            camera_route=scene_camera_route,
+            fine_weights=scene_fine,
+            micro_basis=self.typed_micro_basis,
+            value=typed_coordinates,
+        )
+        scene_contexts = {
+            name: torch.einsum(
+                "bqgcijm,bqgcijmn,bcijmnr->bqgcr",
+                scene_camera_route,
+                scene_fine.float(),
+                key.float(),
+            )
+            for name, key in typed_fine_keys.items()
+        }
+        scene_query = p2_query_structured[:, start:stop, :, 3:4]
+        flat_scene = batch * rows * basis * cameras
+        scene_refiner = self.typed_local_refiners[3]
+        scene_kwargs: dict[str, bool] = {}
+        if self.utility_precision_mainline:
+            scene_kwargs["collect_diagnostics"] = collect_diagnostics
+        with self._target_fact_learned_autocast(scene_query):
+            scene_refined, metrics = scene_refiner(
+                rgb=scene_rgb[:, :, 0][:, :, None].expand(
+                    -1, -1, basis, -1, -1, -1
+                ).reshape(
+                    flat_scene, 1, micro, 3
+                ).to(dtype=scene_query.dtype),
+                learned_detail=scene_detail[:, :, 0][:, :, None].expand(
+                    -1, -1, basis, -1, -1, -1
+                ).reshape(
+                    flat_scene, 1, micro, self.lattice_raw_dim
+                ).to(dtype=scene_query.dtype),
+                coordinates=scene_coordinate[:, :, 0][:, :, None].expand(
+                    -1, -1, basis, -1, -1, -1
+                ).reshape(
+                    flat_scene, 1, micro, 2
+                ).to(dtype=scene_query.dtype),
+                query=scene_query[:, :, :, 0].reshape(
+                    flat_scene, 1, self.lattice_route_dim
+                ),
+                semantic=scene_contexts["semantic"][:, :, 0][:, :, None].expand(
+                    -1, -1, basis, -1, -1
+                ).reshape(
+                    flat_scene, 1, self.lattice_route_dim
+                ).to(dtype=scene_query.dtype),
+                appearance=scene_contexts["appearance"][:, :, 0][:, :, None].expand(
+                    -1, -1, basis, -1, -1
+                ).reshape(
+                    flat_scene, 1, self.lattice_route_dim
+                ).to(dtype=scene_query.dtype),
+                geometry=scene_contexts["geometry"][:, :, 0][:, :, None].expand(
+                    -1, -1, basis, -1, -1
+                ).reshape(
+                    flat_scene, 1, self.lattice_route_dim
+                ).to(dtype=scene_query.dtype),
+                # Coverage is current-scene evidence. It cannot receive a W/action
+                # successor carrier through the local-refiner side door.
+                future_transport=scene_query.new_zeros(flat_scene, 1, 5),
+                intervention=None,
+                **scene_kwargs,
+            )
+        for name, value in metrics.items():
+            local_metrics.setdefault(name, []).append(value)
+        scene_refined = scene_refined[:, 0].reshape(
+            batch, rows, basis, cameras, self.head_dim
+        )
+        scene_head = torch.einsum(
+            "bqacd,bqc->bqad",
+            scene_refined.float(),
+            scene_camera_mass[:, :, 0],
+        )
+
+        factual_values = torch.stack((*target_heads, scene_head), dim=3)
+        typed_query_context = p2_query_structured[:, start:stop].mean(dim=4)
+        if self.shared_p2_glimpse_query is None or self.shared_p2_glimpse_key is None:
+            raise RuntimeError("TargetFact factual cross-read is incomplete")
+        with self._target_fact_learned_autocast(typed_query_context):
+            cross_query = self.shared_p2_glimpse_query(typed_query_context)
+            cross_key = self.shared_p2_glimpse_key(query_row.mean(dim=3))
+        cross_logits = torch.einsum(
+            "bqagr,bqsr->bqags",
+            cross_query.float(),
+            cross_key.float(),
+        ) * (float(self.lattice_route_dim) ** -0.5)
+        cross_support = torch.zeros(
+            4, 4, device=cross_logits.device, dtype=torch.bool
+        )
+        cross_support[:3, :3] = True
+        cross_support[3, 3] = True
+        masked_cross = torch.where(
+            cross_support[None, None, None],
+            cross_logits,
+            torch.full_like(cross_logits, -torch.inf),
+        )
+        cross_weights = torch.softmax(masked_cross, dim=-1)
+        crossed = torch.einsum(
+            "bqags,bqasd->bqagd",
+            cross_weights,
+            factual_values.float(),
+        )
+        typed_output = crossed.to(dtype=factual_values.dtype).flatten(start_dim=-2)
+
+        diagnostic_target_route = torch.einsum(
+            "bk,bkcijm->bcijm",
+            target_posterior,
+            camera_route * object_camera_mass[:, :, :, None, None, None],
+        )
+        diagnostic_route = torch.cat(
+            (
+                diagnostic_target_route[:, None, None].expand(
+                    -1, rows, 3, -1, -1, -1, -1
+                ),
+                scene_route,
+            ),
+            dim=2,
+        )
+        metrics_out: dict[str, Tensor] = {
+            "flow_jepa_target_fact_readable_k_fraction": readable_k.float().mean().detach(),
+            "flow_jepa_target_fact_unresolved_mass": unresolved.mean().detach(),
+            "flow_jepa_target_fact_cross_forbidden_mass": (
+                cross_weights[..., :3, 3].sum()
+                + cross_weights[..., 3, :3].sum()
+            ).detach(),
+            "flow_jepa_target_fact_postaggregate_action_gate_rms": (
+                torch.tanh(
+                    target_operation_condition[:, start:stop]
+                    .reshape(batch, rows, 4, self.head_dim)[:, :, :3]
+                    .float()
+                )
+                .square()
+                .mean()
+                .sqrt()
+                .detach()
+            ),
+        }
+        for name, values in local_metrics.items():
+            metrics_out[name] = torch.stack(values).mean()
+        if collect_diagnostics:
+            entropy = -(
+                cross_weights.clamp_min(1.0e-8)
+                * cross_weights.clamp_min(1.0e-8).log()
+            ).sum(dim=-1)
+            metrics_out["flow_jepa_p2_factual_cross_entropy"] = entropy.mean().detach()
+            metrics_out["flow_jepa_p2_factual_cross_max"] = (
+                cross_weights.max(dim=-1).values.mean().detach()
+            )
+        return typed_output, diagnostic_route, metrics_out
+
     def set_address_eval_intervention(self, mode: str) -> None:
         normalized = str(mode).strip().lower().replace("-", "_")
         allowed = {
@@ -1877,6 +2368,10 @@ class LateRawDetailPolicyReader(nn.Module):
         world_horizon_grid: Tensor,
         detail: LateRawDetailEvidence,
         *,
+        scene_query_input: Tensor | None = None,
+        scene_factual_condition: Tensor | None = None,
+        target_operation_condition: Tensor | None = None,
+        target_spatial: P1TargetSpatialDock | None = None,
         clean_basis_tokens: Tensor | None = None,
         factual_condition: Tensor | None = None,
         collect_diagnostics: bool = True,
@@ -1932,6 +2427,8 @@ class LateRawDetailPolicyReader(nn.Module):
             fine_keys = progressive.dynamic_fine_keys
             fine_values = progressive.dynamic_fine_values
             fine_valid = progressive.dynamic_fine_valid
+            if target_spatial is not None:
+                target_spatial.validate(progressive_address=progressive)
             if tuple(progressive_coarse_bias.shape) != tuple(coarse_keys.shape[:-1]):
                 raise ValueError("G3 coarse prior does not align with the address bank")
             if tuple(progressive_fine_bias.shape) != tuple(fine_keys.shape[:-1]):
@@ -2358,6 +2855,30 @@ class LateRawDetailPolicyReader(nn.Module):
             glimpses,
             self.lattice_route_dim,
         ).permute(0, 1, 3, 2, 4)
+        if self.target_fact_routing:
+            if (
+                scene_query_input is None
+                or target_spatial is None
+                or target_operation_condition is None
+            ):
+                raise ValueError(
+                    "TargetFact P1 requires scene query, target operation and spatial dock"
+                )
+            scene_p2_query = self.lattice_query_proj(
+                self.lattice_query_norm(scene_query_input)
+            ).reshape(
+                batch,
+                horizon * basis,
+                cameras,
+                glimpses,
+                self.lattice_route_dim,
+            ).permute(0, 1, 3, 2, 4)
+            # The first three typed glimpses are strictly A0-free until their
+            # per-K values have been contracted by p.  Coverage is a separate
+            # scene-physics role and may use the physical A0 query.
+            p2_query = torch.cat(
+                (p2_query[:, :, :3], scene_p2_query[:, :, 3:4]), dim=2
+            )
         shared_basis_entropy = trajectory.new_zeros((), dtype=torch.float32)
         address_basis = basis
         if self.utility_precision_mainline:
@@ -2371,6 +2892,17 @@ class LateRawDetailPolicyReader(nn.Module):
                 factual_condition=factual_condition,
                 world_horizon=world_horizon_grid.mean(dim=(3, 4)),
             )
+            if self.target_fact_routing:
+                if scene_factual_condition is None:
+                    raise ValueError(
+                        "TargetFact P1 requires a goal-free scene condition"
+                    )
+                scene_query, _ = self._shared_factual_p1_query(
+                    clean_basis_tokens=clean_basis_tokens,
+                    factual_condition=scene_factual_condition,
+                    world_horizon=world_horizon_grid.mean(dim=(3, 4)),
+                )
+                query = torch.cat((query[:, :, :3], scene_query[:, :, 3:4]), dim=2)
             address_basis = 1
         else:
             query = p2_query
@@ -2430,12 +2962,61 @@ class LateRawDetailPolicyReader(nn.Module):
                 ),
             ):
                 assert fine_value is not None and coarse_value is not None
+                if self.target_fact_routing:
+                    fine_support = fine_valid[..., None]
+                    coarse_support = fine_valid.any(dim=-1)[..., None]
+                    if bool((~torch.isfinite(fine_value) & fine_support).any().item()):
+                        raise ValueError(
+                            f"TargetFact P1 {name} fine key is non-finite on support"
+                        )
+                    if bool(
+                        (~torch.isfinite(coarse_value) & coarse_support).any().item()
+                    ):
+                        raise ValueError(
+                            f"TargetFact P1 {name} coarse key is non-finite on support"
+                        )
+                    fine_value = torch.where(
+                        fine_support,
+                        torch.nan_to_num(fine_value),
+                        torch.zeros_like(fine_value),
+                    )
+                    coarse_value = torch.where(
+                        coarse_support,
+                        torch.nan_to_num(coarse_value),
+                        torch.zeros_like(coarse_value),
+                    )
                 typed_fine_keys[name] = self.lattice_key_norm(fine_value)
                 typed_coarse_keys[name] = self.lattice_key_norm(coarse_value)
             typed_literal_rgb = progressive.dynamic_literal_rgb
             typed_coordinates = progressive.dynamic_fine_coordinates
             if typed_literal_rgb is None or typed_coordinates is None:
                 raise RuntimeError("typed P1 has no literal RGB/current coordinates")
+            if self.target_fact_routing:
+                fine_support = fine_valid[..., None]
+                for value, name in (
+                    (typed_literal_rgb, "literal RGB"),
+                    (typed_coordinates, "fine coordinates"),
+                    (fine_values, "raw detail"),
+                ):
+                    if bool((~torch.isfinite(value) & fine_support).any().item()):
+                        raise ValueError(
+                            f"TargetFact P1 {name} is non-finite on support"
+                        )
+                typed_literal_rgb = torch.where(
+                    fine_support,
+                    torch.nan_to_num(typed_literal_rgb),
+                    torch.zeros_like(typed_literal_rgb),
+                )
+                typed_coordinates = torch.where(
+                    fine_support,
+                    torch.nan_to_num(typed_coordinates),
+                    torch.zeros_like(typed_coordinates),
+                )
+                fine_values = torch.where(
+                    fine_support,
+                    torch.nan_to_num(fine_values),
+                    torch.zeros_like(fine_values),
+                )
             if progressive_future_transport is None:
                 raise RuntimeError("typed P2 has no future transport distribution")
             if intervention == "camera_swap":
@@ -3440,6 +4021,108 @@ class LateRawDetailPolicyReader(nn.Module):
                     owner_fine_weights = {
                         name: fine_weights for name in owner_fine_weights
                     }
+                if self.target_fact_routing:
+                    if (
+                        target_spatial is None
+                        or typed_literal_rgb is None
+                        or typed_coordinates is None
+                        or p2_query_structured is None
+                        or target_operation_condition is None
+                    ):
+                        raise RuntimeError("TargetFact P1 inputs are incomplete")
+                    typed_output, target_route_weights, target_metrics = (
+                        self._target_fact_local_output(
+                            target_spatial=target_spatial,
+                            fine_weights=fine_weights,
+                            route_logits=route_logits,
+                            valid_any=valid_any,
+                            typed_literal_rgb=typed_literal_rgb,
+                            fine_values=fine_values,
+                            typed_coordinates=typed_coordinates,
+                            typed_fine_keys=typed_fine_keys,
+                            query_row=query_row,
+                            p2_query_structured=p2_query_structured,
+                            target_operation_condition=target_operation_condition,
+                            start=start,
+                            stop=stop,
+                            basis=basis,
+                            collect_diagnostics=collect_diagnostics,
+                        )
+                    )
+                    output_rows.append(typed_output)
+                    route_mass = target_route_weights.sum(
+                        dim=(3, 4, 5, 6), keepdim=True
+                    )
+                    normalized_route = torch.where(
+                        route_mass > 0.0,
+                        target_route_weights / route_mass.clamp_min(1.0e-8),
+                        torch.zeros_like(target_route_weights),
+                    )
+                    route_entropy_rows.append(
+                        -(
+                            normalized_route.clamp_min(1.0e-8)
+                            * normalized_route.clamp_min(1.0e-8).log()
+                        ).sum(dim=(3, 4, 5, 6))
+                        / math.log(float(max(state_count, 2)))
+                    )
+                    route_max_rows.append(
+                        normalized_route.flatten(3).max(dim=-1).values
+                    )
+                    fine_entropy = -(
+                        fine_weights.clamp_min(1.0e-8)
+                        * fine_weights.clamp_min(1.0e-8).log()
+                    ).sum(dim=-1) / math.log(float(max(candidates, 2)))
+                    fine_entropy_rows.append(
+                        (fine_entropy * target_route_weights).sum(
+                            dim=(3, 4, 5, 6)
+                        )
+                    )
+                    fine_max_rows.append(
+                        (
+                            fine_weights.max(dim=-1).values
+                            * target_route_weights
+                        ).sum(dim=(3, 4, 5, 6))
+                    )
+                    camera_mass_rows.append(
+                        target_route_weights.sum(dim=(4, 5, 6))
+                    )
+                    slot_mass_rows.append(
+                        target_route_weights.sum(dim=(3, 4, 5))
+                    )
+                    world_logit_std_rows.append(
+                        world_logits.flatten(3).std(dim=-1, unbiased=False)
+                    )
+                    if posterior_basis is not None and fine_basis is not None:
+                        posterior_signature_rows.append(
+                            torch.einsum(
+                                "bqgcijm,cijmf->bqgf",
+                                target_route_weights,
+                                posterior_basis,
+                            )
+                        )
+                        fine_expected = torch.einsum(
+                            "bqgcijmn,nf->bqgcijmf",
+                            fine_weights,
+                            fine_basis,
+                        )
+                        fine_signature_rows.append(
+                            torch.einsum(
+                                "bqgcijm,bqgcijmf->bqgf",
+                                target_route_weights,
+                                fine_expected,
+                            )
+                        )
+                    for name, value in target_metrics.items():
+                        typed_metric_rows.setdefault(name, []).append(value)
+                    for name, value in typed_fine_logit_rms.items():
+                        typed_metric_rows.setdefault(
+                            f"flow_jepa_typed_p1_{name}_fine_logit_rms", []
+                        ).append(value)
+                    for name, value in typed_route_logit_rms.items():
+                        typed_metric_rows.setdefault(
+                            f"flow_jepa_typed_p1_{name}_route_logit_rms", []
+                        ).append(value)
+                    continue
                 if typed_fine_keys:
                     assert typed_literal_rgb is not None
                     assert typed_coordinates is not None
@@ -4272,6 +4955,10 @@ class LateRawDetailPolicyReader(nn.Module):
         phase_context: Tensor | None = None,
         condition_query_context: Tensor | None = None,
         history_query_context: Tensor | None = None,
+        target_physical_action: Tensor | None = None,
+        target_local_modifier_context: Tensor | None = None,
+        scene_query_context: Tensor | None = None,
+        target_spatial: P1TargetSpatialDock | None = None,
         clean_basis_tokens: Tensor | None = None,
         collect_diagnostics: bool = True,
     ) -> tuple[Tensor, dict[str, Tensor]]:
@@ -4315,7 +5002,48 @@ class LateRawDetailPolicyReader(nn.Module):
         phase_query_delta = zero_context
         condition_query_delta = zero_context
         history_query_delta = zero_context
-        if self.phase_query_proj is not None:
+        scene_query_delta = zero_context
+        if self.target_fact_routing:
+            if (
+                self.phase_query_proj is None
+                or self.target_action_input is None
+                or not self.functional_mainline_routing
+            ):
+                raise RuntimeError("TargetFact P1 has no phase/context projection")
+            if (
+                target_physical_action is None
+                or tuple(target_physical_action.shape)
+                != (batch, horizon, int(cfg.action_dim))
+                or target_spatial is None
+            ):
+                raise ValueError(
+                    "TargetFact P1 requires the aligned physical A0 and spatial dock"
+                )
+            if any(
+                value is not None
+                for value in (
+                    condition_query_context,
+                    history_query_context,
+                    target_local_modifier_context,
+                    scene_query_context,
+                )
+            ):
+                raise ValueError(
+                    "TargetFact P1 cannot receive hidden goal/history/scene query lanes"
+                )
+            physical_action = target_physical_action.to(
+                device=trajectory.device,
+                dtype=trajectory.dtype,
+            )
+            local_input = self.target_action_input(physical_action)
+            scene_input = local_input
+            phase_query_delta = self.phase_query_scale * self.phase_query_proj(
+                local_input
+            )
+            scene_query_delta = self.phase_query_scale * self.phase_query_proj(
+                scene_input
+            )
+        elif self.phase_query_proj is not None:
             expected_context = (
                 (batch, int(cfg.future_anchors), self.hidden)
                 if self.functional_mainline_routing
@@ -4462,7 +5190,13 @@ class LateRawDetailPolicyReader(nn.Module):
             horizon,
             self.hidden,
         ).permute(0, 4, 1, 2, 3, 5)
-        if self.functional_mainline_routing:
+        if self.target_fact_routing:
+            # Target factual addressing/refinement is independent of A0 until
+            # after the one shared p contraction.  The scene lane remains an
+            # action-conditioned physical coverage query.
+            trajectory_query = trajectory
+            scene_trajectory_query = trajectory + scene_query_delta[:, :, None]
+        elif self.functional_mainline_routing:
             trajectory_query = (
                 trajectory
                 + phase_query_delta[:, :, None]
@@ -4476,9 +5210,14 @@ class LateRawDetailPolicyReader(nn.Module):
                 + condition_query_delta[:, None, None]
             )
         factual_condition = (
-            phase_query_delta + condition_query_delta + history_query_delta
+            torch.zeros_like(phase_query_delta)
+            if self.target_fact_routing
+            else phase_query_delta + condition_query_delta + history_query_delta
             if self.functional_mainline_routing
             else trajectory.new_zeros(batch, horizon, self.hidden)
+        )
+        scene_factual_condition = (
+            scene_query_delta if self.target_fact_routing else None
         )
         if self.utility_precision_mainline:
 
@@ -4504,6 +5243,12 @@ class LateRawDetailPolicyReader(nn.Module):
         )
         world = world_horizon[:, :, None].expand(-1, -1, basis, -1, -1)
         query_input = torch.cat((trajectory_by_camera, world), dim=-1)
+        scene_query_input = None
+        if self.target_fact_routing:
+            scene_by_camera = scene_trajectory_query[:, :, :, None].expand(
+                -1, -1, -1, cameras, -1
+            )
+            scene_query_input = torch.cat((scene_by_camera, world), dim=-1)
         if detail.address_bank is not None:
             if not self.soft_address_lattice:
                 raise RuntimeError(
@@ -4514,6 +5259,12 @@ class LateRawDetailPolicyReader(nn.Module):
                 trajectory,
                 world_horizon_grid,
                 detail,
+                scene_query_input=scene_query_input,
+                scene_factual_condition=scene_factual_condition,
+                target_operation_condition=(
+                    phase_query_delta if self.target_fact_routing else None
+                ),
+                target_spatial=target_spatial,
                 clean_basis_tokens=clean_basis_tokens,
                 factual_condition=factual_condition,
                 collect_diagnostics=collect_diagnostics,

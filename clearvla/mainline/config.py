@@ -165,9 +165,15 @@ class DataConfig:
         if not self.camera_names or len(set(self.camera_names)) != len(self.camera_names):
             raise ValueError("data.camera_names must be a non-empty ordered unique tuple")
         if any(
-            not name or any(character in name for character in "/\\") for name in self.camera_names
+            not isinstance(name, str)
+            or not name
+            or name != name.strip()
+            or any(character in name for character in "/\\")
+            for name in self.camera_names
         ):
-            raise ValueError("camera names must be non-empty cache-safe identifiers")
+            raise ValueError(
+                "camera names must be canonical non-empty cache-safe identifiers"
+            )
         override_rows = tuple((str(name), str(key)) for name, key in self.camera_key_overrides)
         if len({name for name, _ in override_rows}) != len(override_rows):
             raise ValueError("camera key overrides cannot contain duplicate camera names")
@@ -485,10 +491,12 @@ class TopConfig:
         if self.p2_spatial_intent_mode not in {
             "post_pool_only",
             "shared_target_prior_v1",
+            "target_action_bottleneck_v1",
         }:
             raise ValueError(
-                "top p2_spatial_intent_mode must be post_pool_only "
-                "or shared_target_prior_v1"
+                "top p2_spatial_intent_mode must be post_pool_only, "
+                "shared_target_prior_v1 or "
+                "target_action_bottleneck_v1"
             )
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")

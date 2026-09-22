@@ -437,8 +437,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 raise ValueError(
                     "coordinate_role_v1 requires non-empty unique camera names"
                 )
-            if any(not name for name in self.camera_names):
-                raise ValueError("W camera role names must be non-empty")
+            if any(
+                not name or name != name.strip() for name in self.camera_names
+            ):
+                raise ValueError(
+                    "W camera role names must be canonical and non-empty"
+                )
         self.action_condition_mode = str(action_condition_mode)
         if self.action_condition_mode not in self.ACTION_CONDITION_MODES:
             raise ValueError(

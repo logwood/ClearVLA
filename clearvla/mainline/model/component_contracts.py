@@ -36,6 +36,7 @@ from .types import (
     FlowStepContext,
     ObjectFactSet,
     ObjectIntentState,
+    PhysicalTransitionInnovation,
 )
 
 if TYPE_CHECKING:
@@ -305,7 +306,7 @@ class ExecutionBottomStageContract(Protocol):
         plan: ObjectPolicyPlanDeltaBank,
         intent: ObjectIntentState,
         seed: V120SeedContext,
-        transition: ControlledTransitionState,
+        transition: ControlledTransitionState | PhysicalTransitionInnovation,
         execution_mode: str,
         deployment_fastpath: bool,
         require_execution_supervision: bool,
@@ -357,6 +358,7 @@ MODULAR_TO_LEGACY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("policy_compiler.consequence.", "top.consequence."),
     ("policy_compiler.plan_compiler.", "top.plan_compiler."),
     ("execution_bottom.layer_contract_heads.", "bottom.layer_contract_heads."),
+    ("execution_bottom.transition_delta_lift.", "bottom.transition_delta_lift."),
     ("execution_bottom.decoder.", "bottom.decoder."),
 )
 

@@ -551,6 +551,18 @@ class ObjectFactSet:
             raise TypeError("object camera validity must remain FP32")
         if self.log_camera_validity.dtype != torch.float32:
             raise TypeError("object camera log validity must remain FP32")
+        for name in ("camera_support", "camera_validity"):
+            value = getattr(self, name)
+            if value.dtype != torch.bool and not bool(torch.isfinite(value).all()):
+                raise ValueError(f"object {name.replace('_', ' ')} must be finite")
+            if value.dtype != torch.bool and bool(
+                ((value < 0.0) | (value > 1.0)).any()
+            ):
+                raise ValueError(
+                    f"object {name.replace('_', ' ')} must stay in [0,1]"
+                )
+        if not bool(torch.isfinite(self.log_camera_validity).all()):
+            raise ValueError("object camera log validity must be finite")
         _shape(self.support, (batch, objects, 1), "object support")
         _shape(self.existence, (batch, objects, 1), "object existence")
         _shape(self.validity, (batch, objects, 1), "object validity")
@@ -559,6 +571,16 @@ class ObjectFactSet:
             raise TypeError("object validity must remain FP32")
         if self.log_validity.dtype != torch.float32:
             raise TypeError("object log validity must remain FP32")
+        for name in ("support", "existence", "validity"):
+            value = getattr(self, name)
+            if value.dtype != torch.bool and not bool(torch.isfinite(value).all()):
+                raise ValueError(f"object {name.replace('_', ' ')} must be finite")
+            if value.dtype != torch.bool and bool(
+                ((value < 0.0) | (value > 1.0)).any()
+            ):
+                raise ValueError(f"object {name.replace('_', ' ')} must stay in [0,1]")
+        if not bool(torch.isfinite(self.log_validity).all()):
+            raise ValueError("object log validity must be finite")
         chart = self.dense_chart.dino_content
         expected_chart = (batch, objects, *chart.shape[1:4])
         _shape(self.object_to_chart, expected_chart, "object-to-chart posterior")
@@ -637,6 +659,141 @@ class ObjectFactSet:
             validity=self.validity,
             log_validity=self.log_validity,
         )
+
+
+@dataclass(frozen=True)
+class P1TargetSpatialDock:
+    """One online TargetFact-to-G3 spatial correspondence for factual P1.
+
+    This is a read-only view over the already completed object facts and the
+    exact progressive address state used by P1.  It owns no values, labels or
+    future state.  P1 must preserve K and C until after its nonlinear local
+    refinement; the dock therefore exposes the producer's physical assignment
+    rather than a pooled object coordinate.
+    """
+
+    facts: ObjectFactSet
+    target_posterior: Tensor  # finite FP32 [B,K]
+    target_support: Tensor  # bool [B,K]
+    progressive_address: object
+    camera_names: tuple[str, ...]
+
+    @property
+    def candidate_assignment(self) -> Tensor:
+        return self.facts.candidate_assignment
+
+    @property
+    def object_validity(self) -> Tensor:
+        return self.facts.validity
+
+    @property
+    def camera_validity(self) -> Tensor:
+        return self.facts.camera_validity
+
+    @property
+    def dense_chart(self) -> DenseFactChart:
+        return self.facts.dense_chart
+
+    def validate(self, *, progressive_address: object) -> None:
+        self.facts.validate()
+        if self.progressive_address is not progressive_address:
+            raise ValueError("P1 target dock does not belong to this G3 address state")
+        grounded = getattr(progressive_address, "grounded_fact_set", None)
+        if grounded is None:
+            raise ValueError("P1 target dock requires completed G3 grounded facts")
+        # The dock is an ownership boundary, not a shape adapter.  Bind the
+        # exact chart carried by ObjectFactSet to the completed G3 producer so
+        # a same-shaped chart/assignment from another observation cannot be
+        # paired with this address token.  ObjectFactSet.permute() keeps these
+        # chart tensors unchanged, so a legitimate K relabeling still passes.
+        chart_bindings = (
+            ("public scene", self.dense_chart.public_scene_base, grounded.public_scene_base),
+            ("content", self.dense_chart.candidate_content, grounded.content_slots),
+            ("semantic", self.dense_chart.candidate_semantic, grounded.semantic_slots),
+            ("appearance", self.dense_chart.candidate_appearance, grounded.appearance_slots),
+            ("geometry", self.dense_chart.candidate_geometry, grounded.geometry_slots),
+            ("coordinates", self.dense_chart.candidate_coordinates, grounded.slot_coordinates),
+            ("support", self.dense_chart.candidate_support, grounded.slot_support),
+            ("validity", self.dense_chart.candidate_validity, grounded.slot_validity),
+        )
+        for name, chart_value, grounded_value in chart_bindings:
+            if chart_value is not grounded_value:
+                raise ValueError(
+                    "P1 target dock mixes a foreign dense chart with the "
+                    f"current G3 {name} owner"
+                )
+        if grounded.slot_transport_prior is not None and (
+            self.dense_chart.candidate_transport_prior
+            is not grounded.slot_transport_prior
+        ):
+            raise ValueError(
+                "P1 target dock mixes a foreign transport chart with current G3"
+            )
+        if self.target_posterior.ndim != 2:
+            raise ValueError("P1 target posterior must be [B,K]")
+        batch, objects = self.target_posterior.shape
+        if self.target_posterior.dtype != torch.float32 or not bool(
+            torch.isfinite(self.target_posterior).all()
+        ):
+            raise TypeError("P1 target posterior must be finite FP32")
+        _shape(self.target_support, (batch, objects), "P1 target support")
+        if self.target_support.dtype != torch.bool:
+            raise TypeError("P1 target support must be boolean")
+        if bool((self.target_posterior < 0.0).any().item()):
+            raise ValueError("P1 target posterior cannot contain negative mass")
+        if bool(
+            (
+                self.target_posterior.masked_select(~self.target_support)
+                != 0.0
+            ).any().item()
+        ):
+            raise ValueError("P1 target posterior assigns mass outside target support")
+        expected_mass = self.target_support.any(dim=-1).float()
+        if not bool(
+            torch.allclose(
+                self.target_posterior.sum(dim=-1),
+                expected_mass,
+                atol=1.0e-5,
+                rtol=1.0e-5,
+            )
+        ):
+            raise ValueError("P1 target posterior must have one unit of supported mass")
+        chart_prefix = tuple(self.dense_chart.candidate_content.shape[1:5])
+        _shape(
+            self.candidate_assignment,
+            (batch, objects, *chart_prefix),
+            "P1 target candidate assignment",
+        )
+        _shape(self.object_validity, (batch, objects, 1), "P1 object validity")
+        cameras = int(chart_prefix[0])
+        _shape(
+            self.camera_validity,
+            (batch, objects, cameras, 1),
+            "P1 object-camera validity",
+        )
+        if self.object_validity.dtype != torch.float32 or self.camera_validity.dtype != torch.float32:
+            raise TypeError("P1 physical validity must remain FP32")
+        if not bool(torch.isfinite(self.object_validity).all()) or not bool(
+            torch.isfinite(self.camera_validity).all()
+        ):
+            raise ValueError("P1 physical validity must be finite")
+        if len(self.camera_names) != cameras or len(set(self.camera_names)) != cameras:
+            raise ValueError("P1 target dock camera names do not match the chart")
+        physical_support = self.dense_chart.candidate_validity[..., 0] > 0.0
+        invalid_supported = (
+            ~torch.isfinite(self.candidate_assignment)
+            & physical_support[:, None]
+            & self.target_support[:, :, None, None, None, None]
+        )
+        if bool(invalid_supported.any().item()):
+            raise ValueError("P1 target assignment is non-finite on physical support")
+        negative_supported = (
+            (self.candidate_assignment < 0.0)
+            & physical_support[:, None]
+            & self.target_support[:, :, None, None, None, None]
+        )
+        if bool(negative_supported.any().item()):
+            raise ValueError("P1 target assignment cannot contain negative mass")
 
 
 @dataclass(frozen=True)
@@ -740,7 +897,8 @@ class FactualPrecisionDock:
     pooled factual value.
     """
 
-    protected_detail: Tensor  # [B,24,4,H]
+    protected_detail: Tensor  # target-owned [B,24,4,H]
+    scene_detail: Tensor | None = None  # goal-free physical residual [B,24,4,H]
 
     def validate(self, *, horizon: int = 24, basis: int | None = None) -> None:
         if self.protected_detail.ndim != 4:
@@ -751,6 +909,11 @@ class FactualPrecisionDock:
             raise ValueError("V120 P1 requires at least one action-basis lane")
         if basis is not None and int(self.protected_detail.shape[2]) != int(basis):
             raise ValueError("V120 P1 action-basis axis does not match the model")
+        if self.scene_detail is not None:
+            if tuple(self.scene_detail.shape) != tuple(self.protected_detail.shape):
+                raise ValueError("P1 scene detail must align with target detail")
+            if self.scene_detail.device != self.protected_detail.device:
+                raise ValueError("P1 target and scene detail must share a device")
 
 
 @dataclass(frozen=True)
@@ -760,6 +923,7 @@ class P2QueryDock:
     action_query: Tensor  # [B,24,Q,H]
     factual_base: Tensor  # [B,24,Q,H]
     policy_query_residual: Tensor  # [B,24,Q,H]
+    scene_factual_residual: Tensor | None = None  # [B,24,Q,H]
 
     def validate(self) -> None:
         expected = tuple(self.action_query.shape)
@@ -785,12 +949,14 @@ class CompletedP1PolicyState:
 
     factual_base: Tensor  # [B,24,Q,H]
     policy_query_residual: Tensor  # [B,24,Q,H]
+    scene_factual_residual: Tensor | None = None  # [B,24,Q,H]
 
     def p2_dock(self, action_query: Tensor) -> P2QueryDock:
         dock = P2QueryDock(
             action_query=action_query,
             factual_base=self.factual_base,
             policy_query_residual=self.policy_query_residual,
+            scene_factual_residual=self.scene_factual_residual,
         )
         dock.validate()
         return dock
@@ -819,6 +985,11 @@ class CompletedP1PolicyState:
             raise ValueError(
                 "completed P1 policy residual must share factual_base device"
             )
+        if self.scene_factual_residual is not None:
+            if tuple(self.scene_factual_residual.shape) != expected:
+                raise ValueError("completed P1 scene residual must align with target fact")
+            if self.scene_factual_residual.device != self.factual_base.device:
+                raise ValueError("completed P1 scene residual must share target device")
 
 
 @dataclass(frozen=True)
@@ -833,6 +1004,14 @@ class ActionIntentDock:
     # mask padded/invalid rows without reopening ObjectFactSet or creating a
     # second object-binding path.
     public_object_validity: Tensor | None = None  # FP32 [B,K,1]
+    # TargetFact-v1 pooled views.  Target identity is consumed only through
+    # target_summary/p_target.  public_object_memory remains live for the
+    # retained coarse K reader, whose query is strictly goal/history/p-free and
+    # therefore owns scene facts rather than another target decision.
+    target_summary: Tensor | None = None  # [B,H]
+    scene_context: Tensor | None = None  # [B,H]
+    target_posterior: Tensor | None = None  # FP32 [B,K]
+    target_support: Tensor | None = None  # bool/[B,K]
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -860,6 +1039,32 @@ class ActionIntentDock:
                 raise ValueError(
                     "action-intent object validity must share object-memory device"
                 )
+        if self.target_summary is not None:
+            _shape(self.target_summary, (batch, hidden), "action-intent target summary")
+        if self.scene_context is not None:
+            _shape(self.scene_context, (batch, hidden), "action-intent scene context")
+        if self.target_posterior is not None:
+            if self.target_posterior.ndim != 2 or int(self.target_posterior.shape[0]) != batch:
+                raise ValueError("action-intent target posterior must be [B,K]")
+            if self.target_posterior.dtype != torch.float32:
+                raise TypeError("action-intent target posterior must remain FP32")
+            if self.target_posterior.device != self.public_object_memory.device:
+                raise ValueError(
+                    "action-intent target posterior must share object-memory device"
+                )
+        if self.target_support is not None:
+            if self.target_support.ndim != 2 or int(self.target_support.shape[0]) != batch:
+                raise ValueError("action-intent target support must be [B,K]")
+            if self.target_support.dtype != torch.bool:
+                raise TypeError("action-intent target support must be boolean")
+            if self.target_support.device != self.public_object_memory.device:
+                raise ValueError(
+                    "action-intent target support must share object-memory device"
+                )
+            if self.target_posterior is not None and tuple(self.target_support.shape) != tuple(
+                self.target_posterior.shape
+            ):
+                raise ValueError("action-intent target support must align with posterior")
 
 
 @dataclass(frozen=True)
@@ -869,6 +1074,8 @@ class FactualIntentDock:
     phase_context: Tensor  # [B,I,H]
     condition_query_context: Tensor  # [B,I,H]
     history_query_context: Tensor  # [B,I,H]
+    target_local_modifier_context: Tensor | None = None  # [B,I,H]
+    scene_query_context: Tensor | None = None  # [B,I,H]
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.phase_context.shape[0])
@@ -880,6 +1087,22 @@ class FactualIntentDock:
             "factual-intent condition context",
         )
         _shape(self.history_query_context, expected, "factual-intent history context")
+        if (self.target_local_modifier_context is None) != (
+            self.scene_query_context is None
+        ):
+            raise ValueError("TargetFact P1 contexts must be supplied together")
+        if self.target_local_modifier_context is not None:
+            _shape(
+                self.target_local_modifier_context,
+                expected,
+                "TargetFact local modifier context",
+            )
+            assert self.scene_query_context is not None
+            _shape(
+                self.scene_query_context,
+                expected,
+                "TargetFact scene query context",
+            )
 
 
 @dataclass(frozen=True)
@@ -892,6 +1115,10 @@ class PolicyIntentDock:
     target_object_address_logit: Tensor  # FP32 [B,I,K]
     typed_common_value: Tensor  # [B,K,3,R]
     typed_interval_residual_value: Tensor  # [B,I,K,3,R]
+    target_posterior: Tensor | None = None  # FP32 [B,K]
+    target_support: Tensor | None = None  # bool [B,K]
+    target_log_prior: Tensor | None = None  # FP32 [B,K]
+    target_summary: Tensor | None = None  # [B,H]
 
     def validate(self, *, horizon: int, hidden: int) -> None:
         batch = int(self.interval_key.shape[0])
@@ -930,6 +1157,40 @@ class PolicyIntentDock:
             (batch, 4, objects, 3, route),
             "policy-intent typed interval residual value",
         )
+        if self.target_posterior is not None:
+            if tuple(self.target_posterior.shape) != (batch, objects):
+                raise ValueError("policy-intent target posterior must be [B,K]")
+            if self.target_posterior.dtype != torch.float32:
+                raise TypeError("policy-intent target posterior must remain FP32")
+            if self.target_posterior.device != self.interval_key.device:
+                raise ValueError(
+                    "policy-intent target posterior must share intent device"
+                )
+            if self.target_support is None:
+                raise ValueError("policy-intent target posterior has no producer support")
+        if self.target_support is not None:
+            _shape(
+                self.target_support,
+                (batch, objects),
+                "policy-intent target support",
+            )
+            if self.target_support.dtype != torch.bool:
+                raise TypeError("policy-intent target support must be boolean")
+            if self.target_support.device != self.interval_key.device:
+                raise ValueError(
+                    "policy-intent target support must share intent device"
+                )
+        if self.target_log_prior is not None:
+            if tuple(self.target_log_prior.shape) != (batch, objects):
+                raise ValueError("policy-intent target log prior must be [B,K]")
+            if self.target_log_prior.dtype != torch.float32:
+                raise TypeError("policy-intent target log prior must remain FP32")
+            if self.target_log_prior.device != self.interval_key.device:
+                raise ValueError(
+                    "policy-intent target log prior must share intent device"
+                )
+        if self.target_summary is not None:
+            _shape(self.target_summary, (batch, hidden), "policy-intent target summary")
 
 
 @dataclass(frozen=True)
@@ -957,6 +1218,14 @@ class ObjectIntentState:
     # validity mask.  It is optional only for old in-memory fixtures that
     # construct this compatibility container by hand.
     object_validity: Tensor | None = None  # FP32 [B,K,1]
+    target_posterior: Tensor | None = None  # FP32 [B,K]
+    target_log_prior: Tensor | None = None  # FP32 [B,K]
+    target_summary: Tensor | None = None  # [B,H]
+    target_typed_summary: Tensor | None = None  # [B,3,R]
+    scene_context: Tensor | None = None  # [B,H]
+    p1_local_modifier_context: Tensor | None = None  # [B,4,H]
+    p1_scene_query_context: Tensor | None = None  # [B,4,H]
+    target_support: Tensor | None = None  # bool/[B,K]
 
     @property
     def interval_queries(self) -> Tensor:
@@ -994,15 +1263,31 @@ class ObjectIntentState:
             history_memory=self.history_tokens,
             public_object_memory=self.object_tokens,
             public_object_validity=self.object_validity,
+            target_summary=self.target_summary,
+            scene_context=self.scene_context,
+            target_posterior=self.target_posterior,
+            target_support=self.target_support,
         )
 
     def factual_dock(self) -> FactualIntentDock:
         batch = int(self.policy_interval_context.shape[0])
+        if self.p1_local_modifier_context is not None:
+            if self.p1_scene_query_context is None:
+                raise ValueError("TargetFact P1 scene context is missing")
+            zero = torch.zeros_like(self.policy_interval_context)
+            return FactualIntentDock(
+                phase_context=zero,
+                condition_query_context=zero,
+                history_query_context=zero,
+                target_local_modifier_context=self.p1_local_modifier_context,
+                scene_query_context=self.p1_scene_query_context,
+            )
+        condition_query_context = self.protected_goal_set.mean(dim=1)[:, None].expand(
+            -1, 4, -1
+        )
         return FactualIntentDock(
             phase_context=self.policy_interval_context,
-            condition_query_context=self.protected_goal_set.mean(dim=1)[:, None].expand(
-                -1, 4, -1
-            ),
+            condition_query_context=condition_query_context,
             history_query_context=self.history_tokens[:, -1:, :].expand(
                 batch, 4, -1
             ),
@@ -1016,6 +1301,10 @@ class ObjectIntentState:
             target_object_address_logit=self.target_object_address_logit,
             typed_common_value=self.typed_common_value,
             typed_interval_residual_value=self.typed_interval_residual_value,
+            target_posterior=self.target_posterior,
+            target_support=self.target_support,
+            target_log_prior=self.target_log_prior,
+            target_summary=self.target_summary,
         )
 
     def validate(self, *, horizon: int, hidden: int) -> None:
@@ -1059,6 +1348,49 @@ class ObjectIntentState:
             raise TypeError("target object address logit must remain FP32")
         if self.target_object_address_logit.device != self.object_tokens.device:
             raise ValueError("target object address logit must share object-token device")
+        if self.target_posterior is not None:
+            if tuple(self.target_posterior.shape) != (batch, objects):
+                raise ValueError("target posterior must be [B,K]")
+            if self.target_posterior.dtype != torch.float32:
+                raise TypeError("target posterior must remain FP32")
+            if self.target_posterior.device != self.object_tokens.device:
+                raise ValueError("target posterior must share object-token device")
+        if self.target_log_prior is not None:
+            if tuple(self.target_log_prior.shape) != (batch, objects):
+                raise ValueError("target log prior must be [B,K]")
+            if self.target_log_prior.dtype != torch.float32:
+                raise TypeError("target log prior must remain FP32")
+            if self.target_log_prior.device != self.object_tokens.device:
+                raise ValueError("target log prior must share object-token device")
+        if self.target_summary is not None:
+            _shape(self.target_summary, (batch, hidden), "target summary")
+        if self.target_typed_summary is not None:
+            if self.target_typed_summary.ndim != 3 or tuple(
+                self.target_typed_summary.shape[:2]
+            ) != (batch, 3):
+                raise ValueError("target typed summary must be [B,3,R]")
+            if self.target_typed_summary.device != self.object_tokens.device:
+                raise ValueError("target typed summary must share object-token device")
+        for value, name in ((self.scene_context, "scene context"),):
+            if value is not None:
+                _shape(value, (batch, hidden), name)
+        if (self.p1_local_modifier_context is None) != (
+            self.p1_scene_query_context is None
+        ):
+            raise ValueError("TargetFact P1 contexts must be supplied together")
+        for value, name in (
+            (self.p1_local_modifier_context, "P1 local modifier context"),
+            (self.p1_scene_query_context, "P1 scene query context"),
+        ):
+            if value is not None:
+                _shape(value, (batch, 4, hidden), name)
+        if self.target_support is not None:
+            if tuple(self.target_support.shape) != (batch, objects):
+                raise ValueError("target support must be [B,K]")
+            if self.target_support.dtype != torch.bool:
+                raise TypeError("target support must be boolean")
+            if self.target_support.device != self.object_tokens.device:
+                raise ValueError("target support must share object-token device")
         _shape(
             self.typed_common_mass,
             (batch, objects, 3, 1),
@@ -1124,6 +1456,24 @@ class ObjectIntentState:
                 None
                 if self.object_validity is None
                 else self.object_validity[:, index]
+            ),
+            target_posterior=(
+                None
+                if self.target_posterior is None
+                else self.target_posterior[:, index]
+            ),
+            target_log_prior=(
+                None
+                if self.target_log_prior is None
+                else self.target_log_prior[:, index]
+            ),
+            target_summary=self.target_summary,
+            target_typed_summary=self.target_typed_summary,
+            scene_context=self.scene_context,
+            p1_local_modifier_context=self.p1_local_modifier_context,
+            p1_scene_query_context=self.p1_scene_query_context,
+            target_support=(
+                None if self.target_support is None else self.target_support[:, index]
             ),
         )
 
@@ -1898,6 +2248,34 @@ class ControlledTransitionState:
             self.neutral_coefficients,
             expected,
             "controlled neutral coefficients",
+        )
+
+
+@dataclass(frozen=True)
+class PhysicalTransitionInnovation:
+    """Narrow action-horizon ABI exported by the target-action CT.
+
+    The protected 512-row G3 chart, latent transition values and coefficient
+    decomposition remain private to the controlled-transition owner.  The
+    execution bottom receives only the physical velocity innovation that the
+    transition asks it to add at each deployed action row.
+    """
+
+    delta_v: Tensor  # [B,T,P]
+    layout: str = "action_horizon_v1"
+    chart: str = "physical_action_field_velocity_v1"
+
+    def validate(self, *, horizon: int, physical_dim: int) -> None:
+        if self.layout != "action_horizon_v1":
+            raise ValueError("physical transition layout identity changed")
+        if self.chart != "physical_action_field_velocity_v1":
+            raise ValueError("physical transition chart identity changed")
+        if self.delta_v.ndim != 3:
+            raise ValueError("physical transition innovation must be [B,T,P]")
+        _shape(
+            self.delta_v,
+            (int(self.delta_v.shape[0]), int(horizon), int(physical_dim)),
+            "physical transition innovation",
         )
 
 

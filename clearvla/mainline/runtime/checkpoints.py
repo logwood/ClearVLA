@@ -42,6 +42,8 @@ WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION = (
 WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION = "world_action_sequence_prefix_v1"
 P2_SHARED_TARGET_PRIOR_V1_MIGRATION = "p2_shared_target_prior_v1"
 P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION = "p2_shared_target_prior_pread_v1"
+TARGET_FACT_V1_MIGRATION = "target_action_bottleneck_v1"
+TARGET_ACTION_SYSTEM_V2_MIGRATION = "target_action_system_v2"
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/model/compiler.py",
@@ -130,6 +132,76 @@ P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS = (
 P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
     "intent.organizer.target_object_address.weight"
 )
+TARGET_FACT_V1_NEW_STATE_KEYS = frozenset(
+    {
+        "intent.coarse_action.sequence_row_offset",
+        "intent.organizer.target_key.weight",
+        "intent.organizer.target_physical_value.weight",
+        "intent.organizer.target_query.weight",
+        "intent.organizer.target_score.weight",
+        "execution_bottom.transition_delta_lift.weight",
+        "p1.factual_reader.target_action_input.weight",
+        "policy_compiler.effect_reader.action_interval_key.weight",
+        "policy_compiler.effect_reader.semantic_scene_value.weight",
+        "policy_compiler.effect_reader.transport_scene_value.weight",
+        "policy_compiler.plan_compiler.action_proposal_value.weight",
+        "transition.physical_action_input.weight",
+        "transition.physical_delta_head.weight",
+    }
+)
+TARGET_ACTION_SYSTEM_V2_NEW_STATE_KEYS = frozenset(
+    {
+        "execution_bottom.transition_delta_lift.weight",
+        "transition.physical_delta_head.weight",
+    }
+)
+TARGET_FACT_V1_RETIRED_STATE_KEYS = frozenset(
+    {
+        "intent.coarse_action.object_read.attention.in_proj_weight",
+        "intent.coarse_action.object_read.attention.out_proj.weight",
+        "intent.coarse_action.object_read.ffn.1.weight",
+        "intent.coarse_action.object_read.ffn.3.weight",
+        "intent.organizer.interval_object.attention.in_proj_weight",
+        "intent.organizer.interval_object.attention.out_proj.weight",
+        "intent.organizer.interval_object.ffn.1.weight",
+        "intent.organizer.interval_object.ffn.3.weight",
+        "intent.organizer.target_object_address.weight",
+        "intent.organizer.typed_relevance_queries.0.weight",
+        "intent.organizer.typed_relevance_queries.1.weight",
+        "intent.organizer.typed_relevance_queries.2.weight",
+        "intent.organizer.typed_temperature_logit",
+        "p1.factual_reader.condition_query_proj.weight",
+        "p1.factual_reader.history_query_proj.weight",
+        "policy_compiler.effect_reader.public_interval_key.weight",
+        "policy_compiler.effect_reader.source_query.0.weight",
+    }
+)
+TARGET_FACT_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/model/compiler.py",
+        "clearvla/mainline/model/component_contracts.py",
+        "clearvla/mainline/model/components.py",
+        "clearvla/mainline/model/dynamics.py",
+        "clearvla/mainline/model/__init__.py",
+        "clearvla/mainline/model/intent.py",
+        "clearvla/mainline/model/policy.py",
+        "clearvla/mainline/model/restored_bottom.py",
+        "clearvla/mainline/model/top.py",
+        "clearvla/mainline/model/transition.py",
+        "clearvla/mainline/model/types.py",
+        "clearvla/mainline/model/v120_p1.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/runtime/logging.py",
+        "clearvla/mainline/train.py",
+        "clearvla/mainline/training/engine.py",
+        "clearvla/mainline/training/losses.py",
+        "clearvla/mainline/training/optimizer.py",
+        "clearvla/mainline/v120_core/layer_contracts.py",
+        "clearvla/mainline/v120_core/time_domain_mmdit.py",
+    }
+)
+TARGET_ACTION_SYSTEM_V2_SOURCE_PATHS = TARGET_FACT_V1_SOURCE_PATHS
 LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/checkpoint.py",
@@ -908,6 +980,18 @@ def _p2_shared_target_prior_pread_migration_config_view(
     return payload
 
 
+def _target_fact_v1_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the admitted TargetFact graph selector."""
+
+    payload = _initialization_config_view(config)
+    top = dict(cast(Mapping[str, object], payload["top"]))
+    top.pop("p2_spatial_intent_mode", None)
+    payload["top"] = top
+    return payload
+
+
 def load_checkpoint_for_initialization(
     path: str | Path,
     *,
@@ -985,6 +1069,8 @@ def load_checkpoint_for_initialization(
         P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
         WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION,
         WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
+        TARGET_FACT_V1_MIGRATION,
+        TARGET_ACTION_SYSTEM_V2_MIGRATION,
     }:
         raise ValueError(
             "unknown model-initialization model migration "
@@ -1099,6 +1185,58 @@ def load_checkpoint_for_initialization(
         if saved_identity.dataset != identity.dataset:
             raise ValueError(
                 "W action-sequence migration requires identical dataset identity"
+            )
+    elif selected_model_migration == TARGET_FACT_V1_MIGRATION:
+        if (
+            saved_config.top.p2_spatial_intent_mode
+            not in {"post_pool_only", "shared_target_prior_v1"}
+            or config.top.p2_spatial_intent_mode
+            != "target_action_bottleneck_v1"
+        ):
+            raise ValueError(
+                "TargetFact migration requires a legacy post-pool/shared-target "
+                "source and target_action_bottleneck_v1 target"
+            )
+        if _target_fact_v1_migration_config_view(
+            saved_config
+        ) != _target_fact_v1_migration_config_view(config):
+            raise ValueError(
+                "TargetFact migration differs outside its one graph selector"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "TargetFact migration requires identical dataset identity"
+            )
+    elif selected_model_migration == TARGET_ACTION_SYSTEM_V2_MIGRATION:
+        if (
+            saved_config.top.p2_spatial_intent_mode
+            != "target_action_bottleneck_v1"
+            or config.top.p2_spatial_intent_mode
+            != "target_action_bottleneck_v1"
+        ):
+            raise ValueError(
+                "target-action system migration requires target-action source and target"
+            )
+        if _initialization_config_view(saved_config) != _initialization_config_view(
+            config
+        ):
+            raise ValueError(
+                "target-action system migration requires identical model/data/runtime semantics"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "target-action system migration requires identical dataset identity"
+            )
+        camera_names = tuple(saved_config.data.camera_names)
+        if (
+            any(name != name.strip() or not name for name in camera_names)
+            or len(set(camera_names)) != len(camera_names)
+            or camera_names != tuple(sorted(camera_names))
+        ):
+            raise ValueError(
+                "target-action system migration requires an already canonical "
+                "source camera order; noncanonical trained physical-summary "
+                "weights cannot be reinterpreted safely"
             )
     elif selected_migration is None:
         if _initialization_config_view(saved_config) != _initialization_config_view(config):
@@ -1247,6 +1385,10 @@ def load_checkpoint_for_initialization(
         allowed_source_paths = WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS
     elif selected_model_migration == WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION:
         allowed_source_paths = WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS
+    elif selected_model_migration == TARGET_FACT_V1_MIGRATION:
+        allowed_source_paths = TARGET_FACT_V1_SOURCE_PATHS
+    elif selected_model_migration == TARGET_ACTION_SYSTEM_V2_MIGRATION:
+        allowed_source_paths = TARGET_ACTION_SYSTEM_V2_SOURCE_PATHS
     else:
         allowed_source_paths = (
             INITIALIZATION_SOURCE_PATHS
@@ -1338,6 +1480,59 @@ def load_checkpoint_for_initialization(
             )
         mapped_model = dict(mapped_model)
         for name in WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS:
+            mapped_model[name] = current_model[name].detach().clone()
+    elif selected_model_migration == TARGET_FACT_V1_MIGRATION:
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        expected_new = set(TARGET_FACT_V1_NEW_STATE_KEYS)
+        # A sequence-prefix source already owns a trained 24-row coarse
+        # offset.  Target-action mode must preserve that value rather than
+        # declaring it newly missing and replacing it with a fresh zero row.
+        if saved_config.top.world_action_condition_mode == "sequence_prefix_v1":
+            expected_new.remove("intent.coarse_action.sequence_row_offset")
+        expected_retired = set(TARGET_FACT_V1_RETIRED_STATE_KEYS)
+        if saved_config.top.p2_spatial_intent_mode == "post_pool_only":
+            expected_retired.remove(P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY)
+        if missing != expected_new or unexpected != expected_retired:
+            raise ValueError(
+                "TargetFact migration must retire exactly its legacy target "
+                "selectors and add exactly its declared state"
+            )
+        for name in expected_new:
+            value = current_model[name]
+            if not isinstance(value, torch.Tensor):
+                raise ValueError(f"TargetFact state {name!r} is not a tensor")
+            if (
+                name.endswith("sequence_row_offset")
+                or name.endswith("target_score.weight")
+                or name.endswith("physical_delta_head.weight")
+                or name.endswith("semantic_scene_value.weight")
+                or name.endswith("transport_scene_value.weight")
+            ):
+                if int(torch.count_nonzero(value).item()) != 0:
+                    raise ValueError(
+                        f"TargetFact migration requires exact-zero initialization for {name}"
+                    )
+        mapped_model = dict(mapped_model)
+        for name in expected_new:
+            mapped_model[name] = current_model[name].detach().clone()
+        for name in expected_retired:
+            mapped_model.pop(name, None)
+    elif selected_model_migration == TARGET_ACTION_SYSTEM_V2_MIGRATION:
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        if missing != set(TARGET_ACTION_SYSTEM_V2_NEW_STATE_KEYS) or unexpected:
+            raise ValueError(
+                "target-action system migration must add exactly its narrow CT "
+                "readout and lift"
+            )
+        physical_head = current_model["transition.physical_delta_head.weight"]
+        if int(torch.count_nonzero(physical_head).item()) != 0:
+            raise ValueError(
+                "target-action system migration requires exact-zero physical readout"
+            )
+        mapped_model = dict(mapped_model)
+        for name in TARGET_ACTION_SYSTEM_V2_NEW_STATE_KEYS:
             mapped_model[name] = current_model[name].detach().clone()
     elif set(mapped_model) != set(current_model):
         raise ValueError("model initialization parameter ownership differs")
@@ -1523,6 +1718,13 @@ __all__ = [
     "P2_SHARED_TARGET_PRIOR_V1_MIGRATION",
     "P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY",
     "P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS",
+    "TARGET_FACT_V1_MIGRATION",
+    "TARGET_FACT_V1_NEW_STATE_KEYS",
+    "TARGET_FACT_V1_RETIRED_STATE_KEYS",
+    "TARGET_FACT_V1_SOURCE_PATHS",
+    "TARGET_ACTION_SYSTEM_V2_MIGRATION",
+    "TARGET_ACTION_SYSTEM_V2_NEW_STATE_KEYS",
+    "TARGET_ACTION_SYSTEM_V2_SOURCE_PATHS",
     "MigrationReport",
     "RestoredTrainingState",
     "VALIDATION_REPLAY_SOURCE_PATHS",

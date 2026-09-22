@@ -857,33 +857,77 @@ class TerminalActionController(nn.Module):
             dim=-1,
         )
 
+    @staticmethod
+    def _apply_physical_transition_delta(
+        physical_velocity: Tensor,
+        physical_transition_delta: Tensor | None,
+    ) -> Tensor:
+        """Add one CT field velocity exactly once at a terminal read."""
+
+        if physical_transition_delta is None:
+            return physical_velocity
+        if tuple(physical_transition_delta.shape) != tuple(
+            physical_velocity.shape
+        ):
+            raise ValueError(
+                "physical transition delta must match terminal field velocity"
+            )
+        if not bool(torch.isfinite(physical_transition_delta.detach()).all()):
+            raise ValueError("physical transition delta must be finite")
+        return physical_velocity + physical_transition_delta.to(
+            device=physical_velocity.device,
+            dtype=physical_velocity.dtype,
+        )
+
     def predict_candidate_velocity(
         self,
         normalized_terminal_state: Tensor,
         *,
         arm_private_correction: Tensor | None = None,
+        physical_transition_delta: Tensor | None = None,
     ) -> Tensor:
         # Binary outlets own the native gripper command in a private
         # classifier. Candidate/value reads are used by routing too, so they
         # must obey the same isolation boundary as the terminal read;
         # compatibility-field noise must not steer proposal selection.
         velocity = self.velocity_head(normalized_terminal_state)
+        if physical_transition_delta is None:
+            # Preserve the legacy expression order exactly.
+            if self.optional_command_head is not None:
+                arm_channels = 2 * int(self.arm_dim)
+                velocity = torch.cat(
+                    (
+                        velocity[..., :arm_channels],
+                        velocity[..., arm_channels:] * 0.0,
+                    ),
+                    dim=-1,
+                )
+            return self._apply_arm_private_correction(
+                velocity,
+                arm_private_correction,
+            )
+        velocity = self._apply_arm_private_correction(
+            velocity,
+            arm_private_correction,
+        )
+        velocity = self._apply_physical_transition_delta(
+            velocity,
+            physical_transition_delta,
+        )
         if self.optional_command_head is not None:
             arm_channels = 2 * int(self.arm_dim)
             velocity = torch.cat(
                 (velocity[..., :arm_channels], velocity[..., arm_channels:] * 0.0),
                 dim=-1,
             )
-        return self._apply_arm_private_correction(
-            velocity,
-            arm_private_correction,
-        )
+        return velocity
 
     def read_heads(
         self,
         normalized_terminal_state: Tensor,
         *,
         arm_private_correction: Tensor | None = None,
+        physical_transition_delta: Tensor | None = None,
         collect_diagnostics: bool,
         collect_gripper_diagnostics: bool | None = None,
     ) -> TerminalHeadOutput:
@@ -895,6 +939,10 @@ class TerminalActionController(nn.Module):
         pred_velocity = self._apply_arm_private_correction(
             pred_velocity,
             arm_private_correction,
+        )
+        pred_velocity = self._apply_physical_transition_delta(
+            pred_velocity,
+            physical_transition_delta,
         )
         command_logits = (
             self.optional_command_head(gripper_state)
@@ -1865,6 +1913,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         capacity_ratios: Tensor | None,
         identity_boundary: bool,
         arm_private_correction: Tensor | None = None,
+        physical_transition_delta: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Evaluate candidate targets without entering the committed graph.
 
@@ -1950,6 +1999,11 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         if arm_private_correction is None
                         else arm_private_correction.index_select(0, rows)
                     ),
+                    physical_transition_delta=(
+                        None
+                        if physical_transition_delta is None
+                        else physical_transition_delta.index_select(0, rows)
+                    ),
                 )
                 predictions[:, candidate_index].index_copy_(0, rows, candidate_velocity)
         return predictions.detach(), probe_mask, operation_rows.mean()
@@ -1971,6 +2025,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
         arm_private_correction: Tensor | None = None,
+        physical_transition_delta: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Run legal candidates as an attached training-time action chart.
 
@@ -2029,11 +2084,19 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             .expand(-1, candidate_count, -1, -1)
             .reshape(-1, *arm_private_correction.shape[1:])
         )
+        candidate_transition_delta = (
+            None
+            if physical_transition_delta is None
+            else physical_transition_delta[:, None]
+            .expand(-1, candidate_count, -1, -1)
+            .reshape(-1, *physical_transition_delta.shape[1:])
+        )
         candidate_velocity = self.terminal_controller.predict_candidate_velocity(
             self.terminal_controller.normalize(
                 action_stack.reshape(-1, *action_stack.shape[2:])
             ),
             arm_private_correction=candidate_private_correction,
+            physical_transition_delta=candidate_transition_delta,
         ).reshape(
             batch,
             candidate_count,
@@ -2071,6 +2134,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         identity_boundary: bool,
         prepared_factors: tuple[Tensor, ...] | None,
         arm_private_correction: Tensor | None = None,
+        physical_transition_delta: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Evaluate the canonical eval chart once per block prefix.
 
@@ -2185,11 +2249,19 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             .expand(-1, candidate_count, -1, -1)
             .reshape(-1, *arm_private_correction.shape[1:])
         )
+        candidate_transition_delta = (
+            None
+            if physical_transition_delta is None
+            else physical_transition_delta[:, None]
+            .expand(-1, candidate_count, -1, -1)
+            .reshape(-1, *physical_transition_delta.shape[1:])
+        )
         candidate_velocity = self.terminal_controller.predict_candidate_velocity(
             self.terminal_controller.normalize(
                 action_stack.reshape(-1, *action_stack.shape[2:])
             ),
             arm_private_correction=candidate_private_correction,
+            physical_transition_delta=candidate_transition_delta,
         ).reshape(
             batch,
             candidate_count,
@@ -2513,6 +2585,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         execution_terminal_uncertainty: Tensor | None = None,
         deployment_fastpath: bool = False,
         arm_private_correction: Tensor | None = None,
+        physical_transition_delta: Tensor | None = None,
     ) -> dict[str, Any]:
         """Run one continuous monotonic execution contract.
 
@@ -2582,6 +2655,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             self.terminal_controller.predict_candidate_velocity(
                 self.terminal_controller.normalize(action),
                 arm_private_correction=arm_private_correction,
+                physical_transition_delta=physical_transition_delta,
             )
         ]
         candidate_prediction_rows: list[Tensor] = []
@@ -2637,6 +2711,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                     idle_velocity = self.terminal_controller.predict_candidate_velocity(
                         self.terminal_controller.normalize(action),
                         arm_private_correction=arm_private_correction,
+                        physical_transition_delta=physical_transition_delta,
                     )
                     candidate_prediction_rows.append(
                         idle_velocity[:, None].expand(-1, candidate_count, -1, -1).detach()
@@ -2744,6 +2819,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                                 neutral_action=neutral_action,
                                 decision_index=decision_index,
                                 arm_private_correction=arm_private_correction,
+                                physical_transition_delta=physical_transition_delta,
                             )
                         )
                     else:
@@ -2767,6 +2843,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                                 identity_boundary=identity_boundary,
                                 prepared_factors=prepared_factors,
                                 arm_private_correction=arm_private_correction,
+                                physical_transition_delta=physical_transition_delta,
                             )
                         )
                 (
@@ -2987,6 +3064,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         capacity_ratios=capacity_ratios,
                         identity_boundary=identity_boundary,
                         arm_private_correction=arm_private_correction,
+                        physical_transition_delta=physical_transition_delta,
                     )
                 )
                 selected_capacity = capacity_ratios[
@@ -3047,6 +3125,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 self.terminal_controller.predict_candidate_velocity(
                     self.terminal_controller.normalize(action),
                     arm_private_correction=arm_private_correction,
+                    physical_transition_delta=physical_transition_delta,
                 )
             )
             feedback = action - block_input
@@ -3090,6 +3169,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         evidence_tokens: Tensor,
         evidence_scale: float | Tensor,
         arm_private_correction: Tensor | None = None,
+        physical_transition_delta: Tensor | None = None,
         collect_diagnostics: bool = True,
         collect_gripper_diagnostics: bool | None = None,
     ) -> dict[str, Tensor]:
@@ -3097,6 +3177,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         terminal = self.terminal_controller.read_heads(
             action,
             arm_private_correction=arm_private_correction,
+            physical_transition_delta=physical_transition_delta,
             collect_diagnostics=collect_diagnostics,
             collect_gripper_diagnostics=collect_gripper_diagnostics,
         )
@@ -3390,6 +3471,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         noisy_scale: float | Tensor = 1.0,
         spine_zero: bool = False,
         deployment_fastpath: bool = False,
+        physical_transition_delta: Tensor | None = None,
     ) -> dict[str, Tensor]:
         if not self.training:
             # Parent-module ``load_state_dict`` restores child buffers through
@@ -3403,6 +3485,15 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             raise ValueError(f"noisy_physical must be [B,{self.horizon},P]")
         if time.ndim != 1 or int(time.shape[0]) != int(noisy_physical.shape[0]):
             raise ValueError("time must be [B] aligned with noisy_physical")
+        if physical_transition_delta is not None:
+            if tuple(physical_transition_delta.shape) != tuple(
+                noisy_physical.shape
+            ):
+                raise ValueError(
+                    "physical transition delta must align with noisy physical field"
+                )
+            if not bool(torch.isfinite(physical_transition_delta.detach()).all()):
+                raise ValueError("physical transition delta must be finite")
         if spine_zero and self.training:
             raise ValueError("B-spine zero intervention is evaluation-only")
         if spine_zero and self.spine is None:
@@ -3621,6 +3712,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 ),
                 deployment_fastpath=deployment_fastpath,
                 arm_private_correction=arm_private_correction,
+                physical_transition_delta=physical_transition_delta,
             )
             dynamic_output = self._finalize_dynamic_output(
                 result=dynamic_result,
@@ -3631,6 +3723,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 evidence_tokens=evidence_tokens,
                 evidence_scale=evidence_scale,
                 arm_private_correction=arm_private_correction,
+                physical_transition_delta=physical_transition_delta,
                 collect_diagnostics=collect_diagnostics,
                 collect_gripper_diagnostics=collect_gripper_diagnostics,
             )
@@ -3672,6 +3765,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             self.terminal_controller.predict_candidate_velocity(
                 self.terminal_controller.normalize(action),
                 arm_private_correction=arm_private_correction,
+                physical_transition_delta=physical_transition_delta,
             )
         ]
         dwell_candidate_prediction_rows: list[Tensor] = []
@@ -3837,6 +3931,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         identity_boundary=identity_boundary,
                         prepared_factors=prepared_operation_factors,
                         arm_private_correction=arm_private_correction,
+                        physical_transition_delta=physical_transition_delta,
                     )
                 )
                 selection_probabilities = self._soft_execution_probabilities(
@@ -3873,6 +3968,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                         ),
                         identity_boundary=identity_boundary,
                         arm_private_correction=arm_private_correction,
+                        physical_transition_delta=physical_transition_delta,
                     )
                 )
                 selection_entropy_rows.append(torch.zeros((), device=action.device))
@@ -3906,12 +4002,14 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 self.terminal_controller.predict_candidate_velocity(
                     self.terminal_controller.normalize(action),
                     arm_private_correction=arm_private_correction,
+                    physical_transition_delta=physical_transition_delta,
                 )
             )
         action = self.terminal_controller.normalize(action)
         terminal = self.terminal_controller.read_heads(
             action,
             arm_private_correction=arm_private_correction,
+            physical_transition_delta=physical_transition_delta,
             collect_diagnostics=collect_diagnostics,
             collect_gripper_diagnostics=collect_gripper_diagnostics,
         )

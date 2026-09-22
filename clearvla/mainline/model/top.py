@@ -30,10 +30,10 @@ from ..v120_core.role_delta_attnres import AffineVarianceFlooredCenteredNorm
 from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
 from .compiler import (
     ObjectConsequenceState,
+    ObjectEffectBundle,
     ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
     ObjectPolicyPlanDeltaBank,
-    ObjectTypedEffect,
     ZeroPreservingObjectConsequence,
 )
 from .dynamics import ObjectFutureDynamicsCompiler
@@ -87,6 +87,7 @@ class OnlineTopContext:
         return DeploymentTopCache(
             belief=self.facts.world_belief(),
             intent=self.intent,
+            action_proposal=self.coarse_action.action_prediction,
             candidate_world=self.candidate_world,
         )
 
@@ -99,27 +100,37 @@ class OnlineTopContext:
         self.action_condition.validate(
             action_dim=int(self.coarse_action.action_prediction.shape[-1])
         )
-        if isinstance(self.action_condition, PhysicalActionSequenceCondition):
-            expected_rows = int(horizon)
-            source_action = self.action_condition.source_action
-        else:
-            expected_rows = 4
-            source_action = self.action_condition.source_interval_action
-        expected = (self.facts.batch, expected_rows, hidden)
+        proposal_rows = int(self.coarse_action.action_prediction.shape[1])
+        if proposal_rows not in {4, int(horizon)}:
+            raise ValueError("coarse action proposal has an unsupported time axis")
+        expected = (self.facts.batch, proposal_rows, hidden)
         if tuple(self.coarse_action.tokens.shape) != expected:
-            raise ValueError("coarse action tokens lost the interval axis")
+            raise ValueError("coarse action tokens lost the proposal time axis")
         if self.coarse_action.target is not None:
             raise ValueError("online context cannot carry a future action target")
         if self.coarse_action.loss.ndim != 0:
             raise ValueError("coarse action online placeholder loss must be scalar")
-        if tuple(self.coarse_action.action_prediction.shape) != tuple(
-            source_action.shape
-        ):
-            raise ValueError("coarse proposal and physical W condition do not align")
-        if (
-            source_action is not self.coarse_action.action_prediction
-        ):
-            raise ValueError("physical W condition must retain the exact proposal tensor")
+        if isinstance(self.action_condition, PhysicalActionSequenceCondition):
+            if self.action_condition.source_action is not self.coarse_action.action_prediction:
+                raise ValueError(
+                    "sequence W condition must retain the exact physical proposal"
+                )
+        else:
+            source_action = self.action_condition.source_interval_action
+            if proposal_rows == 4:
+                if source_action is not self.coarse_action.action_prediction:
+                    raise ValueError(
+                        "four-row W condition must retain the exact proposal"
+                    )
+            else:
+                expected_interval = PhysicalActionCondition.from_horizon_action(
+                    self.coarse_action.action_prediction,
+                    self.action_condition.current_action,
+                ).interval_action
+                if not torch.equal(source_action, expected_interval):
+                    raise ValueError(
+                        "interval W condition is not the deterministic A0 reduction"
+                    )
 
 
 @dataclass(frozen=True)
@@ -128,6 +139,7 @@ class DeploymentTopCache:
 
     belief: ObjectWorldBelief
     intent: ObjectIntentState
+    action_proposal: Tensor
     candidate_world: CandidateWorld
 
     @property
@@ -145,8 +157,14 @@ class DeploymentTopCache:
     def validate(self, *, hidden: int, horizon: int) -> None:
         self.belief.validate()
         self.intent.validate(horizon=horizon, hidden=hidden)
+        if self.action_proposal.ndim != 3 or int(
+            self.action_proposal.shape[0]
+        ) != self.belief.batch:
+            raise ValueError("deployment physical proposal must be [B,T,A]")
+        if int(self.action_proposal.shape[1]) not in {4, int(horizon)}:
+            raise ValueError("deployment physical proposal has invalid time axis")
         self.candidate_world.validate(
-            action_dim=int(self.candidate_world.action_condition.action_dim)
+            action_dim=int(self.action_proposal.shape[-1])
         )
 
 
@@ -154,19 +172,21 @@ class DeploymentTopCache:
 class CompiledPolicyState:
     """Dynamic P2/P3 state consumed by the bottom action model."""
 
-    effect: ObjectTypedEffect
+    effect: ObjectEffectBundle
     consequence: ObjectConsequenceState
     plan: ObjectPolicyPlanDeltaBank
 
     def validate(self) -> None:
         self.effect.validate()
         self.consequence.validate()
-        if tuple(self.effect.semantic.shape) != tuple(
+        if tuple(self.effect.target.semantic.shape) != tuple(
             self.consequence.factual_base.shape
         ):
             raise ValueError("P2 effect and consequence schemas do not align")
         self.plan.validate()
-        if tuple(self.plan.protected_base.shape) != tuple(self.effect.semantic.shape):
+        if tuple(self.plan.protected_base.shape) != tuple(
+            self.effect.target.semantic.shape
+        ):
             raise ValueError("P3 plan and P2 effect schemas do not align")
 
 
@@ -249,6 +269,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             route_dim=route_dim,
             horizon=horizon,
             heads=heads,
+            camera_names=camera_names,
             interval_object_query_mode=interval_object_query_mode,
             target_object_address_mode=p2_spatial_intent_mode,
         )
@@ -257,7 +278,15 @@ class ObjectIntentDynamicsTop(nn.Module):
             action_dim=action_dim,
             heads=heads,
             horizon=horizon,
-            action_condition_mode=self.world_action_condition_mode,
+            action_condition_mode=(
+                "sequence_prefix_v1"
+                if str(p2_spatial_intent_mode) == "target_action_bottleneck_v1"
+                else self.world_action_condition_mode
+            ),
+            target_fact_mode=(
+                str(p2_spatial_intent_mode)
+                == "target_action_bottleneck_v1"
+            ),
         )
         self.dynamics = ObjectFutureDynamicsCompiler(
             hidden=hidden,
@@ -288,6 +317,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             hidden=hidden,
             content_dim=content_dim,
             route_dim=route_dim,
+            action_dim=action_dim,
             spatial_intent_mode=p2_spatial_intent_mode,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)
@@ -295,6 +325,10 @@ class ObjectIntentDynamicsTop(nn.Module):
             hidden=hidden,
             horizon=horizon,
             basis=basis,
+            action_dim=action_dim,
+            target_action_bottleneck=(
+                str(p2_spatial_intent_mode) == "target_action_bottleneck_v1"
+            ),
         )
 
     @staticmethod
@@ -732,15 +766,26 @@ class ObjectIntentDynamicsTop(nn.Module):
         # the bound only inside P3 (or omitting it) changes both the trajectory
         # seen by P3 and the controlled-transition coefficient geometry.
         contracted_combined, effect_contract = smooth_rms_contract(
-            raw_effect.combined(),
+            raw_effect.target.combined(),
             0.35,
         )
         # Keep semantic/geometry identity through consequence while preserving
         # the exact caller-owned aggregate RMS boundary.  Both carriers receive
         # the same parameter-free scale computed from their combined value.
-        effect = raw_effect.scaled(effect_contract)
+        target_effect = raw_effect.target.scaled(effect_contract)
+        contracted_scene, scene_effect_contract = smooth_rms_contract(
+            raw_effect.scene.combined(),
+            0.35,
+        )
+        scene_effect = raw_effect.scene.scaled(scene_effect_contract)
+        effect = ObjectEffectBundle(
+            target=target_effect,
+            scene=scene_effect,
+            scene_enabled=raw_effect.scene_enabled,
+        )
         consequence, consequence_metrics = self.consequence(
             factual_base=p1_state.factual_base,
+            scene_factual_base=p1_state.scene_factual_residual,
             effect=effect,
             collect_diagnostics=collect_diagnostics,
         )
@@ -754,6 +799,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             consequence=consequence,
             intent=context.intent.policy_dock(),
             action_query=p3_action_query,
+            action_proposal=context.action_proposal,
             collect_diagnostics=collect_diagnostics,
         )
         state = CompiledPolicyState(
@@ -770,22 +816,37 @@ class ObjectIntentDynamicsTop(nn.Module):
             **plan_metrics,
             "object_p2_effect_contract_min": effect_contract.detach().float().amin(),
             "object_p2_effect_contract_identity_error": (
-                effect.combined().detach().float()
+                effect.target.combined().detach().float()
                 - contracted_combined.detach().float()
             )
             .abs()
             .amax(),
-            "object_p2_effect_postcontract_rms": effect.combined().detach()
+            "object_p2_effect_postcontract_rms": effect.target.combined().detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_semantic_effect_postcontract_rms": effect.semantic.detach()
+            "object_p2_semantic_effect_postcontract_rms": effect.target.semantic.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_geometry_effect_postcontract_rms": effect.geometry.detach()
+            "object_p2_geometry_effect_postcontract_rms": effect.target.geometry.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_scene_effect_contract_min": scene_effect_contract.detach()
+            .float()
+            .amin(),
+            "object_p2_scene_effect_contract_identity_error": (
+                effect.scene.combined().detach().float()
+                - contracted_scene.detach().float()
+            )
+            .abs()
+            .amax(),
+            "object_p2_scene_effect_postcontract_rms": effect.scene.combined()
+            .detach()
             .float()
             .square()
             .mean()

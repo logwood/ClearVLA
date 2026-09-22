@@ -71,6 +71,29 @@ _R2_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
     ),
 )
 
+_TARGET_FACT_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
+    (
+        "top.intent.target_score.weight",
+        "gradient_parameter_target_fact_score_weight_rms",
+    ),
+    (
+        "top.intent.target_query.weight",
+        "gradient_parameter_target_fact_query_weight_rms",
+    ),
+    (
+        "top.intent.target_key.weight",
+        "gradient_parameter_target_fact_key_weight_rms",
+    ),
+    (
+        "top.effect_reader.semantic_scene_value.weight",
+        "gradient_parameter_p2_scene_semantic_value_weight_rms",
+    ),
+    (
+        "top.effect_reader.transport_scene_value.weight",
+        "gradient_parameter_p2_scene_geometry_value_weight_rms",
+    ),
+)
+
 
 def _autocast(
     device: torch.device,
@@ -307,10 +330,31 @@ class MainlineTrainingEngine:
             name: parameter for name, parameter in legacy_named_parameters(self.model)
         }
         metrics: dict[str, Tensor] = {}
-        for parameter_name, metric_name in _R2_PARAMETER_GRADIENT_METRICS:
+        target_fact_mode = (
+            self.config.top.p2_spatial_intent_mode
+            == "target_action_bottleneck_v1"
+        )
+        requested = list(_R2_PARAMETER_GRADIENT_METRICS)
+        if target_fact_mode:
+            requested.extend(_TARGET_FACT_PARAMETER_GRADIENT_METRICS)
+        for parameter_name, metric_name in requested:
             try:
                 parameter = parameters[parameter_name]
             except KeyError as error:
+                if (
+                    target_fact_mode
+                    and parameter_name
+                    == "top.effect_reader.source_query.0.weight"
+                ):
+                    # TargetFact directly owns semantic K and deliberately
+                    # retires the redundant action-conditioned semantic
+                    # spatial query.  Preserve the scalar logging ABI without
+                    # recreating a dead trainable parameter.
+                    reference = next(iter(parameters.values()))
+                    metrics[metric_name] = reference.new_zeros(
+                        (), dtype=torch.float32
+                    )
+                    continue
                 raise RuntimeError(
                     f"R2 gradient diagnostic lost parameter {parameter_name!r}"
                 ) from error

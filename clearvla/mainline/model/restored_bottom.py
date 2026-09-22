@@ -11,7 +11,8 @@ The translation keeps the repaired ownership boundaries:
 * P2's protected consequence is written once through V120's protected-detail
   reader while the historical generic trajectory ingress remains neutral;
 * temporal and state-change are the only optional P3 innovations;
-* all 512 W transition rows reach the evidence bank without pooling;
+* legacy mode keeps all 512 transition rows, while the target-action mode
+  exposes only its declared 24-row physical innovation;
 * observation banks are never reopened below P1;
 * teacher/future tensors cannot be represented by this online signature.
 """
@@ -273,6 +274,20 @@ class RestoredV120EvidenceBottom(nn.Module):
             raise TypeError("V120 trajectory projection must start with LayerNorm")
         if trajectory_norm.weight is not None:
             trajectory_norm.weight.requires_grad_(False)
+        self.transition_delta_lift: nn.Linear | None = None
+        if (
+            config.top.p2_spatial_intent_mode
+            == "target_action_bottleneck_v1"
+        ):
+            # Construct this after every recovered V120 owner so no retained
+            # module's fresh-run initialization stream is shifted.  The CT
+            # physical head is zero-initialized, making this ordinary learned
+            # lift behaviorally neutral at migration.
+            self.transition_delta_lift = nn.Linear(
+                self.physical_action_dim,
+                self.hidden,
+                bias=False,
+            )
 
     @property
     def blocks(self) -> nn.ModuleList:

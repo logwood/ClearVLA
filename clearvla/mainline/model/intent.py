@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -46,6 +48,27 @@ def _interval_common_residual(value: Tensor) -> tuple[Tensor, Tensor]:
     common = value.mean(dim=1)
     residual = value - common[:, None]
     return common, residual
+
+
+def _safe_masked_softmax(logit: Tensor, support: Tensor, *, dim: int = -1) -> Tensor:
+    """Finite masked softmax with an exact-zero all-invalid fallback.
+
+    TargetFact owns a physical support mask, not a learned confidence.  In
+    particular, a row with no legal object must not turn into a uniform target
+    merely because the ordinary softmax kernel has no finite entry.
+    """
+
+    if support.dtype != torch.bool:
+        support = support.to(dtype=torch.bool)
+    if tuple(logit.shape) != tuple(support.shape):
+        raise ValueError("target masked softmax support must align with logits")
+    legal = support.any(dim=dim, keepdim=True)
+    masked = torch.where(support, logit.float(), torch.full_like(logit.float(), -torch.inf))
+    # The all-invalid row receives finite zero logits only for the kernel call;
+    # its output is discarded immediately below.
+    safe = torch.where(legal, masked, torch.zeros_like(masked))
+    probability = torch.softmax(safe, dim=dim)
+    return torch.where(legal, probability, torch.zeros_like(probability))
 
 
 class _CrossRead(nn.Module):
@@ -196,6 +219,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         route_dim: int,
         horizon: int,
         heads: int,
+        camera_names: tuple[str, ...] = ("top", "wrist"),
         interval_object_query_mode: str = "goal_history",
         target_object_address_mode: str = "post_pool_only",
     ) -> None:
@@ -205,12 +229,28 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if target_object_address_mode not in {
             "post_pool_only",
             "shared_target_prior_v1",
+            "target_action_bottleneck_v1",
         }:
             raise ValueError("unknown target object address mode")
         self.interval_object_query_mode = interval_object_query_mode
         self.target_object_address_mode = target_object_address_mode
+        self.target_fact_mode = target_object_address_mode == (
+            "target_action_bottleneck_v1"
+        )
         self.hidden = int(hidden)
         self.horizon = int(horizon)
+        self.camera_names = tuple(str(name) for name in camera_names)
+        if any(not name or name != name.strip() for name in self.camera_names):
+            raise ValueError("intent camera names must be canonical and non-empty")
+        if len(set(self.camera_names)) != len(self.camera_names):
+            raise ValueError("intent camera names must be unique")
+        self.canonical_camera_names = tuple(sorted(self.camera_names))
+        self.camera_canonical_permutation = tuple(
+            self.camera_names.index(name) for name in self.canonical_camera_names
+        )
+        self.cameras = len(self.camera_names)
+        if self.cameras <= 0:
+            raise ValueError("intent requires at least one physical camera")
         self.goal_input = nn.Linear(goal_dim, hidden, bias=False)
         self.goal_queries = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.goal_read = _CrossRead(hidden, heads)
@@ -228,10 +268,59 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.interval_goal = _CrossRead(hidden, heads)
         self.interval_history = _CrossRead(hidden, heads)
-        self.interval_object = _CrossRead(hidden, heads)
+        # The legacy interval K reader remains available only for the two
+        # compatibility modes.  TargetFact-v1 deliberately does not register
+        # or call it: otherwise it would remain a second language-conditioned
+        # target selector upstream of P1/coarse/P2.
+        self.interval_object: _CrossRead | None
+        if self.target_fact_mode:
+            self.interval_object = None
+        else:
+            self.interval_object = _CrossRead(hidden, heads)
+        self.scene_read: _CrossRead | None
+        self.scene_pool: nn.Linear | None
+        self.target_query: nn.Linear | None
+        self.target_key: nn.Linear | None
+        self.target_score: nn.Linear | None
+        self.target_physical_value: nn.Linear | None
+        if self.target_fact_mode:
+            # Full-scene object values must not be rejoined with the complete
+            # instruction after target selection.  Downstream scene physics is
+            # supplied by goal-free W/P/CT under the supervised physical
+            # proposal, so S exports no independent high-capacity scene token.
+            self.scene_read = None
+            self.scene_pool = None
+            self.target_query = nn.Linear(hidden, hidden, bias=False)
+            self.target_key = nn.Linear(hidden, hidden, bias=False)
+            self.target_score = nn.Linear(hidden, 1, bias=False)
+            nn.init.zeros_(self.target_score.weight)
+            # Per camera: coordinate first moment (2), coordinate second
+            # moment (xx, xy, yy), motion-prior first moment (2), and readable
+            # mass (1).  Three global scalars retain object readable mass,
+            # existence mass and unresolved mass.  These are declared
+            # physical statistics; raw content/appearance/RGB is not exported
+            # to the full-goal action proposer.
+            self.target_physical_value = nn.Linear(
+                8 * self.cameras + 3,
+                hidden,
+                bias=False,
+            )
+        else:
+            self.scene_read = None
+            self.scene_pool = None
+            self.target_query = None
+            self.target_key = None
+            self.target_score = None
+            self.target_physical_value = None
         self.typed_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        self.typed_relevance_queries = nn.ModuleList(
-            nn.Linear(hidden, route_dim, bias=False) for _ in TYPED_INTENT_NAMES
+        self.typed_relevance_queries: nn.ModuleList | None
+        self.typed_relevance_queries = (
+            None
+            if self.target_fact_mode
+            else nn.ModuleList(
+                nn.Linear(hidden, route_dim, bias=False)
+                for _ in TYPED_INTENT_NAMES
+            )
         )
         # One shared object identity must bind semantic and geometry reads.
         # The head learns which typed evidence identifies the operated object
@@ -252,9 +341,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # Initial temperature is exactly one.  It remains bounded in [0.25, 4]
         # and therefore cannot turn the fixed-zero null comparison into an
         # unbounded selector gain.
-        self.typed_temperature_logit = nn.Parameter(
-            torch.full((len(TYPED_INTENT_NAMES),), -1.3862943611198906)
-        )
+        if self.target_fact_mode:
+            self.register_parameter("typed_temperature_logit", None)
+        else:
+            self.typed_temperature_logit = nn.Parameter(
+                torch.full((len(TYPED_INTENT_NAMES),), -1.3862943611198906)
+            )
         self.interval_self = _SelfBlock(hidden, heads)
         self.temporal_identity = nn.Parameter(torch.randn(1, horizon, hidden) * 0.02)
         self.temporal_read = _CrossRead(hidden, heads)
@@ -317,6 +409,204 @@ class StatelessObjectIntentOrganizer(nn.Module):
             value_f.square().sum(dim=-1, keepdim=True) + float(floor) ** 2
         ).sqrt()
 
+    def _target_fact(
+        self,
+        *,
+        protected_goal: Tensor,
+        history: Tensor,
+        objects: Tensor,
+        typed_route: Tensor,
+        validity_values: Tensor,
+        camera_coordinates: Tensor,
+        camera_transport_prior: Tensor,
+        camera_validity: Tensor,
+        existence: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Resolve one observation-level language-to-object fact.
+
+        The final target-score row is the only zero-start selector part.
+        Query/key projections are ordinary non-zero projections; because the
+        final score owner starts at zero, their target-binding VJP opens after
+        the first optimizer step.  Validity is split
+        into a boolean support mask and a fractional value weight; it never
+        becomes a second learned selector.
+        """
+
+        if not self.target_fact_mode:
+            raise RuntimeError("TargetFact requested in a compatibility mode")
+        assert (
+            self.target_query is not None
+            and self.target_key is not None
+            and self.target_score is not None
+            and self.target_physical_value is not None
+        )
+        object_support = validity_values[..., 0] > 0.0
+        query_source = protected_goal.mean(dim=1) + history[:, -1]
+        target_query = self.target_query(query_source)
+        target_key = self.target_key(objects)
+        pair = target_query[:, None, :] * target_key
+        target_logits = self.target_score(pair).squeeze(-1).float()
+        target_posterior = _safe_masked_softmax(target_logits, object_support)
+
+        has_target = object_support.any(dim=-1, keepdim=True)
+        valid_count = object_support.float().sum(dim=-1, keepdim=True)
+        uniform = torch.where(
+            has_target,
+            object_support.float() / valid_count.clamp_min(1.0),
+            torch.zeros_like(target_posterior),
+        )
+        # Fractional validity is physical evidence mass, not a probability
+        # normalizer.  Keeping it outside a denominator means a barely readable
+        # object stays barely readable instead of being promoted to a complete
+        # target.  The action proposer receives only declared physical moments
+        # under this weight; it never receives the mixed high-capacity object
+        # content that could let the full instruction reconstruct a second
+        # object selector after a uniform p.
+        target_weight = target_posterior * validity_values[..., 0].float()
+        camera_index = torch.as_tensor(
+            self.camera_canonical_permutation,
+            device=camera_coordinates.device,
+            dtype=torch.long,
+        )
+        camera_coordinates = camera_coordinates.index_select(2, camera_index)
+        camera_transport_prior = camera_transport_prior.index_select(
+            2, camera_index
+        )
+        camera_validity = camera_validity.index_select(2, camera_index)
+        if bool((~torch.isfinite(camera_validity)).any().item()):
+            raise ValueError("TargetPhysicalFact camera validity must be finite")
+        camera_validity_f = torch.nan_to_num(
+            camera_validity.float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(0.0, 1.0)
+        camera_support = camera_validity_f[..., 0] > 0.0
+        supported_coordinate_nonfinite = camera_support & ~torch.isfinite(
+            camera_coordinates
+        ).all(dim=-1)
+        supported_transport_nonfinite = camera_support & ~torch.isfinite(
+            camera_transport_prior
+        ).all(dim=-1)
+        if bool(supported_coordinate_nonfinite.any().item()):
+            raise ValueError(
+                "TargetPhysicalFact camera coordinates are non-finite on support"
+            )
+        if bool(supported_transport_nonfinite.any().item()):
+            raise ValueError(
+                "TargetPhysicalFact transport prior is non-finite on support"
+            )
+        coordinates = torch.where(
+            camera_support[..., None],
+            torch.nan_to_num(
+                camera_coordinates.float(), nan=0.0, posinf=0.0, neginf=0.0
+            ),
+            torch.zeros_like(camera_coordinates.float()),
+        )
+        transport = torch.where(
+            camera_support[..., None],
+            torch.nan_to_num(
+                camera_transport_prior.float(),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ),
+            torch.zeros_like(camera_transport_prior.float()),
+        )
+        camera_weight = (
+            target_posterior[:, :, None]
+            * camera_validity_f[..., 0]
+        )
+        coordinate_first = torch.einsum(
+            "bkc,bkcv->bcv", camera_weight, coordinates
+        )
+        coordinate_second_source = torch.stack(
+            (
+                coordinates[..., 0].square(),
+                coordinates[..., 0] * coordinates[..., 1],
+                coordinates[..., 1].square(),
+            ),
+            dim=-1,
+        )
+        coordinate_second = torch.einsum(
+            "bkc,bkcv->bcv", camera_weight, coordinate_second_source
+        )
+        transport_first = torch.einsum(
+            "bkc,bkcv->bcv", camera_weight, transport
+        )
+        camera_mass = camera_weight.sum(dim=1, keepdim=False)[..., None]
+        camera_moments = torch.cat(
+            (coordinate_first, coordinate_second, transport_first, camera_mass),
+            dim=-1,
+        ).flatten(start_dim=1)
+        supported_existence_nonfinite = object_support & ~torch.isfinite(
+            existence[..., 0]
+        )
+        if bool(supported_existence_nonfinite.any().item()):
+            raise ValueError("TargetPhysicalFact existence is non-finite on support")
+        existence_f = torch.nan_to_num(
+            existence[..., 0].float(), nan=0.0, posinf=0.0, neginf=0.0
+        ).clamp(0.0, 1.0)
+        readable_mass = target_weight.sum(dim=-1, keepdim=True)
+        existence_mass = (
+            target_posterior * existence_f
+        ).sum(dim=-1, keepdim=True)
+        unresolved_mass = has_target.float() - readable_mass
+        physical_moments = torch.cat(
+            (
+                camera_moments,
+                readable_mass,
+                existence_mass,
+                unresolved_mass.clamp_min(0.0),
+            ),
+            dim=-1,
+        )
+        target_summary = self.target_physical_value(
+            physical_moments.to(dtype=objects.dtype)
+        )
+        target_summary = torch.where(
+            has_target,
+            target_summary,
+            torch.zeros_like(target_summary),
+        ).to(dtype=objects.dtype)
+        target_summary, _ = smooth_rms_contract(target_summary, 0.35)
+
+        typed_summary = torch.einsum(
+            "bk,bktr->btr", target_weight, typed_route.float()
+        )
+        typed_summary = torch.where(
+            has_target[..., None],
+            typed_summary,
+            torch.zeros_like(typed_summary),
+        )
+
+        # A bounded, centered log-ratio is neutral for a uniform posterior and
+        # finite for all-invalid rows.  It is a prior over K only; P2 still
+        # owns support and the camera C selection.
+        objects_count = int(objects.shape[1])
+        bound = math.log(float(max(objects_count, 2)))
+        ratio = torch.log(
+            (target_posterior.float() + 1.0e-6)
+            / (uniform.float() + 1.0e-6)
+        )
+        ratio_mean = torch.where(
+            object_support,
+            ratio,
+            torch.zeros_like(ratio),
+        ).sum(dim=-1, keepdim=True) / valid_count.clamp_min(1.0)
+        centered_ratio = ratio - ratio_mean
+        target_log_prior = bound * torch.tanh(centered_ratio / bound)
+        target_log_prior = torch.where(
+            object_support & has_target,
+            target_log_prior,
+            torch.zeros_like(target_log_prior),
+        ).float()
+        return (
+            target_posterior.float(),
+            target_log_prior,
+            target_summary,
+            typed_summary.to(dtype=objects.dtype),
+            object_support,
+            target_logits,
+        )
+
     def _typed_relevance(
         self,
         *,
@@ -324,6 +614,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
         facts: ObjectFactSet,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Build fixed-zero, per-type relevance without collapsing K."""
+
+        if self.target_fact_mode:
+            raise RuntimeError("legacy typed relevance is unavailable in TargetFact mode")
+        if self.typed_relevance_queries is None or self.typed_temperature_logit is None:
+            raise RuntimeError("legacy typed relevance parameters are missing")
 
         query_source = self.typed_query_norm(public_interval_carrier)
         typed_query = torch.stack(
@@ -435,6 +730,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         facts: ObjectFactSet,
         collect_diagnostics: bool,
     ) -> tuple[ObjectIntentState, dict[str, Tensor]]:
+        facts.validate()
         if goal_tokens.ndim != 3 or goal_mask.ndim != 2:
             raise ValueError("intent organizer requires full T5 tokens and mask")
         batch = int(goal_tokens.shape[0])
@@ -530,44 +826,161 @@ class StatelessObjectIntentOrganizer(nn.Module):
         _, history_innovation, interval_history_attention = self.interval_history(
             interval_base, history, diagnostics=collect_diagnostics
         )
-        # This is the repaired language/object seam.  The old query was only
-        # ``interval_base``; consequently its K attention and object update
-        # were invariant to an instruction swap.  Goal/history innovations are
-        # already S-owned, bounded deltas, so using them as the object-read
-        # query preserves the K axis while making object identity conditional
-        # on the instruction and the current causal context.
+        target_posterior: Tensor | None = None
+        target_log_prior: Tensor | None = None
+        target_summary: Tensor | None = None
+        target_typed_summary: Tensor | None = None
+        scene_context: Tensor | None = None
+        p1_local_modifier_context: Tensor | None = None
+        p1_scene_query_context: Tensor | None = None
+        target_support: Tensor | None = None
         language_object_query = interval_base + goal_innovation + history_innovation
-        if self.interval_object_query_mode == "history_only":
-            language_object_query = interval_base + history_innovation
-        _, object_innovation, interval_object_attention = self.interval_object(
-            language_object_query,
-            interval_objects,
-            padding_mask=~object_validity,
-            diagnostics=collect_diagnostics,
-        )
-        public_intervals = self.interval_self(
-            interval_base
-            + goal_innovation
-            + history_innovation
-            + object_innovation
-        )
-        (
-            typed_relevance_mass,
-            typed_relevance_value,
-            typed_policy_components,
-            target_object_address_logit,
-            typed_relevance_score,
-            typed_temperature,
-        ) = self._typed_relevance(
-            public_interval_carrier=public_intervals,
-            facts=facts,
-        )
-        typed_common_mass, typed_interval_residual_mass = (
-            _interval_common_residual(typed_relevance_mass)
-        )
-        typed_common_value, typed_interval_residual_value = (
-            _interval_common_residual(typed_relevance_value)
-        )
+        object_innovation = torch.zeros_like(interval_base)
+        if self.target_fact_mode:
+            # TargetFact-v1 is the only language-conditioned K selector.  The
+            # goal-free set summary and target summary are pooled before the
+            # interval carrier.  P1 preserves K/C only under this same p, while
+            # coarse may retain a separate K read only from its goal-free base
+            # queries for scene facts, never for a second target decision.
+            scene_context = objects.new_zeros(batch, self.hidden)
+            typed_route = torch.stack(
+                (facts.semantic, facts.appearance, facts.geometry), dim=2
+            )
+            typed_route = torch.where(
+                object_validity[..., None, None],
+                typed_route,
+                torch.zeros_like(typed_route),
+            )
+            (
+                target_posterior,
+                target_log_prior,
+                target_summary,
+                target_typed_summary,
+                target_support,
+                target_logits,
+            ) = self._target_fact(
+                protected_goal=protected_goal,
+                history=history,
+                objects=objects,
+                typed_route=typed_route,
+                validity_values=validity_values,
+                camera_coordinates=facts.camera_coordinates,
+                camera_transport_prior=facts.camera_transport_prior,
+                camera_validity=facts.camera_validity,
+                existence=facts.existence,
+            )
+            public_seed = (
+                interval_base
+                + goal_innovation
+                + history_innovation
+                + target_summary[:, None, :]
+            )
+            language_object_query = public_seed
+            object_innovation = target_summary[:, None, :]
+            public_intervals = self.interval_self(public_seed)
+            # P2 retains the full K/type carrier, but language no longer owns a
+            # second per-type K gate.  These are producer-valid factual values;
+            # the single TargetFact posterior is consumed as the P2 prior.
+            route_value = typed_route.to(dtype=objects.dtype) * validity_values[
+                ..., None, :
+            ].to(dtype=objects.dtype)
+            typed_common_value = route_value
+            typed_interval_residual_value = torch.zeros(
+                batch,
+                4,
+                int(objects.shape[1]),
+                len(TYPED_INTENT_NAMES),
+                int(route_value.shape[-1]),
+                device=route_value.device,
+                dtype=route_value.dtype,
+            )
+            typed_common_mass = validity_values[:, :, None, :].expand(
+                -1, -1, len(TYPED_INTENT_NAMES), -1
+            )
+            typed_interval_residual_mass = torch.zeros(
+                batch,
+                4,
+                int(objects.shape[1]),
+                len(TYPED_INTENT_NAMES),
+                1,
+                device=route_value.device,
+                dtype=route_value.dtype,
+            )
+            typed_components_list: list[Tensor] = []
+            for type_index, projection in enumerate(
+                (self.object_semantic, self.object_appearance, self.object_geometry)
+            ):
+                component, _ = smooth_rms_contract(
+                    projection(target_typed_summary[:, type_index]), 0.35
+                )
+                typed_components_list.append(component)
+            typed_policy_components = torch.stack(typed_components_list, dim=1)[
+                :, None
+            ].expand(-1, 4, -1, -1)
+            typed_relevance_mass = (
+                target_posterior[:, None, :, None, None]
+                * typed_common_mass[:, None]
+            ).to(dtype=route_value.dtype)
+            typed_relevance_value = typed_relevance_mass * typed_route[:, None].to(
+                dtype=route_value.dtype
+            )
+            target_object_address_logit = target_log_prior[:, None, :].expand(
+                -1, 4, -1
+            )
+            interval_object_attention = target_posterior[:, None, :].expand(
+                -1, 4, -1
+            ).to(dtype=objects.dtype)
+            typed_relevance_score = target_logits[:, None, :, None].expand(
+                -1, 4, -1, len(TYPED_INTENT_NAMES)
+            )
+            typed_temperature = target_logits.new_ones(len(TYPED_INTENT_NAMES))
+            # These are the only P1 language/history contexts in TargetFact
+            # mode.  The target modifier is consumed only after p×G3 has fixed
+            # the K/coarse address.  Coverage receives the observation-history
+            # innovation and goal-free scene summary, never the protected goal
+            # or the goal-conditioned public interval carrier.
+            # Static P1 receives the supervised physical A0 explicitly at the
+            # policy boundary.  Exporting a goal/history hidden here would
+            # recreate a per-K language selector before p contraction.
+            p1_local_modifier_context = torch.zeros_like(interval_base)
+            p1_scene_query_context = torch.zeros_like(interval_base)
+        else:
+            # Compatibility graph: retain the pre-TargetFact behavior exactly
+            # for post_pool_only/shared_target_prior_v1 checkpoints.
+            language_object_query = interval_base + goal_innovation + history_innovation
+            if self.interval_object_query_mode == "history_only":
+                language_object_query = interval_base + history_innovation
+            if self.interval_object is None:
+                raise RuntimeError("legacy intent graph has no interval object reader")
+            _, object_innovation, interval_object_attention = self.interval_object(
+                language_object_query,
+                interval_objects,
+                padding_mask=~object_validity,
+                diagnostics=collect_diagnostics,
+            )
+            public_intervals = self.interval_self(
+                interval_base
+                + goal_innovation
+                + history_innovation
+                + object_innovation
+            )
+            (
+                typed_relevance_mass,
+                typed_relevance_value,
+                typed_policy_components,
+                target_object_address_logit,
+                typed_relevance_score,
+                typed_temperature,
+            ) = self._typed_relevance(
+                public_interval_carrier=public_intervals,
+                facts=facts,
+            )
+            typed_common_mass, typed_interval_residual_mass = (
+                _interval_common_residual(typed_relevance_mass)
+            )
+            typed_common_value, typed_interval_residual_value = (
+                _interval_common_residual(typed_relevance_value)
+            )
         typed_policy_context = typed_policy_components.sum(dim=2) / (3.0**0.5)
         policy_intervals = public_intervals + typed_policy_context
         temporal_base = self.temporal_identity.to(
@@ -635,6 +1048,14 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 device=objects.device,
                 dtype=torch.float32,
             ),
+            target_posterior=target_posterior,
+            target_log_prior=target_log_prior,
+            target_summary=target_summary,
+            target_typed_summary=target_typed_summary,
+            scene_context=scene_context,
+            p1_local_modifier_context=p1_local_modifier_context,
+            p1_scene_query_context=p1_scene_query_context,
+            target_support=target_support,
         )
         state_out.validate(horizon=self.horizon, hidden=self.hidden)
         if not collect_diagnostics:
@@ -642,6 +1063,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
         metrics: dict[str, Tensor] = {
             "object_intent_interval_query_goal_enabled": objects.new_tensor(
                 float(self.interval_object_query_mode == "goal_history")
+            ),
+            "object_intent_target_fact_mode_enabled": objects.new_tensor(
+                float(self.target_fact_mode)
             ),
             "object_intent_goal_attention_entropy": normalized_entropy(
                 goal_attention, dim=-1
@@ -685,6 +1109,31 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 ).sum(dim=2)
                 / object_validity.detach().float().sum(dim=1)[:, None].clamp_min(1.0)
             ).abs().amax(),
+            "object_intent_target_posterior_entropy": (
+                normalized_entropy(target_posterior, dim=-1).detach().mean()
+                if target_posterior is not None
+                else objects.new_zeros(())
+            ),
+            "object_intent_target_posterior_max": (
+                target_posterior.detach().amax(dim=-1).mean()
+                if target_posterior is not None
+                else objects.new_zeros(())
+            ),
+            "object_intent_target_log_prior_rms": (
+                target_log_prior.detach().square().mean().sqrt()
+                if target_log_prior is not None
+                else objects.new_zeros(())
+            ),
+            "object_intent_target_summary_rms": (
+                target_summary.detach().float().square().mean().sqrt()
+                if target_summary is not None
+                else objects.new_zeros(())
+            ),
+            "object_intent_scene_context_rms": (
+                scene_context.detach().float().square().mean().sqrt()
+                if scene_context is not None
+                else objects.new_zeros(())
+            ),
             "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
             "object_intent_observed_transport_rms": transport_prior.detach().float().square().mean().sqrt(),
             "object_intent_state_change_history_rms": state_change_history.detach().float().square().mean().sqrt(),
@@ -716,6 +1165,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
             metrics,
             "gradient_tensor_s_language_object_attention_rms",
         )
+        if target_posterior is not None:
+            register_gradient_rms_metric(
+                target_posterior,
+                metrics,
+                "gradient_tensor_s_target_posterior_rms",
+            )
         if self.target_object_address is not None:
             register_gradient_rms_metric(
                 target_object_address_logit,
@@ -883,12 +1338,14 @@ class CoarseActionIntent(nn.Module):
         heads: int,
         horizon: int = 24,
         action_condition_mode: str = "interval_mean_v1",
+        target_fact_mode: bool = False,
     ) -> None:
         super().__init__()
         self.horizon = int(horizon)
         if self.horizon != 24:
             raise ValueError("the active coarse action contract requires 24 rows")
         self.action_condition_mode = str(action_condition_mode)
+        self.target_fact_mode = bool(target_fact_mode)
         if self.action_condition_mode not in {
             "interval_mean_v1",
             "sequence_prefix_v1",
@@ -904,7 +1361,13 @@ class CoarseActionIntent(nn.Module):
                 torch.zeros(1, self.horizon, hidden)
             )
         self.intent_read = _CrossRead(hidden, heads)
-        self.object_read = _CrossRead(hidden, heads)
+        # A target-action bottleneck cannot expose a second K-resolved scene
+        # reader to the full-goal action block.  Legacy modes retain the reader
+        # unchanged; the bottleneck mode obtains scene physics only after A0
+        # through W/P/CT.
+        self.object_read: _CrossRead | None = (
+            None if self.target_fact_mode else _CrossRead(hidden, heads)
+        )
         self.history_read = _CrossRead(hidden, heads)
         self.block = _SelfBlock(hidden, heads)
         self.action_head = nn.Linear(hidden, action_dim, bias=False)
@@ -942,6 +1405,11 @@ class CoarseActionIntent(nn.Module):
         # query frame instead of letting a learned query silently wash out the
         # instruction before the physical proposal is formed.
         conditioned_query = query + intent_delta
+        _, history_delta, _ = self.history_read(
+            conditioned_query,
+            intent.history_memory,
+            diagnostics=collect_diagnostics,
+        )
         object_padding_mask = None
         if intent.public_object_validity is not None:
             validity = intent.public_object_validity.to(
@@ -949,22 +1417,27 @@ class CoarseActionIntent(nn.Module):
                 dtype=torch.float32,
             ).squeeze(-1).clamp(0.0, 1.0)
             object_padding_mask = ~(validity > 0.0)
-        _, object_delta, _ = self.object_read(
-            conditioned_query,
-            intent.public_object_memory,
-            padding_mask=object_padding_mask,
-            diagnostics=collect_diagnostics,
-        )
-        _, history_delta, _ = self.history_read(
-            conditioned_query,
-            intent.history_memory,
-            diagnostics=collect_diagnostics,
-        )
-        token = self.block(
-            conditioned_query
-            + object_delta
-            + history_delta
-        )
+        if self.target_fact_mode:
+            if intent.target_summary is None or intent.scene_context is None:
+                raise ValueError(
+                    "TargetFact coarse path requires target_summary and scene_context"
+                )
+            target_context = intent.target_summary[:, None, :].expand(
+                -1, int(conditioned_query.shape[1]), -1
+            )
+            token = self.block(
+                conditioned_query + target_context + history_delta
+            )
+        else:
+            if self.object_read is None:
+                raise RuntimeError("legacy coarse action lost its object reader")
+            _, object_delta, _ = self.object_read(
+                conditioned_query,
+                intent.public_object_memory,
+                padding_mask=object_padding_mask,
+                diagnostics=collect_diagnostics,
+            )
+            token = self.block(conditioned_query + object_delta + history_delta)
         action_prediction = self.action_head(token)
         if future_action is None:
             target = None

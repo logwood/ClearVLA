@@ -35,6 +35,8 @@ from .runtime.checkpoints import (
     LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION,
     P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
     P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+    TARGET_ACTION_SYSTEM_V2_MIGRATION,
+    TARGET_FACT_V1_MIGRATION,
     WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION,
     WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
     InitializationState,
@@ -131,11 +133,13 @@ def _parser() -> argparse.ArgumentParser:
             P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
             WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
             WORLD_ACTION_SEQUENCE_PREFIX_V1_MIGRATION,
+            TARGET_FACT_V1_MIGRATION,
+            TARGET_ACTION_SYSTEM_V2_MIGRATION,
         ),
         help=(
             "Explicitly admit one narrow model-component initialization. "
             "Each admitted migration retains every existing model tensor, "
-            "adds only its declared exact-zero owner, and never restores "
+            "adds only its declared initialized owners, and never restores "
             "optimizer, schedule or RNG state."
         ),
     )

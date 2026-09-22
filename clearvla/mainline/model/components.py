@@ -28,6 +28,7 @@ from .action_codec import (
 )
 from .action_contract import ActionQueryEncoder, BottomDecoderOutput, V120SeedContext
 from .compiler import (
+    ObjectEffectBundle,
     ObjectFutureEffectReader,
     ObjectPolicyPlanCompiler,
     ObjectPolicyPlanDeltaBank,
@@ -62,8 +63,10 @@ from .types import (
     ObjectTopTrainingTargets,
     ObjectWorldBelief,
     OutletPhysicalActionCondition,
+    P1TargetSpatialDock,
     PhysicalActionCondition,
     PhysicalActionSequenceCondition,
+    PhysicalTransitionInnovation,
     WorldActionCondition,
     intersect_object_camera_validity,
     physical_action_normalizer_fingerprint,
@@ -610,8 +613,12 @@ class P1Stage(nn.Module):
         g3_rollout: Tensor,
         detail: Any,
         phase_context: Tensor,
-        condition_query_context: Tensor,
-        history_query_context: Tensor,
+        condition_query_context: Tensor | None,
+        history_query_context: Tensor | None,
+        target_physical_action: Tensor | None = None,
+        target_local_modifier_context: Tensor | None = None,
+        scene_query_context: Tensor | None = None,
+        target_spatial: P1TargetSpatialDock | None = None,
         clean_basis_tokens: Tensor,
         collect_diagnostics: bool = False,
     ) -> tuple[FactualPrecisionDock, dict[str, Tensor]]:
@@ -622,17 +629,35 @@ class P1Stage(nn.Module):
             phase_context=phase_context,
             condition_query_context=condition_query_context,
             history_query_context=history_query_context,
+            target_physical_action=target_physical_action,
+            target_local_modifier_context=target_local_modifier_context,
+            scene_query_context=scene_query_context,
+            target_spatial=target_spatial,
             clean_basis_tokens=clean_basis_tokens,
             collect_diagnostics=collect_diagnostics,
         )
         batch = int(clean_trajectory.shape[0])
+        detail_delta = (updated - clean_trajectory).reshape(
+            batch,
+            self.horizon,
+            self.basis,
+            self.hidden,
+        )
+        scene_detail: Tensor | None = None
+        target_detail = detail_delta
+        if bool(getattr(self.factual_reader, "target_fact_routing", False)):
+            if self.hidden % 4:
+                raise ValueError("TargetFact P1 role split requires four hidden heads")
+            target_width = 3 * (self.hidden // 4)
+            target_mask = torch.zeros_like(detail_delta)
+            target_mask[..., :target_width] = detail_delta[..., :target_width]
+            scene_mask = torch.zeros_like(detail_delta)
+            scene_mask[..., target_width:] = detail_delta[..., target_width:]
+            target_detail = target_mask
+            scene_detail = scene_mask
         factual = FactualPrecisionDock(
-            protected_detail=(updated - clean_trajectory).reshape(
-                batch,
-                self.horizon,
-                self.basis,
-                self.hidden,
-            )
+            protected_detail=target_detail,
+            scene_detail=scene_detail,
         )
         factual.validate(horizon=self.horizon, basis=self.basis)
         return factual, metrics
@@ -646,6 +671,7 @@ class P1Stage(nn.Module):
         collect_diagnostics: bool = False,
     ) -> tuple[CompletedP1PolicyState, dict[str, Tensor]]:
         protected_detail = factual.protected_detail
+        scene_detail = factual.scene_detail
         expected = (
             int(action_query.shape[0]),
             self.horizon,
@@ -692,6 +718,7 @@ class P1Stage(nn.Module):
         state = CompletedP1PolicyState(
             factual_base=protected_detail,
             policy_query_residual=dynamic_delta,
+            scene_factual_residual=scene_detail,
         )
         state.validate(
             horizon=self.horizon,
@@ -712,6 +739,11 @@ class P1Stage(nn.Module):
             .square()
             .mean()
             .sqrt(),
+            "p1_scene_factual_residual_rms": (
+                scene_detail.detach().float().square().mean().sqrt()
+                if scene_detail is not None
+                else protected_detail.new_zeros((), dtype=torch.float32)
+            ),
             # Retain the historical scalar name for longitudinal tooling. The
             # represented sum is no longer exported under a factual identity.
             "p1_completed_fact_rms": completed_policy_trajectory.detach()
@@ -801,15 +833,26 @@ class PolicyCompilerStage(nn.Module):
         # the bound only inside P3 (or omitting it) changes both the trajectory
         # seen by P3 and the controlled-transition coefficient geometry.
         contracted_combined, effect_contract = smooth_rms_contract(
-            raw_effect.combined(),
+            raw_effect.target.combined(),
             0.35,
         )
         # Keep semantic/geometry identity through consequence while preserving
         # the exact caller-owned aggregate RMS boundary.  Both carriers receive
         # the same parameter-free scale computed from their combined value.
-        effect = raw_effect.scaled(effect_contract)
+        target_effect = raw_effect.target.scaled(effect_contract)
+        contracted_scene, scene_effect_contract = smooth_rms_contract(
+            raw_effect.scene.combined(),
+            0.35,
+        )
+        scene_effect = raw_effect.scene.scaled(scene_effect_contract)
+        effect = ObjectEffectBundle(
+            target=target_effect,
+            scene=scene_effect,
+            scene_enabled=raw_effect.scene_enabled,
+        )
         consequence, consequence_metrics = self.consequence(
             factual_base=p1_state.factual_base,
+            scene_factual_base=p1_state.scene_factual_residual,
             effect=effect,
             collect_diagnostics=collect_diagnostics,
         )
@@ -823,6 +866,7 @@ class PolicyCompilerStage(nn.Module):
             consequence=consequence,
             intent=context.intent.policy_dock(),
             action_query=p3_action_query,
+            action_proposal=context.action_proposal,
             collect_diagnostics=collect_diagnostics,
         )
         state = CompiledPolicyState(
@@ -839,22 +883,37 @@ class PolicyCompilerStage(nn.Module):
             **plan_metrics,
             "object_p2_effect_contract_min": effect_contract.detach().float().amin(),
             "object_p2_effect_contract_identity_error": (
-                effect.combined().detach().float()
+                effect.target.combined().detach().float()
                 - contracted_combined.detach().float()
             )
             .abs()
             .amax(),
-            "object_p2_effect_postcontract_rms": effect.combined().detach()
+            "object_p2_effect_postcontract_rms": effect.target.combined().detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_semantic_effect_postcontract_rms": effect.semantic.detach()
+            "object_p2_semantic_effect_postcontract_rms": effect.target.semantic.detach()
             .float()
             .square()
             .mean()
             .sqrt(),
-            "object_p2_geometry_effect_postcontract_rms": effect.geometry.detach()
+            "object_p2_geometry_effect_postcontract_rms": effect.target.geometry.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_scene_effect_contract_min": scene_effect_contract.detach()
+            .float()
+            .amin(),
+            "object_p2_scene_effect_contract_identity_error": (
+                effect.scene.combined().detach().float()
+                - contracted_scene.detach().float()
+            )
+            .abs()
+            .amax(),
+            "object_p2_scene_effect_postcontract_rms": effect.scene.combined()
+            .detach()
             .float()
             .square()
             .mean()
@@ -953,6 +1012,9 @@ class ExecutionBottomStage(nn.Module):
         core_config: Any,
         layer_contract_heads: nn.ModuleList,
         decoder: nn.Module,
+        transition_delta_lift: nn.Module | None = None,
+        binary_transition_tail_start: int | None = None,
+        target_action_bottleneck: bool = False,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -962,6 +1024,21 @@ class ExecutionBottomStage(nn.Module):
         self.core_config = core_config
         self.layer_contract_heads = layer_contract_heads
         self.decoder = decoder
+        self.target_action_bottleneck = bool(target_action_bottleneck)
+        self.transition_delta_lift = transition_delta_lift
+        self.binary_transition_tail_start = (
+            None
+            if binary_transition_tail_start is None
+            else int(binary_transition_tail_start)
+        )
+        if self.target_action_bottleneck and self.transition_delta_lift is None:
+            raise ValueError(
+                "target-action bottom requires the physical transition lift"
+            )
+        if not self.target_action_bottleneck and self.transition_delta_lift is not None:
+            raise ValueError(
+                "legacy bottom cannot register the target-action transition lift"
+            )
 
     @property
     def blocks(self) -> nn.ModuleList:
@@ -1029,6 +1106,49 @@ class ExecutionBottomStage(nn.Module):
             raise ValueError("V120 event milestones do not cover the action horizon")
         return torch.cat(rows_out, dim=1)
 
+    def _transition_views(
+        self,
+        transition: ControlledTransitionState | PhysicalTransitionInnovation,
+    ) -> tuple[Tensor, Tensor, list[Tensor], Tensor | None]:
+        """Expose one layout-consistent CT view to every bottom consumer."""
+
+        if self.target_action_bottleneck:
+            if not isinstance(transition, PhysicalTransitionInnovation):
+                raise TypeError(
+                    "target-action bottom requires PhysicalTransitionInnovation"
+                )
+            transition.validate(
+                horizon=self.horizon,
+                physical_dim=self.physical_action_dim,
+            )
+            if not bool(torch.isfinite(transition.delta_v.detach()).all()):
+                raise ValueError("bottom rejected a non-finite physical CT delta")
+            if self.binary_transition_tail_start is not None:
+                tail = transition.delta_v[..., self.binary_transition_tail_start :]
+                if int(torch.count_nonzero(tail.detach()).item()) != 0:
+                    raise ValueError(
+                        "binary bottom rejected an unmasked CT compatibility tail"
+                    )
+            if self.transition_delta_lift is None:
+                raise RuntimeError("target-action transition lift is missing")
+            rollout = self.transition_delta_lift(transition.delta_v)
+            if tuple(rollout.shape) != (
+                int(transition.delta_v.shape[0]),
+                self.horizon,
+                self.hidden,
+            ):
+                raise ValueError("target-action transition lift changed its ABI")
+            return rollout, rollout, [rollout], transition.delta_v
+        if not isinstance(transition, ControlledTransitionState):
+            raise TypeError("legacy bottom requires ControlledTransitionState")
+        transition.validate(hidden=self.hidden)
+        return (
+            transition.selector,
+            self._transition_event_context(transition),
+            [transition.value, self._transition_event_context(transition)],
+            None,
+        )
+
     def _role_bank(self, plan: ObjectPolicyPlanDeltaBank) -> PolicyRoleDeltaBank:
         return plan.as_policy_role_bank(source_depth=7)
 
@@ -1041,11 +1161,12 @@ class ExecutionBottomStage(nn.Module):
         """Build the live rows read by the position-wise terminal contract."""
 
         batch = int(rollout.shape[0])
-        if tuple(rollout.shape) != (
-            batch,
-            int(self.core_config.future_token_count),
-            self.hidden,
-        ):
+        expected_rows = (
+            self.horizon
+            if self.target_action_bottleneck
+            else int(self.core_config.future_token_count)
+        )
+        if tuple(rollout.shape) != (batch, expected_rows, self.hidden):
             raise ValueError("V120 layer-contract rollout has invalid shape")
         empty = rollout[:, :0]
         parts = (
@@ -1076,7 +1197,17 @@ class ExecutionBottomStage(nn.Module):
                 rollout=rollout,
                 seed=seed,
             )
-            contracts.append(head(canvas, slices))
+            contracts.append(
+                head(
+                    canvas,
+                    slices,
+                    rollout_layout=(
+                        "action_horizon"
+                        if self.target_action_bottleneck
+                        else "spatial_anchor"
+                    ),
+                )
+            )
         return contracts
 
     @staticmethod
@@ -1149,19 +1280,18 @@ class ExecutionBottomStage(nn.Module):
         plan: ObjectPolicyPlanDeltaBank,
         intent: ObjectIntentState,
         seed: V120SeedContext,
-        transition: ControlledTransitionState,
+        transition: ControlledTransitionState | PhysicalTransitionInnovation,
     ):
         state_tokens, state_history_tokens, executed_tokens = self._state_memory(seed)
         trajectory = self._neutral_trajectory_memory(plan)
-        event_context = self._transition_event_context(transition)
-        layer_contracts = self._layer_contracts(
-            rollout=transition.selector,
-            seed=seed,
+        rollout, _event_context, transition_memory, _delta_v = (
+            self._transition_views(transition)
         )
+        layer_contracts = self._layer_contracts(rollout=rollout, seed=seed)
         return self.decoder.evidence_adapter(
             trajectory_tokens=trajectory,
-            rollout_tokens=transition.selector,
-            transition_memory=[transition.value, event_context],
+            rollout_tokens=rollout,
+            transition_memory=transition_memory,
             event_evidence=layer_contracts[-1]["event_logits"],
             state_memory=[state_tokens, state_history_tokens],
             layer_contracts=layer_contracts,
@@ -1181,7 +1311,7 @@ class ExecutionBottomStage(nn.Module):
         plan: ObjectPolicyPlanDeltaBank,
         intent: ObjectIntentState,
         seed: V120SeedContext,
-        transition: ControlledTransitionState,
+        transition: ControlledTransitionState | PhysicalTransitionInnovation,
         execution_mode: str = "learned",
         deployment_fastpath: bool = False,
         require_execution_supervision: bool = False,
@@ -1208,16 +1338,27 @@ class ExecutionBottomStage(nn.Module):
             )
         plan.validate()
         intent.validate(horizon=self.horizon, hidden=self.hidden)
-        transition.validate(hidden=self.hidden)
+        if self.target_action_bottleneck:
+            if not isinstance(transition, PhysicalTransitionInnovation):
+                raise TypeError(
+                    "target-action bottom requires PhysicalTransitionInnovation"
+                )
+            transition.validate(
+                horizon=self.horizon,
+                physical_dim=self.physical_action_dim,
+            )
+        else:
+            if not isinstance(transition, ControlledTransitionState):
+                raise TypeError("legacy bottom requires ControlledTransitionState")
+            transition.validate(hidden=self.hidden)
         state_tokens, state_history_tokens, executed_tokens = self._state_memory(seed)
         role_bank = self._role_bank(plan)
         role_bank.validate(hidden_size=self.hidden, horizon=self.horizon)
         trajectory = self._neutral_trajectory_memory(plan)
-        event_context = self._transition_event_context(transition)
-        layer_contracts = self._layer_contracts(
-            rollout=transition.selector,
-            seed=seed,
+        rollout, _event_context, transition_memory, physical_transition_delta = (
+            self._transition_views(transition)
         )
+        layer_contracts = self._layer_contracts(rollout=rollout, seed=seed)
         event_evidence = layer_contracts[-1]["event_logits"]
         run_diagnostics = bool(
             collect_diagnostics
@@ -1238,8 +1379,8 @@ class ExecutionBottomStage(nn.Module):
                 policy_role_delta_bank=role_bank,
                 execution_terminal_probability=None,
                 execution_terminal_uncertainty=None,
-                rollout_tokens=transition.selector,
-                transition_memory=[transition.value, event_context],
+                rollout_tokens=rollout,
+                transition_memory=transition_memory,
                 event_evidence=event_evidence,
                 state_memory=[state_tokens, state_history_tokens],
                 layer_contracts=layer_contracts,
@@ -1262,6 +1403,7 @@ class ExecutionBottomStage(nn.Module):
                 noisy_scale=1.0,
                 spine_zero=execution_mode == "spine_zero",
                 deployment_fastpath=deployment_fastpath,
+                physical_transition_delta=physical_transition_delta,
             )
         finally:
             if execution_mode != "learned":
@@ -1298,7 +1440,7 @@ class ExecutionBottomStage(nn.Module):
             motion_logits=raw["motion_logits"],
             action_query=action_query,
             block_updates=block_updates,
-            evidence_tokens=transition.value,
+            evidence_tokens=rollout,
             decoder_tensors=tensor_output,
             gripper_command_logits=raw.get("gripper_command_logits"),
         )
@@ -1327,10 +1469,15 @@ class ExecutionBottomStage(nn.Module):
             (), dtype=torch.float32
         )
         metrics["bottom_retained_transition_rows"] = noisy_action_field.new_tensor(
-            float(transition.value.shape[1]), dtype=torch.float32
+            float(rollout.shape[1]), dtype=torch.float32
         )
-        metrics["bottom_rollout_selector_only"] = noisy_action_field.new_ones(
-            (), dtype=torch.float32
+        metrics["bottom_rollout_selector_only"] = noisy_action_field.new_tensor(
+            float(not self.target_action_bottleneck), dtype=torch.float32
+        )
+        metrics["bottom_rollout_action_conditioned_ct_only"] = (
+            noisy_action_field.new_tensor(
+                float(self.target_action_bottleneck), dtype=torch.float32
+            )
         )
         metrics["bottom_protected_consequence_value_writes"] = (
             noisy_action_field.new_ones((), dtype=torch.float32)
@@ -1593,6 +1740,17 @@ class OutletAdapter(nn.Module):
         """Route the online coarse proposal through the configured W ABI."""
 
         if self.world_action_condition_mode == "interval_mean_v1":
+            if action_prediction.ndim != 3:
+                raise ValueError("coarse physical proposal must be [B,T,A]")
+            if int(action_prediction.shape[1]) == self.horizon:
+                interval_action = PhysicalActionCondition.from_horizon_action(
+                    action_prediction,
+                    current_action,
+                ).interval_action
+                return self.world_condition_from_interval_action(
+                    interval_action,
+                    current_action,
+                )
             return self.world_condition_from_interval_action(
                 action_prediction,
                 current_action,
@@ -1708,6 +1866,22 @@ class OutletAdapter(nn.Module):
         if self.is_binary_command:
             return self.codec.binary_command_model_input(field)
         return field
+
+    def prepare_transition_delta(self, delta_v: Tensor) -> Tensor:
+        """Validate and mask one CT physical-field velocity innovation."""
+
+        if delta_v.ndim != 3 or tuple(delta_v.shape[1:]) != (
+            self.horizon,
+            self.physical_dim,
+        ):
+            raise ValueError(
+                "controlled-transition delta must match the deployed physical field"
+            )
+        # Validate before any zero replacement: multiplying or concatenating a
+        # masked NaN would otherwise make a broken producer look neutral.
+        if not bool(torch.isfinite(delta_v.detach()).all()):
+            raise ValueError("controlled-transition physical delta must be finite")
+        return self.prepare_model_input(delta_v)
 
     def conditioning_metrics(
         self,

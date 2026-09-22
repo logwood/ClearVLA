@@ -44,8 +44,10 @@ from .types import (
     FlowStepContext,
     HistoryActionProposalState,
     ObjectTopTrainingTargets,
+    P1TargetSpatialDock,
     PhysicalActionCondition,
     PhysicalActionSequenceCondition,
+    PhysicalTransitionInnovation,
     WorldActionCondition,
 )
 from .v120_p1 import LateRawDetailPolicyReader
@@ -240,12 +242,19 @@ class ClearVLAMainlinePolicy(nn.Module):
             depth=top.proposal_depth,
             expansion=top.role_host_ffn_expansion,
         )
-        raw_factual_reader = LateRawDetailPolicyReader(raw_observation.v120_config)
+        raw_factual_reader = LateRawDetailPolicyReader(
+            raw_observation.v120_config,
+            target_fact_routing=(
+                top.p2_spatial_intent_mode
+                == "target_action_bottleneck_v1"
+            ),
+        )
         raw_transition = ControlledTransitionDynamics(
             hidden=dims.hidden_size,
             content_dim=dims.visual_token_dim,
             state_dim=dims.state_dim,
             action_dim=dims.action_dim,
+            physical_field_dim=raw_codec.physical_dim,
             cameras=dims.num_cameras,
             heads=dims.num_heads,
             horizon=dims.action_horizon,
@@ -254,6 +263,9 @@ class ClearVLAMainlinePolicy(nn.Module):
             action_tokens=config.bottom.controlled_action_tokens,
             normalization_floor=config.bottom.normalization_floor,
             dropout=config.bottom.controlled_delta_dropout,
+            target_action_bottleneck=(
+                top.p2_spatial_intent_mode == "target_action_bottleneck_v1"
+            ),
         )
         raw_bottom = RestoredV120EvidenceBottom(
             config,
@@ -320,6 +332,11 @@ class ClearVLAMainlinePolicy(nn.Module):
         p1_policy_block = _detach_registered(raw_bottom, "p1_policy_block")
         layer_contract_heads = _detach_registered(raw_bottom, "layer_contract_heads")
         decoder = _detach_registered(raw_bottom, "decoder")
+        transition_delta_lift = (
+            _detach_registered(raw_bottom, "transition_delta_lift")
+            if raw_bottom.transition_delta_lift is not None
+            else None
+        )
 
         # Final registered hierarchy.  Each child appears under one owner only.
         self.conditioning = ConditioningStage(raw_history_proposal)
@@ -370,6 +387,13 @@ class ClearVLAMainlinePolicy(nn.Module):
             core_config=raw_bottom.core_config,
             layer_contract_heads=layer_contract_heads,
             decoder=decoder,
+            transition_delta_lift=transition_delta_lift,
+            binary_transition_tail_start=(
+                2 * codec.arm_dim if codec.is_binary_command else None
+            ),
+            target_action_bottleneck=(
+                top.p2_spatial_intent_mode == "target_action_bottleneck_v1"
+            ),
         )
         self.training_targets = TrainingTargetsStage(
             teacher=teacher,
@@ -531,6 +555,15 @@ class ClearVLAMainlinePolicy(nn.Module):
         }
         if collect_diagnostics:
             predicted = world.dynamics
+            if isinstance(action_condition, PhysicalActionSequenceCondition):
+                expected_w_source = coarse.action_prediction
+            elif int(coarse.action_prediction.shape[1]) == 4:
+                expected_w_source = coarse.action_prediction
+            else:
+                expected_w_source = PhysicalActionCondition.from_horizon_action(
+                    coarse.action_prediction,
+                    action_condition.current_action,
+                ).interval_action
             top_metrics.update(
                 {
                     "object_w_prediction_interval_variation": predicted.semantic_delta.detach()
@@ -546,23 +579,43 @@ class ClearVLAMainlinePolicy(nn.Module):
                         (), dtype=torch.float32
                     ),
                     "object_action_world_initial_tag_identity_error": (
-                        (
-                            action_condition.source_action
-                            if isinstance(
-                                action_condition,
-                                PhysicalActionSequenceCondition,
-                            )
-                            else action_condition.source_interval_action
+                        action_condition.source_action
+                        if isinstance(
+                            action_condition,
+                            PhysicalActionSequenceCondition,
                         )
-                        .detach()
-                        .float()
-                        - coarse.action_prediction.detach().float()
+                        else action_condition.source_interval_action
+                    )
+                    .detach()
+                    .float()
+                    .sub(
+                        expected_w_source.detach().float()
                     )
                     .abs()
                     .amax(),
+                    "object_action_bottleneck_full_proposal_rows": (
+                        coarse.action_prediction.new_tensor(
+                            float(coarse.action_prediction.shape[1]),
+                            dtype=torch.float32,
+                        )
+                    ),
                 }
             )
         factual_intent = context.intent.factual_dock()
+        target_spatial: P1TargetSpatialDock | None = None
+        if context.intent.target_posterior is not None:
+            if context.intent.target_support is None:
+                raise RuntimeError("TargetFact has no physical target support")
+            target_spatial = P1TargetSpatialDock(
+                facts=context.facts,
+                target_posterior=context.intent.target_posterior,
+                target_support=context.intent.target_support,
+                progressive_address=evidence.progressive_state,
+                camera_names=tuple(self.config.data.camera_names),
+            )
+            target_spatial.validate(
+                progressive_address=evidence.progressive_state
+            )
         clean_action_basis = self.bridge.clean_action_basis(
             batch,
             device=factual_intent.phase_context.device,
@@ -584,8 +637,22 @@ class ClearVLAMainlinePolicy(nn.Module):
             g3_rollout=g3_rollout,
             detail=p1_detail,
             phase_context=factual_intent.phase_context,
-            condition_query_context=factual_intent.condition_query_context,
-            history_query_context=factual_intent.history_query_context,
+            condition_query_context=(
+                None
+                if target_spatial is not None
+                else factual_intent.condition_query_context
+            ),
+            history_query_context=(
+                None
+                if target_spatial is not None
+                else factual_intent.history_query_context
+            ),
+            target_physical_action=(
+                coarse.action_prediction if target_spatial is not None else None
+            ),
+            target_local_modifier_context=None,
+            scene_query_context=None,
+            target_spatial=target_spatial,
             clean_basis_tokens=clean_action_basis,
             collect_diagnostics=collect_diagnostics,
         )
@@ -786,9 +853,17 @@ class ClearVLAMainlinePolicy(nn.Module):
             source=cache.transition_source,
             action_query=action_query,
             plan=compiled.plan,
+            action_proposal=cache.top.action_proposal,
             seed=seed_context,
             collect_diagnostics=collect_diagnostics,
         )
+        if isinstance(transition, PhysicalTransitionInnovation):
+            transition = replace(
+                transition,
+                delta_v=self.outlet_adapter.prepare_transition_delta(
+                    transition.delta_v
+                ),
+            )
         bottom_core, bottom_metrics = self.execution_bottom.step(
             noisy_action_field=model_action_field,
             time=time,

@@ -19,6 +19,7 @@ from .routing import AffineVarianceFlooredCenteredNorm
 from .types import (
     ControlledTransitionSource,
     ControlledTransitionState,
+    PhysicalTransitionInnovation,
 )
 
 
@@ -38,6 +39,7 @@ class ControlledTransitionDynamics(nn.Module):
         content_dim: int,
         state_dim: int,
         action_dim: int,
+        physical_field_dim: int,
         cameras: int,
         heads: int,
         horizon: int = 24,
@@ -46,14 +48,18 @@ class ControlledTransitionDynamics(nn.Module):
         action_tokens: int = 8,
         normalization_floor: float = 0.25,
         dropout: float = 0.0,
+        target_action_bottleneck: bool = False,
     ) -> None:
         super().__init__()
-        del content_dim, state_dim, action_dim
+        del content_dim, state_dim
         self.hidden = int(hidden)
         self.rank = int(rank)
         self.cameras = int(cameras)
         self.horizon = int(horizon)
         self.basis = int(basis)
+        self.action_dim = int(action_dim)
+        self.physical_field_dim = int(physical_field_dim)
+        self.target_action_bottleneck = bool(target_action_bottleneck)
         self.state_history_rows = 3
         self.executed_rows = 7
         if self.cameras != 2:
@@ -89,6 +95,24 @@ class ControlledTransitionDynamics(nn.Module):
         # network evaluated on an all-zero proposal changes the function.
         self.v120_transition.neutral_queries.requires_grad_(True)
         self.v120_transition.neutral_bias.requires_grad_(True)
+        self.physical_action_input: nn.Linear | None = (
+            nn.Linear(self.action_dim, self.hidden, bias=False)
+            if self.target_action_bottleneck
+            else None
+        )
+        self.physical_delta_head: nn.Linear | None = None
+        if self.target_action_bottleneck:
+            # This is the only public CT readout in the target-action graph.
+            # Keep the new public physical correction exactly zero at
+            # migration while giving task loss a direct structural path into
+            # the private centered transition value.  This does not claim
+            # functional equivalence to the retired 512-row bottom ingress.
+            self.physical_delta_head = nn.Linear(
+                self.hidden,
+                self.physical_field_dim,
+                bias=False,
+            )
+            nn.init.zeros_(self.physical_delta_head.weight)
         # Non-persistent validation state.  It is absent from state_dict and
         # does not add a parameter, buffer, optimizer owner or initialization
         # draw to the recovered transition.
@@ -158,6 +182,7 @@ class ControlledTransitionDynamics(nn.Module):
         self,
         seed: V120SeedContext,
         plan: ObjectPolicyPlanDeltaBank,
+        action_proposal: Tensor | None,
     ) -> Tensor:
         plan.validate()
         seed.validate(
@@ -165,8 +190,23 @@ class ControlledTransitionDynamics(nn.Module):
             state_history=self.state_history_rows,
             executed=self.executed_rows,
         )
-        dtype = plan.protected_base.dtype
-        device = plan.protected_base.device
+        if self.target_action_bottleneck:
+            if self.physical_action_input is None or action_proposal is None:
+                raise ValueError("target-action CT requires the physical A0 proposal")
+            if tuple(action_proposal.shape) != (
+                int(seed.state.shape[0]),
+                self.horizon,
+                self.action_dim,
+            ):
+                raise ValueError("target-action CT A0 must be [B,T,A]")
+            proposal_context = self.physical_action_input(action_proposal)
+            dtype = proposal_context.dtype
+            device = proposal_context.device
+            policy_context = proposal_context
+        else:
+            dtype = plan.protected_base.dtype
+            device = plan.protected_base.device
+            policy_context = plan.protected_base.flatten(1, 2)
         # V120 terminal-normalized the complete canvas before constructing
         # this context.  The protected P1/P2 consequence itself remained an
         # explicit typed delta and therefore is not normalized here.
@@ -178,7 +218,7 @@ class ControlledTransitionDynamics(nn.Module):
                 state.to(device=device, dtype=dtype),
                 state_history.to(device=device, dtype=dtype),
                 executed.to(device=device, dtype=dtype),
-                plan.protected_base.flatten(1, 2),
+                policy_context,
             ),
             dim=1,
         )
@@ -189,9 +229,13 @@ class ControlledTransitionDynamics(nn.Module):
         source: ControlledTransitionSource,
         action_query: Tensor,
         plan: ObjectPolicyPlanDeltaBank,
+        action_proposal: Tensor | None = None,
         seed: V120SeedContext,
         collect_diagnostics: bool = False,
-    ) -> tuple[ControlledTransitionState, dict[str, Tensor]]:
+    ) -> tuple[
+        ControlledTransitionState | PhysicalTransitionInnovation,
+        dict[str, Tensor],
+    ]:
         """Evaluate real minus learned-neutral coefficients for this ODE step."""
 
         source.validate(hidden=self.hidden)
@@ -211,15 +255,31 @@ class ControlledTransitionDynamics(nn.Module):
         # normalization.  Do not basis-reduce this to 24 rows: doing so changes
         # the action cross-attention denominator and erases the factual/effect
         # residual that the transition was meant to condition on.
-        trajectory, norm_denominator, norm_gain = (
-            self.trajectory_norm.forward_with_denominator(
+        if self.target_action_bottleneck:
+            if self.physical_action_input is None or action_proposal is None:
+                raise ValueError("target-action CT requires the physical A0 proposal")
+            if tuple(action_proposal.shape) != (
+                expected_action[0],
+                self.horizon,
+                self.action_dim,
+            ):
+                raise ValueError("target-action CT A0 must be [B,T,A]")
+            proposal_query = self.physical_action_input(action_proposal)[
+                :, :, None
+            ].expand(-1, -1, self.basis, -1)
+            trajectory_source = action_query + proposal_query
+        else:
+            proposal_query = torch.zeros_like(action_query)
+            trajectory_source = (
                 action_query
                 + plan.protected_base
                 + plan.protected_policy_precision
             )
+        trajectory, norm_denominator, norm_gain = (
+            self.trajectory_norm.forward_with_denominator(trajectory_source)
         )
         action_tokens = trajectory.flatten(1, 2)
-        context = self._context_tokens(seed, plan)
+        context = self._context_tokens(seed, plan, action_proposal)
         transition = source.selector
         raw = self.v120_transition(
             transition,
@@ -247,13 +307,48 @@ class ControlledTransitionDynamics(nn.Module):
             # algebraically neutral; the protected G3 selector is retained.
             value = torch.zeros_like(primary_value)
             action_coefficients = neutral_coefficients
-        result = ControlledTransitionState(
-            selector=transition,
-            value=value,
-            action_coefficients=action_coefficients,
-            neutral_coefficients=neutral_coefficients,
-        )
-        result.validate(hidden=self.hidden)
+        spatial_attention: Tensor | None = None
+        physical_delta: Tensor | None = None
+        if self.target_action_bottleneck:
+            if self.physical_delta_head is None:
+                raise RuntimeError("target-action CT physical readout is missing")
+            # Query rows retain the ODE-time/noisy-action seed, A0 and current
+            # state.  Keys and centered values stay on the private G3 chart;
+            # only the resulting 24-row physical field crosses the owner
+            # boundary.
+            state_query = self.trajectory_norm(seed.state).mean(
+                dim=1,
+                keepdim=True,
+            )
+            physical_query = trajectory.mean(dim=2) + state_query
+            private_key = self.trajectory_norm(transition)
+            spatial_logits = torch.einsum(
+                "bth,bnh->btn",
+                physical_query.float(),
+                private_key.float(),
+            ) / float(self.hidden) ** 0.5
+            spatial_attention = torch.softmax(spatial_logits, dim=-1).to(
+                dtype=value.dtype
+            )
+            physical_value = torch.einsum(
+                "btn,bnh->bth",
+                spatial_attention,
+                value,
+            )
+            physical_delta = self.physical_delta_head(physical_value)
+            result = PhysicalTransitionInnovation(delta_v=physical_delta)
+            result.validate(
+                horizon=self.horizon,
+                physical_dim=self.physical_field_dim,
+            )
+        else:
+            result = ControlledTransitionState(
+                selector=transition,
+                value=value,
+                action_coefficients=action_coefficients,
+                neutral_coefficients=neutral_coefficients,
+            )
+            result.validate(hidden=self.hidden)
         if not collect_diagnostics:
             return result, {}
         basis = raw["rollout_transition_basis"]
@@ -279,7 +374,9 @@ class ControlledTransitionDynamics(nn.Module):
             .float()
             .abs(),
             "controlled_transition_dense_rows": value.new_tensor(float(value.shape[1])),
-            "controlled_transition_retained_rows": value.new_tensor(float(value.shape[1])),
+            "controlled_transition_retained_rows": value.new_tensor(
+                float(self.horizon if self.target_action_bottleneck else value.shape[1])
+            ),
             "controlled_transition_per_ode_action": value.new_ones((), dtype=torch.float32),
             "controlled_transition_learned_neutral": value.new_ones((), dtype=torch.float32),
             "controlled_transition_spatial_value_variation": value.detach()
@@ -300,6 +397,11 @@ class ControlledTransitionDynamics(nn.Module):
                 .mean()
                 .sqrt()
             ),
+            "controlled_transition_physical_proposal_query_rms": proposal_query.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "controlled_transition_intervention_active": value.new_tensor(
                 float(mode != "none"), dtype=torch.float32
             ),
@@ -312,6 +414,21 @@ class ControlledTransitionDynamics(nn.Module):
             .square()
             .mean()
             .sqrt(),
+            "controlled_transition_public_physical_delta_rms": (
+                value.new_zeros(())
+                if physical_delta is None
+                else physical_delta.detach().float().square().mean().sqrt()
+            ),
+            "controlled_transition_spatial_attention_entropy": (
+                value.new_zeros(())
+                if spatial_attention is None
+                else -(
+                    spatial_attention.detach().float()
+                    * spatial_attention.detach().float().clamp_min(1e-8).log()
+                )
+                .sum(dim=-1)
+                .mean()
+            ),
             "controlled_transition_intervention_action_neutral_identity_max_abs": (
                 action_coefficients.detach().float()
                 - neutral_coefficients.detach().float()
@@ -319,7 +436,12 @@ class ControlledTransitionDynamics(nn.Module):
             .abs()
             .amax(),
             "controlled_transition_intervention_selector_identity_max_abs": (
-                result.selector.detach().float() - source.selector.detach().float()
+                value.new_zeros(())
+                if self.target_action_bottleneck
+                else (
+                    result.selector.detach().float()
+                    - source.selector.detach().float()
+                )
             )
             .abs()
             .amax(),
