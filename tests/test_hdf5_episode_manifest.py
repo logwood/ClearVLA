@@ -6,6 +6,7 @@ import h5py
 import numpy as np
 import pytest
 
+import clearvla.data.hdf5_episode as hdf5_episode
 from clearvla.data.hdf5_episode import _manifest_hdf5_candidates, load_episodes
 
 
@@ -73,3 +74,39 @@ def test_manifest_direct_path_keeps_exact_suffix(tmp_path: Path) -> None:
     assert _manifest_hdf5_candidates(tmp_path, "*.h5", ("episode",)) == [
         tmp_path / "episode.h5"
     ]
+
+
+def test_manifest_direct_path_matches_legacy_loader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_episode(tmp_path / "episode_b.hdf5", length=3)
+    _write_episode(tmp_path / "episode_a.hdf5", length=2)
+    requested = ("episode_b", "episode_a")
+
+    direct, direct_skipped = load_episodes(
+        tmp_path,
+        "*.hdf5",
+        cameras=("top", "wrist"),
+        min_length=1,
+        episode_names=requested,
+    )
+    monkeypatch.setattr(hdf5_episode, "_manifest_hdf5_candidates", lambda *_args: None)
+    legacy, legacy_skipped = load_episodes(
+        tmp_path,
+        "*.hdf5",
+        cameras=("top", "wrist"),
+        min_length=1,
+        episode_names=requested,
+    )
+
+    assert direct_skipped == legacy_skipped
+    assert [episode.episode_id for episode in direct] == [
+        episode.episode_id for episode in legacy
+    ]
+    for direct_episode, legacy_episode in zip(direct, legacy, strict=True):
+        assert direct_episode.path == legacy_episode.path
+        assert direct_episode.source_partition == legacy_episode.source_partition
+        assert direct_episode.task_id == legacy_episode.task_id
+        np.testing.assert_array_equal(
+            direct_episode.actions_raw, legacy_episode.actions_raw
+        )
