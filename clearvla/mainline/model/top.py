@@ -197,6 +197,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         world_camera_condition_mode: str = "motion_prior_only",
         world_action_condition_mode: str = "interval_mean_v1",
         p2_spatial_intent_mode: str = "post_pool_only",
+        target_binding_mode: str = "reader_local_v1",
         history_encoding_mode: str = "paired_rows_v1",
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = "query_lattice_v1",
@@ -259,6 +260,8 @@ class ObjectIntentDynamicsTop(nn.Module):
             horizon=horizon,
             heads=heads,
             target_object_address_mode=p2_spatial_intent_mode,
+            target_binding_mode=target_binding_mode,
+            camera_names=camera_names,
             history_encoding_mode=history_encoding_mode,
         )
         self.coarse_action = CoarseActionIntent(
@@ -267,6 +270,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             heads=heads,
             horizon=horizon,
             action_condition_mode=self.world_action_condition_mode,
+            target_binding_mode=target_binding_mode,
         )
         self.dynamics = ObjectFutureDynamicsCompiler(
             hidden=hidden,
@@ -298,6 +302,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             content_dim=content_dim,
             route_dim=route_dim,
             spatial_intent_mode=p2_spatial_intent_mode,
+            target_binding_mode=target_binding_mode,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)
         self.plan_compiler = ObjectPolicyPlanCompiler(

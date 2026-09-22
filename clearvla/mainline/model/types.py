@@ -20,6 +20,7 @@ from clearvla.vision.entity_history import ObservedEntityHistory
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
 
 from ..manifest import INTERVALS
+from .target_binding import TargetBinding, TargetEvidence
 
 INTERVAL_NAMES = ("h4_8", "h8_16", "h16_32", "h32_48")
 INTERVAL_BOUNDS = INTERVALS
@@ -930,6 +931,8 @@ class ActionIntentDock:
     # second object-binding path.
     public_object_validity: Tensor | None = None  # FP32 [B,K,1]
     history_validity: Tensor | None = None  # bool [B,L], source padding only
+    target_binding: TargetBinding | None = None
+    target_evidence: TargetEvidence | None = None
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.public_interval_carrier.shape[0])
@@ -973,6 +976,8 @@ class FactualIntentDock:
     phase_context: Tensor  # [B,I,H]
     condition_query_context: Tensor  # [B,I,H]
     history_query_context: Tensor  # [B,I,H]
+    target_binding: TargetBinding | None = None
+    target_evidence: TargetEvidence | None = None
 
     def validate(self, *, hidden: int) -> None:
         batch = int(self.phase_context.shape[0])
@@ -996,6 +1001,7 @@ class PolicyIntentDock:
     target_object_address_logit: Tensor  # FP32 [B,I,K]
     typed_common_value: Tensor  # [B,K,3,R]
     typed_interval_residual_value: Tensor  # [B,I,K,3,R]
+    target_binding: TargetBinding | None = None
 
     def validate(self, *, horizon: int, hidden: int) -> None:
         batch = int(self.interval_key.shape[0])
@@ -1062,6 +1068,8 @@ class ObjectIntentState:
     # construct this compatibility container by hand.
     object_validity: Tensor | None = None  # FP32 [B,K,1]
     history_validity: Tensor | None = None  # bool [B,L]
+    target_binding: TargetBinding | None = None
+    target_evidence: TargetEvidence | None = None
 
     @property
     def interval_queries(self) -> Tensor:
@@ -1099,6 +1107,8 @@ class ObjectIntentState:
             history_memory=self.history_tokens,
             public_object_memory=self.object_tokens,
             public_object_validity=self.object_validity,
+            target_binding=self.target_binding,
+            target_evidence=self.target_evidence,
             history_validity=self.history_validity,
         )
 
@@ -1106,6 +1116,8 @@ class ObjectIntentState:
         batch = int(self.policy_interval_context.shape[0])
         return FactualIntentDock(
             phase_context=self.policy_interval_context,
+            target_binding=self.target_binding,
+            target_evidence=self.target_evidence,
             condition_query_context=self.protected_goal_set.mean(dim=1)[:, None].expand(
                 -1, 4, -1
             ),
@@ -1121,6 +1133,7 @@ class ObjectIntentState:
             state_change_evidence=self.state_change_evidence,
             target_object_address_logit=self.target_object_address_logit,
             typed_common_value=self.typed_common_value,
+            target_binding=self.target_binding,
             typed_interval_residual_value=self.typed_interval_residual_value,
         )
 
@@ -1190,6 +1203,13 @@ class ObjectIntentState:
             (batch, 4, 3, hidden),
             "typed policy components",
         )
+        if (self.target_binding is None) != (self.target_evidence is None):
+            raise ValueError("target binding and current evidence must be provided together")
+        if self.target_binding is not None and self.target_evidence is not None:
+            self.target_evidence.validate(hidden=hidden)
+            self.target_binding.validate(batch=batch, objects=objects, device=self.object_tokens.device)
+            if not torch.equal(self.target_binding.supported, self.target_evidence.valid.any(-1)):
+                raise ValueError("intent target support disagrees with observed evidence")
         self.action_dock().validate(hidden=hidden)
         self.factual_dock().validate(hidden=hidden)
         self.policy_dock().validate(horizon=horizon, hidden=hidden)
@@ -1209,6 +1229,8 @@ class ObjectIntentState:
             history_tokens=self.history_tokens,
             history_validity=self.history_validity,
             object_tokens=self.object_tokens[:, index],
+            target_binding=None if self.target_binding is None else self.target_binding.permute(index),
+            target_evidence=None if self.target_evidence is None else self.target_evidence.permute(index),
             public_interval_carrier=self.public_interval_carrier,
             policy_interval_context=self.policy_interval_context,
             temporal_queries=self.temporal_queries,

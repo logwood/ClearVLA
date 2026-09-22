@@ -45,6 +45,11 @@ from ..gripper_contract import (
     MANISKILL_BINARY_GRIPPER_OUTPUT_MODE,
     VALID_GRIPPER_OUTPUT_MODES,
 )
+from ..model.target_binding import (
+    LOCAL_TARGET_READERS,
+    SHARED_TARGET_BINDING,
+    target_binding_metadata,
+)
 from ..temporal import HISTORY_TIMING_CONTRACT, TIMED_HISTORY_ENCODING
 from .flow_schedule import DeploymentFlowSchedule
 
@@ -352,6 +357,8 @@ def build_deployment_abi(
         "flow_schedule": flow_schedule,
         "flow_schedule_sha256": canonical_sha256(flow_schedule),
         "observation": {
+            **({"operated_target": target_binding_metadata()}
+               if config.top.target_binding_mode == SHARED_TARGET_BINDING else {}),
             **({"entity_motion": entity_motion_metadata(config.top.entity_motion_mode)}
                if config.top.entity_motion_mode == CURRENT_ENTITY_MOTION else {}),
             **({"entity_history": entity_history_metadata(config.top.entity_history_mode)}
@@ -452,6 +459,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     )
     if observation.get("history_timing_contract") != expected_timing:
         raise ValueError("deployment history timing contract differs from selected graph")
+    target_mode = graph_top.get("target_binding_mode", LOCAL_TARGET_READERS)
+    if target_mode == SHARED_TARGET_BINDING:
+        if observation.get("operated_target") != target_binding_metadata():
+            raise ValueError("deployment operated target contract differs from selected graph")
+    elif target_mode != LOCAL_TARGET_READERS or "operated_target" in observation:
+        raise ValueError("deployment operated target contract is unknown or undeclared")
     motion_mode = graph_top.get("entity_motion_mode", QUERY_ANCHOR_MOTION)
     if motion_mode == CURRENT_ENTITY_MOTION:
         actual_motion = _mapping(observation.get("entity_motion"), name="observation.entity_motion")

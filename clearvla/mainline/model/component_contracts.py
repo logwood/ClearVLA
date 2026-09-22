@@ -359,6 +359,7 @@ MODULAR_TO_LEGACY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("policy_compiler.plan_compiler.", "top.plan_compiler."),
     ("execution_bottom.layer_contract_heads.", "bottom.layer_contract_heads."),
     ("execution_bottom.decoder.", "bottom.decoder."),
+    ("p1.target_read.", "operated_target_reader."),
 )
 
 

@@ -44,6 +44,7 @@ from .restored_observation import (
     _PreparedV120Observation,
 )
 from .routing import smooth_rms_contract
+from .target_binding import BoundTargetRead, TargetBinding, TargetEvidence
 from .top import (
     CompiledPolicyState,
     DeploymentTopCache,
@@ -620,6 +621,8 @@ class WorldStage(nn.Module):
         return refined, metrics
 
 
+
+
 class P1Stage(nn.Module):
     """Static factual detail and dynamic P1 policy residual."""
 
@@ -630,6 +633,7 @@ class P1Stage(nn.Module):
         horizon: int,
         basis: int,
         factual_reader: nn.Module,
+        target_reader: BoundTargetRead | None = None,
         dynamic_time: TimeEmbedding,
         dynamic_content_mod: nn.Sequential,
         dynamic_content_mod_scale: nn.Parameter,
@@ -640,6 +644,7 @@ class P1Stage(nn.Module):
         self.horizon = int(horizon)
         self.basis = int(basis)
         self.factual_reader = factual_reader
+        self.target_read = target_reader
         self.dynamic_time = dynamic_time
         self.dynamic_content_mod = dynamic_content_mod
         self.dynamic_content_mod_scale = dynamic_content_mod_scale
@@ -654,6 +659,8 @@ class P1Stage(nn.Module):
         phase_context: Tensor,
         condition_query_context: Tensor,
         history_query_context: Tensor,
+        target_binding: TargetBinding | None = None,
+        target_evidence: TargetEvidence | None = None,
         clean_basis_tokens: Tensor,
         collect_diagnostics: bool = False,
     ) -> tuple[FactualPrecisionDock, dict[str, Tensor]]:
@@ -667,6 +674,17 @@ class P1Stage(nn.Module):
             clean_basis_tokens=clean_basis_tokens,
             collect_diagnostics=collect_diagnostics,
         )
+        if self.target_read is not None:
+            if target_binding is None or target_evidence is None:
+                raise ValueError("shared factual read requires the current target bundle")
+            # Add AFTER subtracting the clean basis: its S-owned common mass is
+            # physical evidence, not a query offset that a residual can cancel.
+            target_query = clean_basis_tokens + phase_context.mean(1)[:, None, None]
+            target_detail = self.target_read(target_query, target_evidence, target_binding)
+        else:
+            if target_binding is not None or target_evidence is not None:
+                raise ValueError("legacy factual read cannot ignore target evidence")
+            target_detail = None
         batch = int(clean_trajectory.shape[0])
         factual = FactualPrecisionDock(
             protected_detail=(updated - clean_trajectory).reshape(
@@ -676,6 +694,8 @@ class P1Stage(nn.Module):
                 self.hidden,
             )
         )
+        if target_detail is not None:
+            factual = FactualPrecisionDock(factual.protected_detail + target_detail)
         factual.validate(horizon=self.horizon, basis=self.basis)
         return factual, metrics
 

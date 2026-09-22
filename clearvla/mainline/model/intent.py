@@ -9,6 +9,15 @@ from torch import Tensor, nn
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
 from .routing import register_gradient_rms_metric, smooth_rms_contract
+from .target_binding import (
+    LOCAL_TARGET_READERS,
+    SHARED_TARGET_BINDING,
+    BoundTargetRead,
+    SharedTargetBinder,
+    TargetBinding,
+    TargetEvidence,
+    masked_probability,
+)
 from .timed_history import TimedHistoryEncoder
 from .types import (
     INTERVAL_BOUNDS,
@@ -222,6 +231,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
         heads: int,
         target_object_address_mode: str = "post_pool_only",
         history_encoding_mode: str = LEGACY_HISTORY_ENCODING,
+        target_binding_mode: str = LOCAL_TARGET_READERS,
+        camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
         super().__init__()
         if target_object_address_mode not in {
@@ -229,6 +240,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "shared_target_prior_v1",
         }:
             raise ValueError("unknown target object address mode")
+        if target_binding_mode not in {LOCAL_TARGET_READERS, SHARED_TARGET_BINDING}:
+            raise ValueError("unknown target binding mode")
+        if target_binding_mode == SHARED_TARGET_BINDING and target_object_address_mode != "post_pool_only":
+            raise ValueError("shared binding cannot duplicate the additive target address")
+        self.target_binding_mode = target_binding_mode
+        self.camera_names = tuple(camera_names)
         self.target_object_address_mode = target_object_address_mode
         self.hidden = int(hidden)
         self.horizon = int(horizon)
@@ -261,7 +278,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.interval_goal = _CrossRead(hidden, heads)
         self.interval_history = _CrossRead(hidden, heads)
-        self.interval_object = _CrossRead(hidden, heads)
+        self.interval_object = (
+            BoundTargetRead(hidden, heads) if target_binding_mode == SHARED_TARGET_BINDING
+            else _CrossRead(hidden, heads)
+        )
         self.typed_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.typed_relevance_queries = nn.ModuleList(
             nn.Linear(hidden, route_dim, bias=False) for _ in TYPED_INTENT_NAMES
@@ -300,6 +320,17 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.state_change_input = nn.Linear(state_dim, hidden, bias=False)
         self.state_change_transport = nn.Linear(2, hidden, bias=False)
         self.state_change_fuse = nn.Linear(2 * hidden, hidden, bias=False)
+        self.shared_binder: SharedTargetBinder | None = None
+        self.target_coordinate: nn.Linear | None = None
+        self.target_state: nn.Linear | None = None
+        self.target_view: nn.Embedding | None = None
+        if target_binding_mode == SHARED_TARGET_BINDING:
+            if not camera_names or len(set(camera_names)) != len(camera_names):
+                raise ValueError("target evidence requires unique declared cameras")
+            self.shared_binder = SharedTargetBinder(hidden)
+            self.target_coordinate = nn.Linear(2, hidden, bias=False)
+            self.target_state = nn.Linear(state_dim, hidden, bias=False)
+            self.target_view = nn.Embedding(len(camera_names), hidden)
 
     @staticmethod
     def _paired_history(
@@ -355,6 +386,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         *,
         public_interval_carrier: Tensor,
         facts: ObjectFactSet,
+        binding: TargetBinding | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Build fixed-zero, per-type relevance without collapsing K."""
 
@@ -426,7 +458,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
             target_address_relative - target_address_mean,
             torch.zeros_like(target_address_relative),
         )
-        validity = validity_values[:, None, :, None, :]
+        if binding is not None:
+            # Operation/type gates can vary by future interval, but not select
+            # a different K for each type. The single target law owns K.
+            operation_score = (typed_address_score * binding.mass[:, None, :, None]).sum(dim=2)
+            signal_probability = binding.mass[:, None, :, None] * torch.sigmoid(operation_score)[:, :, None]
+        validity = (validity_values if binding is None else object_support[..., None].float())[:, None, :, None, :]
         relevance_mass = signal_probability[..., None] * validity
         relevance_mass = relevance_mass.to(dtype=typed_route.dtype)
         relevance_value = (
@@ -439,7 +476,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
         ):
             # K is a fixed identity axis.  A fixed mean preserves zero and
             # cannot cancel the optionality by renormalizing selected mass.
-            selected_route = relevance_value[..., type_index, :].mean(dim=2)
+            selected_route = (
+                relevance_value[..., type_index, :].mean(dim=2) if binding is None
+                else relevance_value[..., type_index, :].sum(dim=2)
+            )
             component, _ = smooth_rms_contract(projection(selected_route), 0.35)
             components.append(component)
         typed_components = torch.stack(components, dim=2)
@@ -568,6 +608,34 @@ class StatelessObjectIntentOrganizer(nn.Module):
             interval_objects,
             torch.zeros_like(interval_objects),
         )
+        target_binding = None
+        target_evidence = None
+        if self.shared_binder is not None:
+            if self.target_coordinate is None or self.target_view is None or self.target_state is None:
+                raise RuntimeError("shared target evidence encoder is incomplete")
+            if facts.camera_coordinates.shape[2] != len(self.camera_names):
+                raise ValueError("target facts lost declared camera axis")
+            history_support = torch.ones(history.shape[:2], dtype=torch.bool, device=history.device) if history_validity is None else history_validity
+            safe_history = torch.where(history_support[..., None], history, torch.zeros_like(history))
+            history_context = safe_history.sum(1) / history_support.sum(1, keepdim=True).clamp_min(1)
+            target_binding = self.shared_binder(protected_goal.mean(1) + history_context, objects, object_validity)
+            camera_valid = (facts.camera_validity[..., 0] > 0) & object_validity[..., None]
+            camera_positions = torch.where(camera_valid[..., None], facts.camera_coordinates, torch.zeros_like(facts.camera_coordinates))
+            view_ids = torch.arange(len(self.camera_names), device=objects.device)
+            # Native image coordinates are not subtracted from world TCP.
+            # Declared view identity + robot state condition a learnable relation.
+            camera_tokens = (
+                self.target_coordinate(camera_positions.to(objects.dtype))
+                + self.target_view(view_ids)[None, None].to(objects.dtype)
+                + self.target_state(state).to(objects.dtype)[:, None, None]
+            )
+            attribute_tokens = torch.stack((content_objects, self.object_semantic(semantic_input),
+                self.object_appearance(appearance_input), self.object_geometry(geometry_input)), dim=2)
+            target_valid = torch.cat((object_validity[..., None].expand(-1, -1, 4), camera_valid), dim=-1)
+            target_tokens = torch.cat((attribute_tokens, camera_tokens), dim=2)
+            target_evidence = TargetEvidence(
+                torch.where(target_valid[..., None], target_tokens, torch.zeros_like(target_tokens)), target_valid
+            )
         interval_base = self.interval_identity.to(
             device=objects.device, dtype=objects.dtype
         ).expand(batch, -1, -1)
@@ -587,12 +655,16 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # query preserves the K axis while making object identity conditional
         # on the instruction and the current causal context.
         language_object_query = interval_base + goal_innovation + history_innovation
-        _, object_innovation, interval_object_attention = self.interval_object(
-            language_object_query,
-            interval_objects,
-            padding_mask=~object_validity,
-            diagnostics=collect_diagnostics,
-        )
+        if isinstance(self.interval_object, BoundTargetRead):
+            if target_binding is None or target_evidence is None:
+                raise RuntimeError("shared S read has no operated-object binding")
+            object_innovation = self.interval_object(language_object_query, target_evidence, target_binding)
+            interval_object_attention = target_binding.mass[:, None].expand(-1, 4, -1)
+        else:
+            _, object_innovation, interval_object_attention = self.interval_object(
+                language_object_query, interval_objects, padding_mask=~object_validity,
+                diagnostics=collect_diagnostics,
+            )
         public_intervals = self.interval_self(
             interval_base
             + goal_innovation
@@ -609,6 +681,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         ) = self._typed_relevance(
             public_interval_carrier=public_intervals,
             facts=facts,
+            binding=target_binding,
         )
         typed_common_mass, typed_interval_residual_mass = (
             _interval_common_residual(typed_relevance_mass)
@@ -651,23 +724,38 @@ class StatelessObjectIntentOrganizer(nn.Module):
             state_change_history = torch.where(
                 no_rate[:, None], torch.zeros_like(state_change_history), state_change_history
             )
-        observed_motion = facts.transport_prior if facts.latest_flow_steps is None else facts.transport_rate
-        transport_prior = observed_motion.to(
-            device=objects.device,
-            dtype=objects.dtype,
-        )
-        transport_prior = torch.where(
-            object_mask.to(device=transport_prior.device),
-            transport_prior,
-            torch.zeros_like(transport_prior),
-        )
-        transport_tokens = self.state_change_transport(transport_prior)
-        transport_validity = validity_values.to(
-            device=transport_tokens.device, dtype=transport_tokens.dtype
-        )
-        state_change_transport = (
-            transport_tokens * transport_validity
-        ).sum(dim=1) / transport_validity.sum(dim=1).clamp_min(1.0)
+        if target_binding is None:
+            observed_motion = facts.transport_prior if facts.latest_flow_steps is None else facts.transport_rate
+            transport_prior = observed_motion.to(
+                device=objects.device,
+                dtype=objects.dtype,
+            )
+            transport_prior = torch.where(
+                object_mask.to(device=transport_prior.device),
+                transport_prior,
+                torch.zeros_like(transport_prior),
+            )
+            transport_tokens = self.state_change_transport(transport_prior)
+            transport_validity = validity_values.to(
+                device=transport_tokens.device, dtype=transport_tokens.dtype
+            )
+            state_change_transport = (
+                transport_tokens * transport_validity
+            ).sum(dim=1) / transport_validity.sum(dim=1).clamp_min(1.0)
+        else:
+            if self.target_view is None:
+                raise RuntimeError("target motion has no declared view identity")
+            view_valid = (facts.camera_validity[..., 0] > 0) & object_validity[..., None]
+            motion = facts.camera_transport_prior if facts.latest_flow_steps is None else facts.camera_transport_rate
+            motion = torch.where(view_valid[..., None], motion, torch.zeros_like(motion))
+            view_ids = torch.arange(len(self.camera_names), device=motion.device)
+            # Map each view into a role-aware feature BEFORE view reduction;
+            # a view embedding alone cannot manufacture motion when rate=0.
+            view_motion = self.state_change_transport(motion.to(objects.dtype))
+            view_motion = view_motion * (1 + torch.tanh(self.target_view(view_ids)))[None, None]
+            view_weights = masked_probability(facts.log_camera_validity[..., 0], view_valid)
+            per_object_motion = (view_motion.float() * view_weights[..., None]).sum(2)
+            state_change_transport = (per_object_motion * target_binding.mass[..., None]).sum(1).to(objects.dtype)
         state_change_evidence, _ = smooth_rms_contract(
             self.state_change_fuse(
                 torch.cat((state_change_history, state_change_transport), dim=-1)
@@ -679,6 +767,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
             history_tokens=history,
             history_validity=history_validity,
             object_tokens=objects,
+            target_binding=target_binding,
+            target_evidence=target_evidence,
             public_interval_carrier=public_intervals,
             policy_interval_context=policy_intervals,
             temporal_queries=temporal,
@@ -979,6 +1069,7 @@ class CoarseActionIntent(nn.Module):
         heads: int,
         horizon: int = 24,
         action_condition_mode: str = "interval_mean_v1",
+        target_binding_mode: str = LOCAL_TARGET_READERS,
     ) -> None:
         super().__init__()
         self.horizon = int(horizon)
@@ -1000,7 +1091,10 @@ class CoarseActionIntent(nn.Module):
                 torch.zeros(1, self.horizon, hidden)
             )
         self.intent_read = _CrossRead(hidden, heads)
-        self.object_read = _CrossRead(hidden, heads)
+        self.object_read = (
+            BoundTargetRead(hidden, heads) if target_binding_mode == SHARED_TARGET_BINDING
+            else _CrossRead(hidden, heads)
+        )
         self.history_read = _CrossRead(hidden, heads)
         self.block = _SelfBlock(hidden, heads)
         self.action_head = nn.Linear(hidden, action_dim, bias=False)
@@ -1046,12 +1140,17 @@ class CoarseActionIntent(nn.Module):
                 dtype=torch.float32,
             ).squeeze(-1).clamp(0.0, 1.0)
             object_padding_mask = ~(validity > 0.0)
-        _, object_delta, _ = self.object_read(
-            conditioned_query,
-            intent.public_object_memory,
-            padding_mask=object_padding_mask,
-            diagnostics=collect_diagnostics,
-        )
+        if isinstance(self.object_read, BoundTargetRead):
+            if intent.target_binding is None or intent.target_evidence is None:
+                raise ValueError("shared coarse read requires target binding and current facts")
+            object_delta = self.object_read(conditioned_query, intent.target_evidence, intent.target_binding)
+        else:
+            if intent.target_binding is not None or intent.target_evidence is not None:
+                raise ValueError("legacy coarse read cannot silently ignore target binding")
+            _, object_delta, _ = self.object_read(
+                conditioned_query, intent.public_object_memory,
+                padding_mask=object_padding_mask, diagnostics=collect_diagnostics,
+            )
         _, history_delta, _ = self.history_read(
             conditioned_query,
             intent.history_memory,

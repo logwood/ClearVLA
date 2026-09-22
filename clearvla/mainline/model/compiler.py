@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from torch import Tensor, nn
@@ -15,6 +15,7 @@ from .routing import (
     register_gradient_rms_metric,
     smooth_rms_contract,
 )
+from .target_binding import LOCAL_TARGET_READERS, SHARED_TARGET_BINDING, masked_probability
 from .types import (
     CandidateWorld,
     FutureObjectDynamics,
@@ -236,6 +237,7 @@ class ObjectFutureEffectReader(nn.Module):
         content_dim: int,
         route_dim: int,
         spatial_intent_mode: str = "post_pool_only",
+        target_binding_mode: str = LOCAL_TARGET_READERS,
     ) -> None:
         super().__init__()
         if spatial_intent_mode not in {
@@ -244,6 +246,9 @@ class ObjectFutureEffectReader(nn.Module):
         }:
             raise ValueError("unknown P2 spatial intent mode")
         self.hidden = int(hidden)
+        if target_binding_mode not in {LOCAL_TARGET_READERS, SHARED_TARGET_BINDING}:
+            raise ValueError("unknown P2 target binding mode")
+        self.target_binding_mode = target_binding_mode
         self.spatial_intent_mode = str(spatial_intent_mode)
         self.source_query = nn.ModuleList(
             nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
@@ -253,6 +258,8 @@ class ObjectFutureEffectReader(nn.Module):
         # consuming initialization RNG, then let their ordinary task gradients
         # separate the two owners.
         self.terminal_query = deepcopy(self.source_query)
+        if target_binding_mode == SHARED_TARGET_BINDING:
+            self.source_query[0] = nn.Identity()
         self.source_key = nn.ModuleList(
             (
                 nn.Linear(content_dim, hidden, bias=False),
@@ -463,9 +470,18 @@ class ObjectFutureEffectReader(nn.Module):
         if intent.target_object_address_logit.dtype != torch.float32:
             raise TypeError("P2 target object address must remain FP32")
 
+        binding = intent.target_binding
+        if self.target_binding_mode == SHARED_TARGET_BINDING:
+            if binding is None:
+                raise ValueError("P2 requires the shared operated-object binding")
+            binding.validate(batch=batch, objects=objects, device=action_query.device)
+        elif binding is not None:
+            raise ValueError("legacy P2 cannot ignore shared binding")
         temperature = self._temperatures().to(device=action_query.device)
         object_measure = dynamics.chart_availability[..., 0].float().clamp(0.0, 1.0)
         semantic_support = object_measure > 0.0
+        if binding is not None and not torch.equal(binding.supported, semantic_support):
+            raise ValueError("P2 world and operated-object source support differ")
         semantic_log_measure = torch.where(
             semantic_support,
             dynamics.log_chart_availability[..., 0].float(),
@@ -480,6 +496,16 @@ class ObjectFutureEffectReader(nn.Module):
             dynamics.log_camera_chart_availability[..., 0].float(),
             torch.zeros_like(camera_measure),
         )
+        if binding is not None:
+            # Quarantine source-invalid payload before projections and common /
+            # interval decomposition, not merely after multiplying by zero.
+            dynamics = replace(
+                dynamics,
+                semantic_delta=torch.where(semantic_support[:, None, :, None], dynamics.semantic_delta, torch.zeros_like(dynamics.semantic_delta)),
+                transport_mean=torch.where(camera_support[:, None, :, :, None], dynamics.transport_mean, torch.zeros_like(dynamics.transport_mean)),
+                transport_covariance=torch.where(camera_support[:, None, :, :, None], dynamics.transport_covariance, torch.zeros_like(dynamics.transport_covariance)),
+                camera_coordinates=torch.where(camera_support[..., None], dynamics.camera_coordinates, torch.zeros_like(dynamics.camera_coordinates)),
+            )
         conditional_camera, conditional_camera_log = _safe_masked_log_softmax(
             camera_log_measure,
             camera_support,
@@ -657,6 +683,8 @@ class ObjectFutureEffectReader(nn.Module):
                     ..., self.S_TYPE_INDEX_BY_P2[type_index], :
                 ]
             )
+            if binding is not None:
+                typed_route = torch.where(semantic_support[:, None, :, None], typed_route, torch.zeros_like(typed_route))
             typed_candidate = self.typed_intent_key[type_index](typed_route).float()
 
             if type_index == 0:
@@ -695,7 +723,22 @@ class ObjectFutureEffectReader(nn.Module):
 
             flat_logit = candidate_logit.reshape(batch, horizon, basis, intervals, -1)
             flat_support = candidate_support.reshape_as(flat_logit)
-            posterior = _safe_masked_softmax(flat_logit, flat_support, dim=-1)
+            if binding is None:
+                posterior = _safe_masked_softmax(flat_logit, flat_support, dim=-1)
+            else:
+                object_mass = binding.mass
+                if self._eval_intervention in self._TARGET_ADDRESS_NEUTRAL_MODES:
+                    if self.training:
+                        raise ValueError("P2 interventions are evaluation-only")
+                    # Neutralize identity only, retaining the same null mass.
+                    object_mass = semantic_support.float() * object_mass.sum(-1, keepdim=True) / semantic_support.sum(-1, keepdim=True).clamp_min(1)
+                if type_index == 0:
+                    posterior = object_mass[:, None, None, None, :].expand_as(flat_logit)
+                else:
+                    # Action/geometry chooses a view inside each K. It cannot
+                    # move probability to another object or erase null mass.
+                    view_probability = masked_probability(candidate_logit, candidate_support)
+                    posterior = (view_probability * object_mass[:, None, None, None, :, None]).reshape_as(flat_logit)
             interval_support = support.flatten(start_dim=2).any(dim=-1)
             flat_key = source_key.reshape(batch, intervals, -1, self.hidden)
             flat_typed = candidate_typed.reshape(batch, intervals, -1, self.hidden)
@@ -810,9 +853,11 @@ class ObjectFutureEffectReader(nn.Module):
             "object_p2_spatial_posterior_max": torch.stack(
                 [value.detach().amax(dim=-1).mean() for value in spatial_posteriors]
             ).mean(),
-            "object_p2_spatial_selector_has_null": action_query.new_zeros(
-                (), dtype=torch.float32
+            "object_p2_spatial_selector_has_null": action_query.new_tensor(
+                float(binding is not None), dtype=torch.float32
             ),
+            **({"object_p2_shared_target_null_mass": binding.null_mass.detach().mean()}
+               if binding is not None else {}),
             "object_p2_selected_w_key_rms": selected.key.detach()
             .float()
             .square()

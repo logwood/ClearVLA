@@ -24,7 +24,9 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit candidate is
-`configs/mainline/structural_rebuild_m4d_calvin.json`. Legacy and M1a/M1b/M1c/M1d/M2/M3/M4b
+`configs/mainline/structural_rebuild_m5a_calvin.json`. M5a adds one soft operated-
+object distribution across actual S/coarse/P1/P2 readers; its detailed contract
+is below. Instruction-start progress and deeper downstream redesign are open. Legacy and M1a/M1b/M1c/M1d/M2/M3/M4b
 configs remain reproducible controls, not automatic aliases of this candidate.
 M2 preserves full G1 support through the actual G2 sampler and G3/P1
 value consumers. M3 adds one soft local observation law for typed properties
@@ -558,7 +560,9 @@ T5 + observed state/history + ObjectFactSet
   -> action-tagged CandidateWorld / FutureObjectDynamics
 ~~~
 
-S is the sole intent owner. W cannot read goal tokens, S values, coarse hidden
+For reader-local configurations, the following reader arrangements remain
+the control graph. M5a supersedes their independent target selections only
+when explicitly selected. S is the sole intent owner. W cannot read goal tokens, S values, coarse hidden
 tokens, Teacher or noisy ODE action. Semantic successors retain
 [B,4,K,D]; transport, covariance and camera support retain
 [B,4,K,C,*] until P2. W predicts no validity, visibility or status authority.
@@ -1171,6 +1175,71 @@ Historical replay provenance is indexed by
 [archive/replay/README.md](archive/replay/README.md). Open it only for ancestry,
 an old log or the reason behind a past repair; never reconstruct the current
 graph from the ledger.
+
+## M5a one operated-object law per observation
+
+`top.target_binding_mode=shared_operation_v1` is an explicit new graph, selected
+by `configs/mainline/structural_rebuild_m5a_calvin.json`. It replaces the
+additive `shared_target_prior_v1`; selecting both is an error. The default
+`reader_local_v1` omits this field from old configuration serialization and
+retains the original reader modules. Old checkpoints are not silently migrated.
+
+S computes one differentiable FP32 normalized K-plus-null distribution from
+language, causal timestamped history and observed entity values. Physical
+source support and learned target confidence are separate. The binding refers
+to the current G entity slots, not persistent physical IDs or known colors.
+The same binding object flows through S, coarse, P1 and P2 and is reused for
+proposal/refined sampling and all ODE evaluations. There is no task clock or
+recurrent update inside numerical time. Every new observation rebinds.
+
+Task-independent current target evidence retains four distinct attribute
+values and one token per declared camera. Camera tokens keep image coordinates,
+view identity and observed robot state separate before learned projection; no
+pixel/world subtraction or calibrated 3D claim is made. Each reader attends
+INSIDE each object over multiple attribute/view tokens, then multiplies by the
+shared object mass. It does not run its own K softmax. Multiple keys retain real
+Q/K derivatives; a singleton attention with constant softmax is not used.
+Target mass is applied after the complete internal read without normalization
+by total real mass. The bias-free value path cannot invent target evidence at
+full null. Smooth RMS contraction is not a target attention quota. Null means
+no target evidence, not an environment stop command.
+
+P1 adds its target-specific current evidence after the clean-basis residual
+subtraction. It therefore cannot cancel merely because the same target was
+written to both sides of that subtraction. This lane does not require nonzero
+W motion or future labels. Existing high-resolution scene detail remains a
+separate context lane; M7 still owns the deeper target-local spatial read.
+The actual P1 reader belongs to the `operated_target_reader` logical namespace
+and `p1_factual` optimizer group, with ordinary checkpoint parameter ownership.
+No uncaptured parameters or optimizer-registration exception is admitted.
+The inherited W output heads initialize at zero, so coarse may initially have
+zero policy-only VJP through W. Its separately defined supervised action loss
+is responsible for initial updates; this is distinct from parameter ownership.
+M6 must revisit action-matched supervision without assuming immediate W VJP.
+
+P2's semantic object marginal is exactly the shared target mass. Geometric
+selection factors into that mass times a camera distribution conditioned INSIDE
+each object. Different action queries can choose views/intervals, not redefine
+which K is operated. A source without camera support contributes no fabricated
+geometry. Typed operation gates vary across future intervals and property
+kinds but no longer give each kind an independent operated-object identity.
+Source-invalid W/intent payload is quarantined before projections and interval
+common/residual decomposition. Evaluation-only identity neutralization preserves
+real-versus-null mass. Exact full-null evidence and zero predicted effects
+remain zero even though unrelated proprioception/scene context may remain.
+
+S's recent observed motion is projected per view before camera conditioning
+and target marginalization. View identity alone cannot manufacture nonzero
+motion when displacement is zero. This is recent target-related motion, NOT
+cumulative task progress: an instruction-start reference, endpoint objectives,
+future-recognizer redesign and actual executed-prefix feedback remain open.
+Raw multi-view future transport in P2 still needs M7's deeper chart review.
+
+Deployment ABI carries the exact operated-target contract, source dependency
+identity includes `target_binding.py`, and incompatible metadata/resume config
+is rejected. Focused tests run real G/S/W/P/bottom, optimizer, ordinary
+checkpoint and deployment loading. They establish connectivity, null/mask
+semantics and numerical identity, not useful learned grounding or robot success.
 
 ## M4d current-entity motion law
 

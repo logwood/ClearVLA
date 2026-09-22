@@ -463,8 +463,16 @@ class TopConfig:
     entity_chart_mode: str = "query_lattice_v1"
     entity_history_mode: str = "current_only_v1"
     entity_motion_mode: str = "query_anchor_v1"
+    target_binding_mode: str = "reader_local_v1"
 
     def validate(self) -> None:
+        if self.target_binding_mode not in {"reader_local_v1", "shared_operation_v1"}:
+            raise ValueError("unknown top target_binding_mode")
+        if self.target_binding_mode == "shared_operation_v1":
+            if self.p2_spatial_intent_mode != "post_pool_only":
+                raise ValueError("shared target binding replaces, not duplicates, the P2 target prior")
+            if self.history_encoding_mode != "timestamped_streams_v1":
+                raise ValueError("shared target binding requires timestamped history")
         if self.entity_motion_mode not in {"query_anchor_v1", "current_entity_support_v1"}:
             raise ValueError("unknown top entity_motion_mode")
         if self.entity_history_mode not in {"current_only_v1", "flow_pulled_history_v1"}:
@@ -1144,6 +1152,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.top.target_binding_mode == "reader_local_v1":
+            cast(dict[str, object], payload["top"]).pop("target_binding_mode")
         if self.top.entity_motion_mode == "query_anchor_v1":
             cast(dict[str, object], payload["top"]).pop("entity_motion_mode")
         if self.top.entity_history_mode == "current_only_v1":

@@ -32,6 +32,7 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "p1_factual",
         (
             "factual_reader.",
+            "operated_target_reader.",
             "bottom.p1_time.",
             "bottom.p1_content_mod.",
             "bottom.p1_content_mod_scale",

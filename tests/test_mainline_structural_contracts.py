@@ -4045,6 +4045,16 @@ def test_s_object_read_is_language_conditioned_and_reaches_the_coarse_action() -
         rtol=1.0e-6,
     )
 
+    # This is explicitly the legacy-reader test. The shared mode has a
+    # different, separately tested Q/K representation; narrow the real
+    # production variant before selecting its parameter for the VJP.
+    object_reader = top.intent.interval_object
+    coarse_reader = top.coarse_action.object_read
+    assert isinstance(object_reader, intent_module._CrossRead)
+    assert isinstance(coarse_reader, intent_module._CrossRead)
+    object_weight = object_reader.attention.in_proj_weight
+    coarse_weight = coarse_reader.attention.in_proj_weight
+    assert object_weight is not None and coarse_weight is not None
     (
         goal_gradient,
         object_reader_gradient,
@@ -4054,8 +4064,8 @@ def test_s_object_read_is_language_conditioned_and_reaches_the_coarse_action() -
         first_coarse.action_prediction.float().square().mean(),
         (
             goal,
-            top.intent.interval_object.attention.in_proj_weight,
-            top.coarse_action.object_read.attention.in_proj_weight,
+            object_weight,
+            coarse_weight,
             top.intent.object_appearance.weight,
         ),
         allow_unused=True,

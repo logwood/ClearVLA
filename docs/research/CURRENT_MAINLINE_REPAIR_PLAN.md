@@ -37,9 +37,10 @@ choices just to preserve old golden outputs.
 | M4c1 causal observed entity evidence | Implemented candidate; verification per source | Existing inverse flows compose observed past onto current pixels; actual full-candidate evidence reaches K competition. Same finite window in training and online, no deployment-only state. |
 | M4c2 remaining global/persistent identity | Open | Physical objectness, cross-window association and any matching recurrent training/online state; do not mistake finite-window grouping for persistent K identity. |
 | M4d entity-motion chart | Implemented candidate; validation per source | Shared current-image spatial law for position and motion; includes earlier-source status correction. No extra parameters or world calls; view-aware downstream reasoning remains open. |
-| M5 S/coarse | Interface adapted only | The history submodule is new; target/operation/progress decomposition, shared entity binding and recognizer supervision still require deep review. |
+| M5a S/shared target | Implemented; exact-source acceptance recorded in artifacts | One soft K-plus-null binding consumed by real S/coarse/P1/P2, post-read mass, current spatial evidence, registered optimizer/checkpoint owners. Not task progress or persistent physical identity. |
+| M5b S task reference/operation/progress | Open | Causal instruction-start observation with matching dataset and runtime lifecycle; cross-time reassociation, desired relation and recognizer targets. No fabricated previous draft is a baseline. |
 | M6 W1/W2 | Not started | Match supervised action to observed outcome; separate candidate prediction from demonstration-target training; explicit robot-object relations and known control horizon. |
-| M7 P1/P2 | History context adapted only | Shared operated entity, current target facts, view-aware geometry and corresponding candidate consequences. |
+| M7 P1/P2 | M5a target marginal/current-evidence seam implemented | Deeper target-local precision, view-aware future geometry and physical consequence semantics remain open; shared binding alone does not close them. |
 | M8 P3 | Not started | Task-related local coordination and actual-prefix execution feedback; no task-clock or oracle state machine. |
 | M9 transition/bottom/outlets | Padding values quarantined only | Audit actual consumers, redundant/frozen paths, action codec, clipping/history feedback and endpoint heads. Do not treat retained topology as approved. |
 | M10 training/deployment/resume | M1a/history and M1b/label interfaces integrated only | Production CPU train/restore/sample and source-label masks are exercised; W supervision, endpoint context and new entity/task state lifecycle remain open. |
@@ -204,3 +205,19 @@ is erased because correspondence confidence, coverage or camera mass is small.
 The corrected M4c focused file has 33 cases; its full local inventory finished
 with 678 passes and one skip, no failures/errors. The additional M4d acceptance
 belongs to its own exact-source report, not this preceding correction result.
+
+## M5a producer-consumer closure
+
+| Producer | Actual consumers | Ownership / lifespan |
+|---|---|---|
+| S protected goal + timestamped history + G facts | SharedTargetBinder | One FP32 K+null law per physical observation; no oracle or future target. |
+| Current attributes, per-camera coordinates/roles and robot state | Internal evidence reads in S/coarse/P1 | Multi-key per-object attention; target mass only after internal reading; no independent target softmax. |
+| Shared K mass | P2 semantic K and conditional geometric cameras | Common object marginal for every numerical query; interval/view choice does not replace target identity. |
+| P1 operated-target reader | Current factual detail -> real action decoder | Added after clean residual subtraction; optimizer/checkpoint owner registered; no dependency on nonzero W. |
+| Current per-view displacement/rate | S state-change evidence | View-aware features before pooling; task-start cumulative progress is explicitly not inferred. |
+| Config, source closure, target metadata | Factory/checkpoint/deployment | Distinct new identity, old reader-local path retained unchanged; no strict=False migration. |
+
+The previous M5 recovery ZIP contained zero source files. This unit was rebuilt
+from the independently verified M4d archive; earlier unarchived M5 claims are
+not used as test evidence. Final artifacts record executed checks, source hash,
+unsupported-runtime versus supported CI, and whether publication occurred.

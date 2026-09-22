@@ -32,6 +32,7 @@ from .proposal import HistoryActionProposal
 from .restored_bottom import RestoredV120EvidenceBottom
 from .restored_observation import RestoredV120ObservationCompiler
 from .routing import register_gradient_rms_metric
+from .target_binding import SHARED_TARGET_BINDING, BoundTargetRead
 from .top import (
     CompiledPolicyState,
     DeploymentTopCache,
@@ -227,6 +228,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             world_camera_condition_mode=top.world_camera_condition_mode,
             world_action_condition_mode=top.world_action_condition_mode,
             p2_spatial_intent_mode=top.p2_spatial_intent_mode,
+            target_binding_mode=top.target_binding_mode,
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,
@@ -265,6 +267,9 @@ class ClearVLAMainlinePolicy(nn.Module):
             physical_action_dim=raw_codec.physical_dim,
         )
 
+        raw_target_reader = (BoundTargetRead(dims.hidden_size, dims.num_heads)
+                             if top.target_binding_mode == SHARED_TARGET_BINDING else None)
+
         # Capture the exact old traversal before changing registrations.  This
         # ledger is consumed by optimizer/clipping code and by checkpoint
         # migration; the new human-facing module order is deliberately not
@@ -280,6 +285,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             ("factual_reader", raw_factual_reader),
             ("transition", raw_transition),
             ("bottom", raw_bottom),
+            *((("operated_target_reader", raw_target_reader),) if raw_target_reader is not None else ()),
         ):
             for name in owner.state_dict().keys():
                 logical_state = _temporary_source_legacy_name(f"{prefix}.{name}")
@@ -352,6 +358,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             horizon=dims.action_horizon,
             basis=dims.action_basis_tokens,
             factual_reader=raw_factual_reader,
+            target_reader=raw_target_reader,
             dynamic_time=p1_time,
             dynamic_content_mod=p1_content_mod,
             dynamic_content_mod_scale=p1_content_mod_scale,
@@ -607,6 +614,8 @@ class ClearVLAMainlinePolicy(nn.Module):
             g3_rollout=g3_rollout,
             detail=p1_detail,
             phase_context=factual_intent.phase_context,
+            target_binding=factual_intent.target_binding,
+            target_evidence=factual_intent.target_evidence,
             condition_query_context=factual_intent.condition_query_context,
             history_query_context=factual_intent.history_query_context,
             clean_basis_tokens=clean_action_basis,

@@ -46,12 +46,14 @@ Still open before/through subsequent milestones:
   units do not establish physical objectness or cross-window re-identification.
   Distribution preservation is not a trained segmentation/tracking guarantee;
   production-scale memory/latency must be measured on the user's GPU.
-- S: target/operation/progress separation, object-specific change, shared
-  target binding and future recognizer objectives. New time encoding does not
-  close these semantic questions.
+- S: M5a implements a shared K-plus-null operation binding with current-value
+  consumers, and target-related recent motion. Instruction-start references,
+  cumulative/relational progress, richer operation context and future recognizer
+  objectives remain open. A current K number is not a persistent entity ID.
 - W: candidate-action versus demonstration-future target mismatch, missing
   explicit robot-object relations, and control support past the known 24 rows.
-- P/bottom: same-target current facts and consequences, camera-aware geometry,
+- P/bottom: M5a closes the same-target marginal/current-fact seam; deeper
+  target-local precision and camera-aware future geometry remain open, as do
   genuine executed-prefix feedback, endpoint command conditions and retained
   unused/redundant/frozen paths.
 - Verification: historical Ruff/Pyright debt is not newly introduced but is
