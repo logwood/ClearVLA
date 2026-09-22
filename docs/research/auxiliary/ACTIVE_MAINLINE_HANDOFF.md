@@ -1,5 +1,42 @@
 # ClearVLA structural rebuild handoff
 
+## Current M6j source checkpoint — 2026-09-22
+
+Recovered all 818 M6i source files, verifying all 977 manifest entries and exact
+Git tree `485bf48b920439c0938a8cc862179dc6f2fb7fd1`. Remote baseline was read at
+`76a00fb900ebcd856704022fe500b8e6f29a4b2d`. Local ancestry is synthetic; do not
+force-push recovery history. Existing workflow/master remain untouched.
+
+M6j implements explicit magnitude-preserving native evidence values from the
+real adapter to native host cross-write, with exact selector/value range identity,
+bias-free K/V/output, parameter-free neutral trajectory, existing smooth upper
+bound, explicit-value admission and graph/ABI checks. CT numerical computation
+is unchanged; its description is corrected to G3/noisy-plan features rather than
+physical W dynamics. P3 has its existing direct lane; CT proposal composition
+is an open next unit, not a silently dropped pathway.
+
+Initial focused production suite: 36 passed after a test-oracle correction. The
+first run had 31 passes and one random FP32 homogeneity assertion failure; random
+dense matmul scaling changes roundoff order. The exact homogeneity test now uses
+a diagonal FP32 map, with a separate exact arbitrary-projection oracle. No
+historical assertion was relaxed. A first smoke used sample_action without its
+config argument; corrected by real sampler tests. First static delta found
+nine test type-narrowing errors, not nine production failures; all are retained
+in external reports. Final expanded tests/status belong to checkpoint reports,
+not intermediate dots. Check final source hashes before continuing.
+
+Final dedicated inventory: 38 passed, exit 0. Eight-Python-file delta static
+check: Ruff zero, Pyright errors 55 -> 55, warnings 358 -> 389, no new type
+errors/missing imports. Old M6i controls at seeds 0,71 match all 1,486 state tensors,
+1,473 parameter entries/order, serialized config, RNG and same-noise actions.
+Affected production components at H=512/depth=3 reduce trainable parameters by
+272,902. Expanded regression is recorded separately and is not a release gate.
+
+Save the subunit before full milestone CI, as requested. Next audit CT typed
+proposal conditioning and execution-controller/output/value paths, including
+endpoint heads and native executed-command/history integrity. No physical
+success, CUDA, full milestone or end-to-end amplitude invariance is claimed.
+
 ## Current M6i source checkpoint — 2026-09-22
 
 Recovered all 814 M6h source files and verified all 919 archive manifest entries.

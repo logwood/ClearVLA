@@ -30,6 +30,7 @@ from clearvla.data.window_boundaries import (
     WINDOW_BOUNDARY_CONTRACTS,
 )
 
+from .bottom_evidence import NORMALIZED_EVIDENCE, validate_evidence_value_mode
 from .future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from .gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
@@ -617,6 +618,7 @@ class TopConfig:
 
 @dataclass(frozen=True)
 class BottomConfig:
+    evidence_value_mode: str = NORMALIZED_EVIDENCE
     flow_time_distribution: str = "v120_mirrored_beta_1_5_1"
     evidence_depth: int = 3
     latent_dim: int = 64
@@ -664,6 +666,7 @@ class BottomConfig:
     bspine_action_group_mask: str = ""
 
     def validate(self) -> None:
+        validate_evidence_value_mode(self.evidence_value_mode)
         if self.flow_time_distribution != "v120_mirrored_beta_1_5_1":
             raise ValueError("formal training uses the mirrored V120 beta_1_5_1 flow time")
         integer_fields = (
@@ -1247,6 +1250,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.bottom.evidence_value_mode == NORMALIZED_EVIDENCE:
+            cast(dict[str, object], payload["bottom"]).pop("evidence_value_mode")
         if self.top.operation_intent_mode == POSTERIOR_INTENT:
             cast(dict[str, object], payload["top"]).pop("operation_intent_mode")
         if self.top.instruction_change_mode == MIXED_REFERENCE_CHANGE:

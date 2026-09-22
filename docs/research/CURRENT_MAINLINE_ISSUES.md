@@ -67,6 +67,25 @@ Still open before/through subsequent milestones:
 - Verification: historical Ruff/Pyright debt is not newly introduced but is
   not resolved; CPU tensor tests do not certify GPU/BF16 or closed-loop success.
 
+## M6j downstream review boundary
+
+The initial native-bottom check found deliberately trainable null-value geometry
+and repeated value normalization. In the new explicit M6j graph, zero transition
+and generic trajectory values remain zero through the production evidence bank;
+the host cross-write no longer normalizes tiny signals to a unit direction.
+The old graph remains an intentional control, not retroactively relabeled as a
+physical predictor. Source and host cross-write semantics are in the contract.
+
+Remaining downstream decisions (not hidden by this change):
+- ControlledTransition currently sums query/protected fact/precision before
+  normalization and does not directly consume the optional P3 lanes. P3 DOES
+  have an independent bottom route; do not label it globally disconnected.
+- Execution-controller value/operation reads and final decoder normalizations
+  are outside this subunit's magnitude guarantee. Their causal roles and actual
+  consumer/gradient paths must be reviewed rather than renamed.
+- Exact endpoint command training conditions, native clipping/write-back and
+  all previous physical object/correspondence limitations remain unresolved.
+
 ## Maintenance rule
 
 Each issue has one question, one latest comparable observation, and one

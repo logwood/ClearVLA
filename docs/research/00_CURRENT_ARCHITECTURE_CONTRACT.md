@@ -24,7 +24,7 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit source candidate is
-`configs/mainline/structural_rebuild_m6i_calvin.json` (validation scope in handoff).
+`configs/mainline/structural_rebuild_m6j_calvin.json` (validation scope in handoff).
 M5a adds one soft operated-
 object distribution across actual S/coarse/P1/P2 readers; its detailed contract
 is below. M5b adds a causal instruction reference; M6a/b/c separate action-matched W
@@ -42,6 +42,48 @@ W-supervision and the deeper P redesign remain open. No learned behavior
 is established by these source changes. The user-authorized rebuild may revise
 historical implementation details; accepted source semantics belong here,
 future work in the repair plan, and test/publish status in the handoff.
+
+## M6j magnitude-preserving native evidence values
+
+`bottom.evidence_value_mode=magnitude_preserving_v1` is a new explicit graph/ABI.
+Default `normalized_legacy_v1` preserves previous registered weights, RNG draws,
+arithmetic and serialized experiment config (the default field is omitted).
+No checkpoint/optimizer migration is implied.
+
+The actual evidence adapter uses bias-free source projections for rollout,
+transition, event and state. The generic trajectory is still a neutral zero
+placeholder in the mainline; it now uses an Identity with no dead parameters,
+not a trainable null value. Selector tokens keep source normalization, type
+embeddings and the existing role prior. Value tokens reuse those exact source
+ranges WITHOUT the bank LayerNorm or type/depth embeddings. Layer values still
+come only from clean-intent attention, never the mixed layer-selector chart.
+This separation does not remove current factual/intent content.
+
+Every native host MMDiT block uses separate bias-free K/V projections (shared K
+bias cancels in softmax; a V bias invents content). Only K inputs are normalized.
+V and its output projection are bias-free and unnormalized. The evidence write
+uses the existing smooth RMS upper bound at 1 rather than rescaling small
+signals toward a unit direction. This is an upper bound, not an amplitude floor
+or source allocation. Keys/global condition fixed, a zero value stream produces
+an exact zero evidence cross-write and zero derivative to its Q/K parameters;
+small values retain their scale. Other self/FFN/factual/intent contributions are
+not required to vanish, and selectors may still redistribute other values.
+
+An explicit value stream is mandatory in the new host path: selector fallback
+is rejected. EvidenceView carries its value identity and the decoder checks it
+before the host path. Config parsing, restored core config, parameter inventory,
+checkpoint ABI and same-mode reload include the change. All normal two-pass
+sampling, candidate probes and execution paths use the same host implementation.
+No additional W, DINO or ODE calls, time states or token banks are introduced.
+
+**Limits:** this unit covers adapter -> evidence values -> native host cross-write,
+not invariance of the entire nonlinear policy or calibrated physical magnitudes.
+ControlledTransition reads completed G3 plus noisy-plan features, not a W physical
+rollout; its learned neutral response is not a calibrated no-op counterfactual.
+Its summed/normalized proposal ingress, independent direct P3 route, execution
+controller/value normalization, final output normalization, command endpoint
+conditions and outlet/history semantics still require deeper review. No robot
+performance, exact physical error or complete milestone acceptance is claimed.
 
 ## M6i source-supervised object operation expectations
 

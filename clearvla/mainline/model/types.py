@@ -2074,9 +2074,10 @@ class HistoryActionProposalState:
 class ControlledTransitionState:
     """Action-centred low-rank transition evidence consumed read-only below P.
 
-    ``selector`` carries the typed W transition state.  ``value`` is the
-    real-action coefficient response minus the neutral-context response, so a
-    learned action-independent base cannot become a second world residual.
+    ``selector`` is the completed G3 feature chart, NOT a physical W rollout.
+    ``value`` is a noisy-plan-conditioned coefficient response minus a learned
+    neutral-context response. It is a decoder feature, not a calibrated no-op
+    physical counterfactual or a measured robot/object execution error.
     """
 
     selector: Tensor  # [B,I*C*8*8,H] -- 512 V120 spatial transition rows

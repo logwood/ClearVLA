@@ -17,6 +17,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..bottom_evidence import (
+    MAGNITUDE_EVIDENCE,
+    NORMALIZED_EVIDENCE,
+    validate_evidence_value_mode,
+)
 from ..gripper_contract import VALID_GRIPPER_OUTPUT_MODES, is_binary_gripper_mode
 from ..model.component_contracts import TerminalHeadOutput
 from ..model.routing import register_gradient_rms_metric
@@ -34,7 +39,7 @@ from .evidence import OwnedEvidenceMemoryBank
 from .gauges import deterministic_module_probe, select_centered_candidate
 from .primitives import BiasFreeFFN, TimeEmbedding, sinusoidal_positions
 from .refinement import NestedLowRankContractionBank
-from .role_delta_attnres import PolicyRoleDeltaBank, RoleDeltaAttnRes
+from .role_delta_attnres import PolicyRoleDeltaBank, RoleDeltaAttnRes, smooth_rms_contract
 
 
 def _autocast_without_weight_cache(device: torch.device):
@@ -60,7 +65,7 @@ def _autocast_without_weight_cache(device: torch.device):
 
 @dataclass
 class EvidenceView:
-    """Typed, normalized evidence visible to the action solver.
+    """Typed evidence with an explicit selector/value semantic identity.
 
     The solver never receives raw canvas slices or raw layer-contract dicts.
     ``source_tokens`` are selector/key tokens; ``value_tokens`` are the
@@ -77,6 +82,7 @@ class EvidenceView:
     ranges: dict[str, tuple[int, int]]
     summaries: dict[str, Tensor]
     masks: dict[str, Tensor]
+    value_mode: str = NORMALIZED_EVIDENCE
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,9 @@ class EvidenceViewAdapter(nn.Module):
         super().__init__()
         h = int(config.hidden_size)
         self.hidden_size = h
+        self.value_mode = str(getattr(config, "evidence_value_mode", NORMALIZED_EVIDENCE))
+        validate_evidence_value_mode(self.value_mode)
+        self.magnitude_values = self.value_mode == MAGNITUDE_EVIDENCE
         self.allow_terminal_layer_subset = bool(
             int(getattr(config, "flow_jepa_strict_role_visual_path", 0))
         )
@@ -107,15 +116,25 @@ class EvidenceViewAdapter(nn.Module):
         self.layer_field_proj = nn.ModuleDict(
             {name: nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)) for name in self._LAYER_FIELDS}
         )
-        self.source_proj = nn.ModuleDict(
-            {
-                "trajectory": nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)),
-                "rollout": nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)),
-                "transition": nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)),
-                "state": nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)),
-            }
-        )
-        self.event_proj = nn.Sequential(nn.LayerNorm(3), nn.Linear(3, h))
+        if self.magnitude_values:
+            # Selector normalization is owned by the bank below, not by these
+            # value projections. No bias may create a value from an absent
+            # transition or the intentionally neutral trajectory placeholder.
+            self.source_proj = nn.ModuleDict({
+                name: (nn.Identity() if name == "trajectory" else nn.Linear(h, h, bias=False))
+                for name in ("trajectory", "rollout", "transition", "state")
+            })
+            self.event_proj = nn.Linear(3, h, bias=False)
+        else:
+            self.source_proj = nn.ModuleDict(
+                {
+                    "trajectory": nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)),
+                    "rollout": nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)),
+                    "transition": nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)),
+                    "state": nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)),
+                }
+            )
+            self.event_proj = nn.Sequential(nn.LayerNorm(3), nn.Linear(3, h))
         self.layer_depth_embed = nn.Parameter(torch.randn(1, int(config.depth), h) * 0.02)
         self.intent_source_names = (
             "task",
@@ -311,20 +330,32 @@ class EvidenceViewAdapter(nn.Module):
         )
         value_sources = dict(source_tokens)
         value_sources["layer"] = layer_value_tokens
-        prepared_values = self.bank.prepare_static_memory(
-            value_sources,
-            blocks=nn.ModuleList(),
-            batch_size=batch,
-            device=reference.device,
-            dtype=reference.dtype,
-        )
+        if self.magnitude_values:
+            # Reuse the selector's exact source ranges but not its source_norm
+            # or type_embed. The latter are addresses, not observed values.
+            value_parts = []
+            for name, (start, stop) in prepared_selector.ranges.items():
+                value = value_sources[name].to(device=reference.device, dtype=reference.dtype)
+                if tuple(value.shape) != (batch, stop - start, self.hidden_size):
+                    raise ValueError("bottom evidence value lost its selector source range")
+                value_parts.append(value)
+            compiled_values = torch.cat(value_parts, dim=1)
+        else:
+            prepared_values = self.bank.prepare_static_memory(
+                value_sources,
+                blocks=nn.ModuleList(),
+                batch_size=batch,
+                device=reference.device,
+                dtype=reference.dtype,
+            )
+            compiled_values = prepared_values.tokens
         summaries = {name: value.mean(dim=1) for name, value in value_sources.items()}
         masks = {
             name: torch.ones(value.shape[:2], device=value.device, dtype=torch.bool)
             for name, value in source_tokens.items()
         }
         selector_tokens = prepared_selector.tokens
-        value_tokens = prepared_values.tokens
+        value_tokens = compiled_values
         key_bias = prepared_selector.key_bias
         ranges = dict(prepared_selector.ranges)
         if visual_selector_tokens is not None or visual_value_tokens is not None:
@@ -373,6 +404,7 @@ class EvidenceViewAdapter(nn.Module):
             ranges=ranges,
             summaries=summaries,
             masks=masks,
+            value_mode=self.value_mode,
         )
 
 
@@ -585,6 +617,9 @@ class TimeDomainMMDiTBlock(nn.Module):
         if h % heads != 0:
             raise ValueError("hidden_size must be divisible by num_heads")
         self.hidden_size = h
+        self.value_mode = str(getattr(config, "evidence_value_mode", NORMALIZED_EVIDENCE))
+        validate_evidence_value_mode(self.value_mode)
+        self.magnitude_values = self.value_mode == MAGNITUDE_EVIDENCE
         self.heads = heads
         self.head_dim = h // heads
         self.residual_scale_max = float(
@@ -595,8 +630,16 @@ class TimeDomainMMDiTBlock(nn.Module):
         self.action_qkv = nn.Linear(h, 3 * h)
         self.self_out = nn.Linear(h, h)
         self.evidence_query = nn.Linear(h, h)
-        self.evidence_kv = nn.Linear(h, 2 * h)
-        self.evidence_out = nn.Linear(h, h)
+        if self.magnitude_values:
+            # Separate bias-free K/V: a shared K bias cancels in softmax,
+            # while a V bias would create content from absent evidence.
+            # No dead half-bias is retained from a legacy packed KV layer.
+            self.evidence_key = nn.Linear(h, h, bias=False)
+            self.evidence_value = nn.Linear(h, h, bias=False)
+            self.evidence_out = nn.Linear(h, h, bias=False)
+        else:
+            self.evidence_kv = nn.Linear(h, 2 * h)
+            self.evidence_out = nn.Linear(h, h)
         self.action_ffn_norm = nn.LayerNorm(h, elementwise_affine=False)
         self.action_ffn = BiasFreeFFN(h, float(getattr(config, "latent_cvae_ffn_expansion", 2.0)))
         self.global_norm = nn.LayerNorm(h, elementwise_affine=False)
@@ -712,33 +755,39 @@ class TimeDomainMMDiTBlock(nn.Module):
         self_direction = self._unit_rms(self.self_out(self._merge(self_attended)))
 
         if evidence_value_tokens is None:
+            if self.magnitude_values:
+                raise ValueError("magnitude evidence requires an explicit value stream, not selector fallback")
             evidence_value_tokens = evidence_tokens
         if tuple(evidence_value_tokens.shape) != tuple(evidence_tokens.shape):
             raise ValueError("evidence selector and value tokens must be shape-aligned")
         evidence_selector = self.evidence_norm(evidence_tokens)
-        evidence_value = self.evidence_norm(evidence_value_tokens)
         eq = self._split(self.evidence_query(modulated_action))
-        # The two halves of the shared projection have stable semantics across
-        # every block: selector -> K and value -> V.  Previously both halves
-        # were fed from ``evidence_value_tokens``, so the selector lane was only
-        # shape-checked and never participated in retrieval.
-        # Slice the checkpoint-compatible shared projection instead of running
-        # the full 2H projection twice and discarding half of each result.
-        h = self.hidden_size
-        ek = self._split(
-            F.linear(
-                evidence_selector,
-                self.evidence_kv.weight[:h],
-                None if self.evidence_kv.bias is None else self.evidence_kv.bias[:h],
+        if self.magnitude_values:
+            ek = self._split(self.evidence_key(evidence_selector))
+            ev = self._split(self.evidence_value(evidence_value_tokens))
+        else:
+            evidence_value = self.evidence_norm(evidence_value_tokens)
+            # The two halves of the shared projection have stable semantics across
+            # every block: selector -> K and value -> V.  Previously both halves
+            # were fed from ``evidence_value_tokens``, so the selector lane was only
+            # shape-checked and never participated in retrieval.
+            # Slice the checkpoint-compatible shared projection instead of running
+            # the full 2H projection twice and discarding half of each result.
+            h = self.hidden_size
+            ek = self._split(
+                F.linear(
+                    evidence_selector,
+                    self.evidence_kv.weight[:h],
+                    None if self.evidence_kv.bias is None else self.evidence_kv.bias[:h],
+                )
             )
-        )
-        ev = self._split(
-            F.linear(
-                evidence_value,
-                self.evidence_kv.weight[h:],
-                None if self.evidence_kv.bias is None else self.evidence_kv.bias[h:],
+            ev = self._split(
+                F.linear(
+                    evidence_value,
+                    self.evidence_kv.weight[h:],
+                    None if self.evidence_kv.bias is None else self.evidence_kv.bias[h:],
+                )
             )
-        )
         evidence_attended, evidence_weights = self._attention(
             eq,
             ek,
@@ -746,7 +795,13 @@ class TimeDomainMMDiTBlock(nn.Module):
             None,
             key_bias=evidence_key_bias,
         )
-        evidence_direction = self._unit_rms(self.evidence_out(self._merge(evidence_attended)))
+        evidence_projected = self.evidence_out(self._merge(evidence_attended))
+        if self.magnitude_values:
+            # Upper-bound large writes, but do not promote arbitrarily small
+            # evidence to a unit direction or synthesize a bias at zero.
+            evidence_direction, _ = smooth_rms_contract(evidence_projected, 1.0)
+        else:
+            evidence_direction = self._unit_rms(evidence_projected)
 
         evidence_factor = self._source_scale(evidence_scale, action)
         evidence_anchor = evidence_direction * evidence_factor
@@ -789,7 +844,11 @@ class TimeDomainMMDiTBlock(nn.Module):
         }
 
     def evidence_reader_parameters(self) -> tuple[nn.Parameter, ...]:
-        modules = (self.evidence_query, self.evidence_kv, self.evidence_out)
+        modules = (
+            (self.evidence_query, self.evidence_key, self.evidence_value, self.evidence_out)
+            if self.magnitude_values
+            else (self.evidence_query, self.evidence_kv, self.evidence_out)
+        )
         return tuple(parameter for module in modules for parameter in module.parameters())
 
 
@@ -3467,6 +3526,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             visual_value_tokens=visual_value_tokens,
             visual_key_bias=visual_key_bias,
         )
+        if view.value_mode != str(getattr(self.config, "evidence_value_mode", NORMALIZED_EVIDENCE)):
+            raise ValueError("bottom evidence value semantics differ from the configured decoder")
         organized = self.organizer(view, time, flow_step_context)
         global_condition = organized["global_condition"]
         z_token = organized["latent_token"]

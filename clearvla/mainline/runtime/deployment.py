@@ -36,6 +36,11 @@ from clearvla.vision.preprocessing import (
 )
 from clearvla.vision.source_time import FIXED_VISUAL_TIME, visual_time_metadata
 
+from ..bottom_evidence import (
+    MAGNITUDE_EVIDENCE,
+    NORMALIZED_EVIDENCE,
+    bottom_evidence_metadata,
+)
 from ..checkpoint import CheckpointIdentity
 from ..config import DataConfig, ExperimentConfig, config_from_mapping
 from ..data.normalizer import ArrayNormalizer
@@ -367,6 +372,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"bottom_evidence": bottom_evidence_metadata()}
+           if config.bottom.evidence_value_mode == MAGNITUDE_EVIDENCE else {}),
         **({"operation_expectation": operation_expectation_metadata(tuple(config.data.camera_names))}
            if config.top.operation_intent_mode == OBJECT_OUTCOME_INTENT else {}),
         **({"instruction_change": instruction_change_metadata(tuple(config.data.camera_names))}
@@ -469,6 +476,13 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         raise ValueError("deployment ABI graph section ownership differs")
     if str(abi.get("graph_config_sha256", "")) != canonical_sha256(graph):
         raise ValueError("deployment ABI graph digest is inconsistent")
+    graph_bottom = _mapping(graph.get("bottom"), name="graph_config.bottom")
+    evidence_mode = graph_bottom.get("evidence_value_mode", NORMALIZED_EVIDENCE)
+    if evidence_mode == MAGNITUDE_EVIDENCE:
+        if abi.get("bottom_evidence") != bottom_evidence_metadata():
+            raise ValueError("bottom evidence value ABI semantics mismatch")
+    elif evidence_mode != NORMALIZED_EVIDENCE or "bottom_evidence" in abi:
+        raise ValueError("unknown or unselected bottom evidence value ABI")
     runtime = _mapping(graph.get("runtime"), name="graph_config.runtime")
     configured_schedule = runtime.get("deployment_flow_schedule")
     expected_schedule = (

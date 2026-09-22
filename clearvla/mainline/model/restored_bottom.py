@@ -11,7 +11,7 @@ The translation keeps the repaired ownership boundaries:
 * P2's protected consequence is written once through V120's protected-detail
   reader while the historical generic trajectory ingress remains neutral;
 * temporal and state-change are the only optional P3 innovations;
-* all 512 W transition rows reach the evidence bank without pooling;
+* all 512 completed-G3 transition rows reach the evidence bank without pooling;
 * observation banks are never reopened below P1;
 * teacher/future tensors cannot be represented by this online signature.
 """
@@ -24,6 +24,7 @@ from typing import cast
 import torch
 from torch import Tensor, nn
 
+from ..bottom_evidence import MAGNITUDE_EVIDENCE
 from ..config import ExperimentConfig
 from ..future_time import resolve_future_time
 from ..interfaces import ObservableHistory
@@ -79,6 +80,7 @@ def _build_decoder_config(config: ExperimentConfig):
         action_horizon=dims.action_horizon,
         executed_history_length=dims.executed_history_length,
         hidden_size=dims.hidden_size,
+        evidence_value_mode=bottom.evidence_value_mode,
         num_heads=dims.num_heads,
         visual_token_dim=dims.visual_token_dim,
         patches_per_camera=dims.patches_per_camera,
@@ -267,18 +269,24 @@ class RestoredV120EvidenceBottom(nn.Module):
             self.decoder.evidence_adapter.intent_proj[source_name].requires_grad_(
                 False
             )
-        # Generic trajectory is an exact-zero source in this path.  Its first
-        # LayerNorm scale multiplies zero forever, while the affine biases and
-        # following projection remain the trainable V120 null-value geometry.
-        trajectory_projection = cast(
-            nn.Sequential,
-            self.decoder.evidence_adapter.source_proj["trajectory"],
-        )
-        trajectory_norm = trajectory_projection[0]
-        if not isinstance(trajectory_norm, nn.LayerNorm):
-            raise TypeError("V120 trajectory projection must start with LayerNorm")
-        if trajectory_norm.weight is not None:
-            trajectory_norm.weight.requires_grad_(False)
+        if bottom.evidence_value_mode == MAGNITUDE_EVIDENCE:
+            # This mainline always supplies a zero generic trajectory. An
+            # identity keeps the placeholder honest without dead parameters.
+            if not isinstance(self.decoder.evidence_adapter.source_proj["trajectory"], nn.Identity):
+                raise TypeError("magnitude evidence requires a parameter-free neutral trajectory")
+        else:
+            # Generic trajectory is an exact-zero source in this path.  Its first
+            # LayerNorm scale multiplies zero forever, while the affine biases and
+            # following projection remain the trainable V120 null-value geometry.
+            trajectory_projection = cast(
+                nn.Sequential,
+                self.decoder.evidence_adapter.source_proj["trajectory"],
+            )
+            trajectory_norm = trajectory_projection[0]
+            if not isinstance(trajectory_norm, nn.LayerNorm):
+                raise TypeError("V120 trajectory projection must start with LayerNorm")
+            if trajectory_norm.weight is not None:
+                trajectory_norm.weight.requires_grad_(False)
 
     @property
     def blocks(self) -> nn.ModuleList:
