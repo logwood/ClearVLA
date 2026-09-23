@@ -20,6 +20,7 @@ from clearvla.vision.entity_chart import (
 from clearvla.vision.entity_history import ObservedEntityHistory
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
 
+from ..annotation_goal import AnnotatedGoalEvidence, AnnotatedGoalValues
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import InstructionChangeEvidence
 from ..instruction_posterior import InstructionChangeValues
@@ -1031,6 +1032,8 @@ class PolicyIntentDock:
     target_binding: TargetBinding | None = None
     instruction_change: InstructionChangeEvidence | None = None
     instruction_plan_values: InstructionChangeValues | None = None
+    annotated_goal: AnnotatedGoalEvidence | None = None
+    annotated_goal_values: AnnotatedGoalValues | None = None
     operation_expectation: OperationExpectation | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
@@ -1054,6 +1057,14 @@ class PolicyIntentDock:
         ) != (batch,):
             raise ValueError("policy-intent typed common value must be [B,K,3,R]")
         objects = int(self.typed_common_value.shape[1])
+        if self.annotated_goal is not None:
+            self.annotated_goal.validate()
+            if self.annotated_goal.instruction_change is not self.instruction_change:
+                raise ValueError("goal belongs to another causal observation/reference")
+        if self.annotated_goal_values is not None:
+            self.annotated_goal_values.validate(hidden=hidden)
+            if self.annotated_goal_values.evidence is not self.annotated_goal:
+                raise ValueError("prepared goal belongs to another goal evidence")
         if self.operation_expectation is not None:
             self.operation_expectation.validate()
             if self.operation_expectation.binding is not self.target_binding:
@@ -1119,6 +1130,8 @@ class ObjectIntentState:
     target_evidence: TargetEvidence | None = None
     instruction_change: InstructionChangeEvidence | None = None
     instruction_plan_values: InstructionChangeValues | None = None
+    annotated_goal: AnnotatedGoalEvidence | None = None
+    annotated_goal_values: AnnotatedGoalValues | None = None
     operation_expectation: OperationExpectation | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
@@ -1189,6 +1202,8 @@ class ObjectIntentState:
             instruction_change=self.instruction_change,
             instruction_plan_values=self.instruction_plan_values,
             operation_expectation=self.operation_expectation,
+            annotated_goal=self.annotated_goal,
+            annotated_goal_values=self.annotated_goal_values,
             target_object_address_logit=self.target_object_address_logit,
             typed_common_value=self.typed_common_value,
             target_binding=self.target_binding,
@@ -1199,6 +1214,14 @@ class ObjectIntentState:
         resolve_future_time(self.time_grid_mode)
         batch = int(self.public_interval_carrier.shape[0])
         _shape(self.protected_goal_set, (batch, 4, hidden), "protected goal set")
+        if self.annotated_goal is not None:
+            self.annotated_goal.validate()
+            if self.annotated_goal.instruction_change is not self.instruction_change:
+                raise ValueError("goal belongs to another causal observation/reference")
+        if self.annotated_goal_values is not None:
+            self.annotated_goal_values.validate(hidden=hidden)
+            if self.annotated_goal_values.evidence is not self.annotated_goal:
+                raise ValueError("prepared goal belongs to another goal evidence")
         if self.operation_expectation is not None:
             self.operation_expectation.validate()
             if self.operation_expectation.binding is not self.target_binding:
@@ -1308,6 +1331,11 @@ class ObjectIntentState:
             if binding is None:
                 raise ValueError("instruction change cannot lose target law during permutation")
             change = self.instruction_change.permute(index, binding)
+        annotated_goal = None
+        if self.annotated_goal is not None:
+            if change is None:
+                raise ValueError("goal permutation lost instruction evidence")
+            annotated_goal = self.annotated_goal.permute(change)
         return ObjectIntentState(
             time_grid_mode=self.time_grid_mode,
             protected_goal_set=self.protected_goal_set,
@@ -1319,6 +1347,9 @@ class ObjectIntentState:
             instruction_plan_values=(None if self.instruction_plan_values is None or change is None else
                                      self.instruction_plan_values.permute(index,change)),
             operation_expectation=operation,
+            annotated_goal=annotated_goal,
+            annotated_goal_values=(None if self.annotated_goal_values is None or annotated_goal is None else
+                                   self.annotated_goal_values.permute(index, annotated_goal)),
             target_evidence=None if self.target_evidence is None else self.target_evidence.permute(index),
             public_interval_carrier=self.public_interval_carrier,
             policy_interval_context=self.policy_interval_context,
@@ -2529,6 +2560,7 @@ class ObjectTopTrainingTargets:
     future_interval_valid: Tensor | None = None  # dataset-owned, never a predicted confidence
     supervised_world: SupervisedWorld | None = None  # training plane only
     robot_response_loss: Tensor | None = None  # past-to-current observed response
+    annotated_goal_terms: dict[str, Tensor] | None = None
     operation_terms: dict[str, Tensor] | None = None  # supervised expectations, never observed progress
 
     @property

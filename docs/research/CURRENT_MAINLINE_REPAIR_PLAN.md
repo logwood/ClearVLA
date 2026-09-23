@@ -1,3 +1,23 @@
+## M8j: annotated-endpoint prior and remaining relation candidate
+
+Continue from independently restored f5ab2eef source (same tree as expanded
+remote M8i). Separate real annotation-end state/DINO labels from fixed-window
+future labels, preserving source ID/time through HDF5, cached loading, typed
+supervision and dataset identity. Missing/censored endpoints retain BC examples
+without goal labels; no segment-end success assumption.
+
+S now predicts a terminal-scene/soft relation/robot prior only from observed
+instruction start and protected language. Independent S/P3 readers compare it
+to the current scene, conditioning partial observations on their available
+support and preserving soft/null mass. Goal and W retrodiction error have distinct
+roles. Source-mode and prepared-cache contracts reach deployment/exact reload.
+
+The candidate supplies a learnable demonstration-outcome discrepancy, NOT a
+certified terminal relation or task-progress recognizer. Resolve full regression
+and real runtime/data admission before adding another goal/feedback module.
+Production GPU, real encoder cost, held-out learned behavior and physical object
+correspondence still require actual evidence. Older configs remain controls.
+
 ## Executed-control discrepancy continuation (2026-09-23)
 
 The causal confirmed-control window, shared past G/W1 retrodiction, frozen

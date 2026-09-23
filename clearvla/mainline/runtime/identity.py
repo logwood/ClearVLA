@@ -62,6 +62,12 @@ def dataset_identity(
             {
                 "episode_id": episode.episode_id,
                 "source_partition": episode.source_partition,
+                **({"annotation_endpoint": {
+                    "source_annotation_index": episode.source_annotation_index,
+                    "source_start": episode.source_start, "source_end": episode.source_end,
+                    "context_start": episode.context_start, "terminal_state_index": episode.terminal_state_index,
+                    "terminal_padding_mode": episode.terminal_padding_mode,
+                }} if config.top.annotation_goal_mode != "none" else {}),
                 "task_id": episode.task_id,
                 "instruction_sha256": (
                     None if episode.instruction is None else _digest(episode.instruction)

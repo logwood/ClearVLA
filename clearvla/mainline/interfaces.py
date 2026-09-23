@@ -21,6 +21,7 @@ from torch import Tensor
 
 from clearvla.data.window_boundaries import OBSERVED_TAIL_V1
 
+from .annotation_goal import AnnotationEndpoint
 from .config import ExperimentConfig
 from .executed_world import ExecutedWorldWindow
 from .future_time import LEGACY_FUTURE_TIME, resolve_future_time
@@ -260,6 +261,7 @@ class FutureSupervision:
     offsets: Tensor  # int64 [B,F]
     support: FutureLabelSupport | None = None
     time_grid_mode: str = LEGACY_FUTURE_TIME
+    annotation_endpoint: AnnotationEndpoint | None = None
 
     @property
     def batch(self) -> int:
@@ -270,6 +272,10 @@ class FutureSupervision:
         return int(self.dino_supports.shape[1])
 
     def validate(self, config: ExperimentConfig) -> None:
+        if (self.annotation_endpoint is not None) != (config.top.annotation_goal_mode != "none"):
+            raise ValueError("annotation endpoint label presence differs from the selected graph")
+        if self.annotation_endpoint is not None:
+            self.annotation_endpoint.validate(config, batch=self.batch, device=self.dino_supports.device)
         if self.time_grid_mode != config.top.future_time_grid_mode:
             raise ValueError("future label time grid differs from selected graph")
         dims = config.dimensions
@@ -447,6 +453,15 @@ class TrainingBatch:
             raise ValueError("training batch partitions must share a device")
         if self.action_target.support is not self.future.support:
             raise ValueError("action and future labels must share one source-support record")
+        endpoint = self.future.annotation_endpoint
+        if endpoint is not None:
+            reference = self.online.instruction_reference
+            if reference is None:
+                raise ValueError("annotated goal labels require an instruction reference")
+            _, context, start, _, center = endpoint.source_indices.unbind(-1)
+            expected_age = center - (start - context)
+            if bool((endpoint.declared & (expected_age != reference.age_steps)).any()):
+                raise ValueError("annotation endpoint and instruction reference source clocks differ")
         self.audit.validate(self.online.batch)
 
 

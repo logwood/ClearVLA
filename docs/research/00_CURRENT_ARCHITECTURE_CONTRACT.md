@@ -1,3 +1,56 @@
+## M8j — reference-conditioned annotated endpoint relation candidate (2026-09-23)
+
+`top.annotation_goal_mode=annotated_endpoint_relation_v1` is explicit in
+`structural_rebuild_annotated_goal_calvin.json`; all earlier modes stay unchanged.
+This is a supervised demonstration-end prior, not an oracle, calibrated physical
+relation, success classifier or elapsed-time progress value. The default new
+objective weight 0.01 is a declared untuned budget, not a measured optimum.
+
+The converter's annotation ID is now preserved by the HDF5 loader. A separate
+training-only AnnotationEndpoint owns source annotation/context/start/end/center,
+real endpoint state and full native DINO chart. The endpoint is read independently
+of the action/W horizon in the existing grouped token load. Unknown provenance
+or a censored prefix supplies no goal label but retains its behavioral example;
+contradictory source indices fail admission. Terminal storage padding is never
+the target. The source chronology must agree with the online instruction anchor.
+Neither these indices, duration nor the actual endpoint enter OnlinePolicyInput.
+
+The new S predictor reads ONLY the causal instruction-start DINO, robot feature
+and protected language tokens. It predicts a normalized endpoint scene, a full
+reference-patch-to-endpoint-patch-plus-null distribution and robot feature delta.
+Current observations cannot change this prior under the same weights/reference/
+language. Predictions are not detached from their direct losses or policy use.
+A conditional mean scene can blur ambiguous futures; the finite soft relation is
+not a persistent physical-object ID or complete semantic task specification.
+
+Current observations and terminal labels use the same fixed full-native cosine
+observation law, with uniform real-cell measure and a null alternative. The
+label/current metric has no learned projection that could erase its supervision.
+It is explicitly uncalibrated appearance correspondence, not metric 3D geometry.
+S and P3 independently transform content, coordinates and joint features BEFORE
+posterior expectation. Existing soft current-G3-to-start support transports the
+remaining relation to current K without matching slot indices. Target/null mass
+is applied after reading, not divided away. Robot relation remains a separate
+feature chart. P3 consumes these values on its task/temporal lane, not by renaming
+observed-change or W-retrodiction discrepancy values. Its projections are cached
+once per online encoding; the goal adds no G/W/ODE image calls, but does add
+learned parameters and quadratic native-patch attention work.
+
+Partially missing current destinations condition BOTH goal and observed laws on
+the same available cells plus null; unseen cells do not become goal failure.
+The fixed physical goal prior remains unchanged by this comparison support.
+
+Scene Huber, relation KL and robot Huber are independently source-masked and
+averaged into the new budget. Missing destination cells condition both laws and
+are not trained as negatives. Endpoint labels are detached; learned target/null
+confidence cannot erase goal supervision. No end-of-window heuristic, success
+threshold, task string branch or deployment-only memory is introduced. Typed
+cache/deployment/checkpoint ownership distinguishes the candidate from old models.
+
+This is a saved implementation candidate. Exact completed tests, failed attempts,
+resource costs and runtime identity belong to its reports; a source save is not
+supported-runtime, real-data learning, GPU or closed-loop acceptance.
+
 ## Executed-control world discrepancy candidate (2026-09-23)
 
 Explicit `top.world_feedback_mode=executed_four_step_world_v1` is selected in

@@ -20,6 +20,7 @@ from ..supervision import quarantine, supported_mean
 from ..world_robot import OBSERVED_ROBOT_VIEWS, RobotWorldObservation
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from .action_contract import BottomOutput
+from .annotation_goal import supervise_annotated_goal
 from .component_contracts import ComponentSelection, modular_to_legacy_name
 from .components import (
     BridgeStage,
@@ -151,6 +152,17 @@ class OnlinePolicyCache:
                 raise ValueError("executed world feedback belongs to another source window")
             if fb.binding is not self.top.intent.target_binding:
                 raise ValueError("executed world feedback belongs to another operated target")
+        endpoint_goal = self.top.intent.annotated_goal
+        endpoint_values = self.top.intent.annotated_goal_values
+        if (endpoint_goal is not None) != (config.top.annotation_goal_mode != "none"):
+            raise ValueError("annotated goal cache differs from configured graph")
+        if (endpoint_values is not None) != (endpoint_goal is not None):
+            raise ValueError("annotated goal cache lost its prepared P3 values")
+        if endpoint_goal is not None:
+            if endpoint_goal.instruction_change is not self.top.intent.instruction_change:
+                raise ValueError("annotated goal belongs to another causal comparison")
+            if endpoint_goal.prediction.reference is not self.instruction_reference:
+                raise ValueError("annotated goal belongs to another instruction start")
         op = self.top.intent.operation_expectation
         if (op is not None) != (config.top.operation_intent_mode == OBJECT_OUTCOME_INTENT):
             raise ValueError("operation expectation cache differs from configured mode")
@@ -336,6 +348,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             instruction_reference_mode=top.instruction_reference_mode,
             instruction_change_mode=top.instruction_change_mode,
             operation_intent_mode=top.operation_intent_mode,
+            annotation_goal_mode=top.annotation_goal_mode,
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,
@@ -970,6 +983,11 @@ class ClearVLAMainlinePolicy(nn.Module):
             label_support=future.support,
             collect_diagnostics=collect_diagnostics,
         )
+        if self.config.top.annotation_goal_mode != "none":
+            evidence = training_state.top.intent.annotated_goal
+            if evidence is None or future.annotation_endpoint is None:
+                raise ValueError("endpoint goal supervision lost online prediction or label support")
+            targets = replace(targets, annotated_goal_terms=supervise_annotated_goal(evidence.prediction, future.annotation_endpoint))
         proposal_rows = F.smooth_l1_loss(
             training_state.history_proposal.action_prediction.float(),
             source_action[:, : self.config.dimensions.action_horizon].detach().float(),

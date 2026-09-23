@@ -15,6 +15,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from clearvla.data.annotation_endpoint import resolve_annotation_endpoint
 from clearvla.data.future_clock import OBSERVED_FUTURE_CONTRACT, future_source_rows
 from clearvla.data.hdf5_episode import LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING, LoadedEpisode
 from clearvla.data.history_clock import sparse_history_clock
@@ -60,6 +61,7 @@ class ObservedStateDatasetConfig:
     causal_reset_padding: bool = False
     emit_history_timing: bool = False
     instruction_reference_mode: str = "none"
+    annotation_goal_mode: str = "none"
     robot_feedback_mode: str = "none"
     world_feedback_mode: str = "none"
     state_feature_mode: str = NATIVE_AFFINE_STATE
@@ -67,6 +69,13 @@ class ObservedStateDatasetConfig:
     window_boundary_contract: str = STRICT_COMPLETE_V1
 
     def validate(self) -> None:
+        if self.annotation_goal_mode not in {"none", "annotated_endpoint_relation_v1"}:
+            raise ValueError("unknown annotated endpoint dataset mode")
+        if self.annotation_goal_mode != "none" and (
+            self.instruction_reference_mode != INSTRUCTION_START_REFERENCE
+            or self.window_boundary_contract != OBSERVED_TAIL_V1
+        ):
+            raise ValueError("annotated endpoints require real-tail instruction provenance")
         if self.world_feedback_mode not in {"none",EXECUTED_WORLD_FEEDBACK}:
             raise ValueError("unknown executed world source producer")
         if self.world_feedback_mode!="none" and (
@@ -341,6 +350,19 @@ class ObservedStateWindowDataset(Dataset):
                     ),
                 }
             )
+        if self.config.annotation_goal_mode != "none":
+            endpoints = {i: resolve_annotation_endpoint(self.episodes[i]) for i in self.episode_ids}
+            statuses: dict[str, int] = {}
+            for endpoint in endpoints.values():
+                statuses[endpoint.status] = statuses.get(endpoint.status, 0) + 1
+            summary["annotation_endpoint_episode_statuses"] = statuses
+            labeled_windows = 0
+            for ref in self.refs:
+                endpoint_index = endpoints[ref.episode_idx].index
+                if endpoint_index is not None and ref.center <= endpoint_index:
+                    labeled_windows += 1
+            summary["annotation_endpoint_labeled_windows"] = labeled_windows
+            summary["annotation_endpoint_is_success_label"] = False
         return summary
 
     def _gripper_transition_boundary_raw(
@@ -701,7 +723,34 @@ class ObservedStateWindowDataset(Dataset):
                     mode=cfg.state_feature_mode, profile=cfg.state_profile,
                 )),
             }
+        endpoint_fields: dict[str, torch.Tensor] = {}
+        if cfg.annotation_goal_mode != "none":
+            source = resolve_annotation_endpoint(episode)
+            idx = source.index
+            available = idx is not None and center <= idx
+            # Unknown endpoint still uses a safe observed row for transport;
+            # its mask is false and no endpoint label is fabricated.
+            endpoint_index = center if idx is None else idx
+            fields = [-1] * 5
+            if available:
+                assert episode.source_annotation_index is not None
+                assert episode.context_start is not None and episode.source_start is not None and episode.source_end is not None
+                fields = [episode.source_annotation_index, episode.context_start,
+                          episode.source_start, episode.source_end, center]
+            endpoint_state = encode_state_features(
+                np.asarray(states_raw[endpoint_index], dtype=np.float32), self.state_normalizer,
+                mode=cfg.state_feature_mode, profile=cfg.state_profile,
+            ) if available else np.zeros_like(future_state_features[0])
+            endpoint_fields = {
+                "annotation_endpoint_key": torch.tensor([[ref.episode_idx, endpoint_index]], dtype=torch.long),
+                "annotation_endpoint_state": torch.from_numpy(endpoint_state),
+                "annotation_endpoint_declared": torch.tensor(available, dtype=torch.bool),
+                "annotation_endpoint_state_observed": torch.tensor(available, dtype=torch.bool),
+                "annotation_endpoint_source_indices": torch.tensor(fields, dtype=torch.long),
+                "annotation_endpoint_offset_steps": torch.tensor(endpoint_index - center if available else 0, dtype=torch.long),
+            }
         return {
+            **endpoint_fields,
             **world_fields,
             **reference_fields,
             **step_fields,
@@ -819,11 +868,14 @@ class CachedTokenPolicyWindowDataset(Dataset):
         # exact current/future ownership split in the returned mapping.
         reference_key = sample.pop("instruction_reference_key", None)
         executed_keys=sample.pop("executed_world_keys",None)
+        endpoint_key = sample.pop("annotation_endpoint_key", None)
         keys=[history_keys,future_keys]
         if reference_key is not None:
             keys.append(reference_key)
         if executed_keys is not None:
             keys.append(executed_keys)
+        if endpoint_key is not None:
+            keys.append(endpoint_key)
         token_rows=self.token_store.load_batch(torch.cat(keys,dim=0))
         history_rows = int(history_keys.shape[0])
         future_end = history_rows + int(future_keys.shape[0])
@@ -837,6 +889,11 @@ class CachedTokenPolicyWindowDataset(Dataset):
             sample["executed_world_dino"]=token_rows[first:first+int(executed_keys.shape[0])]
             if not bool(sample["executed_world_observed"]):
                 sample["executed_world_dino"]=torch.zeros_like(sample["executed_world_dino"])
+        if endpoint_key is not None:
+            endpoint_tokens = token_rows[-1]
+            support = torch.full(endpoint_tokens.shape[:-1], bool(sample["annotation_endpoint_declared"]), dtype=torch.bool)
+            sample["annotation_endpoint_dino"] = torch.where(support[..., None], endpoint_tokens, 0.0)
+            sample["annotation_endpoint_visual_observed"] = support
         sample["target_future_offsets"] = sample.pop("future_offsets")
         return sample
 

@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..annotation_goal import ANNOTATED_ENDPOINT_GOAL
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import (
     INSTRUCTION_CHANGE_MODES,
@@ -17,6 +18,7 @@ from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionRefe
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
+from .annotation_goal import AnnotatedGoalValueRead, EndpointGoalPredictor, compare_goal_to_current
 from .instruction_change import TypedInstructionReferenceRead
 from .instruction_posterior import PosteriorInstructionReferenceRead
 from .instruction_progress import InstructionReferenceRead
@@ -306,6 +308,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         instruction_reference_mode: str = "none",
         instruction_change_mode: str = MIXED_REFERENCE_CHANGE,
         operation_intent_mode: str = POSTERIOR_INTENT,
+        annotation_goal_mode: str = "none",
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
         super().__init__()
@@ -442,6 +445,20 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
         elif operation_intent_mode != POSTERIOR_INTENT:
             raise ValueError("unknown operation intent")
+
+        self.endpoint_goal = None
+        self.endpoint_goal_read = None
+        self.endpoint_goal_output = None
+        if annotation_goal_mode == ANNOTATED_ENDPOINT_GOAL:
+            if instruction_change_mode != POSTERIOR_REFERENCE_CHANGE:
+                raise ValueError("endpoint goal requires full posterior instruction evidence")
+            self.endpoint_goal = EndpointGoalPredictor(hidden=hidden, content_dim=content_dim,
+                state_dim=state_dim, heads=heads, camera_names=camera_names)
+            self.endpoint_goal_read = AnnotatedGoalValueRead(hidden=hidden, content_dim=content_dim,
+                state_dim=state_dim, camera_names=camera_names)
+            self.endpoint_goal_output = nn.Linear(4 * hidden, hidden, bias=False)
+        elif annotation_goal_mode != "none":
+            raise ValueError("unknown endpoint goal mode")
 
     @staticmethod
     def _paired_history(
@@ -813,6 +830,14 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if progress is not None:
             interval_source = interval_source + progress[:, None]
         public_intervals = self.interval_self(interval_source)
+        annotated_goal = None
+        if self.endpoint_goal is not None:
+            if instruction_reference is None or instruction_change is None or self.endpoint_goal_read is None or self.endpoint_goal_output is None:
+                raise ValueError("annotated goal lost its causal reference or value reader")
+            prediction = self.endpoint_goal(reference=instruction_reference, language=protected_goal)
+            annotated_goal = compare_goal_to_current(prediction, instruction_change)
+            values = self.endpoint_goal_read(annotated_goal)
+            public_intervals = public_intervals + self.endpoint_goal_output(torch.cat(values, -1).to(public_intervals.dtype))[:, None]
         operation_expectation = None
         if self.operation_predictor is not None:
             if target_binding is None or self.operation_read is None:
@@ -938,6 +963,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             state_change_evidence=state_change_evidence,
             instruction_change=instruction_change,
             operation_expectation=operation_expectation,
+            annotated_goal=annotated_goal,
             target_object_address_logit=target_object_address_logit,
             typed_common_mass=typed_common_mass,
             typed_common_value=typed_common_value,

@@ -18,6 +18,7 @@ from torch import Tensor
 from clearvla.data.history_clock import sparse_history_clock
 from clearvla.data.window_boundaries import OBSERVED_TAIL_V1
 
+from ..annotation_goal import AnnotationEndpoint
 from ..config import ExperimentConfig
 from ..data.normalizer import ArrayNormalizer
 from ..executed_world import ExecutedWorldWindow
@@ -213,6 +214,15 @@ def synthetic_batch(
         support=support,
         time_grid_mode=grid.mode,
     )
+    if config.top.annotation_goal_mode != "none":
+        # Explicit synthetic label, not a real annotation or a success claim.
+        future = replace(future, annotation_endpoint=AnnotationEndpoint(
+            rand(count, dims.num_cameras, dims.patches_per_camera, dims.visual_token_dim),
+            rand(count, dims.state_dim), mask(count, dims.num_cameras, dims.patches_per_camera),
+            mask(count), mask(count),
+            torch.tensor([[0, 0, 16, 75, 24]], dtype=torch.long, device=device).expand(count, -1).clone(),
+            torch.full((count,), 51, dtype=torch.long, device=device),
+        ))
     target = actions[:, : dims.action_horizon].clone()
     batch = TrainingBatch(
         online,

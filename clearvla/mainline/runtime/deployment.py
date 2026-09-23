@@ -36,6 +36,7 @@ from clearvla.vision.preprocessing import (
 )
 from clearvla.vision.source_time import FIXED_VISUAL_TIME, visual_time_metadata
 
+from ..annotation_goal import ANNOTATED_ENDPOINT_GOAL, annotation_goal_metadata
 from ..bottom_evidence import (
     MAGNITUDE_EVIDENCE,
     NORMALIZED_EVIDENCE,
@@ -396,6 +397,8 @@ def build_deployment_abi(
            if config.bottom.transition_condition_mode == TYPED_TRANSITION else {}),
         **({"bottom_evidence": bottom_evidence_metadata()}
            if config.bottom.evidence_value_mode == MAGNITUDE_EVIDENCE else {}),
+        **({"annotation_goal": annotation_goal_metadata(tuple(config.data.camera_names))}
+           if config.top.annotation_goal_mode != "none" else {}),
         **({"operation_expectation": operation_expectation_metadata(tuple(config.data.camera_names))}
            if config.top.operation_intent_mode == OBJECT_OUTCOME_INTENT else {}),
         **({"instruction_change": instruction_change_metadata(tuple(config.data.camera_names), config.top.instruction_change_mode)}
@@ -547,6 +550,15 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     graph_top = _mapping(
         _mapping(abi.get("graph_config"), name="graph_config").get("top"), name="graph_config.top"
     )
+    annotation_mode = graph_top.get("annotation_goal_mode", "none")
+    if annotation_mode == ANNOTATED_ENDPOINT_GOAL:
+        cameras = observation.get("camera_names")
+        if not isinstance(cameras, list) or not all(isinstance(n, str) for n in cameras):
+            raise ValueError("annotated goal ABI requires named cameras")
+        if abi.get("annotation_goal") != annotation_goal_metadata(tuple(cameras)):
+            raise ValueError("annotated goal ABI semantics mismatch")
+    elif annotation_mode != "none" or "annotation_goal" in abi:
+        raise ValueError("unexpected annotated goal ABI")
     operation_mode = graph_top.get("operation_intent_mode", POSTERIOR_INTENT)
     if operation_mode == OBJECT_OUTCOME_INTENT:
         cameras = observation.get("camera_names")

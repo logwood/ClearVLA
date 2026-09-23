@@ -2461,6 +2461,13 @@ def compose_losses(
         + objective.flow_uncertainty * geometry["flow_uncertainty"]
         + objective.flow_refinement_sequence * geometry["flow_refinement_sequence"]
     )
+    goal_terms = top_targets.annotated_goal_terms
+    if config.top.annotation_goal_mode != "none":
+        if goal_terms is None:
+            raise ValueError("annotated endpoint objective missing")
+        representation_group = representation_group + objective.annotated_goal * goal_terms["annotated_goal_total"]
+    elif goal_terms is not None:
+        raise ValueError("unselected endpoint objective supplied")
     execution_group = objective.execution_value * execution["execution_value"]
     response = top_targets.robot_response_loss
     if config.top.robot_feedback_mode != "none":
@@ -2551,6 +2558,9 @@ def compose_losses(
         "coarse_action": top_targets.coarse_action_loss,
         "history_action_proposal": top_targets.history_proposal_loss,
     }
+    if goal_terms is not None:
+        terms.update(goal_terms)
+        contributions["annotated_goal"] = objective.annotated_goal * goal_terms["annotated_goal_total"]
     if top_targets.operation_terms is not None:
         terms.update(top_targets.operation_terms)
     if response is not None:

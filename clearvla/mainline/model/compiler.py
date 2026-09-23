@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 import torch
 from torch import Tensor, nn
 
+from ..annotation_goal import ANNOTATED_ENDPOINT_GOAL
 from ..executed_world import EXECUTED_WORLD_FEEDBACK, ExecutedWorldPlanValues
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import (
@@ -21,6 +22,7 @@ from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_
 from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from ..robot_execution import RobotResponseFeedback
 from .action_codec import ACTION_BAND_ENDS
+from .annotation_goal import AnnotatedGoalPlanRead
 from .executed_world import ExecutedWorldPlanRead
 from .horizon_coordination import P3HorizonContext, TypedHorizonCoordinator
 from .instruction_change import InstructionChangePlanRead
@@ -1469,6 +1471,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
                  robot_feedback_mode: str = "none", world_feedback_mode: str = "none", state_dim: int = 7, action_dim: int = 7,
                  instruction_change_mode: str = MIXED_REFERENCE_CHANGE, content_dim: int = 768,
                  operation_intent_mode: str = POSTERIOR_INTENT,
+                 annotation_goal_mode: str = "none",
                  camera_names: tuple[str, ...] = ("top", "wrist")) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
@@ -1508,6 +1511,10 @@ class ObjectPolicyPlanCompiler(nn.Module):
             raise ValueError("executed world feedback requires typed P3")
         self.world_feedback_read=(ExecutedWorldPlanRead(hidden=hidden,content_dim=content_dim,
             camera_names=camera_names) if world_feedback_mode != "none" else None)
+        if annotation_goal_mode not in {"none", ANNOTATED_ENDPOINT_GOAL}:
+            raise ValueError("unknown annotated goal P3 reader")
+        self.annotated_goal_read = (AnnotatedGoalPlanRead(hidden=hidden, content_dim=content_dim,
+            state_dim=state_dim, camera_names=camera_names) if annotation_goal_mode != "none" else None)
         self.coordinator: TypedHorizonCoordinator | None = None
         if coordination_mode == TYPED_HORIZON_PLAN:
             if not self.time_grid.aligned:
@@ -1535,10 +1542,16 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if isinstance(self.instruction_change_read, PosteriorInstructionChangePlanRead):
             if intent.instruction_change is None:
                 raise ValueError("posterior P3 preparation requires causal instruction evidence")
-            return replace(
+            intent = replace(
                 intent,
                 instruction_plan_values=self.instruction_change_read.prepare(intent.instruction_change),
             )
+        if self.annotated_goal_read is not None:
+            if intent.annotated_goal is None:
+                raise ValueError("P3 goal preparation requires online inferred endpoint intent")
+            intent = replace(intent, annotated_goal_values=self.annotated_goal_read.prepare(intent.annotated_goal))
+        elif intent.annotated_goal is not None:
+            raise ValueError("annotated goal supplied to an unselected reader")
         return intent
 
     def forward(
@@ -1606,6 +1619,14 @@ class ObjectPolicyPlanCompiler(nn.Module):
             temporal_raw = temporal_raw + self.operation_read(intent.operation_expectation, temporal_private)
         elif intent.operation_expectation is not None:
             raise ValueError("unexpected operation expectation in legacy P3")
+        if self.annotated_goal_read is not None:
+            if intent.annotated_goal is None:
+                raise ValueError("P3 requires the inferred desired endpoint relation")
+            # Desired relation is an intent contribution, not measured progress
+            # or W discrepancy. It joins the temporal/task lane separately.
+            temporal_raw = temporal_raw + self.annotated_goal_read(intent.annotated_goal, temporal_private, intent.annotated_goal_values)
+        elif intent.annotated_goal is not None or intent.annotated_goal_values is not None:
+            raise ValueError("annotated goal supplied to unselected P3")
         if self.world_feedback_read is not None:
             if world_feedback is None:
                 raise ValueError("executed world P3 reader requires prepared causal evidence")

@@ -25,6 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..annotation_goal import AnnotationEndpoint
 from ..future_time import LEGACY_FUTURE_TIME
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE
 from ..instruction_reference import InstructionReference
@@ -33,6 +34,7 @@ from ..temporal import HistoryTiming
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
 from ..v120_core.role_delta_attnres import AffineVarianceFlooredCenteredNorm
 from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
+from .annotation_goal import supervise_annotated_goal
 from .compiler import (
     ObjectConsequenceState,
     ObjectFutureEffectReader,
@@ -226,6 +228,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         instruction_reference_mode: str = "none",
         instruction_change_mode: str = "mixed_reference_v1",
         operation_intent_mode: str = POSTERIOR_INTENT,
+        annotation_goal_mode: str = "none",
         history_encoding_mode: str = "paired_rows_v1",
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = "query_lattice_v1",
@@ -293,6 +296,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             target_binding_mode=target_binding_mode,
             instruction_reference_mode=instruction_reference_mode,
             operation_intent_mode=operation_intent_mode,
+            annotation_goal_mode=annotation_goal_mode,
             instruction_change_mode=instruction_change_mode,
             camera_names=camera_names,
             history_encoding_mode=history_encoding_mode,
@@ -356,6 +360,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             coordination_mode=p3_coordination_mode, heads=heads,
             robot_feedback_mode=robot_feedback_mode, world_feedback_mode=world_feedback_mode, state_dim=state_dim, action_dim=action_dim,
             operation_intent_mode=operation_intent_mode,
+            annotation_goal_mode=annotation_goal_mode,
             instruction_change_mode=instruction_change_mode, content_dim=content_dim,
             camera_names=camera_names,
             hidden=hidden,
@@ -709,6 +714,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         future_offsets: Tensor,
         future_action: Tensor,
         future_state: Tensor,
+        annotation_endpoint: AnnotationEndpoint | None = None,
         collect_diagnostics: bool = False,
     ) -> tuple[ObjectTopTrainingTargets, dict[str, Tensor]]:
         """Build the sole training plane without changing online values."""
@@ -773,6 +779,12 @@ class ObjectIntentDynamicsTop(nn.Module):
             history_proposal_loss=coarse_loss.new_zeros(()),
             object_reconstruction_loss=context.facts.reconstruction_error,
         )
+        if context.intent.annotated_goal is not None:
+            if annotation_endpoint is None:
+                raise ValueError("selected endpoint intent requires explicit label support")
+            targets = replace(targets, annotated_goal_terms=supervise_annotated_goal(context.intent.annotated_goal.prediction, annotation_endpoint))
+        elif annotation_endpoint is not None:
+            raise ValueError("endpoint labels supplied to unselected top")
         if not collect_diagnostics:
             return targets, {}
         metrics = {

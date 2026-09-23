@@ -62,6 +62,7 @@ from clearvla.vision.decoded_image_store import DecodedImageStore
 from clearvla.vision.online_store import OnlineVisualStore
 from clearvla.vision.preprocessing import PreprocessConfig
 
+from ..annotation_goal import AnnotationEndpoint
 from ..config import ExperimentConfig
 from ..executed_world import ExecutedWorldWindow
 from ..future_time import resolve_future_time
@@ -524,6 +525,7 @@ def _load_mainline_data(
     strict_dataset_config = ObservedStateDatasetConfig(
         emit_history_timing=config.top.history_encoding_mode == TIMED_HISTORY_ENCODING,
         instruction_reference_mode=config.top.instruction_reference_mode,
+        annotation_goal_mode=config.top.annotation_goal_mode,
         robot_feedback_mode=config.top.robot_feedback_mode,
         world_feedback_mode=config.top.world_feedback_mode,
         state_feature_mode=config.top.state_feature_mode,
@@ -1192,7 +1194,19 @@ def to_training_batch(
             device=dino_history.device,
             strict=True,
         )
+    annotation_endpoint = None
+    if config.top.annotation_goal_mode != "none":
+        annotation_endpoint = AnnotationEndpoint(
+            dino=_device_tensor(batch, "annotation_endpoint_dino", device=device),
+            state=_device_tensor(batch, "annotation_endpoint_state", device=device, dtype=torch.float32),
+            visual_observed=_device_tensor(batch, "annotation_endpoint_visual_observed", device=device),
+            state_observed=_device_tensor(batch, "annotation_endpoint_state_observed", device=device),
+            declared=_device_tensor(batch, "annotation_endpoint_declared", device=device),
+            source_indices=_device_tensor(batch, "annotation_endpoint_source_indices", device=device),
+            offset_steps=_device_tensor(batch, "annotation_endpoint_offset_steps", device=device),
+        )
     future = FutureSupervision(
+        annotation_endpoint=annotation_endpoint,
         time_grid_mode=config.top.future_time_grid_mode,
         dino_supports=_device_tensor(
             batch,

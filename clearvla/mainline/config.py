@@ -501,8 +501,17 @@ class TopConfig:
     instruction_reference_mode: str = "none"
     instruction_change_mode: str = MIXED_REFERENCE_CHANGE
     operation_intent_mode: str = POSTERIOR_INTENT
+    annotation_goal_mode: str = "none"
 
     def validate(self) -> None:
+        if self.annotation_goal_mode not in {"none", "annotated_endpoint_relation_v1"}:
+            raise ValueError("unknown annotation_goal_mode")
+        if self.annotation_goal_mode != "none" and (
+            self.instruction_change_mode != POSTERIOR_REFERENCE_CHANGE
+            or self.target_binding_mode != "shared_operation_v1"
+            or self.p3_coordination_mode != TYPED_HORIZON_PLAN
+        ):
+            raise ValueError("annotated goal requires native soft instruction evidence and typed P3")
         if self.world_feedback_mode not in {"none","executed_four_step_world_v1"}:
             raise ValueError("unknown world_feedback_mode")
         if self.world_feedback_mode != "none" and (
@@ -842,6 +851,7 @@ class BottomConfig:
 
 @dataclass(frozen=True)
 class ObjectiveConfig:
+    annotated_goal: float = 0.0
     robot_response: float = 0.0
     future_dynamics: float = 0.10
     intent_structure: float = 0.02
@@ -1121,6 +1131,16 @@ class ExperimentConfig:
             or self.top.state_feature_mode != CALVIN_ROTATION6D_STATE
             or self.observation.source_time_mode != "source_history_steps_v1"):
             raise ValueError("executed world feedback needs declared CALVIN source-time producer")
+        if self.top.annotation_goal_mode != "none":
+            # Deployment reconstructs the graph without training-only data fields.
+            # Real-tail label admission belongs to ObservedStateDatasetConfig;
+            # the graph still requires the same named CALVIN observation chart.
+            if self.data.data_profile != "calvin_relative_7d_v1":
+                raise ValueError("annotated goal needs the declared CALVIN observation chart")
+            if self.objectives.annotated_goal <= 0:
+                raise ValueError("annotated goal needs explicit endpoint supervision weight")
+        elif self.objectives.annotated_goal != 0:
+            raise ValueError("annotated goal weight requires the selected graph")
         if self.top.robot_feedback_mode != "none":
             if self.data.data_profile != "calvin_relative_7d_v1" or self.top.state_feature_mode != CALVIN_ROTATION6D_STATE:
                 raise ValueError("robot response needs the declared CALVIN feature/command producer")
@@ -1313,6 +1333,10 @@ class ExperimentConfig:
             cast(dict[str, object], payload["bottom"]).pop("transition_condition_mode")
         if self.bottom.evidence_value_mode == NORMALIZED_EVIDENCE:
             cast(dict[str, object], payload["bottom"]).pop("evidence_value_mode")
+        if self.top.annotation_goal_mode == "none":
+            cast(dict[str, object], payload["top"]).pop("annotation_goal_mode")
+        if self.objectives.annotated_goal == 0:
+            cast(dict[str, object], payload["objectives"]).pop("annotated_goal")
         if self.top.operation_intent_mode == POSTERIOR_INTENT:
             cast(dict[str, object], payload["top"]).pop("operation_intent_mode")
         if self.top.instruction_change_mode == MIXED_REFERENCE_CHANGE:

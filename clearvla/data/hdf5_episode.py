@@ -77,6 +77,7 @@ class LoadedEpisode:
     # clamp only the virtual suffix to the cached terminal observation.  The
     # default keeps the historical one-cache-row-per-logical-row contract.
     cache_frame_count: int | None = None
+    source_annotation_index: int | None = None
     source_start: int | None = None
     source_end: int | None = None
     context_start: int | None = None
@@ -357,9 +358,26 @@ def load_episode(
         state_normalizer_reference_semantics = str(
             raw_state_normalizer_reference_semantics
         ).strip()
+        raw_annotation_index = f.attrs.get("source_annotation_index")
+        if raw_annotation_index is not None and (
+            isinstance(raw_annotation_index, (bool, np.bool_))
+            or not isinstance(raw_annotation_index, (int, np.integer))
+            or raw_annotation_index < 0
+        ):
+            raise ValueError(f"{path}: source_annotation_index must be a nonnegative integer")
         raw_source_start = f.attrs.get("source_start")
         raw_source_end = f.attrs.get("source_end")
         raw_context_start = f.attrs.get("context_start")
+        for source_name, source_value in (
+            ("source_start", raw_source_start), ("source_end", raw_source_end),
+            ("context_start", raw_context_start), ("terminal_state_index", raw_terminal_index),
+        ):
+            if source_value is not None and (
+                isinstance(source_value, (bool, np.bool_))
+                or not isinstance(source_value, (int, np.integer))
+                or source_value < 0
+            ):
+                raise ValueError(f"{path}: {source_name} must be a nonnegative integer")
         raw_source_trajectory_id = f.attrs.get("source_trajectory_id", "")
         if isinstance(raw_source_trajectory_id, (bytes, np.bytes_)):
             raw_source_trajectory_id = bytes(raw_source_trajectory_id).decode("utf-8")
@@ -506,6 +524,7 @@ def load_episode(
         source_action_count=source_action_count,
         state_normalizer_reference_raw=state_normalizer_reference_raw,
         state_normalizer_reference_semantics=state_normalizer_reference_semantics,
+        source_annotation_index=None if raw_annotation_index is None else int(raw_annotation_index),
         source_start=None if raw_source_start is None else int(raw_source_start),
         source_end=None if raw_source_end is None else int(raw_source_end),
         context_start=None if raw_context_start is None else int(raw_context_start),
