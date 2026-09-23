@@ -1901,12 +1901,18 @@ class LateRawDetailPolicyReader(nn.Module):
         for micro_index in range(int(basis.shape[1])):
             local = fine_weights.float() * basis[:, micro_index]
             local = local / local.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
+            # Contract candidate values before introducing the object axis.
+            # The previous three-input einsum materialized a broadcast
+            # [B,Q,G,K,C,Y,X,M,N] product for autograd even though K only
+            # participates in the final weighted reduction.
+            local_value = torch.einsum(
+                "bqgcijmn,bcijmnv->bqgcijmv", local, value_f
+            )
             rows.append(
                 torch.einsum(
-                    "bqgcijmn,bkcijm,bcijmnv->bqgkcv",
-                    local,
+                    "bqgcijmv,bkcijm->bqgkcv",
+                    local_value,
                     camera_route,
-                    value_f,
                 )
             )
         return torch.stack(rows, dim=-2)
@@ -1927,12 +1933,14 @@ class LateRawDetailPolicyReader(nn.Module):
         for micro_index in range(int(basis.shape[1])):
             local = fine_weights.float() * basis[:, micro_index]
             local = local / local.sum(dim=-1, keepdim=True).clamp_min(1.0e-8)
+            local_value = torch.einsum(
+                "bqgcijmn,bcijmnv->bqgcijmv", local, value_f
+            )
             rows.append(
                 torch.einsum(
-                    "bqgcijmn,bqgcijm,bcijmnv->bqgcv",
-                    local,
+                    "bqgcijmv,bqgcijm->bqgcv",
+                    local_value,
                     camera_route,
-                    value_f,
                 )
             )
         return torch.stack(rows, dim=-2)
@@ -1967,32 +1975,38 @@ class LateRawDetailPolicyReader(nn.Module):
             self._target_object_routes(target_spatial, device=fine_weights.device)
         )
         target_fine = fine_weights[:, :, :3]
-        target_rgb = self._microgrid_by_object_camera(
+        target_value_bank = torch.cat(
+            (typed_literal_rgb, fine_values, typed_coordinates), dim=-1
+        )
+        target_value_micro = self._microgrid_by_object_camera(
             camera_route=camera_route,
             fine_weights=target_fine,
             micro_basis=self.typed_micro_basis,
-            value=typed_literal_rgb,
+            value=target_value_bank,
         )
-        target_detail = self._microgrid_by_object_camera(
-            camera_route=camera_route,
-            fine_weights=target_fine,
-            micro_basis=self.typed_micro_basis,
-            value=fine_values,
+        rgb_width = int(typed_literal_rgb.shape[-1])
+        detail_width = int(fine_values.shape[-1])
+        target_rgb = target_value_micro[..., :rgb_width]
+        target_detail = target_value_micro[..., rgb_width : rgb_width + detail_width]
+        target_coordinate = target_value_micro[..., rgb_width + detail_width :]
+        key_names = ("semantic", "appearance", "geometry")
+        target_key_bank = torch.cat(
+            tuple(typed_fine_keys[name] for name in key_names), dim=-1
         )
-        target_coordinate = self._microgrid_by_object_camera(
-            camera_route=camera_route,
-            fine_weights=target_fine,
-            micro_basis=self.typed_micro_basis,
-            value=typed_coordinates,
+        target_key_local = torch.einsum(
+            "bqgcijmn,bcijmnv->bqgcijmv",
+            target_fine.float(),
+            target_key_bank.float(),
         )
+        target_context_bank = torch.einsum(
+            "bqgcijmv,bkcijm->bqgkcv", target_key_local, camera_route
+        )
+        route_width = int(typed_fine_keys[key_names[0]].shape[-1])
         target_contexts = {
-            name: torch.einsum(
-                "bqgcijmn,bkcijm,bcijmnr->bqgkcr",
-                target_fine.float(),
-                camera_route,
-                key.float(),
-            )
-            for name, key in typed_fine_keys.items()
+            name: target_context_bank[
+                ..., index * route_width : (index + 1) * route_width
+            ]
+            for index, name in enumerate(key_names)
         }
         target_heads: list[Tensor] = []
         local_metrics: dict[str, list[Tensor]] = {}
@@ -2106,32 +2120,33 @@ class LateRawDetailPolicyReader(nn.Module):
             torch.zeros_like(scene_route),
         )
         scene_fine = fine_weights[:, :, 3:4]
-        scene_rgb = self._microgrid_by_camera(
-            camera_route=scene_camera_route,
-            fine_weights=scene_fine,
-            micro_basis=self.typed_micro_basis,
-            value=typed_literal_rgb,
+        scene_value_bank = torch.cat(
+            (typed_literal_rgb, fine_values, typed_coordinates), dim=-1
         )
-        scene_detail = self._microgrid_by_camera(
+        scene_value_micro = self._microgrid_by_camera(
             camera_route=scene_camera_route,
             fine_weights=scene_fine,
             micro_basis=self.typed_micro_basis,
-            value=fine_values,
+            value=scene_value_bank,
         )
-        scene_coordinate = self._microgrid_by_camera(
-            camera_route=scene_camera_route,
-            fine_weights=scene_fine,
-            micro_basis=self.typed_micro_basis,
-            value=typed_coordinates,
+        scene_rgb = scene_value_micro[..., :rgb_width]
+        scene_detail = scene_value_micro[..., rgb_width : rgb_width + detail_width]
+        scene_coordinate = scene_value_micro[..., rgb_width + detail_width :]
+        scene_key_local = torch.einsum(
+            "bqgcijmn,bcijmnv->bqgcijmv",
+            scene_fine.float(),
+            target_key_bank.float(),
+        )
+        scene_context_bank = torch.einsum(
+            "bqgcijm,bqgcijmv->bqgcv",
+            scene_camera_route,
+            scene_key_local,
         )
         scene_contexts = {
-            name: torch.einsum(
-                "bqgcijm,bqgcijmn,bcijmnr->bqgcr",
-                scene_camera_route,
-                scene_fine.float(),
-                key.float(),
-            )
-            for name, key in typed_fine_keys.items()
+            name: scene_context_bank[
+                ..., index * route_width : (index + 1) * route_width
+            ]
+            for index, name in enumerate(key_names)
         }
         scene_query = p2_query_structured[:, start:stop, :, 3:4]
         flat_scene = batch * rows * basis * cameras
@@ -3276,7 +3291,13 @@ class LateRawDetailPolicyReader(nn.Module):
                     dim=-1,
                 )
         typed_future_rows: Tensor | None = None
-        if progressive_future_transport is not None:
+        # Under the accepted G-aligned contract the successor transport is a
+        # P2 operand, not a P1 address prior.  TargetFact's P1 local reader
+        # supplies an explicit zero future lane, so expanding the full
+        # [Q,G,C,Y,X,M,5] transport chart here would be dead activation.
+        if progressive_future_transport is not None and not (
+            self.target_fact_routing and self.g_aligned_future_effect
+        ):
             typed_future_rows = progressive_future_transport[:, :, None, None].expand(
                 -1,
                 -1,
@@ -3620,42 +3641,48 @@ class LateRawDetailPolicyReader(nn.Module):
                             ) / math.sqrt(2.0)
                     else:
                         fine_logits = sum(typed_fine_logits.values()) / math.sqrt(3.0)
-                    if typed_future_rows is None or typed_coordinates is None:
+                    if typed_coordinates is None:
                         raise RuntimeError(
                             "typed P1 fine routing has no future transport geometry"
                         )
-
-                    transport = typed_future_rows[:, start:stop].float()
-                    transport_center = transport[..., :2].unsqueeze(-2)
-                    # [B,Q,G,C,i,j,slot,K,2].  Current observed coordinates
-                    # remain the value anchors; the W prediction only supplies
-                    # a bounded soft likelihood that they remain relevant at
-                    # this horizon.
-                    current_coordinate = typed_coordinates.float()[
-                        :, None, None
-                    ]
-                    transport_scale = transport[..., 2:3].unsqueeze(-2)
-                    transport_visibility = transport[..., 3:4].unsqueeze(-2)
-                    transport_uncertainty = transport[..., 4:5].unsqueeze(-2)
-                    transport_width = (
-                        0.05 + transport_scale * transport_uncertainty
-                    ).clamp(0.05, 1.0)
-                    transport_distance = (
-                        (current_coordinate - transport_center)
-                        / transport_width
-                    ).square().sum(dim=-1)
-                    transport_fine_logit = 0.5 * (
-                        (-0.5 * transport_distance).clamp_min(-4.0)
-                        + 0.25
-                        * (2.0 * transport_visibility[..., 0] - 1.0)
-                    )
                     if self.g_aligned_future_effect:
                         # The V115 successor field is a P2 operand, not a P1
-                        # address prior.  Retain the selected transport context
-                        # in SharedFactualGlimpseBank, while making the factual
-                        # address posterior exactly independent of W.
+                        # address prior.  In the target-action contract the
+                        # target branch exits after this read, so there is no
+                        # reason to materialize the [B,Q,G,C,Y,X,M,5]
+                        # transport chart just to replace its contribution by
+                        # a scalar zero.  Keep the exact same posterior while
+                        # avoiding that dead high-rank activation.
                         transport_fine_logit = fine_logits.new_zeros(())
                     else:
+                        if typed_future_rows is None:
+                            raise RuntimeError(
+                                "typed P1 fine routing has no future transport geometry"
+                            )
+                        transport = typed_future_rows[:, start:stop].float()
+                        transport_center = transport[..., :2].unsqueeze(-2)
+                        # [B,Q,G,C,i,j,slot,K,2].  Current observed coordinates
+                        # remain the value anchors; the W prediction only
+                        # supplies a bounded soft likelihood that they remain
+                        # relevant at this horizon.
+                        current_coordinate = typed_coordinates.float()[
+                            :, None, None
+                        ]
+                        transport_scale = transport[..., 2:3].unsqueeze(-2)
+                        transport_visibility = transport[..., 3:4].unsqueeze(-2)
+                        transport_uncertainty = transport[..., 4:5].unsqueeze(-2)
+                        transport_width = (
+                            0.05 + transport_scale * transport_uncertainty
+                        ).clamp(0.05, 1.0)
+                        transport_distance = (
+                            (current_coordinate - transport_center)
+                            / transport_width
+                        ).square().sum(dim=-1)
+                        transport_fine_logit = 0.5 * (
+                            (-0.5 * transport_distance).clamp_min(-4.0)
+                            + 0.25
+                            * (2.0 * transport_visibility[..., 0] - 1.0)
+                        )
                         fine_logits = fine_logits + transport_fine_logit
                     appearance_pre_value_prior: Tensor | None = None
                     if (
