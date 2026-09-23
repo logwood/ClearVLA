@@ -14,6 +14,7 @@ from clearvla.action_solvers.flow_solver.spec import ScheduleSpec
 from clearvla.data.action_chart import resolve_action_state_profile
 
 from ..config import ExperimentConfig
+from ..endpoint_supervision import CLEAN_ENDPOINT_SUPERVISION, EndpointHeadSupervision
 from ..gripper_contract import is_binary_gripper_mode
 from ..interfaces import ActionSupervision, ObservableHistory
 from ..model.action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
@@ -1162,13 +1163,24 @@ def execution_value_terms(
         if row_valid is None
         else row_valid
     )
-    if tuple(source_rows.shape) != (batch, horizon):
-        raise ValueError("execution label support must be [B,T]")
+    if (
+        tuple(source_rows.shape) != (batch, horizon)
+        or source_rows.dtype != torch.bool
+        or source_rows.device != candidates.device
+    ):
+        raise ValueError("execution label support must be Boolean [B,T] on the candidate device")
     label_field = source_rows[:, None, None, :, None]
-    residual = candidates - target[:, None, None]
-    if row_valid is not None:
-        residual = torch.where(label_field, residual, torch.zeros_like(residual))
-        predicted = torch.where(label_field, predicted, torch.zeros_like(predicted))
+    candidate_rows = valid[..., None] & source_rows[:, None, None]
+    # The candidate mask and label mask have different owners. Both must be
+    # applied before squaring, Huber loss and diagnostics: an invalid candidate
+    # can contain arbitrary workspace storage, even when the action row exists.
+    candidate_field = candidate_rows[..., None]
+    candidates = torch.where(candidate_field, candidates, torch.zeros_like(candidates))
+    predicted = torch.where(candidate_field, predicted, torch.zeros_like(predicted))
+    target = quarantine(target, source_rows)
+    residual = torch.where(
+        candidate_field, candidates - target[:, None, None], torch.zeros_like(candidates)
+    )
     flat = residual.reshape(batch * blocks * candidate_count, horizon, physical)
     parts = codec.split(flat)
     # Both established value/difference arm branches retain symmetric
@@ -1328,6 +1340,15 @@ def execution_value_terms(
         predicted_scalar[..., -1] - predicted_operation.amin(dim=-1)
     )
     terminal_denominator = terminal_valid.float().sum().clamp_min(1.0)
+    terminal_rows = valid[..., -1, None] & source_rows[:, None]
+    terminal_baseline = torch.where(terminal_rows[..., None], baseline, torch.zeros_like(baseline))
+    terminal_residual = torch.where(
+        terminal_rows[..., None], candidates[:, :, -1] - terminal_baseline,
+        torch.zeros_like(terminal_baseline),
+    )
+    # Audit only actual candidates with actual source labels, including when
+    # no explicit tail mask was supplied. Empty support is an exact finite 0.
+    gripper_audit_support = candidate_rows.reshape(-1, horizon)
     execution_cost = tensors.get("evidence_mmd_it_execution_cost")
     if execution_cost is None or execution_cost.ndim != 0:
         execution_cost = value_loss.new_zeros(())
@@ -1335,35 +1356,19 @@ def execution_value_terms(
         "execution_value": value_loss,
         "execution_gripper_error_legacy": supported_mean(
             gripper_error_legacy.detach(),
-            None
-            if row_valid is None
-            else source_rows[:, None, None]
-            .expand(batch, blocks, candidate_count, horizon)
-            .reshape(-1, horizon),
+            gripper_audit_support,
         ),
         "execution_gripper_error_deployed": supported_mean(
             gripper_error_deployed.detach(),
-            None
-            if row_valid is None
-            else source_rows[:, None, None]
-            .expand(batch, blocks, candidate_count, horizon)
-            .reshape(-1, horizon),
+            gripper_audit_support,
         ),
         "execution_gripper_error_compatibility": supported_mean(
             gripper_error_compatibility.detach(),
-            None
-            if row_valid is None
-            else source_rows[:, None, None]
-            .expand(batch, blocks, candidate_count, horizon)
-            .reshape(-1, horizon),
+            gripper_audit_support,
         ),
         "execution_gripper_error_owned": supported_mean(
             gripper_error_owned.detach(),
-            None
-            if row_valid is None
-            else source_rows[:, None, None]
-            .expand(batch, blocks, candidate_count, horizon)
-            .reshape(-1, horizon),
+            gripper_audit_support,
         ),
         "execution_gripper_compatibility_weight": predicted.new_tensor(
             float(config.objectives.gripper_compatibility_weight), dtype=torch.float32
@@ -1390,11 +1395,9 @@ def execution_value_terms(
             predicted_common_rms / predicted_rms.clamp_min(1e-8)
         ).detach(),
         "execution_candidate_coverage": valid.float().mean().detach(),
-        "execution_terminal_identity_error": (candidates[:, :, -1] - baseline)
-        .square()
-        .mean()
-        .sqrt()
-        .detach(),
+        "execution_terminal_identity_error": supported_mean(
+            terminal_residual.square(), terminal_rows
+        ).sqrt().detach(),
         "execution_terminal_target_cost_margin": (
             (terminal_target_margin * terminal_valid.float()).sum() / terminal_denominator
         ).detach(),
@@ -1415,8 +1418,15 @@ def action_terms(
     history: ObservableHistory,
     flow_state: FlowMatchingState,
     *,
+    endpoint_supervision: EndpointHeadSupervision | None = None,
     collect_diagnostics: bool = False,
 ) -> dict[str, Tensor]:
+    expected_endpoint = config.bottom.endpoint_supervision_mode == CLEAN_ENDPOINT_SUPERVISION
+    if expected_endpoint != (endpoint_supervision is not None):
+        raise ValueError("endpoint supervision does not match the selected head-training graph")
+    if endpoint_supervision is not None:
+        endpoint_supervision.validate()
+    head_output = output if endpoint_supervision is None else endpoint_supervision.output
     objective = config.objectives
     row_valid = target.row_valid
     if row_valid is not None:
@@ -1470,7 +1480,7 @@ def action_terms(
     # namespace without the optional binary-command field. Treat that as the
     # continuous-path default; the binary profile still fails closed below
     # when the command head is genuinely missing.
-    command_logits = getattr(output.bottom, "gripper_command_logits", None)
+    command_logits = getattr(head_output.bottom, "gripper_command_logits", None)
     if binary_command:
         if command_logits is None:
             raise ValueError("binary action loss requires gripper command logits")
@@ -1484,6 +1494,10 @@ def action_terms(
                 "binary gripper command logits must be [B,T,2], got "
                 f"{tuple(command_logits.shape)}"
             )
+        # Remove unavailable endpoint rows BEFORE nonlinear head losses.
+        # Multiplying NaN CE/BCE by a zero row weight cannot quarantine its VJP.
+        if row_valid is not None:
+            command_logits = quarantine(command_logits, row_valid)
         command_target = (raw_grip >= 0.0).to(dtype=torch.long)
         command_rows = F.cross_entropy(
             command_logits.float().reshape(-1, 2),
@@ -1494,6 +1508,11 @@ def action_terms(
         command_target = None
         command_rows = torch.zeros_like(raw_grip)
     prediction = output.bottom.physical_velocity.float()
+    # Quarantine unavailable action rows before ANY trajectory decode or head
+    # loss, not merely after forming the direct velocity residual. The causal
+    # codec still reads every supported prefix row exactly as before.
+    if row_valid is not None:
+        prediction = quarantine(prediction, row_valid)
     velocity_target = flow_state.target_physical_velocity.detach().float()
     if (row_valid is None) != (flow_state.row_valid is None):
         raise ValueError("action and flow label support disagree")
@@ -1672,6 +1691,8 @@ def action_terms(
         native_flow = supported_mean(native_error * horizon_weight[None], complete)
     remaining = (1.0 - flow_state.time.float())[:, None, None]
     clean_physical = flow_state.noisy_physical.float() + remaining * prediction
+    if row_valid is not None:
+        clean_physical = quarantine(clean_physical, row_valid)
     # Unlike the standalone codec compatibility API, the formal loss path
     # must always carry the profile-owned command boundary explicitly.
     codec_gripper_boundary = history.codec_gripper_boundary.float()
@@ -1889,8 +1910,11 @@ def action_terms(
         )
         >= float(objective.arm_motion_threshold)
     ).float()
+    motion_logits = head_output.bottom.motion_logits.float()
+    if row_valid is not None:
+        motion_logits = quarantine(motion_logits, row_valid)
     motion_rows = F.binary_cross_entropy_with_logits(
-        output.bottom.motion_logits.float(), motion_target, reduction="none"
+        motion_logits, motion_target, reduction="none"
     )
     motion = (motion_rows * step_weight).mean()
     phase_arm_flow = (
@@ -1986,7 +2010,7 @@ def action_terms(
     hold_count = hold_mask.sum()
     event_row_weight_mean = (event_row_weight * event_mask).sum() / event_count.clamp_min(1.0)
     hold_row_weight_mean = (event_row_weight * hold_mask).sum() / hold_count.clamp_min(1.0)
-    predicted_motion = torch.sigmoid(output.bottom.motion_logits.detach().float()) >= 0.5
+    predicted_motion = torch.sigmoid(motion_logits.detach()) >= 0.5
     target_motion = motion_target >= 0.5
     motion_true_positive = ((predicted_motion & target_motion) & valid).float().sum()
     motion_false_positive = ((predicted_motion & (~target_motion)) & valid).float().sum()
@@ -2353,6 +2377,7 @@ def compose_losses(
     top_targets: ObjectTopTrainingTargets,
     predicted_dynamics: FutureObjectDynamics,
     action_codec: PhysicalActionFieldCodec | OutletAdapter,
+    endpoint_supervision: EndpointHeadSupervision | None = None,
     collect_diagnostics: bool = False,
 ) -> LossLedger:
     action = action_terms(
@@ -2362,6 +2387,7 @@ def compose_losses(
         action_target,
         history,
         flow_state,
+        endpoint_supervision=endpoint_supervision,
         collect_diagnostics=collect_diagnostics,
     )
     execution = execution_value_terms(

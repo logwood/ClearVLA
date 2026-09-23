@@ -7,7 +7,7 @@ import os
 import tempfile
 from argparse import ArgumentParser
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -147,9 +147,11 @@ class EpisodeRecorder:
             raise ValueError("recorded action must be one finite [7] vector")
         if self._steps and (self._steps[-1].terminated or self._steps[-1].truncated):
             raise RuntimeError("cannot append after an episode terminal")
+        if result.command_receipt is not None and not np.array_equal(value, result.command_receipt.applied):
+            raise ValueError("recorded label is not the acknowledged applied command")
         self._observations.append(observation.copied())
         self._actions.append(value.copy())
-        self._steps.append(result)
+        self._steps.append(replace(result, observation=result.observation.copied()))
 
     def finish(self) -> RecordedEpisode:
         if not self._steps:

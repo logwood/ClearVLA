@@ -12,6 +12,7 @@ from .contracts import (
     ACTION_DIM,
     EnvironmentDescriptor,
     EvaluationState,
+    ExecutedCommand,
     PolicyObservation,
     ResetResult,
     StepResult,
@@ -182,7 +183,8 @@ class AliciaProxyEnv:
         return ResetResult(self._observation(), self._evaluation())
 
     def step(self, action: np.ndarray) -> StepResult:
-        self._set_control(action)
+        submitted = np.asarray(action, dtype=np.float32).copy()
+        self._set_control(submitted)
         for _ in range(self._substeps):
             self._mujoco.mj_step(self.model, self.data)
         self._step += 1
@@ -194,6 +196,7 @@ class AliciaProxyEnv:
             terminated=success,
             truncated=self._step >= self._max_steps and not success,
             evaluation=evaluation,
+            command_receipt=ExecutedCommand(submitted, self._last_action),
         )
         result.validate()
         return result

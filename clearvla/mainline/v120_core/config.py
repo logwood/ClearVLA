@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..bottom_evidence import NORMALIZED_EVIDENCE, validate_evidence_value_mode
+from ..bottom_evidence import MAGNITUDE_EVIDENCE, NORMALIZED_EVIDENCE, validate_evidence_value_mode
+from ..controller_values import (
+    LEGACY_CONTROLLER_VALUES,
+    RAW_CONTROLLER_VALUES,
+    validate_controller_value_mode,
+)
 from ..future_time import CONTROL_ALIGNED_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import VALID_GRIPPER_OUTPUT_MODES
 
@@ -722,6 +727,7 @@ class V39PolicyConfig(V38PolicyConfig):
     # decoder.  Costs two extra decodes per eval batch; diagnostic runs only.
     latent_cvae_z_probe: int = 0
     evidence_value_mode: str = NORMALIZED_EVIDENCE
+    controller_value_mode: str = LEGACY_CONTROLLER_VALUES
     latent_cvae_output_init_std: float = 1e-3
     latent_cvae_mu_bound: float = 1.5
     latent_cvae_min_std: float = 0.5
@@ -1092,6 +1098,9 @@ class V39PolicyConfig(V38PolicyConfig):
     def validate(self) -> None:
         super().validate()
         validate_evidence_value_mode(self.evidence_value_mode)
+        validate_controller_value_mode(self.controller_value_mode)
+        if self.controller_value_mode == RAW_CONTROLLER_VALUES and self.evidence_value_mode != MAGNITUDE_EVIDENCE:
+            raise ValueError("separate controller values require magnitude-preserving evidence")
         if str(self.controlled_base_mode) not in {"learned", "fixed_zero"}:
             raise ValueError("controlled_base_mode must be learned or fixed_zero")
         if int(self.flow_jepa_enabled) not in (0, 1):

@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 import torch
 from torch import Tensor
 
 from ..config import ExperimentConfig
-from ..interfaces import TrainingBatch
+from ..endpoint_supervision import (
+    CLEAN_ENDPOINT_SUPERVISION,
+    EndpointHeadSupervision,
+    clean_endpoint_field,
+    endpoint_condition,
+)
+from ..interfaces import OnlinePolicyInput, TrainingBatch
 from ..model.component_contracts import legacy_named_parameters
 from ..model.policy import (
     ClearVLAMainlinePolicy,
@@ -219,6 +225,42 @@ class EncodedTrainingBatch:
     cache: OnlinePolicyCache
     training_state: OnlineTrainingState
     metrics: dict[str, Tensor]
+    source_online: OnlinePolicyInput = field(repr=False)
+    producer_id: int
+    producer_step: int
+    model_training: bool
+
+    @classmethod
+    def capture(
+        cls, cache: OnlinePolicyCache, training_state: OnlineTrainingState,
+        metrics: dict[str, Tensor], *, source_online: OnlinePolicyInput,
+        model: ClearVLAMainlinePolicy, global_step: int,
+    ) -> EncodedTrainingBatch:
+        return cls(cache, training_state, metrics, source_online, id(model),
+                   int(global_step), bool(model.training))
+
+    def validate_for(
+        self, batch: TrainingBatch, *, model: ClearVLAMainlinePolicy, global_step: int,
+    ) -> None:
+        # Object/source ownership checks occur once per loss composition, not
+        # inside an ODE node. They add no image copies, hashes, device reduction
+        # or history state mutation. This is not an in-place tensor write guard.
+        if batch.online is not self.source_online:
+            raise ValueError("encoded training graph belongs to another online observation")
+        if self.producer_id != id(model):
+            raise ValueError("encoded training graph belongs to another model instance")
+        if self.producer_step != int(global_step):
+            raise ValueError("encoded training graph predates the current optimizer step")
+        if self.model_training != bool(model.training):
+            raise ValueError("encoded training graph was built in another train/eval mode")
+        if (
+            self.cache.top.intent is not self.training_state.top.intent
+            or self.cache.top.candidate_world is not self.training_state.top.candidate_world
+        ):
+            raise ValueError("encoded policy and Teacher source planes have different owners")
+        batch.validate(model.config)
+        self.cache.validate(model.config)
+        self.training_state.validate(model.config)
 
 
 class MainlineTrainingEngine:
@@ -838,7 +880,10 @@ class MainlineTrainingEngine:
         )
         return self._forward_encoded(
             batch,
-            encoded=EncodedTrainingBatch(cache, training_state, static_metrics),
+            encoded=EncodedTrainingBatch.capture(
+                cache, training_state, static_metrics, source_online=batch.online,
+                model=self.model, global_step=self.global_step,
+            ),
             collect_diagnostics=collect_diagnostics,
             generator=generator,
         )
@@ -851,8 +896,7 @@ class MainlineTrainingEngine:
         collect_diagnostics: bool,
         generator: torch.Generator | None,
     ) -> tuple[LossLedger, dict[str, Tensor]]:
-        encoded.cache.validate(self.config)
-        encoded.training_state.validate(self.config)
+        encoded.validate_for(batch, model=self.model, global_step=self.global_step)
         top_targets, teacher_metrics = self.model.build_training_targets(
             encoded.training_state,
             batch.future,
@@ -887,9 +931,24 @@ class MainlineTrainingEngine:
             require_execution_supervision=True,
             collect_diagnostics=collect_diagnostics,
         )
+        endpoint_supervision = None
+        if self.config.bottom.endpoint_supervision_mode == CLEAN_ENDPOINT_SUPERVISION:
+            # Current evidence is reused. Clean action labels are legal only
+            # as this teacher-forced endpoint input, never in the online cache.
+            endpoint_field = clean_endpoint_field(flow_state, arm_dim=self.model.outlet_adapter.arm_dim)
+            endpoint_time, endpoint_context = endpoint_condition(
+                endpoint_field, context_enabled=flow_state.flow_step_context is not None
+            )
+            endpoint_output = self.model.velocity(
+                encoded.cache, noisy_action_field=endpoint_field, time=endpoint_time,
+                flow_step_context=endpoint_context, require_execution_supervision=False,
+                collect_diagnostics=False,
+            )
+            endpoint_supervision = EndpointHeadSupervision(endpoint_output, endpoint_time, endpoint_context)
         ledger = compose_losses(
             self.config,
             policy_output=output,
+            endpoint_supervision=endpoint_supervision,
             action_target=batch.action_target,
             history=batch.online.history,
             flow_state=flow_state,
@@ -907,6 +966,12 @@ class MainlineTrainingEngine:
             collect_diagnostics=collect_diagnostics,
         )
         metrics = {**encoded.metrics, **teacher_metrics, **output.metrics}
+        if endpoint_supervision is not None:
+            metrics["training_endpoint_head_calls"] = flow_state.time.new_ones(())
+            metrics["training_endpoint_supervised_rows"] = (
+                batch.action_target.row_valid.float().sum() if batch.action_target.row_valid is not None
+                else flow_state.time.new_tensor(batch.action_target.normalized.shape[0] * batch.action_target.normalized.shape[1])
+            )
         if collect_diagnostics:
             metrics.update(self._audit_progress_metrics(batch, encoded))
         return ledger, metrics
@@ -928,7 +993,10 @@ class MainlineTrainingEngine:
                 training_mask=False,
                 collect_diagnostics=collect_diagnostics,
             )
-        return EncodedTrainingBatch(cache, training_state, metrics)
+        return EncodedTrainingBatch.capture(
+            cache, training_state, metrics, source_online=batch.online,
+            model=self.model, global_step=self.global_step,
+        )
 
     def train_step(
         self,

@@ -1,0 +1,129 @@
+{
+  "data": {
+    "raw_hdf5_root": "/data/senwang/data/calvin/converted/abc_d_full",
+    "hdf5_glob": "*.hdf5",
+    "decoded_cache": "/data/senwang/data/calvin/caches/abc_d_full/decoded_336",
+    "dino_cache": "/data/senwang/data/calvin/caches/abc_d_full/dinov2_base_336",
+    "t5_condition": "/data/senwang/data/calvin/language/abc_d_full_t5_xxl_bank.pt",
+    "calvin_raw_source": "/data/senwang/data/calvin/raw/task_ABC_D",
+    "output_dir": "runs/structural-rebuild-m6n-calvin",
+    "data_profile": "calvin_relative_7d_v1",
+    "action_key": "action",
+    "action_state_key": "action_state",
+    "state_key": "state",
+    "top_camera_key": "observations/images/cam_high",
+    "wrist_camera_key": "observations/images/cam_right_wrist",
+    "split_mode": "episode-manifest",
+    "split_manifest": "/data/senwang/data/calvin/converted/abc_d_push_color6_raw_overlay_v2_splits_20260915.json",
+    "train_episodes": 0,
+    "val_episodes": 0,
+    "test_episodes": 0,
+    "num_workers": 4,
+    "sampling_gripper_event_threshold": 0.1,
+    "visual_cache_read_backend": "pread",
+    "visual_pread_max_open_files": 16,
+    "window_boundary_contract": "observed_tail_v1"
+  },
+  "top": {
+    "world_camera_condition_mode": "coordinate_role_v1",
+    "world_action_condition_mode": "sequence_prefix_v1",
+    "p2_spatial_intent_mode": "post_pool_only",
+    "history_encoding_mode": "timestamped_streams_v1",
+    "state_feature_mode": "calvin_tcp_rotation6d_v1",
+    "entity_context_mode": "completed_g3_v1",
+    "entity_chart_mode": "current_image_support_v1",
+    "entity_history_mode": "flow_pulled_history_v1",
+    "entity_motion_mode": "current_entity_support_v1",
+    "target_binding_mode": "shared_operation_v1",
+    "instruction_reference_mode": "instruction_start_observation_v1",
+    "world_supervision_mode": "matched_observed_sequence_v1",
+    "world_control_mode": "known_prefix_v1",
+    "world_robot_condition_mode": "observed_state_views_v1",
+    "future_time_grid_mode": "control_aligned_24_v1",
+    "p2_geometry_mode": "view_conditioned_transport_v1",
+    "p3_coordination_mode": "typed_horizon_v1",
+    "robot_feedback_mode": "one_step_proprioceptive_v1",
+    "instruction_change_mode": "typed_reference_v1",
+    "operation_intent_mode": "object_outcome_v1"
+  },
+  "bottom": {
+    "arm_flow_mode": "relative_command_adapter",
+    "gripper_output_mode": "calvin_binary_command",
+    "evidence_value_mode": "magnitude_preserving_v1",
+    "transition_condition_mode": "typed_plan_v1",
+    "controller_value_mode": "separate_magnitude_v1",
+    "endpoint_supervision_mode": "clean_command_v1"
+  },
+  "objectives": {
+    "gripper_command": 0.1,
+    "gripper_event_threshold": 0.1,
+    "robot_response": 0.1
+  },
+  "optimizer": {
+    "epochs": 1,
+    "batch_size": 8
+  },
+  "runtime": {
+    "max_train_batches": 11012,
+    "max_val_batches": 256,
+    "log_every": 50,
+    "deployment_flow_schedule": {
+      "deployment_flow_schedule": "clearvla.mainline.deployment_flow_schedule",
+      "schema_version": 2,
+      "method": "euler",
+      "bottom_context_contract": "flow_step_context_t_dt_kn_endpoint_fourier_v1",
+      "endpoint_policy": "external_t1_head",
+      "initial_state_policy": "reuse_exact_initial",
+      "cache_boundary_policy": "one_w_rebuild_no_history",
+      "proposal": {
+        "schedule": "clearvla.flow_schedule",
+        "schema_version": 1,
+        "kind": "custom",
+        "boundaries": [
+          0.0,
+          0.1337480609952844,
+          0.3181082915068203,
+          0.528067042076036,
+          0.7565932872025407,
+          1.0
+        ],
+        "parameters": {
+          "candidate_id": "Q5",
+          "exponent": 1.25,
+          "formula": "t_i=(i/5)^exponent",
+          "label": "same-nfe-power-five",
+          "steps": 5
+        }
+      },
+      "refined": {
+        "schedule": "clearvla.flow_schedule",
+        "schema_version": 1,
+        "kind": "custom",
+        "boundaries": [
+          0.0,
+          0.1337480609952844,
+          0.3181082915068203,
+          0.528067042076036,
+          0.7565932872025407,
+          1.0
+        ],
+        "parameters": {
+          "candidate_id": "Q5",
+          "exponent": 1.25,
+          "formula": "t_i=(i/5)^exponent",
+          "label": "same-nfe-power-five",
+          "steps": 5
+        }
+      }
+    }
+  },
+  "dimensions": {
+    "state_dim": 10,
+    "future_supports": 6
+  },
+  "observation": {
+    "source_time_mode": "source_history_steps_v1",
+    "candidate_support_mode": "full_posterior_lattice_v1",
+    "local_ownership_mode": "coupled_observation_v1"
+  }
+}

@@ -11,6 +11,7 @@ from .contracts import (
     ACTION_DIM,
     EnvironmentDescriptor,
     EvaluationState,
+    ExecutedCommand,
     PolicyObservation,
     ResetResult,
     StepResult,
@@ -442,12 +443,17 @@ class ManiSkillStackCubeEnv:
         )
 
     def step(self, action: np.ndarray) -> StepResult:
-        command = self.clip_action(action)
-        value, reward, terminated, truncated, info = self._env.step(self._batched_action(command))
-        self._last_action = command
+        submitted = np.asarray(action, dtype=np.float32).copy()
+        command = self.clip_action(submitted)
+        # Backend batching may create views and third-party environments may
+        # reuse their input buffers. Freeze the accepted boundary beforehand.
+        receipt = ExecutedCommand(submitted, command)
+        value, reward, terminated, truncated, info = self._env.step(self._batched_action(command.copy()))
+        self._last_action = receipt.applied.copy()
         result = StepResult(
             observation=self._observation(value),
             reward=float(_scalar(reward)),
+            command_receipt=receipt,
             terminated=bool(_scalar(terminated)),
             truncated=bool(_scalar(truncated)),
             evaluation=EvaluationState(

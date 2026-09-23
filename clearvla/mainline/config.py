@@ -31,6 +31,16 @@ from clearvla.data.window_boundaries import (
 )
 
 from .bottom_evidence import MAGNITUDE_EVIDENCE, NORMALIZED_EVIDENCE, validate_evidence_value_mode
+from .controller_values import (
+    LEGACY_CONTROLLER_VALUES,
+    RAW_CONTROLLER_VALUES,
+    validate_controller_value_mode,
+)
+from .endpoint_supervision import (
+    CLEAN_ENDPOINT_SUPERVISION,
+    NO_ENDPOINT_SUPERVISION,
+    validate_endpoint_mode,
+)
 from .future_time import CONTROL_ALIGNED_FUTURE_TIME, LEGACY_FUTURE_TIME, resolve_future_time
 from .gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
@@ -623,6 +633,8 @@ class TopConfig:
 
 @dataclass(frozen=True)
 class BottomConfig:
+    endpoint_supervision_mode: str = NO_ENDPOINT_SUPERVISION
+    controller_value_mode: str = LEGACY_CONTROLLER_VALUES
     transition_condition_mode: str = SUMMED_TRANSITION
     evidence_value_mode: str = NORMALIZED_EVIDENCE
     flow_time_distribution: str = "v120_mirrored_beta_1_5_1"
@@ -672,6 +684,12 @@ class BottomConfig:
     bspine_action_group_mask: str = ""
 
     def validate(self) -> None:
+        validate_endpoint_mode(self.endpoint_supervision_mode)
+        if self.endpoint_supervision_mode == CLEAN_ENDPOINT_SUPERVISION and self.gripper_output_mode not in {"calvin_binary_command", "maniskill_binary_command"}:
+            raise ValueError("clean endpoint supervision requires a binary command outlet")
+        validate_controller_value_mode(self.controller_value_mode)
+        if self.controller_value_mode == RAW_CONTROLLER_VALUES and self.evidence_value_mode != MAGNITUDE_EVIDENCE:
+            raise ValueError("separate controller values require magnitude-preserving evidence")
         validate_transition_condition_mode(self.transition_condition_mode)
         if self.transition_condition_mode == TYPED_TRANSITION and self.controlled_delta_dropout != 0.0:
             raise ValueError("typed transition uses deterministic per-ODE attention; dropout must be zero")
@@ -1265,6 +1283,10 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.bottom.endpoint_supervision_mode == NO_ENDPOINT_SUPERVISION:
+            cast(dict[str, object], payload["bottom"]).pop("endpoint_supervision_mode")
+        if self.bottom.controller_value_mode == LEGACY_CONTROLLER_VALUES:
+            cast(dict[str, object], payload["bottom"]).pop("controller_value_mode")
         if self.bottom.transition_condition_mode == SUMMED_TRANSITION:
             cast(dict[str, object], payload["bottom"]).pop("transition_condition_mode")
         if self.bottom.evidence_value_mode == NORMALIZED_EVIDENCE:

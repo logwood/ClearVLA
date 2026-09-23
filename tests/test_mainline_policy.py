@@ -386,7 +386,10 @@ def test_recovered_training_uses_one_formal_forward_and_loss() -> None:
         collect_diagnostics=False,
         condition_generator=torch.Generator().manual_seed(29001),
     )
-    encoded = EncodedTrainingBatch(cache, training_state, static_metrics)
+    encoded = EncodedTrainingBatch.capture(
+        cache, training_state, static_metrics, source_online=batch.online,
+        model=model, global_step=engine.global_step,
+    )
 
     grad_modes: list[bool] = []
     autocast_cache_modes: list[bool] = []
@@ -3441,7 +3444,10 @@ def test_frame_progress_audit_is_detached_from_forward_and_reports_s_w_correlati
         )
     audit_metrics = MainlineTrainingEngine._audit_progress_metrics(
         batch,
-        EncodedTrainingBatch(cache=cache, training_state=training_state, metrics=metrics),
+        EncodedTrainingBatch.capture(
+            cache, training_state, metrics, source_online=batch.online,
+            model=model, global_step=0,
+        ),
         formal_cache=cache,
     )
     expected = {
@@ -3507,7 +3513,7 @@ def test_preflight_rejects_a_same_shape_but_wrong_future_offset_schedule() -> No
     try:
         validate_finite_training_batch(broken)
     except ValueError as error:
-        assert "exactly 4,8,...,48" in str(error)
+        assert "future teacher offsets must match the declared physical time grid" in str(error)
     else:
         raise AssertionError("future teacher offsets are part of the semantic ABI")
 

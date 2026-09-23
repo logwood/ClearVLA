@@ -11,6 +11,7 @@ from torch import Tensor
 from clearvla.action_solvers.flow_solver.spec import ScheduleSpec
 
 from ..config import ExperimentConfig
+from ..endpoint_supervision import endpoint_condition
 from ..interfaces import OnlinePolicyInput
 from ..model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
 from ..model.types import (
@@ -220,17 +221,7 @@ def _integrate_cache(
     # V120 evaluates the retained motion head once more at the clean endpoint.
     # This is a head-producing dynamic forward, not a sixth integration step:
     # the resulting physical field is deliberately left unchanged.
-    endpoint_time = torch.ones(batch, device=device, dtype=torch.float32)
-    endpoint_context = (
-        FlowStepContext(
-            time=endpoint_time,
-            step_size=endpoint_time.new_zeros((batch,)),
-            normalized_index=endpoint_time.new_ones((batch,)),
-            endpoint=endpoint_time.new_ones((batch,)),
-        )
-        if context_enabled
-        else None
-    )
+    endpoint_time, endpoint_context = endpoint_condition(value, context_enabled=context_enabled)
     with torch.autocast(
         device_type=device.type,
         dtype=dtype,

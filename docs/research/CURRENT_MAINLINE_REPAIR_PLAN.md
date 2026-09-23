@@ -1,5 +1,31 @@
 # ClearVLA structural rebuild work plan
 
+## Current batch M6l–M6p
+
+Implement together on the M6k baseline: (l) native execution selector/value
+separation; (m) numerically matched clean-endpoint command/motion training;
+(n) acknowledged native-command history/recording and residual-RL fail-closed
+mapping; (o) pre-operation source-label quarantine; (p) source/model/step/mode
+ownership of reusable training graphs. See the architecture contract for exact roles and non-claims.
+M6l–M6n have cumulative candidate configs; M6o/M6p are source-wide corrections
+without new neural modes. All five have real-production tests. The
+existing structural check script discovers all new mainline test files and now
+also includes StackCube recording and residual SAC regression. No workflow edit.
+
+Two stale test fixtures are repaired as part of this batch, not skipped:
+`ActionSupervision.row_valid=None` is explicit in the minimal legacy fixture;
+the malformed future-offset test expects the actual declared-grid rejection
+rather than an obsolete hard-coded 48-step message. Numeric strictness is unchanged.
+
+Next system-level work: run the FULL selected-inventory milestone under the
+supported Python/Torch runtime; reconcile remaining type/strict-numeric debt;
+audit data-source and checkpoint migration admission, production-scale compute,
+external evaluator integration and causal object/goal-progress limitations.
+Do not add another feedback head merely because a contract name is missing.
+The five units do not resolve calibrated 3D correspondence or oracle-free true
+terminal-goal estimation. Scope tests distinguish architecture from learned success.
+
+
 Updated: 2026-09-22
 
 This branch is an implementation of the user's authorized, sequential
@@ -56,8 +82,8 @@ merely because this subunit is saved.
 | M6h typed instruction change | Implemented candidate; verification per source | Shared-query causal comparison; separate visual-content/image/robot/status owners; S and P3 typed direct reads; current/reference cache provenance. Not persistent correspondence or desired-relation supervision. |
 | M7 P1/P2 | M5a target marginal/current-evidence seam implemented | Deeper target-local precision, view-aware future geometry and physical consequence semantics remain open; shared binding alone does not close them. |
 | M8 P3 | M6f/g/h candidate coordination, robot innovation and typed reference changes implemented; milestone open | Direct distinct fact/precision/effect/change consumers. Object-matched endpoint error and desired-relation progress remain open. |
-| M9 transition/bottom/outlets | M6j evidence-value ingress/host cross-write implemented; milestone open | Separate normalized selectors from unnormalized bias-free values; neutral trajectory has no trainable value. CT proposal composition, controller/value reads, command endpoint and outlet/history still require review. |
-| M10 training/deployment/resume | M1a/history and M1b/label interfaces integrated only | Production CPU train/restore/sample and source-label masks are exercised; W supervision, endpoint context and new entity/task state lifecycle remain open. |
+| M9 transition/bottom/outlets | M6j–M6n source units implemented; milestone open | Typed CT, separate evidence/controller values, clean endpoint heads and acknowledged command history/recording are implemented. Production-scale numerical/resource behavior, external adapters and aggregate acceptance remain open. |
+| M10 training/deployment/resume | Source units through M6p integrated; milestone open | Matched W supervision, endpoint context, loss support closure and cached-graph provenance have production CPU coverage. Full supported-runtime inventory, remaining numeric/type debt, external weight mutation admission and release validation remain open. |
 | M11 full release review | Not started | Rewalk output-to-input gradients and input-to-output semantics, remove temporary transport/compatibility paths, record all remaining unsupported claims. |
 
 ## M1a source and lifecycle map

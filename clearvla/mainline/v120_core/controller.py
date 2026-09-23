@@ -10,6 +10,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..controller_values import (
+    LEGACY_CONTROLLER_VALUES,
+    RAW_CONTROLLER_VALUES,
+    validate_controller_value_mode,
+)
 from .gauges import fp32_diagnostic
 from .primitives import BiasFreeFFN, sinusoidal_positions
 
@@ -129,8 +134,12 @@ class NativeExecutionValueReader(nn.Module):
         max_dwell: int,
         horizon: int,
         ffn_expansion: float,
+        value_mode: str = LEGACY_CONTROLLER_VALUES,
     ) -> None:
         super().__init__()
+        validate_controller_value_mode(value_mode)
+        self.value_mode = value_mode
+        self.preserve_values = value_mode == RAW_CONTROLLER_VALUES
         hidden_size = int(hidden_size)
         heads = int(heads)
         block_count = int(block_count)
@@ -159,13 +168,13 @@ class NativeExecutionValueReader(nn.Module):
         self.action_norm = nn.LayerNorm(hidden_size, elementwise_affine=False)
         self.temporal_norm = nn.LayerNorm(hidden_size, elementwise_affine=False)
         self.memory_attention = nn.MultiheadAttention(
-            hidden_size, heads, dropout=0.0, batch_first=True
+            hidden_size, heads, dropout=0.0, batch_first=True, bias=not self.preserve_values
         )
         self.action_attention = nn.MultiheadAttention(
-            hidden_size, heads, dropout=0.0, batch_first=True
+            hidden_size, heads, dropout=0.0, batch_first=True, bias=not self.preserve_values
         )
         self.temporal_attention = nn.MultiheadAttention(
-            hidden_size, heads, dropout=0.0, batch_first=True
+            hidden_size, heads, dropout=0.0, batch_first=True, bias=not self.preserve_values
         )
         self.ffn_norm = nn.LayerNorm(hidden_size, elementwise_affine=False)
         self.ffn = BiasFreeFFN(hidden_size, float(ffn_expansion))
@@ -236,6 +245,8 @@ class NativeExecutionValueReader(nn.Module):
         if global_condition.shape != (batch, hidden) or time_context.shape != (batch, hidden):
             raise ValueError("value-reader conditions have the wrong shape")
         if evidence_value_tokens is None:
+            if self.preserve_values:
+                raise ValueError("execution value reader requires explicit evidence values")
             evidence_value_tokens = evidence_tokens
         if tuple(evidence_value_tokens.shape) != tuple(evidence_tokens.shape):
             raise ValueError("value-reader evidence selector/value tokens are misaligned")
@@ -337,6 +348,11 @@ class NativeExecutionValueReader(nn.Module):
             ],
             dim=1,
         )
+        # Evidence values never substitute for the declared selector chart.
+        selector_memory = (
+            torch.cat([private_state, evidence_tokens, global_condition[:, None], time_context[:, None]], dim=1)
+            if self.preserve_values else memory
+        )
         memory_key_bias = torch.zeros(
             int(memory.shape[1]), device=memory.device, dtype=torch.float32
         )
@@ -350,8 +366,8 @@ class NativeExecutionValueReader(nn.Module):
         )
         memory_context, _ = self.memory_attention(
             self.query_norm(query),
-            self.memory_norm(memory),
-            self.memory_norm(memory),
+            self.memory_norm(selector_memory),
+            memory if self.preserve_values else self.memory_norm(memory),
             attn_mask=memory_attention_mask,
             need_weights=False,
         )
@@ -365,14 +381,14 @@ class NativeExecutionValueReader(nn.Module):
         action_context, _ = self.action_attention(
             self.action_norm(action_query),
             self.action_norm(action_memory),
-            self.action_norm(action_memory),
+            action_memory if self.preserve_values else self.action_norm(action_memory),
             need_weights=False,
         )
         value_tokens = action_query + action_context
         temporal_context, _ = self.temporal_attention(
             self.temporal_norm(value_tokens),
             self.temporal_norm(value_tokens),
-            self.temporal_norm(value_tokens),
+            value_tokens if self.preserve_values else self.temporal_norm(value_tokens),
             need_weights=False,
         )
         value_tokens = value_tokens + temporal_context
@@ -403,6 +419,9 @@ class EvidenceExecutionController(nn.Module):
         self, config: object, *, block_count: int, max_dwell: int | None = None
     ) -> None:
         super().__init__()
+        self.value_mode = str(getattr(config, "controller_value_mode", LEGACY_CONTROLLER_VALUES))
+        validate_controller_value_mode(self.value_mode)
+        self.preserve_values = self.value_mode == RAW_CONTROLLER_VALUES
         h = int(config.hidden_size)
         heads = int(getattr(config, "latent_cvae_mmdit_controller_heads", config.num_heads))
         if h % heads:
@@ -470,6 +489,7 @@ class EvidenceExecutionController(nn.Module):
             block_count=self.block_count,
             max_dwell=max_dwell,
             horizon=int(config.action_horizon),
+            value_mode=self.value_mode,
             ffn_expansion=float(
                 getattr(config, "latent_cvae_mmdit_controller_ffn_expansion", 2.0)
             ),
@@ -553,6 +573,8 @@ class EvidenceExecutionController(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         """Build native selector and value lanes with one auditable boundary."""
         if evidence_value_tokens is None:
+            if self.preserve_values:
+                raise ValueError("execution controller requires explicit evidence values")
             evidence_value_tokens = evidence_tokens
         if tuple(evidence_value_tokens.shape) != tuple(evidence_tokens.shape):
             raise ValueError("native evidence selector/value tokens are misaligned")
@@ -578,7 +600,7 @@ class EvidenceExecutionController(nn.Module):
         )
         return (
             self.key_proj(self.source_norm(selector_sources)),
-            self.value_proj(self.source_norm(value_sources)),
+            self.value_proj(value_sources if self.preserve_values else self.source_norm(value_sources)),
         )
 
     def _split_heads(self, value: Tensor) -> Tensor:
@@ -656,6 +678,8 @@ class EvidenceExecutionController(nn.Module):
         if feedback is None:
             feedback = torch.zeros_like(action_tokens)
         if evidence_value_tokens is None:
+            if self.preserve_values:
+                raise ValueError("execution controller requires explicit evidence values")
             evidence_value_tokens = evidence_tokens
         if tuple(evidence_value_tokens.shape) != tuple(evidence_tokens.shape):
             raise ValueError("native evidence selector/value tokens are misaligned")
@@ -718,7 +742,9 @@ class EvidenceExecutionController(nn.Module):
         )
         private_state = state - state.mean(dim=1, keepdim=True)
         operation_keys = self.operation_key(self.state_norm(private_state))
-        operation_values = self.operation_value(self.state_norm(private_state))
+        operation_values = self.operation_value(
+            private_state if self.preserve_values else self.state_norm(private_state)
+        )
         operation_context, operation_weights = self._attention(
             operation_query, operation_keys, operation_values
         )

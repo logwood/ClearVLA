@@ -81,6 +81,7 @@ def _build_decoder_config(config: ExperimentConfig):
         executed_history_length=dims.executed_history_length,
         hidden_size=dims.hidden_size,
         evidence_value_mode=bottom.evidence_value_mode,
+        controller_value_mode=bottom.controller_value_mode,
         num_heads=dims.num_heads,
         visual_token_dim=dims.visual_token_dim,
         patches_per_camera=dims.patches_per_camera,

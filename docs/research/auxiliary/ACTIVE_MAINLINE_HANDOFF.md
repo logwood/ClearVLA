@@ -1,5 +1,61 @@
 # ClearVLA structural rebuild handoff
 
+## Current combined checkpoint: M6l–M6p
+
+The local implementation history consists of three closed source units:
+- `67a4bc316ae9a20b03680bcd0302c6a9fad292a9`: M6l controller values,
+  M6m clean endpoint head supervision and M6n acknowledged commands.
+- `11ec0d4a00ffe7b16f9e442ee7ade741af0af5e0`: M6o source-supported loss closure.
+- `5824192d3e57058b37bda1e4e833f18d1d971d36`: M6p encoded graph provenance.
+The following integration-record commit changes documentation only. Exact final
+commit/tree identities and restore instructions are in the checkpoint archive.
+
+Base is the real upstream M6k commit
+`5467a0ad70477a80fe5c1c18c2015020424d9b61`, tree
+`88652ae066ee0a2a6dad6e0d14fd3bbfbcfeee64`. The base commit object was restored
+and hash-verified, with that shallow boundary explicit. None of this batch has
+been pushed. The connected account reports repository push permission, but the
+session exposes only read operations; a bounded native Git read fails DNS.
+Do not retry release plumbing indefinitely or claim a local commit is remote.
+No GitHub workflows or master refs changed.
+
+Latest accumulated neural config is `structural_rebuild_m6n_calvin.json`.
+M6o/M6p correct source-wide loss/cache semantics, not new model modes. Read the
+latest five-unit section in the architecture contract before continuing.
+
+Final selected regression: 17 complete isolated test-file processes, 417 actual
+unique tests, 416 passed, 1 CUDA-only skip, no failures or errors. The 84 new
+tests (15/21/16/21/11 for l/m/n/o/p) are INCLUDED in that total. Earlier per-unit
+runs and the 291-case pre-o/p run are not added to these counts. M6o's original
+M6n reproduction had 18 failures and 3 passes. A separate actual-engine probe
+accepted mixed-batch cache evaluation before M6p (and consumed RNG), and now
+rejects before Teacher or RNG. Intentional baseline failures remain archived.
+Two old fixture/message tests were repaired without relaxing numeric tolerances.
+
+Scoped static: 23 Python files, 16 present in baseline; Ruff diagnostics 0.
+Pyright baseline/current errors 226/226, warnings 853/1135; no new matched type
+errors or missing imports. The errors and increased warnings remain debt.
+Two seeds (0,71), new neural modes disabled, exactly match M6k configuration,
+parameters/buffers, parameter/trainable ordering, RNG, sampled actions, physical
+field and motion logits. This is inference/init parity, not identical new loss
+arithmetic. Runtime Python 3.13.5/PyTorch 2.10 CPU; 3.12/2.11 supported-runtime
+full milestone, CUDA resource validation and physics success remain unverified.
+H=512 controller components decrease by 6,144 parameters. Endpoint training adds
+one velocity evaluation on the same online cache; no new inference W/ODE calls.
+
+Do not overclaim: teacher-forced clean-arm supervision does not guarantee sampled
+endpoint distribution matching; receipts describe an adapter's accepted command,
+not actual motor displacement; loss quarantine does not sanitize supported NaNs.
+M6p ownership is input/model/engine-step/mode provenance, not a tensor mutation
+or external optimizer detector. Treat captured tensors as immutable and rebuild
+following any external weight change. Persistent physical object identity,
+calibrated world-frame progress, external CALVIN evaluator adaptation and final
+M6/M9–M11 release acceptance remain open. Next prioritize integrated source-wide
+acceptance and measured production-scale behavior, not another named head merely
+to fill the milestone table.
+
+## Historical checkpoints (not the current state)
+
 ## M6k source checkpoint — 2026-09-22 Pacific
 
 Recovered and hash-verified all 821 M6j sources and 891 archived items. Reproduced

@@ -130,17 +130,59 @@ class ResetResult:
 
 
 @dataclass(frozen=True)
+class ExecutedCommand:
+    """Controller-boundary receipt; command, not measured joint motion or reward.
+
+    The adapter acknowledges the exact submitted command and the canonical native
+    command it accepted. Copies are read-only so simulator buffer reuse cannot
+    rewrite a historical receipt. A physics substep is not another policy step.
+    """
+
+    submitted: np.ndarray
+    applied: np.ndarray
+
+    def __post_init__(self) -> None:
+        for name in ("submitted", "applied"):
+            value = _finite_vector(getattr(self, name), size=ACTION_DIM, name=f"command receipt {name}").copy()
+            value.setflags(write=False)
+            object.__setattr__(self, name, value)
+
+
+@dataclass(frozen=True)
 class StepResult:
     observation: PolicyObservation
     reward: float
     terminated: bool
     truncated: bool
     evaluation: EvaluationState = EvaluationState()
+    command_receipt: ExecutedCommand | None = None
 
     def validate(self) -> None:
         self.observation.validate()
         if not np.isfinite(self.reward):
             raise ValueError("environment reward must be finite")
+        if self.command_receipt is not None:
+            if not isinstance(self.command_receipt, ExecutedCommand):
+                raise TypeError("command receipt must be an ExecutedCommand")
+            if not np.array_equal(self.observation.action_state, self.command_receipt.applied):
+                raise ValueError("observation action_state differs from acknowledged native command")
+
+    def executed_command(self, submitted: np.ndarray) -> np.ndarray:
+        """Resolve one authoritative command after step succeeds, before recording.
+
+        Old adapters remain admitted only under their existing identity check.
+        They cannot silently apply a different command. Receipt adapters may
+        canonicalize/clamp internally but must acknowledge that exact request.
+        """
+        self.validate()
+        requested = _finite_vector(submitted, size=ACTION_DIM, name="submitted action")
+        if self.command_receipt is not None:
+            if not np.array_equal(requested, self.command_receipt.submitted):
+                raise ValueError("command receipt acknowledges a different submitted action")
+            return self.command_receipt.applied.copy()
+        if not np.allclose(self.observation.action_state, requested, rtol=0., atol=1e-6):
+            raise ValueError("next action_state must equal the submitted command for an adapter without a receipt")
+        return requested.copy()
 
 
 @runtime_checkable

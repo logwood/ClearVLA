@@ -1,5 +1,112 @@
 # Current ClearVLA architecture contract
 
+## M6l–M6p batch: execution, endpoint, command and supervision ownership
+
+This batch continues the M6k source tree; it does not declare the entire M6 or
+system rebuild accepted. The isolated branch is the only intended remote target.
+Five connected units have been implemented within this continuation, with local
+source commits at closed boundaries and one final report. Complete checkpoints
+are retained without adding or changing GitHub workflow files.
+
+### M6l: `bottom.controller_value_mode = separate_magnitude_v1`
+
+The native EvidenceExecutionController and NativeExecutionValueReader preserve
+selector/value ownership downstream of M6j. Source normalization remains in K;
+source V and operation-private-state V use bias-free unnormalized projections.
+The candidate reader now constructs evidence K from the actual selector stream,
+not by reusing the value stream as a key. Its memory/action/temporal attentions
+normalize Q/K but not V, with bias-free attention/output projections. Explicit
+matching value streams are mandatory in this mode. The configuration requires
+M6j magnitude-preserving evidence and records independent deployment metadata.
+
+This is a learned computation/capacity policy, NOT the robot actuator. Existing
+capacity sigmoid and 200-step warm-up, candidate centering, GRU identity state,
+FFNs, decoder operator budgets and terminal decisions remain unchanged. Their
+hidden nonlinearities have legitimate representation roles: zero evidence does
+not force a zero controller state, zero capacity or zero policy output. The
+constraint is on the identified reads, not global scale equivariance.
+
+### M6m: `bottom.endpoint_supervision_mode = clean_command_v1`
+
+Binary-gripper modes may train existing command CE and motion BCE on a separate
+clean-arm endpoint forward, reusing the SAME causal OnlinePolicyCache. Its
+numerical context is exactly t=1; where schedule contexts are enabled, dt=0,
+normalized index=1 and endpoint=1. A common helper defines both training and
+existing proposal/refinement endpoint calls. Known arm rows use detached clean
+action labels; unlabelled rows keep source noise; binary-gripper field lanes
+keep source noise and are neutralized by the same existing outlet boundary as
+in deployment. No clean gripper label is fed to the command head as an input.
+Unavailable head rows are quarantined BEFORE CE/BCE; masking a NaN loss afterward
+would not protect its gradient.
+
+The interior velocity forward retains flow-matching, clean-trajectory and
+execution-value objectives. Only the existing command/motion budgets change
+owner to the endpoint; no duplicate head loss or new objective weight is added.
+The endpoint forward does not request candidate execution supervision and never
+rebuilds G/S/W. Training has one additional velocity evaluation; deployment keeps
+its existing solver and two endpoint reads. Teacher-forced clean arm inputs
+match the numerical endpoint, not necessarily the sampled inference distribution.
+This is not a guarantee of correct gripper behavior or an implicit task-stop gate.
+
+### M6n: controller-boundary receipts and immutable recording
+
+`ExecutedCommand(submitted, applied)` holds independent read-only finite native
+[7] arrays. The rollout protects the raw policy proposal from mutating clipping
+and step adapters. Following a successful step, it checks the receipt against
+the exact submitted request and next action_state; its applied value becomes the
+single command used by history, the HDF5 action label and execution telemetry.
+Old adapters without receipts retain their identity/allclose admission rule and
+cannot silently change a command. Repository Alicia and ManiSkill adapters
+produce receipts. ManiSkill freezes the accepted command before handing a copy
+to a backend that may reuse inputs. These receipts identify the command boundary,
+not measured joint movement or undocumented internal actuator transformations.
+
+EpisodeRecorder also copies successor observations, preventing simulator buffer
+reuse from altering saved labels. A receipt/label disagreement is rejected before
+recording. The residual-RL collector protects its clip-check input and rejects a
+receipt that changes its identified residual action mapping BEFORE replay write;
+silently associating a different actuator command with the original residual
+would change the learning problem. Evaluator telemetry never enters policy input.
+External CALVIN evaluation scripts that are not in this repository remain unaudited.
+
+Candidate configurations accumulate changes in structural_rebuild_m6l_calvin.json,
+structural_rebuild_m6m_calvin.json and structural_rebuild_m6n_calvin.json. M6n uses
+the M6m neural graph plus the source-wide simulation boundary; it adds no model
+feature, reward input or learned stage machine. Legacy disabled-mode serialization
+and model initialization/output are compared independently against M6k.
+
+## M6o: source-supported loss closure
+
+Action-row support is applied before trajectory decoding, CE and BCE, including
+the interior-head control mode. Candidate existence and label support are distinct
+producer masks, jointly applied before candidate cost/Huber computations and
+audit reductions. Empty support yields finite zero contributions; valid NaNs
+remain errors. Gripper audit denominators and terminal identity checks count
+only actual supported candidates/rows. No online tensor or deployed decoder is
+masked by future label support. This is a training-loss/audit correction, not a
+new model mode, noise distribution, source-truth mask, or inference fallback.
+It does not make NaNs in upstream supported activations acceptable.
+
+## M6p: reusable training graph ownership
+
+`EncodedTrainingBatch.capture` binds one causal input object, model instance,
+engine optimizer step and train/eval mode to paired online/Teacher source planes.
+Cached loss composition rejects a different online observation, model, engine
+step or mixed source planes BEFORE Teacher, flow-noise sampling or velocity.
+Both planes must retain the same intent and candidate-world objects. Future
+labels/audit metadata may change while retaining the same online input; they
+do not own or overwrite its cache. Guards are CPU object/step checks plus the
+existing tensor contracts, once per composition, not per ODE node.
+
+This record is ephemeral, not a serialized checkpoint or immutable tensor
+container. In-place input tensor writes and parameter mutation outside the
+engine are not detected. Callers must treat source tensors as immutable and
+rebuild after any optimizer/external weight change. Equal-valued reconstructed
+inputs need re-encoding. No per-step image hashing, cloning, learned parameters,
+device reductions or simulation state are added by the ownership guard.
+
+
+
 Updated: 2026-09-22
 
 This is the compact source of truth for the active mainline graph. Read it
@@ -24,7 +131,8 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit source candidate is
-`configs/mainline/structural_rebuild_m6k_calvin.json` (validation scope in handoff).
+`configs/mainline/structural_rebuild_m6n_calvin.json` (validation scope in handoff).
+M6o/M6p correct shared loss/cache semantics; they do not add another model mode.
 M5a adds one soft operated-
 object distribution across actual S/coarse/P1/P2 readers; its detailed contract
 is below. M5b adds a causal instruction reference; M6a/b/c separate action-matched W

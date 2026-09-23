@@ -684,6 +684,7 @@ def test_event_direction_changes_only_open_close_names_and_propagates_to_matched
     boundary[:, -1] = -1
     history = SimpleNamespace(action_state=boundary, codec_gripper_boundary=boundary[:, -1:])
     action = SimpleNamespace(
+        row_valid=None,
         normalized=target,
         raw_units=target,
         current_raw_units=boundary,

@@ -1,5 +1,31 @@
 # ClearVLA current decision ledger
 
+## M6l–M6p remaining acceptance boundary
+
+Execution selector/value ownership, clean endpoint head supervision and
+controller-boundary command receipts are implemented in the current batch.
+Loss support closure and cached-graph ownership are also implemented.
+They still require the full supported-runtime milestone inventory. Local CPU
+checks do not certify GPU memory/latency or closed-loop task performance.
+
+The endpoint head sees teacher-forced arm trajectories during supervision;
+matching t/dt/index/endpoint removes a conditioning discrepancy, not the full
+rollout-distribution mismatch. Native receipts are adapter declarations, not
+physical actuator sensors. External CALVIN evaluators must adopt equivalent
+executed-command semantics before their logs can be certified. Independent
+source support and learned object correspondence remain different concepts.
+
+The controller retains capacity schedules, GRU identities and hidden nonlinear
+normalization where they own controller representations; no claim of end-to-end
+amplitude proportionality is made. W/S/P evidence needs actual trained behavior
+and resource measurement beyond static path/gradient tests.
+
+
+Cache-source guards operate at reference/model/engine-step/mode level. They do
+not detect in-place tensor mutation or out-of-engine parameter writes; callers
+must retain immutable source inputs and re-encode after such updates. Label
+quarantine is not permission to ignore NaNs in supported upstream activations.
+
 Updated: 2026-09-22
 
 This file contains only unresolved questions that can select the next source

@@ -289,19 +289,12 @@ def run_episode(
         # Receding-horizon control: execute one action and replan immediately.
         # The recorded target must be the command that actually crosses the
         # controller boundary, never an out-of-range policy proposal.
-        action = environment.clip_action(chunk[0])
-        result = environment.step(action)
-        result.validate()
-        if not np.allclose(
-            np.asarray(result.observation.action_state, dtype=np.float32),
-            action,
-            rtol=0.0,
-            atol=1e-6,
-        ):
-            raise ValueError(
-                "next action_state must equal the clipped action executed at the "
-                "environment boundary"
-            )
+        # Isolate proposal and submitted buffers from mutating native adapters.
+        submitted = np.asarray(environment.clip_action(chunk[0].copy()), dtype=np.float32).copy()
+        if submitted.shape != (ACTION_DIM,) or not np.isfinite(submitted).all():
+            raise ValueError("clipped policy command must be finite [7]")
+        result = environment.step(submitted.copy())
+        action = result.executed_command(submitted)
         if record_policy_trace:
             trace = _policy_trace_metrics(
                 chunk,
@@ -314,7 +307,10 @@ def run_episode(
             result = replace(
                 result,
                 evaluation=EvaluationState(
-                    {**dict(result.evaluation.metrics), **trace}
+                    {**dict(result.evaluation.metrics), **trace,
+                     "telemetry_submitted_native_action": submitted.tolist(),
+                     "telemetry_command_receipt": result.command_receipt is not None,
+                     "telemetry_adapter_command_delta": (action - submitted).tolist()}
                 ),
             )
         if recorder is not None:

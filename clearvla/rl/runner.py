@@ -50,12 +50,15 @@ def run_episode(
             else learner.act(decision.features, deterministic=mode == "adapter")
         )
         action, diagnostics = action_map.execute(decision.base_action, u)
-        if not np.array_equal(action, environment.clip_action(action)):
+        if not np.array_equal(action, environment.clip_action(action.copy())):
             raise ValueError("residual action map differs from the native environment boundary")
-        result = environment.step(action)
-        result.validate()
-        if not np.allclose(result.observation.action_state, action, rtol=0, atol=1e-6):
-            raise ValueError("next action_state must be the actual executed residual command")
+        submitted = action.copy()
+        result = environment.step(submitted.copy())
+        action = result.executed_command(submitted)
+        # The critic's residual action map is an identified MDP contract. Do
+        # not silently train it on another controller transformation.
+        if not np.array_equal(action, submitted):
+            raise ValueError("acknowledged command differs from the residual action map")
         history.append(action, result.observation)
         terminated = bool(result.terminated)
         # A collector budget is a timeout, not an absorbing MDP termination.

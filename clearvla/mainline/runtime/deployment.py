@@ -43,7 +43,17 @@ from ..bottom_evidence import (
 )
 from ..checkpoint import CheckpointIdentity
 from ..config import DataConfig, ExperimentConfig, config_from_mapping
+from ..controller_values import (
+    LEGACY_CONTROLLER_VALUES,
+    RAW_CONTROLLER_VALUES,
+    controller_value_metadata,
+)
 from ..data.normalizer import ArrayNormalizer
+from ..endpoint_supervision import (
+    CLEAN_ENDPOINT_SUPERVISION,
+    NO_ENDPOINT_SUPERVISION,
+    endpoint_supervision_metadata,
+)
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
@@ -377,6 +387,10 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"endpoint_supervision": endpoint_supervision_metadata()}
+           if config.bottom.endpoint_supervision_mode == CLEAN_ENDPOINT_SUPERVISION else {}),
+        **({"controller_values": controller_value_metadata()}
+           if config.bottom.controller_value_mode == RAW_CONTROLLER_VALUES else {}),
         **({"transition_condition": transition_condition_metadata()}
            if config.bottom.transition_condition_mode == TYPED_TRANSITION else {}),
         **({"bottom_evidence": bottom_evidence_metadata()}
@@ -484,6 +498,18 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     if str(abi.get("graph_config_sha256", "")) != canonical_sha256(graph):
         raise ValueError("deployment ABI graph digest is inconsistent")
     graph_bottom = _mapping(graph.get("bottom"), name="graph_config.bottom")
+    endpoint_mode = graph_bottom.get("endpoint_supervision_mode", NO_ENDPOINT_SUPERVISION)
+    if endpoint_mode == CLEAN_ENDPOINT_SUPERVISION:
+        if abi.get("endpoint_supervision") != endpoint_supervision_metadata():
+            raise ValueError("endpoint supervision ABI semantics mismatch")
+    elif endpoint_mode != NO_ENDPOINT_SUPERVISION or "endpoint_supervision" in abi:
+        raise ValueError("unknown or unselected endpoint supervision ABI")
+    controller_mode = graph_bottom.get("controller_value_mode", LEGACY_CONTROLLER_VALUES)
+    if controller_mode == RAW_CONTROLLER_VALUES:
+        if abi.get("controller_values") != controller_value_metadata():
+            raise ValueError("execution controller value ABI semantics mismatch")
+    elif controller_mode != LEGACY_CONTROLLER_VALUES or "controller_values" in abi:
+        raise ValueError("unknown or unselected execution controller value ABI")
     transition_mode = graph_bottom.get("transition_condition_mode", SUMMED_TRANSITION)
     if transition_mode == TYPED_TRANSITION:
         if abi.get("transition_condition") != transition_condition_metadata():
