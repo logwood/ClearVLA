@@ -453,7 +453,7 @@ def build_deployment_abi(
                 "reference_batch_size": int(config.data.dinov2_reference_batch_size),
             },
             **({"visual_source_time": visual_time_metadata(config.observation.source_time_mode)} if config.observation.source_time_mode != FIXED_VISUAL_TIME else {}),
-            **({"candidate_support": candidate_support_metadata(config.observation.candidate_support_mode)}
+            **({"candidate_support": candidate_support_metadata(config.observation.candidate_support_mode, source_candidate_count=config.dimensions.patches_per_camera)}
                if config.observation.candidate_support_mode != MOMENT_LOCAL_SUPPORT else {}),
             **({"local_ownership": local_ownership_metadata(config.observation.local_ownership_mode)}
                if config.observation.local_ownership_mode != INDEPENDENT_LOCAL_OWNERS else {}),
@@ -687,7 +687,13 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     support_mode = str(graph_observation.get("candidate_support_mode", MOMENT_LOCAL_SUPPORT))
     if support_mode != MOMENT_LOCAL_SUPPORT:
         support_metadata = _mapping(observation.get("candidate_support"), name="observation.candidate_support")
-        if canonical_sha256(support_metadata) != canonical_sha256(candidate_support_metadata(support_mode)):
+        support_dimensions = _mapping(graph.get("dimensions"), name="graph_config.dimensions")
+        source_count = _strict_abi_int(
+            support_dimensions.get("patches_per_camera"), name="dimensions.patches_per_camera"
+        )
+        if canonical_sha256(support_metadata) != canonical_sha256(candidate_support_metadata(
+            support_mode, source_candidate_count=source_count
+        )):
             raise ValueError("deployment candidate support contract differs from graph")
     elif "candidate_support" in observation:
         raise ValueError("legacy visual graph cannot acquire an undeclared candidate support")

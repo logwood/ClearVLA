@@ -1,4 +1,37 @@
+## M8a–M8g: bounded production and CALVIN execution admission
+
+Seven local source units complete; see the current architecture contract for
+producer/consumer semantics. Cumulative config remains structural_rebuild_m6n_calvin.json.
+Production chart correction retains all256 native candidates independently from
+the8x8 query canvas. P1 resource policy chunks computation and recomputes pure
+quadrature without pruning candidates/rows. No new neural mode/parameters.
+
+The next external prerequisites are declared/actual runtime qualification, valid
+real data/cache admission, CUDA production BF16 plus actual H512 optimizer step,
+then finite real-data learning and official CALVIN rollout. Do not install into
+XVLA or pretend the configured files exist. The new script blocks rather than
+fabricates data, records phases and isolates its owned worker on interruption.
+Archive/source preservation remains independent from CI and milestone acceptance.
+Final selected local scope289 cases:288 passes and1 baseline-reproduced resource
+error. Full prior74-file inventory has not been rerun on M8.
+
 # ClearVLA structural rebuild work plan
+
+## M7f–M7l cumulative closure checkpoint
+
+Seven implementation/test units are separately committed and archived. No new
+neural modes. Final local selected inventory: 1433 passed, 1 CUDA skip, no failures,
+1434 actual cases across 74 files. The M7k 74-file full run plus complete
+M7l reruns of two changed test files are reconciled with byte-identical remaining
+sources and unchanged production code; not a fresh all-file M7l run. Read the
+handoff and raw ledgers for negative baselines and scoped static debt.
+
+Next: run the same inventory in the declared Python/Torch environment with the
+existing vision extra, validate actual production-size GPU forward/backward and
+cost, then finite real-data learning and external CALVIN command/reset semantics.
+Meta/constant-only-CPU construction verifies ownership, not hardware behavior.
+Source preservation must not wait for these gates; do not redo already saved
+M6p or M7a–e and do not force-push shallow recovery history.
 
 ## Current cumulative closure: M7a–M7c
 
@@ -109,10 +142,10 @@ merely because this subunit is saved.
 | M6i S outcome expectation | Implemented candidate; verification per source | Direct per-object/view/robot demonstration-outcome supervision and separate S/P3 reads. Not terminal goal or success. |
 | M6j bottom evidence magnitude | Implemented candidate; verification per source | Production adapter/host values retain zeros and small magnitudes; selector identities do not become V. Explicit config/ABI; legacy controls retained. |
 | M6h typed instruction change | Implemented candidate; verification per source | Shared-query causal comparison; separate visual-content/image/robot/status owners; S and P3 typed direct reads; current/reference cache provenance. Not persistent correspondence or desired-relation supervision. |
-| M7 P1/P2 | M5a target marginal/current-evidence seam implemented | Deeper target-local precision, view-aware future geometry and physical consequence semantics remain open; shared binding alone does not close them. |
+| M7 P1/P2 | M5a shared binding and M6d/M6e time/view-aware consequence reads implemented; milestone open | Production-scale cost, trained precision and physical correspondence require measured acceptance; do not re-list the implemented raw cross-view pooling seam as unfixed. |
 | M8 P3 | M6f/g/h candidate coordination, robot innovation and typed reference changes implemented; milestone open | Direct distinct fact/precision/effect/change consumers. Object-matched endpoint error and desired-relation progress remain open. |
 | M9 transition/bottom/outlets | M6j–M6n source units implemented; milestone open | Typed CT, separate evidence/controller values, clean endpoint heads and acknowledged command history/recording are implemented. Production-scale numerical/resource behavior, external adapters and aggregate acceptance remain open. |
-| M10 training/deployment/resume | Source units through M6p integrated; milestone open | Matched W supervision, endpoint context, loss support closure and cached-graph provenance have production CPU coverage. Full supported-runtime inventory, remaining numeric/type debt, external weight mutation admission and release validation remain open. |
+| M10 training/deployment/resume | Source units through M6p integrated; milestone open | Matched W supervision, endpoint context, loss support closure and cached-graph provenance have production CPU coverage. M7h adds ordinary external parameter-write admission; supported-runtime/GPU inventory, remaining numeric/type debt, unversioned/raw mutations and release validation remain open. |
 | M11 full release review | Not started | Rewalk output-to-input gradients and input-to-output semantics, remove temporary transport/compatibility paths, record all remaining unsupported claims. |
 
 ## M1a source and lifecycle map

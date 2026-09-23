@@ -1,35 +1,116 @@
+# Current M8a–M8g continuation (2026-09-23)
+
+Recovered M7l exactly: `457107a6d091e4f893469b347a927e47c3737eeb`,
+tree `977235e92bf3287eaa549760062d4c50928a1c02`. Do not restart M7l/M6p.
+Current production/test code: `d4d98c4d3d45dc9dd1ca099063e77159ff5bd71f`,
+tree `07fc14d30c92802f7f5f501d7fcc8d0375a2dc24`. The following archival
+commit is documentation-only; archive SOURCE_IDENTITY owns its exact hash.
+
+Seven closed units: explicit bridge instruction events; confirmed CALVIN
+commands and separate task/environment resets; bounded real/synthetic runtime
+qualification; native candidate chart identity (not hard-coded 64); support-aware
+P1 tiling/recomputation; child lifetime cleanup; explicit post-warmup phase probes.
+No model parameters/modes, workflow/master changes, automatic installation,
+remote writes, formal training or actual simulator execution this turn. GitHub
+namespace absent, plugin reported installed=false; reconnect suggestion shown.
+
+Final local selected inventory: 13 files / 289 unique cases, 288 passed and
+ONE existing mixed-reset B4 training case terminated under memory limit. It was
+also OOM-killed independently on unchanged M7l. Preserve error; it is NOT a skip.
+78 new cases are INCLUDED. Runtime qualifier's updated 27 cases ran in disjoint
+23+4 batches after M8g. Others retain the identical tested production code.
+Do not reuse historical M7l 1433 passes as this turn's test result.
+Scoped static: 14 Python files; Ruff 0; no new matched errors/import failures;
+48->48 inherited errors, 256->295 warnings. Not full static acceptance.
+
+Actual H512/B1/256-patch FP32 inference with phase=1.0 (emulated clock1200,
+fresh random weights): encode7.189s, complete two-pass9.969s; peak process
+RSS1,754,755,072 bytes. Registered182,961,466/trainable166,722,447 unchanged.
+Synthetic DINO/T5/RGB, not trained checkpoint or real encoders; no commands sent.
+H512 BF16 incomplete/failed at sampling after interruption; full-size training
+not accepted. Separate H32/native256 FP32 and CPU BF16 VJPs passed; routine
+memory tests use100 native supports, not a concealed production resize.
+
+Next: reconnect and save normally without overwriting remote updates; use
+qualify_mainline_runtime.py for target-environment, real-data and GPU evidence.
+Do not upgrade XVLA automatically. Current Python3.13.5/Torch2.10 CPU differs
+from declared3.12/2.11; real configured paths and CUDA are absent. CALVIN
+wrapper tests use fake physics and real input/history components; actual official
+CALVIN run, physical identity/progress and whole-milestone acceptance stay open.
+
+## Historical records below — not current acceptance
+
 # Current M7 continuation (2026-09-23)
 
-Remote saved M7a–M7c: `8723ba072dd805908eff439e13150b7df7782034`, tree
-`ec1f90be3fecfc91854b2b0d3c39b5015e4c0c77`; M6p was already saved as
-`01cc826f92fa7fef1056fc2d27b1fcdaf83a9322`. Do not restart from M6k.
-M7a phase consistency (10 tests), M7b language padding (14), M7c source
-preflight (16) have completed local final runs: 40 passed. Full cumulative
-runtime and later M7d fixtures remain under a separate frozen-source inventory;
-read the final report rather than extrapolating from these focused successes.
+## M7f–M7l cumulative local result (2026-09-23)
 
-M7d reconciles exact structural/top whitelists, optional typed values and
-camera provenance in stale unit fixtures; it does not suppress failures or
-weaken numerical tolerances. M7e changes source-owned test orchestration so a
-historical baseline failure cannot prevent current tests, while overall status
-remains failed. Seven stubbed-orchestration tests passed independently; they are
-shell control-flow checks, not seven additional neural validations.
+Genuine remote M7e base: `194a6e5b954ba947774d79b8c94e12d0ceca62b5`, tree
+`978ee9c7435010788f940a71304aaded9f425414`. M6p/M7a–e were already saved;
+do not restore the stale chat boundary or upload them a second time.
+Final code/test unit: `8866b37f05078a86dde2bbc44ea9fc52f71c4b05`; final archival commit is
+subsequent documentation only. Cumulative config remains
+`configs/mainline/structural_rebuild_m6n_calvin.json`.
 
-CI run `35833825786` saved M7a–M7c correctly and passed cumulative differential
-static review in Python 3.12.14 / Torch 2.11 CPU. Its old 0f0716 baseline had one
-StackCube trace test failing because both imageio and cv2 were absent; the old
-shell exited there without current tests. The artifact was retrieved and hashed.
-The supported-runtime inventory remains NOT accepted. Backend availability is
-now recorded, but no workflow/dependency install or real-data/GPU job is changed.
+Seven units cover sampler graph/seed admission, adjacent-command agreement,
+ordinary source/parameter mutation detection, truthful legacy/materialized
+cache fixtures, finite bottom scales, numeric-admission ordering, and explicit
+cross-extent FP32 comparison distinct from exact prefix causality. There are
+no new neural modes/parameters, W calls or ODE evaluations.
 
-Cumulative configuration remains `configs/mainline/structural_rebuild_m6n_calvin.json`.
-The local 60-file M6p baseline recorded 14 structural/prefix assertion failures
-and one top-context whitelist failure, plus resource-killed endpoint and timed
-out policy processes. Preserve original records; partial dots are not passes.
-Current-source tests run serially under the actual 4 GiB limit. Source-only
-archives and ordinary isolated-branch saves precede full CI by user instruction.
+The COMPLETE frozen M7k run covered 74 files / 1,426 actual cases:
+1,423 passed, two old strict cross-extent numeric failures, one CUDA skip.
+M7l changes only two test functions plus an explicit assertion helper and eight
+helper-contract cases; all production and preexisting shared fixtures are
+unchanged. Those TWO affected files were rerun completely. The remaining 72
+results are reused with byte-identical tests and production code; this is NOT
+claimed to be a fresh 74-file M7l invocation. Reconciled current inventory:
+1434 actual unique cases, 1433 passed, 1 CUDA-only skipped, zero failures/errors.
+All 84 newly added cases are INCLUDED, not added again. Raw failing earlier
+runs, negative baselines and reused/fresh source identities are retained.
+
+The two previous numerical failures reproduced on unchanged M7e. Exact physical
+prefixes/times and projections first diverged in per-token RMS at different
+full-tensor extents; same-extent future perturbations remain bit-exact. A
+DIAGNOSTIC-only canonical row RMS restores exact terminal agreement in both
+fixtures; it is not installed in production. Cross-extent tests now use an
+explicit 16*FP32-epsilon*per-output-reference-peak absolute budget, rtol=0,
+without a fixed absolute floor. This is an engineering regression budget, not
+a proof of a universal error bound. Zeroed/signed/nonfinite/materially changed
+small outputs are rejected; same-extent causality remains exact and is stronger.
+
+Production fixes reproduce 42 failures / 23 passes in 65 original-M7e probes.
+The NEW M7g ordering regression was independently reproduced on M7j (4 failures
+in 30 cases), then corrected at M7k; it is not mislabeled historical debt.
+Final cumulative seed0/71, post-warmup step333 inference exactly matches original
+M7e parameters, buffers, ordering, config, RNG and outputs.
+
+Scoped static covers 12 Python files: Ruff zero, no new matched type errors or
+missing imports. Inherited errors 42->42, warnings
+676->684 remain visible. Different historical scopes are not comparable totals.
+Runtime Python3.13.5/Torch2.10 CPU, 4GiB cgroup, serial independent test files.
+Prior M7e 3.12/2.11 CI had 4 failures among 1350 cases (two now-fixed cache fixtures,
+two absent video backends), NOT a passed milestone. Current-source supported
+runtime/CUDA/real-data/physical-task acceptance remains unperformed.
+
+Production-width meta/constant-only-CPU construction verified 182,961,466
+registered / 166,722,447 trainable parameters and 22 optimizer groups without
+missing/duplicate ownership. It is not production forward/backward or GPU cost.
+No workflow or master change; no remote push this turn. The current connector
+has no callable write operation and a bounded native Git read failed DNS.
+The final remote read returned a connector Link-not-found error; it is not
+evidence that the repository/ref disappeared. Last successful read was M7e.
+Archives contain full source, genuine shallow base, incremental bundle, raw
+results and independent empty-directory restoration checks.
+
+Remaining limits: unversioned inference tensors, .data/raw writes without a
+version bump and external buffers require explicit re-encoding; physical object
+identity/progress, external CALVIN command receipts/reset and learned behavior
+remain unverified. Next: declared runtime and its existing vision extra, measured
+production-scale resources/numerics, real-data learning, external evaluator.
+Do not add another neural head merely to create a milestone label.
 
 ## Earlier implementation records (historical acceptance scopes)
+
 
 # ClearVLA structural rebuild handoff
 

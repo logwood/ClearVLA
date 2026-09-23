@@ -17,16 +17,23 @@ MOMENT_LOCAL_SUPPORT = "moment_local_v1"
 FULL_POSTERIOR_SUPPORT = "full_posterior_lattice_v1"
 
 
-def candidate_support_metadata(mode: str) -> dict[str, object]:
+def candidate_support_metadata(
+    mode: str, *, source_candidate_count: int = 64
+) -> dict[str, object]:
+    # G1 reads the complete DINO chart, not the 8x8 public query grid.
+    # The default preserves the historical 64-patch metadata for callers
+    # without a source; all graph/runtime boundaries must pass their source.
     if mode not in {MOMENT_LOCAL_SUPPORT, FULL_POSTERIOR_SUPPORT}:
         raise ValueError("unknown progressive candidate support mode")
+    if type(source_candidate_count) is not int or source_candidate_count < 1:
+        raise ValueError("source candidate count must be a positive integer")
     return {
         "contract": mode,
         "coordinates": "current_camera_normalized_xy_align_corners",
         "source": "complete_G1_camera_chart"
         if mode == FULL_POSTERIOR_SUPPORT
         else "moment_centered_local_lattice",
-        "candidate_count": 64 if mode == FULL_POSTERIOR_SUPPORT else 49,
+        "candidate_count": source_candidate_count if mode == FULL_POSTERIOR_SUPPORT else 49,
         "parent_measure": "FP32_log_probability"
         if mode == FULL_POSTERIOR_SUPPORT
         else "moment_gaussian",

@@ -95,8 +95,10 @@ def test_action_condition_and_candidate_world_remain_one_cache_pair() -> None:
     assert deployment.predicted_dynamics is context.predicted_dynamics
     assert deployment.candidate_world is context.candidate_world
     assert context.action_condition.interval_action is context.coarse_action.action_prediction
-    assert context.current_world_belief is not None
-    assert deployment.belief is context.current_world_belief
+    # This fixture selects the legacy top: no robot-conditioned compact
+    # belief was materialized. Deployment still aliases its actual G facts.
+    assert context.current_world_belief is None
+    assert deployment.belief.robot_observation is None
     assert deployment.belief.content is context.facts.content
     assert deployment.belief.camera_coordinates is context.facts.camera_coordinates
 
@@ -319,3 +321,22 @@ def test_dynamic_p2_p3_consumes_one_materialized_p1_dock() -> None:
     assert compiled.plan.source_names == ("p3_temporal", "p3_state_change")
     for name in ("factual", "precision", "effect"):
         assert not hasattr(compiled.plan, name)
+
+
+def test_cumulative_top_preserves_materialized_current_world_owner() -> None:
+    from test_mainline_endpoint_supervision import _config
+    from test_mainline_operation_expectation import _batch
+    from test_mainline_state_features import _model_engine
+
+    model, _ = _model_engine(_config())
+    batch = _batch()
+    model.eval()
+    with torch.no_grad():
+        cache, state, _ = model.encode_online(batch.online, collect_diagnostics=False)
+    belief = state.top.current_world_belief
+    assert belief is not None and belief.robot_observation is not None
+    assert cache.top.belief is belief
+    assert belief.robot_observation.state is cache.history.state
+    assert belief.content is state.top.facts.content
+    assert belief.camera_coordinates is state.top.facts.camera_coordinates
+    assert cache.top.candidate_world is state.top.candidate_world

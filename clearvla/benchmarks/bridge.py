@@ -75,6 +75,7 @@ class RemotePolicyClient:
         instruction: str,
         *,
         reset: bool,
+        begin_instruction: bool = False,
     ) -> np.ndarray:
         observation.validate()
         body = io.BytesIO()
@@ -85,6 +86,7 @@ class RemotePolicyClient:
             state=np.asarray(observation.state, dtype=np.float32),
             action_state=np.asarray(observation.action_state, dtype=np.float32),
             reset=np.asarray([bool(reset)], dtype=np.uint8),
+            begin_instruction=np.asarray([bool(begin_instruction)], dtype=np.uint8),
         )
         query = urllib.parse.urlencode({"instruction": str(instruction)})
         request = urllib.request.Request(
@@ -148,8 +150,9 @@ class PolicyBridge:
         return {
             "status": "ok",
             "protocol": {
-                "version": 2,
+                "version": 3,
                 "observe_only": True,
+                "instruction_boundary": callable(getattr(self.policy, "begin_instruction", None)),
             },
             "mode": (
                 "smoke-zero" if isinstance(self.policy, SmokeZeroPolicy) else "formal-checkpoint"
@@ -167,17 +170,29 @@ class PolicyBridge:
         instruction: str,
         *,
         reset: bool,
+        begin_instruction: bool = False,
     ) -> np.ndarray:
+        # Admit the event before mutating physical history. A new instruction
+        # may have identical text, and is NOT an environment reset/RNG restart.
+        observation.validate()
+        if not isinstance(instruction, str) or not instruction.strip():
+            raise ValueError("policy bridge requires a non-empty instruction")
+        start = getattr(self.policy, "begin_instruction", None)
+        if begin_instruction and not callable(start):
+            raise ValueError("policy does not support an explicit instruction boundary")
         if reset or not self.initialized:
             self.policy.reset()
             self.history.reset(observation, reset_action=observation.action_state)
             self.initialized = True
         else:
             self.history.append(observation.action_state, observation)
+        if begin_instruction:
+            assert callable(start)  # admitted before any history mutation
+            start(instruction)
         action = np.asarray(
             self.policy.act(self.history.snapshot(), instruction), dtype=np.float32
         )
-        if action.ndim != 2 or action.shape[1] != 7 or not np.isfinite(action).all():
+        if action.ndim != 2 or action.shape[0] < 1 or action.shape[1] != 7 or not np.isfinite(action).all():
             raise ValueError("policy bridge requires one finite [T,7] action chunk")
         return action
 
@@ -201,11 +216,25 @@ class SmokeZeroPolicy:
     def reset(self) -> None:
         return
 
+    def begin_instruction(self, instruction: str) -> None:
+        if not str(instruction).strip():
+            raise ValueError("smoke bridge still requires a real instruction")
+
     def act(self, history, instruction: str) -> np.ndarray:
         history.validate()
         if not str(instruction).strip():
             raise ValueError("smoke bridge still requires a real instruction")
         return np.zeros((self.horizon, 7), dtype=np.float32)
+
+
+def _event_flag(value: np.ndarray, *, name: str) -> bool:
+    """Explicit wire events: reject ambiguous shapes, NaNs and truthy strings."""
+    array = np.asarray(value)
+    if array.shape != (1,) or array.dtype not in (np.dtype("uint8"), np.dtype("bool")):
+        raise ValueError(f"bridge {name} must be a single bool/uint8 flag")
+    if int(array[0]) not in (0, 1):
+        raise ValueError(f"bridge {name} must be zero or one")
+    return bool(array[0])
 
 
 def serve_policy_bridge(
@@ -218,7 +247,7 @@ def serve_policy_bridge(
         raise ValueError("the benchmark policy bridge is intentionally loopback-only")
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "ClearVLABridge/2"
+        server_version = "ClearVLABridge/3"
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -254,7 +283,11 @@ def serve_policy_bridge(
                         action_state=data["action_state"],
                     )
                     if parsed.path == "/act":
-                        reset = bool(np.asarray(data["reset"]).reshape(-1)[0])
+                        reset = _event_flag(data["reset"], name="reset")
+                        begin_instruction = (
+                            _event_flag(data["begin_instruction"], name="begin_instruction")
+                            if "begin_instruction" in data else False
+                        )
                 if parsed.path == "/observe":
                     payload = json.dumps(
                         {"history_time_index": bridge.observe(observation)},
@@ -264,7 +297,10 @@ def serve_policy_bridge(
                 else:
                     query = urllib.parse.parse_qs(parsed.query)
                     instruction = query.get("instruction", [""])[0]
-                    action = bridge.act(observation, instruction, reset=reset)
+                    action = bridge.act(
+                        observation, instruction, reset=reset,
+                        begin_instruction=begin_instruction,
+                    )
                     output = io.BytesIO()
                     np.save(output, action, allow_pickle=False)
                     self._send(200, output.getvalue(), "application/x-npy")

@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from clearvla.vision.candidate_support import candidate_support_metadata
+from clearvla.vision.candidate_support import FULL_POSTERIOR_SUPPORT, candidate_support_metadata
 from clearvla.vision.entity_history import ObservedEntityHistory
 
 from ..v120_core.flow_dino_evidence import (
@@ -202,7 +202,26 @@ class ObservationEvidence:
         if not all(torch.is_tensor(value) for value in required):
             raise ValueError("completed G3 state lost its selected precision candidates")
         assert state.dynamic_fine_values is not None
-        expected = candidate_support_metadata(state.candidate_support_mode)["candidate_count"]
+        source_count = 64
+        if state.candidate_support_mode == FULL_POSTERIOR_SUPPORT:
+            # Compare against the actual G1 source chart, not the downstream
+            # 8x8 public canvas or the already-selected (possibly truncated) V.
+            points = state.bank.coarse_candidate_coordinates
+            keys = state.bank.coarse_candidate_keys
+            logits = state.coarse_logits
+            if points is None or keys is None or logits is None:
+                raise ValueError("full posterior evidence lost the G1 source chart")
+            if points.ndim != 4 or points.shape[-1] != 2 or keys.ndim != 4:
+                raise ValueError("G1 source candidates require [B,C,N,2] and [B,C,N,R]")
+            source_count = int(points.shape[-2])
+            if (points.shape[:3] != keys.shape[:3]
+                    or logits.shape[:2] != points.shape[:2]
+                    or logits.shape[-1] != source_count
+                    or points.shape[:2] != state.dynamic_fine_values.shape[:2]):
+                raise ValueError("G1 source keys, coordinates and posterior support differ")
+        expected = candidate_support_metadata(
+            state.candidate_support_mode, source_candidate_count=source_count
+        )["candidate_count"]
         if int(state.dynamic_fine_values.shape[-2]) != expected:
             raise ValueError("P1 requires the complete selected candidate support axis")
         prefix = tuple(state.dynamic_fine_values.shape[:-1])

@@ -47,6 +47,53 @@ class SamplingResult:
     flow_schedule_pass_role: str = "legacy_unspecified"
 
 
+
+def _validate_model_config(model: object, config: ExperimentConfig) -> None:
+    """Bind sampling to the instantiated graph, allowing operational overrides.
+
+    Data locations, training budgets and the explicitly supplied flow schedule
+    do not define parameter/feature semantics. Graph and input charts do.
+    Minimal numerical test fields do not own an ExperimentConfig and retain
+    their existing standalone integrator contract.
+    """
+
+    if not isinstance(model, ClearVLAMainlinePolicy):
+        return
+    expected = model.config
+    mismatches = [
+        name for name in ("dimensions", "observation", "top", "bottom")
+        if getattr(config, name) != getattr(expected, name)
+    ]
+    mismatches.extend(
+        "data." + name for name in ("data_profile", "camera_names")
+        if getattr(config.data, name) != getattr(expected.data, name)
+    )
+    if mismatches:
+        raise ValueError("sampling model configuration differs: " + ", ".join(mismatches))
+
+
+def _validate_initial_noise(
+    model: ClearVLAMainlinePolicy, config: ExperimentConfig,
+    noise: Tensor | None, *, batch: int,
+) -> None:
+    """Audit caller-owned initial values once at admission, never per ODE step.
+
+    An integer seed field would cast predicted velocities back to integers.
+    Nonfinite inputs are errors, not instructions to sanitize or resample them.
+    No random draws, field copies or model mode changes occur here.
+    """
+
+    if noise is None:
+        return
+    if not isinstance(noise, Tensor) or not noise.is_floating_point():
+        raise TypeError("initial physical action noise must be a floating-point tensor")
+    expected = (batch, config.dimensions.action_horizon, model.outlet_adapter.physical_dim)
+    if tuple(noise.shape) != expected:
+        raise ValueError(f"initial physical action noise must be {expected}")
+    if not bool(torch.isfinite(noise).all()):
+        raise ValueError("initial physical action noise must contain only finite values")
+
+
 def _validate_outlet_world_condition(
     model: object,
     condition: object,
@@ -141,6 +188,12 @@ def _integrate_cache(
         torch.float16,
     }
     dims = config.dimensions
+    steps = config.runtime.inference_steps
+    if schedule.interval_count != steps:
+        raise ValueError(
+            f"{pass_role} schedule has {schedule.interval_count} intervals; "
+            f"runtime requires {steps}"
+        )
     if initial_physical_noise is None:
         value = model.outlet_adapter.sample_noise(
             batch,
@@ -154,12 +207,6 @@ def _integrate_cache(
             raise ValueError(f"initial physical action noise must be {expected}")
         value = initial_physical_noise.to(device=device)
     noise = value.clone()
-    steps = config.runtime.inference_steps
-    if schedule.interval_count != steps:
-        raise ValueError(
-            f"{pass_role} schedule has {schedule.interval_count} intervals; "
-            f"runtime requires {steps}"
-        )
     # Preserve the exact historical expression for the default grid.  This is
     # intentionally separate from the general boundary-difference path:
     # subtracting decimal Python boundaries would produce slightly different
@@ -296,6 +343,7 @@ def refine_cached_world(
     """
 
     config.validate()
+    _validate_model_config(model, config)
     cache.validate(config)
     _validate_outlet_world_condition(model, cache.top.action_condition)
     if world_condition_action.ndim != 3 or tuple(world_condition_action.shape[1:]) != (
@@ -355,6 +403,7 @@ def sample_refined_cached_action_with_cache(
     """
 
     config.validate()
+    _validate_model_config(model, config)
     runtime_dtype = resolve_compute_dtype(config, dtype)
     resolved_flow_schedule = resolve_deployment_flow_schedule(
         getattr(config.runtime, "deployment_flow_schedule", None)
@@ -362,6 +411,8 @@ def sample_refined_cached_action_with_cache(
         else flow_schedule
     )
     schedule_identity = resolved_flow_schedule.identity
+    _validate_initial_noise(model, config, initial_physical_noise, batch=cache.history.batch)
+    cache.validate(config)
     model.eval()
     proposal = _integrate_cache(
         model,
@@ -559,7 +610,13 @@ def sample_action(
     """Integrate five updates, then evaluate heads at the clean endpoint."""
 
     config.validate()
+    _validate_model_config(model, config)
     dtype = resolve_compute_dtype(config, dtype)
+    resolved_flow_schedule = resolve_deployment_flow_schedule(
+        getattr(config.runtime, "deployment_flow_schedule", None)
+        if flow_schedule is None else flow_schedule
+    )
+    _validate_initial_noise(model, config, initial_physical_noise, batch=policy_input.batch)
     model.eval()
     autocast_enabled = policy_input.device.type in {"cuda", "cpu"} and dtype in {
         torch.bfloat16,
@@ -590,7 +647,7 @@ def sample_action(
         collect_diagnostics=collect_diagnostics,
         dtype=dtype,
         deployment_fastpath=deployment_fastpath,
-        flow_schedule=flow_schedule,
+        flow_schedule=resolved_flow_schedule,
     )
     return replace(result, metrics={**static_metrics, **result.metrics})
 
@@ -613,6 +670,7 @@ def sample_cached_action(
     """Deploy from a cache already built for another read-only consumer."""
 
     config.validate()
+    _validate_model_config(model, config)
     dtype = resolve_compute_dtype(config, dtype)
     resolved_flow_schedule = resolve_deployment_flow_schedule(
         getattr(config.runtime, "deployment_flow_schedule", None)
@@ -626,6 +684,8 @@ def sample_cached_action(
         if pass_role == "proposal"
         else resolved_flow_schedule.refined
     )
+    _validate_initial_noise(model, config, initial_physical_noise, batch=cache.history.batch)
+    cache.validate(config)
     model.eval()
     return _integrate_cache(
         model,
@@ -654,6 +714,7 @@ def deployment_cache(
     """Expose cache construction for deployment integration and profiling."""
 
     config.validate()
+    _validate_model_config(model, config)
     dtype = resolve_compute_dtype(config, dtype)
     model.eval()
     autocast_enabled = policy_input.device.type in {"cuda", "cpu"} and dtype in {

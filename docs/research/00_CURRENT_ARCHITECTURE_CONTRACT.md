@@ -1,4 +1,180 @@
+## M8g — expose the controller phase in production qualification (2026-09-23)
+
+Fresh-weight inference defaults to the zero-update execution clock. It cannot
+qualify the post-warmup controller merely by constructing H=512. The bounded
+probe now admits an explicit nonnegative `--inference-step` only for inference,
+calls the real `set_training_step` before online encoding, and records both the
+requested clock and returned execution phase. This emulates the capacity
+schedule on fresh weights; it is NOT a resumed or trained model. Data inspection
+and one-update training reject a nonzero emulated clock. No parameters, modes,
+solver steps, production numerical operations or user environments are changed.
+
+## M8f — qualification process ownership (2026-09-23)
+
+The runtime probe now binds Linux workers to the owning parent process before
+importing Torch; parent death cannot leave a full model running as an orphan.
+Parent SIGINT/SIGTERM and timeouts terminate the owned process group, retain the
+last completed stage, and never convert partial output into success. Abrupt
+SIGKILL can leave a last-stage report marked running; it is not acceptance.
+The parent process metadata is separate from the child-owned atomic report.
+Relative configuration paths are resolved before changing worker cwd. Sampled
+outlet tensors are saved separately and explicitly are not accepted/physical
+commands. All measurements identify fresh deterministic weights, not a trained
+policy. No external runtime packages, workflows, or user training jobs change.
+
+## M8e — P1 native-chart activation policy (2026-09-23)
+
+P1 query tiling now accounts for native candidate cardinality relative to its
+public query canvas. All queries, candidates and local micro cells are still
+read. Wide native posterior charts enable the existing raw checkpoint flag
+even at narrow test widths, and request pure-quadrature recomputation whenever
+gradients are enabled, including eval-mode VJPs. Inference under no_grad has no
+new recomputation. Small-chart legacy computational policy is unchanged.
+G-aligned P1 no longer constructs a candidate-distance graph that it immediately
+overwrites with zero: future-conditioned likelihoods remain disallowed at P1.
+
+The 4-GiB shared container killed grouped native-chart backward tests; these
+are resource failures, not passes. Narrow-width native-256 backward has separate
+standalone measurements. Routine branch/gradient tests use 100 native patches;
+full native-256 forward, ABI, stress backward and H=512 inference are separate
+checks, not substitutes for production-scale training/GPU qualification.
+
+## M8d — native candidate chart is not the public query canvas (2026-09-23)
+
+Full-posterior G1 uses every patch of the configured native DINO chart. G2,
+G3 and P1 retain that same N; the 8x8 public canvas is a distinct query axis.
+The real H=512/256-patch/336-RGB production forward exposed a hard-coded N=64
+validator and ABI. Runtime validation now compares values to the independent G1
+coordinate/key/logit source, and deployment metadata obtains N from graph
+`patches_per_camera`. Truncation does not redefine the source size. Legacy
+moment-local support remains 49. Existing 64-patch full-posterior metadata is
+unchanged; stale 256-patch ABI claiming 64 is rejected, not silently migrated.
+No candidates, dimensions, heads, or learned weights are removed or added.
+The fixed production FP32 run reached two-pass sampling; actual reports state
+synthetic inputs, batch size and unqualified runtime. It is not skill acceptance.
+
+## M8c — bounded runtime and data qualification (2026-09-23)
+
+`scripts/qualify_mainline_runtime.py` inspects the existing interpreter and
+configured data, or executes one actual-model inference / optimizer update in
+a bounded child process. It never installs dependencies, replaces missing real
+data with synthetic tensors, falls back from CUDA to CPU, changes dimensions,
+or runs formal training. An explicitly requested dtype override and declared
+runtime mismatch are recorded. Synthetic DINO/T5 inputs qualify numerical
+execution only, not external encoders, real data, learned skill, or physics.
+The atomic report distinguishes input admission, model construction, forward
+attempt, completed computation, timeout, and process failure. Output directories
+must be new/empty and outside the checkout. The current server XVLA environment
+is not to be upgraded merely to meet the repository's declared runtime.
+
 # Current ClearVLA architecture contract
+
+## M8b: CALVIN sequence/task/command lifecycle
+
+Both repository CALVIN evaluators now wrap the real env with
+`CalvinExecutionEnvironment` and enable command acknowledgement. Only a successful
+`env.reset` clears the physical timeline. Official per-subtask `model.reset`
+discards unexecuted rows and starts a new instruction anchor, retaining the last
+accepted command and history even for identical instruction text. A language
+change also invalidates a reused action chunk. This applies with/without video.
+
+A prepared row is pending, not an execution record. Only a returned, validated
+step commits it. `ExecutedCommand` may explicitly report a different accepted
+canonical command; otherwise the adapter confirms the submitted command at the
+successful call boundary and rejects input-buffer mutation. This does NOT
+observe low-level actuator commands, displacement or contact. Wrong submissions
+fail before physics; uncertain/failed steps or remote planning failures require
+an environment reset rather than a duplicate history append. Observations and
+commands alternate exactly once in receipt-enabled chunked execution.
+
+The legacy unwrapped duck-typed model mode remains explicitly marked
+`legacy-assumed`, not receipt-certified. Repository evaluators require the new
+bridge instruction capability; external clients must use the same wrapper or
+supply equivalent lifecycle events. No reward, oracle or scene state is sent
+as policy input. Official loop reference: mees/calvin, evaluate_policy.py,
+`evaluate_sequence` vs `rollout`, inspected 2026-09-23.
+
+## M8a: instruction events across the benchmark bridge
+
+Bridge protocol v3 distinguishes `begin_instruction` from physical `reset`.
+The explicit task event calls the policy anchor hook without clearing causal
+history or reseeding action RNG, including identical consecutive text. Wire
+flags are scalar bool/uint8 events, not arbitrary truthy data. Unsupported task
+events and invalid observations/instructions fail before history mutation.
+Existing clients without a task event preserve their old request semantics.
+This is an execution-interface fix, not a task-success or persistent-ID claim.
+
+## M7l: numeric layout agreement is not future-control dependence
+
+Same physical action/time prefixes on legacy 24/48-row layouts are admitted
+exactly, but FP32 per-token RMS may round differently on a full tensor versus
+its slice. Cross-extent output comparisons use rtol=0 and an explicit
+16*FP32-epsilon*reference-peak budget per typed output, without a fixed absolute
+floor. The budget is a regression policy, not a global error theorem. Tests
+separately require bit-exact near outputs when only later controls change in
+the SAME layout. Diagnostic canonical-row RMS made the two prior failures
+bit-exact but is not installed in production; no slow numerical workaround is
+added to satisfy an unjustified across-layout zero tolerance. Zero/signed/NaN/
+materially wrong tiny signals remain rejected by dedicated tests. The PyTorch
+2.10 numerical-accuracy contract explicitly distinguishes full/batched and
+sliced computation; checkpoint/diagnostic and same-layout invariants stay exact.
+
+
+## M7f–M7g: sampling admission and adjacent command provenance
+
+Sampling verifies the caller's dimensions, observation, top/bottom graph and
+input profile/named-camera chart against the instantiated production policy.
+Data paths, output locations, training budgets and explicit solver schedules
+remain legitimate operational overrides. Explicit initial fields must be finite
+floating-point tensors with the outlet's physical shape. Graph/seed/schedule
+rejection happens before encoding, random draws or changing the model's mode;
+integer fields cannot truncate velocities by casting them back to integer.
+These are entry-boundary checks, not per-ODE reductions. Numerical standalone
+test fields retain their explicitly smaller ABI. Valid sampling is unchanged.
+
+Expensive preflight validates the one-step response record's exact [-1,-1,0]
+clock (or an absent zero clock). If sparse action history also samples t-1,
+both records must agree on execution support and the normalized accepted
+command. No array-position guess or forced t-1 entry in other sparse charts is
+introduced. Unobserved NaNs remain masked and unmodified. This audits observed
+command provenance; it does not infer measured robot displacement or contact.
+
+## M7h: reusable graph tensor versions, without copying observations
+
+The existing input/model/step/mode identity guard additionally snapshots tensor
+references, PyTorch mutation versions and metadata of the online input records
+and named parameters. Ordinary in-place writes (including views), parameter
+replacement, requires-grad changes, load_state_dict and external optimizer
+updates invalidate a reusable graph before Teacher, flow RNG or velocity work.
+Fresh encoding remains legal; independent future labels are not part of this
+snapshot. Gradient accumulation/zero_grad does not change parameter values.
+No tensor storage is copied or hashed, and no per-ODE check is introduced.
+
+This is not complete storage immutability. Inference tensors have no mutation
+counter and are explicitly listed as unversioned while retaining reference and
+metadata checks. `.data`, raw-memory/custom writes without a PyTorch version
+bump, and buffers modified externally remain caller-owned invalidation cases.
+The execution phase buffer is intentionally excluded because the engine fills
+its canonical value even when the phase is unchanged. Normal sampling does not
+use this training-graph snapshot. The runtime stamp is not serialized in model
+checkpoints and does not add trainable parameters or numerical forward work.
+
+## M7i–M7j: exact cache fixtures and finite bottom numerical scales
+
+The default legacy top does not materialize current_world_belief; its deployment
+cache wraps the same current fact tensors. The cumulative robot-conditioned top
+must instead preserve the materialized world's exact owner. Tests now check
+both cases separately, and DeploymentTopCache admits exactly its actual three
+fields rather than inventing an extra copy of the online source field. No
+numerical tolerance is relaxed. Missing external video backends remain a CI
+environment failure, not a neural pass or an automatically skipped test.
+
+Bottom residual scales, normalization floor, FFN expansion and operator-depth
+initial logit must be finite and positive. They have no infinity-as-disabled
+convention. A min-of-values positivity check can admit NaN and positive infinity;
+those values are rejected during configuration validation, before model creation
+or random initialization. Existing finite positive choices remain configurable;
+this does not freeze them to legacy constants or change valid forward math.
 
 ## M7a–M7c: cumulative graph correctness, without new neural modes
 
@@ -2067,3 +2243,13 @@ increase is 2,097,152 weights. One contextual P3 attention is evaluated per
 EXISTING dynamic policy call; no W/ODE count changes, but GPU latency/memory is
 not yet measured. Review this cost, long-horizon conditioning, S progress and
 bottom role routing at their actual consumers rather than declaring them closed.
+
+
+## M7k: numeric source admission precedes command equality
+
+The adjacent-command preflight agreement must run after the supported-value
+finite audit. Nonfinite history must retain its named numeric diagnostic, not
+be mistaken for disagreement merely because NaN is unequal to itself.
+Temporal/observability validation remains earlier, the response record retains
+its own strict finite-payload check, and no values are repaired or reclassified
+as unobserved. This corrects a regression found by the cumulative M7j inventory.

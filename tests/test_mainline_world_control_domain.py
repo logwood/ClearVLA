@@ -190,6 +190,58 @@ def test_same_noise_action_is_independent_of_unknown_world_even_after_learning(m
     torch.testing.assert_close(a.action, z.action, rtol=0, atol=0)
 
 
+def _assert_cross_extent_fp32(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    """Compare legacy 24/48-row layouts, not a same-layout causality test.
+
+    Per-token RMS math is identical, but full-tensor vs sliced FP32 kernels
+    need not be bitwise identical (PyTorch numerical-accuracy contract).
+    Sixteen eps times THIS output's reference peak is a regression budget,
+    not a proven global error bound or a tolerance for future dependence.
+    No fixed absolute floor: replacing a tiny nonzero result with zero fails.
+    """
+    assert actual.dtype == expected.dtype == torch.float32
+    assert actual.shape == expected.shape and actual.numel() > 0
+    assert bool(torch.isfinite(actual).all()) and bool(torch.isfinite(expected).all())
+    scale = float(expected.detach().abs().max())
+    torch.testing.assert_close(
+        actual, expected, rtol=0.0, atol=16 * torch.finfo(torch.float32).eps * scale,
+        equal_nan=False,
+    )
+
+
+@pytest.mark.parametrize("bad", ["zeroed", "sign", "relative_error", "nan", "inf", "dtype"])
+def test_cross_extent_numeric_budget_cannot_hide_small_signal_errors(bad: str) -> None:
+    expected = torch.tensor([1e-6, -2e-6, 0.0])
+    actual = expected.clone()
+    if bad == "zeroed":
+        actual.zero_()
+    elif bad == "sign":
+        actual.neg_()
+    elif bad == "relative_error":
+        actual.mul_(1.001)
+    elif bad == "nan":
+        actual[0] = torch.nan
+    elif bad == "inf":
+        actual[0] = torch.inf
+    else:
+        actual = actual.double()
+    with pytest.raises(AssertionError):
+        _assert_cross_extent_fp32(actual, expected)
+
+
+def test_cross_extent_numeric_budget_accepts_only_small_roundoff() -> None:
+    expected = torch.tensor([1e-6, -2e-6, 0.0])
+    actual = expected * (1 + 4 * torch.finfo(torch.float32).eps)
+    _assert_cross_extent_fp32(actual, expected)
+
+
+def test_zero_reference_has_no_nonzero_absolute_tolerance_floor() -> None:
+    expected = torch.zeros(3)
+    _assert_cross_extent_fp32(expected.clone(), expected)
+    with pytest.raises(AssertionError):
+        _assert_cross_extent_fp32(torch.full_like(expected, 1e-30), expected)
+
+
 def test_matched_known_controls_produce_same_near_physics_after_update():
     m, e, b = _setup()
     e.train_step(b, collect_diagnostics=False)
@@ -200,10 +252,19 @@ def test_matched_known_controls_produce_same_near_physics_after_update():
         assert isinstance(a, PhysicalActionSequenceCondition)
         controls = torch.cat((a.source_action, b.future.action_sequence[:, 24:]), dim=1)
         observed = m.outlet_adapter.observed_world_condition(controls, b.online.history.action_state)
+        torch.testing.assert_close(a.physical_fingerprint, observed.physical_fingerprint[:, :24], rtol=0, atol=0)
+        torch.testing.assert_close(a.row_end / a.horizon, observed.row_end[:, :24] / observed.control_time_scale, rtol=0, atol=0)
         supervised, _ = m.world.materialize_supervised(belief=state.top.facts, action_condition=observed)
+        # Same-extent causality remains exact; no budget can hide future reads.
+        later_controls = controls.clone()
+        later_controls[:, 24:, 0] += 0.7
+        later = m.outlet_adapter.observed_world_condition(later_controls, b.online.history.action_state)
+        changed, _ = m.world.materialize_supervised(belief=state.top.facts, action_condition=later)
     assert supervised.dynamics.control_domain is None
     for name in ("semantic_delta", "transport_mean", "transport_covariance"):
-        torch.testing.assert_close(getattr(cache.top.predicted_dynamics, name)[:, :2], getattr(supervised.dynamics, name)[:, :2], rtol=0, atol=0)
+        known = getattr(supervised.dynamics, name)[:, :2]
+        _assert_cross_extent_fp32(getattr(cache.top.predicted_dynamics, name)[:, :2], known)
+        torch.testing.assert_close(known, getattr(changed.dynamics, name)[:, :2], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("bf16", [False, True])

@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from clearvla.vision.candidate_support import FULL_POSTERIOR_SUPPORT
+
 from ..future_time import resolve_future_time
 from .config import V39PolicyConfig
 
@@ -132,8 +134,9 @@ def build_v120_visual_config(mainline_config: Any) -> V39PolicyConfig:
     explicit shape projection exists so the small executable mainline tests
     exercise the same Flow-DINO/raw-address implementation instead of a toy
     substitute.  Activation checkpointing is a computational policy only and
-    is disabled for the tiny FP32 graph; it is retained for the 512-wide
-    production graph.
+    is disabled only for narrow graphs with a small support chart. Native
+    full-posterior charts larger than the public canvas retain checkpointing
+    even at reduced hidden widths; source cardinality also determines memory.
     """
 
     mainline_config.validate()
@@ -184,7 +187,11 @@ def build_v120_visual_config(mainline_config: Any) -> V39PolicyConfig:
         flow_jepa_address_route_dim=int(observation.address_route_dim),
         flow_jepa_raw_micro_grid=int(observation.microgrid_side),
         flow_jepa_raw_reader_heads=min(4, int(dims.num_heads)),
-        flow_jepa_raw_activation_checkpoint=int(dims.hidden_size >= 128),
+        flow_jepa_raw_activation_checkpoint=int(
+            dims.hidden_size >= 128
+            or (observation.candidate_support_mode == FULL_POSTERIOR_SUPPORT
+                and dims.patches_per_camera > observation.grid_size ** 2)
+        ),
     )
     config.validate()
     return config

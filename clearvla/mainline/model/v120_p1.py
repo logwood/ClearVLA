@@ -2750,17 +2750,34 @@ class LateRawDetailPolicyReader(nn.Module):
                 )
             )
         if self.utility_precision_mainline:
+            query_budget = self.address_query_batch_budget
+            if progressive is not None and progressive.candidate_support_mode == FULL_POSTERIOR_SUPPORT:
+                # Bound temporary query x native-candidate work. This only
+                # tiles queries; every query, candidate and micro cell remains.
+                query_budget = max(query_budget * grid * grid // max(candidates, 1), 1)
             chunk = min(
                 int(query.shape[1]),
-                max(self.address_query_batch_budget // max(batch, 1), 1),
+                max(query_budget // max(batch, 1), 1),
             )
+        # Complete native charts can be much larger than the public query
+        # canvas even for B=1. Recompute the pure local-patch quadrature in
+        # backward instead of retaining nine sampled candidate volumes per
+        # query chunk. eval() may still request gradients; only no_grad()
+        # makes this unnecessary. No source point or micro cell is removed.
+        large_native_support = bool(
+            progressive is not None
+            and progressive.candidate_support_mode == FULL_POSTERIOR_SUPPORT
+            and candidates > grid * grid
+        )
         activation_checkpoint_active = bool(
             self.raw_activation_checkpoint
-            and self.training
             and torch.is_grad_enabled()
             and (
-                not self.utility_precision_mainline
-                or batch >= self.checkpoint_min_batch
+                large_native_support
+                or (self.training and (
+                    not self.utility_precision_mainline
+                    or batch >= self.checkpoint_min_batch
+                ))
             )
         )
         p2_query_structured = (
@@ -3039,37 +3056,35 @@ class LateRawDetailPolicyReader(nn.Module):
                             "typed P1 fine routing has no future transport geometry"
                         )
 
-                    transport = typed_future_rows[:, start:stop].float()
-                    transport_center = transport[..., :2].unsqueeze(-2)
-                    # [B,Q,G,C,i,j,slot,K,2].  Current observed coordinates
-                    # remain the value anchors; the W prediction only supplies
-                    # a bounded soft likelihood that they remain relevant at
-                    # this horizon.
-                    current_coordinate = typed_coordinates.float()[
-                        :, None, None
-                    ]
-                    transport_scale = transport[..., 2:3].unsqueeze(-2)
-                    transport_visibility = transport[..., 3:4].unsqueeze(-2)
-                    transport_uncertainty = transport[..., 4:5].unsqueeze(-2)
-                    transport_width = (
-                        0.05 + transport_scale * transport_uncertainty
-                    ).clamp(0.05, 1.0)
-                    transport_distance = (
-                        (current_coordinate - transport_center)
-                        / transport_width
-                    ).square().sum(dim=-1)
-                    transport_fine_logit = 0.5 * (
-                        (-0.5 * transport_distance).clamp_min(-4.0)
-                        + 0.25
-                        * (2.0 * transport_visibility[..., 0] - 1.0)
-                    )
                     if self.g_aligned_future_effect:
-                        # The V115 successor field is a P2 operand, not a P1
-                        # address prior.  Retain the selected transport context
-                        # in SharedFactualGlimpseBank, while making the factual
-                        # address posterior exactly independent of W.
+                        # P1 is current-fact owned. Do not materialize the
+                        # unused candidate-distance graph and then overwrite it.
                         transport_fine_logit = fine_logits.new_zeros(())
                     else:
+                        transport = typed_future_rows[:, start:stop].float()
+                        transport_center = transport[..., :2].unsqueeze(-2)
+                        # [B,Q,G,C,i,j,slot,K,2].  Current observed coordinates
+                        # remain the value anchors; the W prediction only supplies
+                        # a bounded soft likelihood that they remain relevant at
+                        # this horizon.
+                        current_coordinate = typed_coordinates.float()[
+                            :, None, None
+                        ]
+                        transport_scale = transport[..., 2:3].unsqueeze(-2)
+                        transport_visibility = transport[..., 3:4].unsqueeze(-2)
+                        transport_uncertainty = transport[..., 4:5].unsqueeze(-2)
+                        transport_width = (
+                            0.05 + transport_scale * transport_uncertainty
+                        ).clamp(0.05, 1.0)
+                        transport_distance = (
+                            (current_coordinate - transport_center)
+                            / transport_width
+                        ).square().sum(dim=-1)
+                        transport_fine_logit = 0.5 * (
+                            (-0.5 * transport_distance).clamp_min(-4.0)
+                            + 0.25
+                            * (2.0 * transport_visibility[..., 0] - 1.0)
+                        )
                         fine_logits = fine_logits + transport_fine_logit
                     appearance_pre_value_prior: Tensor | None = None
                     if (

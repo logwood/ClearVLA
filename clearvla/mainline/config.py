@@ -720,17 +720,18 @@ class BottomConfig:
             raise ValueError("the recovered V120 execution schedule is warmup=200/transition=1000")
         if self.operator_rank % self.operator_groups:
             raise ValueError("operator rank must be divisible by groups")
-        if (
-            min(
-                self.residual_scale_max,
-                self.residual_scale_init,
-                self.normalization_floor,
-                self.ffn_expansion,
-                self.operator_depth_logit_init,
-            )
-            <= 0.0
-        ):
-            raise ValueError("bottom numerical scales must be positive")
+        numerical_scales = (
+            self.residual_scale_max,
+            self.residual_scale_init,
+            self.normalization_floor,
+            self.ffn_expansion,
+            self.operator_depth_logit_init,
+        )
+        # min(..., NaN, ...) can ignore the NaN depending on position; +inf
+        # is positive but cannot be a normalization floor or residual scale.
+        # These fields have no infinity-as-disabled convention.
+        if any(not math.isfinite(value) or value <= 0.0 for value in numerical_scales):
+            raise ValueError("bottom numerical scales must be finite and positive")
         if self.residual_scale_init > self.residual_scale_max:
             raise ValueError("bottom initial residual scale cannot exceed its bound")
         if not 0.0 <= self.dropout < 1.0:

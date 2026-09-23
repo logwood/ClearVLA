@@ -34,6 +34,7 @@ from .gradient_audit import (
 )
 from .losses import LossLedger, compose_losses, sample_flow_matching
 from .optimizer import WarmupCosineSchedule, gradient_diagnostics, parameter_role
+from .tensor_versions import TrainingSourceVersions
 
 _R2_PARAMETER_GRADIENT_METRICS: tuple[tuple[str, str], ...] = (
     (
@@ -134,6 +135,11 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
         values["online.executed_history"] = quarantine(history.executed_action_history, timing.action_executed)
     robot_step = history.executed_robot_step
     if robot_step is not None:
+        robot_step.validate(
+            batch=history.batch, state_dim=int(history.state.shape[-1]),
+            action_dim=int(history.action_state.shape[-1]),
+            device=history.state.device, strict=True,
+        )
         for name in ("previous_state", "command"):
             values["online.robot_step." + name] = torch.where(robot_step.observed[:, None], getattr(robot_step, name), 0.0)
     if batch.online.instruction_reference is not None:
@@ -162,6 +168,29 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
     invalid = [name for name, value in values.items() if not bool(torch.isfinite(value).all())]
     if invalid:
         raise ValueError(f"training batch contains non-finite tensors: {', '.join(invalid)}")
+    # Reject non-finite observed content before comparing two source records.
+    # NaN != NaN must not disguise a named non-finite input as a mere
+    # finite command disagreement. No source values are repaired.
+    if robot_step is not None and timing is not None:
+        # The response record is separate from sparse S history, but when
+        # both expose t-1 they must describe the SAME accepted command.
+        # Do not infer that the final array row is t-1, or require an
+        # alternative sparse history to sample that particular timestamp.
+        predecessor = timing.action_offsets == -1
+        present = predecessor.any(dim=1)
+        executed = predecessor & timing.action_executed
+        observed = executed.any(dim=1)
+        if bool((present & (robot_step.observed != observed)).any()):
+            raise ValueError("robot step execution support disagrees with source history")
+        expected_command = torch.where(
+            executed[..., None], history.executed_action_history, 0.0,
+        ).sum(dim=1)
+        comparable = (present & observed)[:, None]
+        if not torch.equal(
+            torch.where(comparable, robot_step.command, 0.0),
+            torch.where(comparable, expected_command, 0.0),
+        ):
+            raise ValueError("robot step executed command disagrees with source history")
     from ..future_time import resolve_future_time
     grid = resolve_future_time(batch.future.time_grid_mode)
     expected_offsets = batch.future.offsets.new_tensor(grid.support_offsets)[None].expand(batch.future.batch, -1)
@@ -244,6 +273,7 @@ class EncodedTrainingBatch:
     producer_id: int
     producer_step: int
     model_training: bool
+    source_versions: TrainingSourceVersions = field(repr=False, compare=False)
 
     @classmethod
     def capture(
@@ -252,14 +282,16 @@ class EncodedTrainingBatch:
         model: ClearVLAMainlinePolicy, global_step: int,
     ) -> EncodedTrainingBatch:
         return cls(cache, training_state, metrics, source_online, id(model),
-                   int(global_step), bool(model.training))
+                   int(global_step), bool(model.training),
+                   TrainingSourceVersions.capture(source_online, model))
 
     def validate_for(
         self, batch: TrainingBatch, *, model: ClearVLAMainlinePolicy, global_step: int,
     ) -> None:
         # Object/source ownership checks occur once per loss composition, not
         # inside an ODE node. They add no image copies, hashes, device reduction
-        # or history state mutation. This is not an in-place tensor write guard.
+        # or history state mutation. Version stamps additionally detect ordinary
+        # tensor/parameter writes; they are not a data-hashing security boundary.
         if batch.online is not self.source_online:
             raise ValueError("encoded training graph belongs to another online observation")
         if self.producer_id != id(model):
@@ -273,6 +305,7 @@ class EncodedTrainingBatch:
             or self.cache.top.candidate_world is not self.training_state.top.candidate_world
         ):
             raise ValueError("encoded policy and Teacher source planes have different owners")
+        self.source_versions.validate(batch.online, model)
         batch.validate(model.config)
         self.cache.validate(model.config)
         self.training_state.validate(model.config)

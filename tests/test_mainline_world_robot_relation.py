@@ -10,6 +10,7 @@ import pytest
 import torch
 from test_mainline_instruction_reference import _batch
 from test_mainline_state_features import _model_engine
+from test_mainline_world_control_domain import _assert_cross_extent_fp32
 from test_mainline_world_control_domain import _config as control_config
 
 from clearvla.mainline.checkpoint import active_source_snapshot
@@ -273,6 +274,8 @@ def test_real_matched_controls_keep_near_predictions_equal_and_later_controls_ca
         assert isinstance(candidate, PhysicalActionSequenceCondition)
         raw = torch.cat((candidate.source_action, b.future.action_sequence[:, 24:]), dim=1)
         a = m.outlet_adapter.observed_world_condition(raw, b.online.history.action_state)
+        torch.testing.assert_close(candidate.physical_fingerprint, a.physical_fingerprint[:, :24], rtol=0, atol=0)
+        torch.testing.assert_close(candidate.row_end / candidate.horizon, a.row_end[:, :24] / a.control_time_scale, rtol=0, atol=0)
         raw2 = raw.clone()
         raw2[:, 24:, 0] += 0.7
         z = m.outlet_adapter.observed_world_condition(raw2, b.online.history.action_state)
@@ -280,7 +283,7 @@ def test_real_matched_controls_keep_near_predictions_equal_and_later_controls_ca
         q, _ = m.world.materialize_supervised(belief=cache.top.belief, action_condition=z)
     for name in ("semantic_delta", "transport_mean", "transport_covariance"):
         torch.testing.assert_close(getattr(w.dynamics, name)[:, :2], getattr(q.dynamics, name)[:, :2], rtol=0, atol=0)
-        torch.testing.assert_close(getattr(w.dynamics, name)[:, :2], getattr(cache.top.predicted_dynamics, name)[:, :2], rtol=0, atol=0)
+        _assert_cross_extent_fp32(getattr(w.dynamics, name)[:, :2], getattr(cache.top.predicted_dynamics, name)[:, :2])
     assert not torch.equal(w.dynamics.semantic_delta[:, 2:], q.dynamics.semantic_delta[:, 2:])
 
 

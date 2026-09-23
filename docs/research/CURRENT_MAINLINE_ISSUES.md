@@ -1,4 +1,37 @@
+## M8 continuation — production chart and execution boundary closure
+
+Closed in M8a–g: explicit task-vs-environment reset across the NPZ bridge and
+CALVIN official/targeted entry points; acknowledged native command history;
+256-patch source rejected by obsolete64 P1/ABI contracts; activation checkpoint
+policy ignoring native support size; useless G-aligned expanded distance graph;
+probe child surviving parent interruption; warmup-only production qualification.
+
+Open: actual target environment/version compatibility; absent real datasets/caches;
+no CUDA; H512 BF16 sampling interrupted, full-size training unqualified; one
+existing B4 visual-time training case OOM on both final and M7l baseline. These
+are retained as resource/incomplete outcomes, not skips or passing tests.
+Current scoped static debt is48 inherited errors and295 warnings (baseline256).
+New tests/shape checks do not validate actual DINO crop geometry, physical
+object association, contact dynamics, progress, real simulator or robot success.
+No GitHub writes this turn; source and local history are fully archived.
+
 # ClearVLA current decision ledger
+
+## M7f–M7l local closure, not model-performance acceptance
+
+Source admission, adjacent-command consistency, ordinary source/weight mutation,
+finite scales and finite-check ordering are fixed. Cache fixture ownership is
+explicit. Local 74-file reconciled inventory: 1433 passed, 1 CUDA skip; raw M7k
+and affected-only M7l runs remain distinct. Old cross-extent FP32 failures are
+now governed by a stated signal-relative comparison, while same-layout future
+causality remains bit-exact. This is a test-contract revision, not an alleged
+physical dynamics fix or suppressed failure.
+
+Still open: current-source declared-runtime/GPU acceptance, CI video backend
+installation, external CALVIN receipts/reset, physical entity correspondence and
+real-data learning. Unversioned inference storage, raw .data writes and external
+buffer edits require explicit re-encoding. Scoped type errors/warnings remain.
+No closed-loop success or whole-rebuild completion follows from the test count.
 
 ## Current cumulative closure boundary (M7)
 
@@ -15,12 +48,14 @@ both imageio and cv2, causing the old StackCube trace/video path to fail. A vide
 backend from the existing project vision extra is needed for that inventory;
 record/import checks alone do not install or validate it.
 
-Outstanding acceptance: full current-source selected inventory, supported
-Python/Torch environment, CUDA/BF16/cache/resource probes, formal-data semantics,
+Local current-source primary inventory is complete under the documented result-reuse
+rule. Outstanding acceptance: supported Python/Torch environment, CUDA/BF16/cache/resource
+probes, formal-data semantics,
 external CALVIN evaluator and physical task behavior. Baseline resource-killed
 runs and partial pytest dots remain unresolved until independently rerun.
-Reference/model/step/mode ownership still does not detect in-place source tensor
-mutation or optimizer changes outside the engine. Consumers must re-encode.
+M7h extends reference/model/step/mode ownership with ordinary tensor and parameter
+version checks. Unversioned inference tensors, raw storage writes without a
+counter update, and external buffer edits still require explicit re-encoding.
 
 ## Earlier acceptance boundaries still applicable
 
@@ -45,10 +80,11 @@ amplitude proportionality is made. W/S/P evidence needs actual trained behavior
 and resource measurement beyond static path/gradient tests.
 
 
-Cache-source guards operate at reference/model/engine-step/mode level. They do
-not detect in-place tensor mutation or out-of-engine parameter writes; callers
-must retain immutable source inputs and re-encode after such updates. Label
-quarantine is not permission to ignore NaNs in supported upstream activations.
+The historical M6p cache guard covered reference/model/step/mode only. Current
+M7h additionally rejects tracked in-place source and parameter updates. It is
+not content hashing: raw writes, unversioned inference storage and external
+buffer updates remain outside detection. Label quarantine is not permission
+to ignore NaNs in supported upstream activations.
 
 Updated: 2026-09-22
 

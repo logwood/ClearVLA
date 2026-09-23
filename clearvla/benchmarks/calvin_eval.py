@@ -15,6 +15,8 @@ from typing import Any, Iterator, Mapping, cast
 
 import numpy as np
 
+from clearvla.simulation.contracts import ExecutedCommand
+
 from .bridge import RemotePolicyClient, policy_observation
 from .io import atomic_json, atomic_npz
 
@@ -113,6 +115,7 @@ def validate_bridge_health(
     *,
     allow_smoke_policy: bool,
     require_observe_only: bool = False,
+    require_instruction_boundary: bool = False,
 ) -> None:
     if health.get("status") != "ok":
         raise RuntimeError(f"ClearVLA bridge is unhealthy: {dict(health)}")
@@ -122,6 +125,10 @@ def validate_bridge_health(
             raise ValueError(
                 "chunked CALVIN execution requires bridge observe-only protocol support"
             )
+    if require_instruction_boundary:
+        protocol = health.get("protocol")
+        if not isinstance(protocol, Mapping) or protocol.get("instruction_boundary") is not True:
+            raise ValueError("CALVIN task boundaries require bridge instruction_boundary support")
     mode = str(health.get("mode", ""))
     if mode == "smoke-zero":
         if allow_smoke_policy:
@@ -154,11 +161,15 @@ def validate_bridge_health(
 class CalvinBridgeModel:
     """Duck-typed CalvinBaseModel with complete action/latency auditing."""
 
-    def __init__(self, client: RemotePolicyClient, *, execute_rows: int = 1) -> None:
-        if int(execute_rows) <= 0 or int(execute_rows) > 24:
+    def __init__(self, client: RemotePolicyClient, *, execute_rows: int = 1,
+                 require_step_receipt: bool = False) -> None:
+        if (isinstance(execute_rows, (bool, np.bool_))
+                or not isinstance(execute_rows, (int, np.integer))
+                or not 1 <= int(execute_rows) <= 24):
             raise ValueError("CALVIN execute_rows must be in [1,24]")
         self.client = client
         self.execute_rows = int(execute_rows)
+        self.require_step_receipt = bool(require_step_receipt)
         self.raw_chunks: list[np.ndarray] = []
         self.raw_executed_actions: list[np.ndarray] = []
         self.executed_actions: list[np.ndarray] = []
@@ -167,37 +178,74 @@ class CalvinBridgeModel:
         self.observed_history_time_indices: list[int] = []
         self.observed_after_executed_steps: list[int] = []
         self.latency_seconds: list[float] = []
-        self.reset()
+        self.reset_episode()
 
-    def reset(self) -> None:
+    def reset_episode(self) -> None:
+        """Only a confirmed environment reset clears the physical timeline."""
+        self._requires_episode_reset = False
+        self._pending_command: tuple[np.ndarray, np.ndarray, int, int] | None = None
+        self._needs_observation = False
+        self._pending_instruction_start = False
+        self._planned_goal: str | None = None
         self._previous_action = np.zeros(7, dtype=np.float32)
         self._pending_reset = True
         self._planned_chunk: np.ndarray | None = None
         self._planned_chunk_index: int | None = None
         self._next_chunk_row = 0
 
+    def reset(self) -> None:
+        """Official rollout calls this at EACH subtask, not each env reset."""
+        if self.require_step_receipt and (self._pending_command is not None or self._requires_episode_reset):
+            raise RuntimeError("unconfirmed execution requires an environment reset")
+        self._planned_chunk = None
+        self._planned_chunk_index = None
+        self._next_chunk_row = 0
+        self._planned_goal = None
+        self._pending_instruction_start = True
+
+    def _admit_observation(self) -> None:
+        if self.require_step_receipt:
+            if self._requires_episode_reset or self._pending_command is not None:
+                raise RuntimeError("unconfirmed execution requires an environment reset")
+            if not self._pending_reset and not self._needs_observation:
+                raise RuntimeError("duplicate observation without a new executed control step")
+
     def plan(self, observation: Mapping[str, Any], goal: str) -> np.ndarray:
         """Create one action chunk at the current physical environment time."""
 
+        self._admit_observation()
+        text = str(goal).strip()
+        if not text:
+            raise ValueError("CALVIN instruction must be non-empty")
         policy_input = calvin_policy_observation(observation, self._previous_action)
-        started = time.perf_counter()
-        chunk = self.client.act(
-            policy_input,
-            str(goal),
-            reset=self._pending_reset,
+        instruction_start = self._pending_instruction_start or (
+            self._planned_goal is not None and self._planned_goal != text
         )
-        elapsed = time.perf_counter() - started
-        raw = np.asarray(chunk, dtype=np.float32)
-        if raw.ndim != 2 or raw.shape[1] != 7 or not np.isfinite(raw).all():
-            raise ValueError("CALVIN bridge returned an invalid [T,7] chunk")
-        if raw.shape[0] == 0:
-            raise ValueError("CALVIN bridge returned an empty action chunk")
+        started = time.perf_counter()
+        # Omit the new keyword for ordinary/initial calls so old transport
+        # clients remain usable; lifecycle evaluation preflights protocol v3.
+        event = {"begin_instruction": True} if instruction_start and not self._pending_reset else {}
+        try:
+            chunk = self.client.act(policy_input, text, reset=self._pending_reset, **event)
+            elapsed = time.perf_counter() - started
+            raw = np.asarray(chunk, dtype=np.float32)
+            if raw.ndim != 2 or raw.shape[1] != 7 or not np.isfinite(raw).all():
+                raise ValueError("CALVIN bridge returned an invalid [T,7] chunk")
+            if raw.shape[0] == 0:
+                raise ValueError("CALVIN bridge returned an empty action chunk")
+        except BaseException:
+            if self.require_step_receipt:
+                self.invalidate_execution()  # remote history may already have advanced
+            raise
         self.raw_chunks.append(raw.copy())
         self.latency_seconds.append(float(elapsed))
         self._planned_chunk = raw.copy()
         self._planned_chunk_index = len(self.raw_chunks) - 1
         self._next_chunk_row = 0
         self._pending_reset = False
+        self._pending_instruction_start = False
+        self._planned_goal = text
+        self._needs_observation = False
         return raw.copy()
 
     def execute_planned_row(self, row: int) -> np.ndarray:
@@ -205,20 +253,59 @@ class CalvinBridgeModel:
 
         if self._planned_chunk is None or self._planned_chunk_index is None:
             raise RuntimeError("CALVIN action execution requires a preceding plan")
+        if isinstance(row, (bool, np.bool_)) or not isinstance(row, (int, np.integer)):
+            raise ValueError("CALVIN planned row must be an integer control index")
         row_index = int(row)
         if row_index < 0 or row_index >= self._planned_chunk.shape[0]:
             raise IndexError(
                 f"planned row {row_index} is outside horizon {self._planned_chunk.shape[0]}"
             )
-        raw = self._planned_chunk[row_index]
+        if self.require_step_receipt:
+            if self._requires_episode_reset or self._pending_command is not None:
+                raise RuntimeError("a control command is already unconfirmed")
+            if self._needs_observation:
+                raise RuntimeError("a new observation is required before the next command")
+            if row_index != self._next_chunk_row:
+                raise ValueError("control rows must be executed once and in order")
+        raw = self._planned_chunk[row_index].copy()
         action = execute_calvin_action(raw)
-        self.raw_executed_actions.append(raw.copy())
-        self.executed_actions.append(action.copy())
-        self.executed_plan_indices.append(int(self._planned_chunk_index))
-        self.executed_chunk_rows.append(row_index)
-        self._previous_action = action.copy()
+        if self.require_step_receipt:
+            self._pending_command = (raw, action.copy(), int(self._planned_chunk_index), row_index)
+        else:
+            # Explicit legacy duck-typed mode lacks an environment callback.
+            self._record_execution(raw, action, int(self._planned_chunk_index), row_index)
         self._next_chunk_row = max(int(self._next_chunk_row), row_index + 1)
         return action
+
+    def _record_execution(self, raw: np.ndarray, action: np.ndarray, plan: int, row: int) -> None:
+        self.raw_executed_actions.append(raw.copy())
+        self.executed_actions.append(action.copy())
+        self.executed_plan_indices.append(plan)
+        self.executed_chunk_rows.append(row)
+        self._previous_action = action.copy()
+        self._needs_observation = True
+
+    def validate_submitted_command(self, action: np.ndarray) -> np.ndarray:
+        if not self.require_step_receipt or self._pending_command is None or self._requires_episode_reset:
+            raise RuntimeError("CALVIN environment step has no pending policy command")
+        value = np.asarray(action, dtype=np.float32)
+        if value.shape != (7,) or not np.array_equal(value, self._pending_command[1]):
+            raise ValueError("CALVIN environment received a different submitted command")
+        return value.copy()
+
+    def confirm_execution(self, receipt: ExecutedCommand) -> None:
+        self.validate_submitted_command(receipt.submitted)
+        if not np.array_equal(execute_calvin_action(receipt.applied), receipt.applied):
+            raise ValueError("acknowledged CALVIN command is outside its native chart")
+        assert self._pending_command is not None
+        raw, _, plan, row = self._pending_command
+        self._record_execution(raw, receipt.applied, plan, row)
+        self._pending_command = None
+
+    def invalidate_execution(self) -> None:
+        # A failed step may already have changed physics. Never retry it as if
+        # nothing happened, or silently label a proposed command as executed.
+        self._requires_episode_reset = True
 
     def observe(self, observation: Mapping[str, Any]) -> int:
         """Record an intermediate physical step while retaining the current plan."""
@@ -227,8 +314,10 @@ class CalvinBridgeModel:
             raise RuntimeError("CALVIN observe requires an initialized policy episode")
         if not self.executed_actions:
             raise RuntimeError("CALVIN observe requires an executed action")
+        self._admit_observation()
         policy_input = calvin_policy_observation(observation, self._previous_action)
         time_index = int(self.client.observe(policy_input))
+        self._needs_observation = False
         self.observed_history_time_indices.append(time_index)
         self.observed_after_executed_steps.append(len(self.executed_actions))
         return time_index
@@ -244,6 +333,8 @@ class CalvinBridgeModel:
         then appends that observation exactly once before replanning.
         """
 
+        if self._planned_goal is not None and str(goal).strip() != self._planned_goal:
+            self.reset()  # discard every unexecuted row from the previous task
         chunk = self._planned_chunk
         if (
             chunk is None
@@ -285,8 +376,10 @@ class CalvinBridgeModel:
         return {
             "raw_chunks": raw_chunks,
             "raw_first": raw_chunks[:, 0],
-            "raw_executed": np.stack(self.raw_executed_actions).astype(np.float32),
-            "executed": np.stack(self.executed_actions).astype(np.float32),
+            "raw_executed": (np.stack(self.raw_executed_actions).astype(np.float32)
+                             if self.raw_executed_actions else np.empty((0, 7), dtype=np.float32)),
+            "executed": (np.stack(self.executed_actions).astype(np.float32)
+                         if self.executed_actions else np.empty((0, 7), dtype=np.float32)),
             "executed_plan_index": np.asarray(
                 self.executed_plan_indices, dtype=np.int64
             ),
@@ -307,12 +400,15 @@ class CalvinBridgeModel:
         raw_executed = arrays["raw_executed"]
         executed = arrays["executed"]
         latency = arrays["latency_seconds"]
-        if raw_first.shape[0] == 0:
-            return {"steps": 0, "action_names": list(CALVIN_ACTION_NAMES)}
+        if executed.shape[0] == 0:
+            return {"steps": 0, "planning_decisions": int(raw_first.shape[0]),
+                    "action_names": list(CALVIN_ACTION_NAMES),
+                    "command_confirmation": "successful-env-step" if self.require_step_receipt else "legacy-assumed"}
         gripper = executed[:, 6]
         switches = int(np.count_nonzero(gripper[1:] != gripper[:-1]))
         return {
             "steps": int(executed.shape[0]),
+            "command_confirmation": "successful-env-step" if self.require_step_receipt else "legacy-assumed",
             "planning_decisions": int(raw_first.shape[0]),
             "mean_executed_rows_per_plan": float(
                 executed.shape[0] / raw_first.shape[0]
@@ -369,6 +465,54 @@ class CalvinBridgeModel:
                 "max": float(latency.max()),
             },
         }
+
+
+class CalvinExecutionEnvironment:
+    """Acknowledge returned env.step and distinguish sequence/subtask boundaries.
+
+    Without an explicit backend receipt, confirmation is at this adapter's
+    call boundary; it is NOT a sensor reading or proof of internal actuator
+    commands. Buffer mutations require an explicit receipt, never inference.
+    """
+    def __init__(self, env: Any, model: CalvinBridgeModel) -> None:
+        if not model.require_step_receipt:
+            raise ValueError("execution wrapper requires receipt-enabled model")
+        self.env = env
+        self.model = model
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.env, name)
+
+    def reset(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            result = self.env.reset(*args, **kwargs)
+        except BaseException:
+            self.model.invalidate_execution()
+            raise
+        self.model.reset_episode()
+        return result
+
+    def step(self, action: np.ndarray) -> Any:
+        submitted = self.model.validate_submitted_command(action)
+        forwarded = submitted.copy()
+        try:
+            result = self.env.step(forwarded)
+            if not isinstance(result, tuple) or len(result) != 4:
+                raise ValueError("CALVIN env.step must return observation,reward,done,info")
+            observation, _, _, info = result
+            receipt = info.get("clearvla_command_receipt") if isinstance(info, Mapping) else None
+            if receipt is None:
+                if not np.array_equal(forwarded, submitted):
+                    raise ValueError("backend changed command buffer without an explicit receipt")
+                receipt = ExecutedCommand(submitted, submitted)
+            if not isinstance(receipt, ExecutedCommand):
+                raise TypeError("CALVIN command receipt must be ExecutedCommand")
+            calvin_policy_observation(observation, receipt.applied).validate()
+            self.model.confirm_execution(receipt)
+            return result
+        except BaseException:
+            self.model.invalidate_execution()
+            raise
 
 
 def _summary(results: list[int]) -> dict[str, Any]:
@@ -891,11 +1035,13 @@ def evaluate_calvin(
         health,
         allow_smoke_policy=allow_smoke_policy,
         require_observe_only=execute_rows > 1,
+        require_instruction_boundary=True,
     )
 
     official = importlib.import_module("calvin_agent.evaluation.evaluate_policy")
     env = _environment(dataset_root, show_gui=show_gui)
-    model = CalvinBridgeModel(client, execute_rows=execute_rows)
+    model = CalvinBridgeModel(client, execute_rows=execute_rows, require_step_receipt=True)
+    env = CalvinExecutionEnvironment(env, model)
     output_dir.mkdir(parents=True, exist_ok=True)
     resolved_video_dir = (
         Path(video_dir) if video_dir is not None else output_dir / "videos"
@@ -1025,6 +1171,7 @@ def evaluate_calvin_targeted(
         health_before,
         allow_smoke_policy=allow_smoke_policy,
         require_observe_only=execute_rows > 1,
+        require_instruction_boundary=True,
     )
     official, conf_dir, oracle, annotations = _official_task_assets()
     if task not in annotations:
@@ -1036,7 +1183,8 @@ def evaluate_calvin_targeted(
         raise ValueError("targeted CALVIN instruction must be non-empty")
 
     env = _environment(dataset_root, show_gui=show_gui)
-    model = CalvinBridgeModel(client)
+    model = CalvinBridgeModel(client, require_step_receipt=True)
+    env = CalvinExecutionEnvironment(env, model)
     output_dir.mkdir(parents=True, exist_ok=True)
     resolved_video_dir = (
         Path(video_dir) if video_dir is not None else output_dir / "videos"

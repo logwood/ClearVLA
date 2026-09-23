@@ -5009,11 +5009,12 @@ def test_deployment_cache_has_only_declared_causal_sources_and_no_future_labels(
         "instruction_reference",
         "robot_feedback",
     }
+    # Deployment owns one compact belief. The optional current_world_belief
+    # is an OnlineTopContext source; it is not a second deployment belief.
     assert {field.name for field in fields(DeploymentTopCache)} == {
         "belief",
         "intent",
         "candidate_world",
-        "current_world_belief",
     }
 
 def test_s_shared_target_address_is_zero_start_k_centered_and_appearance_reachable() -> None:
