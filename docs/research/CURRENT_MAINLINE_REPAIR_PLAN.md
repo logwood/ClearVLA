@@ -372,6 +372,13 @@ Prepare an opt-in `hdf5_indexed_lazy_v1` reader with these boundaries:
   normalizer/field-byte gate for the sample, but not the full E1 terminal,
   overlay, or worker-resume gate.
 
+  The next gate is automated by `scripts/probe_hdf5_e1_workers.py`: it builds
+  the complete E1 train-manifest index, checks the sorted identity contract,
+  compares a deterministic action-row sample to eager admission, and feeds the
+  same fixed batch sequence through worker 0 and worker 4. It is intentionally
+  a loader-only process; no model, CUDA context, raw-overlay mutation or
+  training output is involved.
+
 ### 1c. Evaluate the historical V1 before deciding whether to retire its trainer
 
 The authorized bounded panel is complete. It evaluated the frozen
