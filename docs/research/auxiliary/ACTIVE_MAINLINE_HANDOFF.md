@@ -1,6 +1,82 @@
+# Current M7 continuation (2026-09-23)
+
+Remote saved M7a–M7c: `8723ba072dd805908eff439e13150b7df7782034`, tree
+`ec1f90be3fecfc91854b2b0d3c39b5015e4c0c77`; M6p was already saved as
+`01cc826f92fa7fef1056fc2d27b1fcdaf83a9322`. Do not restart from M6k.
+M7a phase consistency (10 tests), M7b language padding (14), M7c source
+preflight (16) have completed local final runs: 40 passed. Full cumulative
+runtime and later M7d fixtures remain under a separate frozen-source inventory;
+read the final report rather than extrapolating from these focused successes.
+
+M7d reconciles exact structural/top whitelists, optional typed values and
+camera provenance in stale unit fixtures; it does not suppress failures or
+weaken numerical tolerances. M7e changes source-owned test orchestration so a
+historical baseline failure cannot prevent current tests, while overall status
+remains failed. Seven stubbed-orchestration tests passed independently; they are
+shell control-flow checks, not seven additional neural validations.
+
+CI run `35833825786` saved M7a–M7c correctly and passed cumulative differential
+static review in Python 3.12.14 / Torch 2.11 CPU. Its old 0f0716 baseline had one
+StackCube trace test failing because both imageio and cv2 were absent; the old
+shell exited there without current tests. The artifact was retrieved and hashed.
+The supported-runtime inventory remains NOT accepted. Backend availability is
+now recorded, but no workflow/dependency install or real-data/GPU job is changed.
+
+Cumulative configuration remains `configs/mainline/structural_rebuild_m6n_calvin.json`.
+The local 60-file M6p baseline recorded 14 structural/prefix assertion failures
+and one top-context whitelist failure, plus resource-killed endpoint and timed
+out policy processes. Preserve original records; partial dots are not passes.
+Current-source tests run serially under the actual 4 GiB limit. Source-only
+archives and ordinary isolated-branch saves precede full CI by user instruction.
+
+## Earlier implementation records (historical acceptance scopes)
+
 # ClearVLA structural rebuild handoff
 
-## Current combined checkpoint: M6l–M6p
+## Current cumulative closure checkpoint — M7a–M7c
+
+The interrupted M6p save DID complete remotely: commit
+`01cc826f92fa7fef1056fc2d27b1fcdaf83a9322`, tree
+`7abffddad974616518b87a8465dd4bdb46e015e0`. Recovered all 835 archived sources
+and reproduced that tree. No unarchived old workspace was found in this runtime.
+Do not restart from M6k or upload M6p again.
+
+New M7a/M7b/M7c fixes were saved via the UNCHANGED isolated-branch workflow;
+expanded remote source commit `8723ba072dd805908eff439e13150b7df7782034` has
+exact tree `ec1f90be3fecfc91854b2b0d3c39b5015e4c0c77`, matching local
+`a4e87bf81b07f69e09b908bf82d0dbee6fbcf0d0`. This is source preservation,
+not CI acceptance. Local commits separately retain phase, language support,
+preflight consistency and regression-fixture adjustments.
+
+Actual pre-fix production probes found: (1) one completed optimizer update at
+200->201 left in-memory phase 0, while deployment reconstructs 0.001, changing
+same-noise actions; (2) masked T5 NaNs yield finite online features but nonfinite
+`intent.organizer.goal_input.weight` gradients. The fixes are described in the
+architecture contract. No new parameters/configuration modes/inference passes.
+
+The 60-file pre-existing primary inventory runs on a frozen M6p worktree.
+The 63-file current inventory adds the three new suites on a separately frozen
+M7 source worktree. Results are not yet marked complete at this save point.
+Initial parallel neural checks exceeded the measured 4 GiB cgroup and were
+killed; retain those failures and rerun serially. Sixteen preflight cases have
+completed; phase/language final neural results must be read from final reports,
+not inferred from their earlier partial dots. Initial static errors were in
+new test annotations/imports; corrected without ignoring diagnostics. The
+six-file differential static gate passes, inherited debt retained.
+
+Use final archive/process ledgers for exact inventory, return codes, source
+identities and counts. Old candidate-prefix tests require the now-explicit
+optional private-arm keyword in their harness; numerical assertions unchanged.
+The architecture quick contract now distinguishes legacy defaults from the
+cumulative M6n config instead of imposing old 48-step/N=49 assumptions on it.
+
+Runtime remains Python 3.13.5/PyTorch 2.10 CPU, not the declared 3.12/2.11
+supported environment. No formal-data training, CUDA performance, external
+CALVIN executor, persistent physical identity or task-success validation.
+
+## Previous M6l–M6p local handoff (historical save status)
+
+### Combined checkpoint: M6l–M6p
 
 The local implementation history consists of three closed source units:
 - `67a4bc316ae9a20b03680bcd0302c6a9fad292a9`: M6l controller values,

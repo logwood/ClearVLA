@@ -66,6 +66,18 @@ def _assert_same_typed_value(left, right) -> None:
     assert left == right
 
 
+def _assert_close_typed(left: object, right: object, *, atol: float, rtol: float) -> None:
+    """Compare numerical leaves without discarding typed causal metadata."""
+    assert type(left) is type(right)
+    if isinstance(left, torch.Tensor):
+        assert isinstance(right, torch.Tensor)
+        torch.testing.assert_close(left, right, atol=atol, rtol=rtol)
+    else:
+        # None, time-grid names, camera tuples and source-domain records have
+        # exact identity semantics, not a numerical tolerance or a skip rule.
+        _assert_same_typed_value(left, right)
+
+
 def test_feature_chart_sampling_owns_the_fp16_bf16_boundary() -> None:
     feature = torch.randn(1, 2, 8, 4, 4, dtype=torch.float16)
     coordinates = torch.zeros(1, 2, 2, 2, 4, 2, dtype=torch.bfloat16)
@@ -177,6 +189,7 @@ def _local_facts(
 
 def _object_top(
     *,
+    camera_names: tuple[str, ...] = ("top", "wrist"),
     p2_spatial_intent_mode: str = "post_pool_only",
 ) -> ObjectIntentDynamicsTop:
     base = ExperimentConfig()
@@ -206,6 +219,7 @@ def _object_top(
         teacher_key_dim=8,
         p2_spatial_intent_mode=p2_spatial_intent_mode,
         core_config=build_v120_visual_config(config),
+        camera_names=camera_names,
     )
 
 
@@ -257,7 +271,7 @@ def test_physical_action_condition_is_lossless_and_adjacent() -> None:
 
 def test_candidate_world_rejects_retagged_action_condition() -> None:
     torch.manual_seed(302)
-    top = _object_top().eval()
+    top = _object_top(camera_names=("top",)).eval()
     context, _ = top.build_online_context(
         local_facts=_local_facts(),
         goal_tokens=torch.randn(1, 6, 12),
@@ -1706,6 +1720,9 @@ def test_chunked_future_support_pool_matches_full_fp32_pool() -> None:
 def test_future_dynamics_abi_retains_camera_geometry_and_has_no_status_alias() -> None:
     field = _future_dynamics(cameras=3)
     assert {row.name for row in fields(field)} == {
+        "control_domain",
+        "time_grid_mode",
+        "camera_names",
         "current_reference",
         "successor_content",
         "semantic_delta",
@@ -1717,6 +1734,9 @@ def test_future_dynamics_abi_retains_camera_geometry_and_has_no_status_alias() -
         "camera_chart_availability",
         "log_camera_chart_availability",
     }
+    assert field.control_domain is None
+    assert field.camera_names == ()
+    assert field.time_grid_mode == "legacy_48_v1"
     field.validate()
     assert tuple(field.transport_mean.shape) == (1, 4, 2, 3, 2)
     assert tuple(field.transport_covariance.shape) == (1, 4, 2, 3, 3)
@@ -2174,7 +2194,9 @@ def test_w_reads_only_the_explicit_physical_action_condition() -> None:
         "facts",
         "action",
         "collect_diagnostics",
+        "robot_relation",
     }
+    assert signature.parameters["robot_relation"].default is None
     source = inspect.getsource(type(top.dynamics)._base)
     assert "protected_goal" not in source
     assert "public_interval_carrier" not in source
@@ -2533,7 +2555,7 @@ def test_p2_consumes_camera_covariance_and_zero_support_is_exact_zero() -> None:
 
 def test_p2_transport_conditions_only_semantic_k_address_with_zero_identities() -> None:
     torch.manual_seed(3141)
-    top = _object_top().eval()
+    top = _object_top(camera_names=("top",)).eval()
     context, _ = top.build_online_context(
         local_facts=_local_facts(cameras=1),
         goal_tokens=torch.randn(1, 6, 12),
@@ -3759,12 +3781,10 @@ def test_teacher_track_is_equivariant_to_global_object_relabeling() -> None:
     )
     expected = target.permute(permutation)
     for field in fields(FutureObjectDynamics):
-        assert torch.allclose(
-            getattr(relabeled, field.name),
-            getattr(expected, field.name),
-            atol=1e-6,
-            rtol=1e-6,
-        ), field.name
+        _assert_close_typed(
+            getattr(relabeled, field.name), getattr(expected, field.name),
+            atol=1e-6, rtol=1e-6,
+        )
 
 
 @pytest.mark.parametrize("current_image", [False, True])
@@ -3854,14 +3874,10 @@ def test_teacher_camera_relabeling_permutes_the_physical_geometry_axis(current_i
         expected = getattr(target, field.name)
         if field.name in ("transport_mean", "transport_covariance"):
             expected = expected[:, :, :, camera_permutation]
-        elif field.name in ("camera_coordinates", "camera_chart_availability"):
+        elif field.name in ("camera_coordinates", "camera_chart_availability", "log_camera_chart_availability"):
             expected = expected[:, :, camera_permutation]
-        torch.testing.assert_close(
-            getattr(relabeled, field.name),
-            expected,
-            atol=2e-6,
-            rtol=2e-6,
-            msg=field.name,
+        _assert_close_typed(
+            getattr(relabeled, field.name), expected, atol=2e-6, rtol=2e-6,
         )
 
 
@@ -3894,12 +3910,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     for field in fields(type(intent)):
         actual = getattr(relabeled_intent, field.name)
         expected = getattr(expected_intent, field.name)
-        if actual is None or expected is None:
-            # Legacy S has no padding-mask field; absence must survive the
-            # same permutation just as every populated tensor does.
-            assert actual is expected is None, field.name
-        else:
-            assert torch.allclose(actual, expected, atol=2e-5, rtol=2e-5), field.name
+        _assert_close_typed(actual, expected, atol=2e-5, rtol=2e-5)
 
     coarse = top.coarse_action(intent.action_dock())
     relabeled_coarse = top.coarse_action(relabeled_intent.action_dock())
@@ -3936,12 +3947,10 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     )
     expected_dynamics = dynamics.permute(permutation)
     for field in fields(FutureObjectDynamics):
-        assert torch.allclose(
-            getattr(relabeled_dynamics, field.name),
-            getattr(expected_dynamics, field.name),
-            atol=2e-5,
-            rtol=2e-5,
-        ), field.name
+        _assert_close_typed(
+            getattr(relabeled_dynamics, field.name), getattr(expected_dynamics, field.name),
+            atol=2e-5, rtol=2e-5,
+        )
 
     batch, horizon, basis, hidden = 1, 24, 2, 32
     p1_fact = torch.randn(batch, horizon, basis, hidden)
@@ -4606,7 +4615,7 @@ def test_w_has_no_goal_s_or_coarse_hidden_reread() -> None:
 
 def test_p3_retains_only_private_temporal_and_state_change_innovations() -> None:
     torch.manual_seed(4)
-    top = _object_top()
+    top = _object_top(camera_names=("top",))
     context, _ = top.build_online_context(
         local_facts=_local_facts(),
         goal_tokens=torch.randn(1, 6, 12),
@@ -4814,7 +4823,7 @@ def test_p3_zero_private_sources_are_exact_zero_and_fact_is_not_reprojected() ->
 
 def test_supervised_successor_innovation_crosses_w_to_p2_without_current_bypass() -> None:
     torch.manual_seed(28)
-    top = _object_top()
+    top = _object_top(camera_names=("top",))
     context, _ = top.build_online_context(
         local_facts=_local_facts(),
         goal_tokens=torch.randn(1, 6, 12),
@@ -4988,7 +4997,7 @@ def test_active_v120_capacity_reuses_explicit_prepared_basis_within_a_forward() 
         assert qr.call_count == 1
 
 
-def test_deployment_cache_has_no_source_or_training_charts() -> None:
+def test_deployment_cache_has_only_declared_causal_sources_and_no_future_labels() -> None:
     assert {field.name for field in fields(OnlinePolicyCache)} == {
         "top",
         "factual_dock",
@@ -4997,11 +5006,14 @@ def test_deployment_cache_has_no_source_or_training_charts() -> None:
         "executed_memory",
         "action_history_keep",
         "role_table",
+        "instruction_reference",
+        "robot_feedback",
     }
     assert {field.name for field in fields(DeploymentTopCache)} == {
         "belief",
         "intent",
         "candidate_world",
+        "current_world_belief",
     }
 
 def test_s_shared_target_address_is_zero_start_k_centered_and_appearance_reachable() -> None:

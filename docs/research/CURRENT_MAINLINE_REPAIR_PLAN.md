@@ -1,6 +1,35 @@
 # ClearVLA structural rebuild work plan
 
-## Current batch M6l–M6p
+## Current cumulative closure: M7a–M7c
+
+Continue from published M6p, not remote M6k. Three general corrections are now
+implemented: (a) engine/evaluation/completed-update phase consistency, (b) T5
+source padding isolation before its first parameterized read, and (c) preflight
+codec/history support and complete-window action-prefix consistency. No new
+model mode or workflow is required; the accumulated config remains M6n.
+
+Freeze/discover the primary mainline and CALVIN/outlet inventory, run old-source
+baselines separately from current-source acceptance, and preserve each process
+exit including OOM/timeouts. An intentional failing baseline never proves a
+current test passed. Current-source runtime tests and historical unmodified
+results must not be summed into a single all-green release count.
+
+Audit forward values, backward owners and mutable runtime phase together. After
+these fixes, complete the supported-runtime inventory, production GPU resources,
+real data learning and external evaluator admission. Prior M6 subunits cover
+parts of the original M7–M10 plan; renumbering is not an extra architecture stage
+and does not imply calibrated identity/progress or final release completion.
+
+M7d/M7e complete fixture and orchestration compatibility alongside the three
+production fixes. Retain both historical and current results even when the
+baseline fails; report source tests, process failures and optional environment
+availability separately. Do not call a successful source save a passed CI run.
+The unchanged supported CPU environment also needs a usable video backend before
+its full StackCube/video inventory can pass; model correctness is independent
+of that installation gap.
+
+## Historical implementation batch (M6l–M6p)
+
 
 Implement together on the M6k baseline: (l) native execution selector/value
 separation; (m) numerically matched clean-endpoint command/motion training;

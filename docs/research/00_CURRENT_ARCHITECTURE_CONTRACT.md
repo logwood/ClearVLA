@@ -1,5 +1,67 @@
 # Current ClearVLA architecture contract
 
+## M7a–M7c: cumulative graph correctness, without new neural modes
+
+These source-wide corrections continue the published M6p tree
+`7abffddad974616518b87a8465dd4bdb46e015e0`. The cumulative model selection is
+still `configs/mainline/structural_rebuild_m6n_calvin.json`. Saving a source
+unit before milestone CI is not a claim of supported-runtime or robot acceptance.
+
+**M7a — one completed-update execution clock.** `MainlineTrainingEngine.global_step`
+counts completed optimizer updates. Successful `train_step` publishes the phase
+for that completed count only after backward, optimizer and schedule advance.
+Both `encode_eval` and `eval_step` resolve the same phase before building/reading
+an evaluation graph. Deployment already restores it from the checkpoint count.
+This closes the old one-step difference between in-memory evaluation and reload
+at the 200/1000 controller schedule. Current-update diagnostics remain detached
+snapshots, not aliases of the next phase. Failed forwards do not advance the
+step; updates made outside this engine still require explicit resynchronization.
+No controller schedule, parameter, inference W or ODE count is changed.
+
+**M7b — language support before the first trainable projection.** T5 padding is
+quarantined by the source mask BEFORE `goal_input`, not only before attention.
+An unsupported NaN can otherwise leave a finite forward value but poison the
+Linear weight VJP through `NaN * 0`. The mask must align with token axes. This
+changes no arithmetic for supported tokens, adds no fallback label or learned
+null, and does not hide nonfinite supported evidence. Preflight uses the same
+language support law. All-padding inputs may still use existing learned priors;
+zero padded evidence does not imply that the whole policy must output zero.
+
+**M7c — finite audit follows causal support and shared label ownership.** The
+expensive preflight checks current action-state and codec-gripper boundaries as
+observed values, and checks state/action history only on their separately owned
+observed/executed supports. It validates the actual history clock before using
+those masks. Complete-window and observed-tail policy/world action labels must
+share the same normalized recorded prefix; absence of a support record means
+complete support, not permission for conflicting labels. The future-time chart
+is checked before this equality, so malformed clocks fail at their own boundary.
+These reductions remain preflight-only, not additional per-ODE host syncs.
+
+The old candidate-prefix test harness now explicitly admits the existing
+`arm_private_correction=None` keyword and rejects non-None private-arm data it
+does not implement. Its numerical and prefix-sharing assertions are retained.
+Final test inventories and process exits belong to the handoff/archive, not
+inferred from partial pytest dots or a successful source push.
+
+## M7d–M7e: cumulative verification ownership
+
+M7d updates source-owned tests to the already implemented camera/time/cache ABI:
+single-view top fixtures declare their actual camera names; tensor equivariance
+keeps its prior tolerances while non-tensor provenance is compared exactly;
+current-world/causal reference fields cannot be mistaken for future labels.
+No production path or numerical assertion is relaxed by these fixture updates.
+
+M7e keeps historical baseline and current test outcomes independent. A failed
+or killed baseline child cannot skip current-source testing. The read-only shell
+gate attempts both inventories, stores their individual exits, and returns a
+failure if either failed; static/source preparation errors still stop before
+unprepared testing. Cumulative discovery includes mainline, CALVIN, benchmark
+language/config, deployment-prefix, simulation recording, residual RL and the
+review scripts. It runs real test files in fresh processes, not replacements.
+Optional video import availability is recorded in runtime metadata. An absent
+codec/backend remains an environment failure, not a skipped successful video
+check. Workflows and their environment installation are not changed here.
+
 ## M6l–M6p batch: execution, endpoint, command and supervision ownership
 
 This batch continues the M6k source tree; it does not declare the entire M6 or
@@ -700,35 +762,33 @@ or changed constructor RNG/order. No old-checkpoint or optimizer migration.
 
 ## Agent quick contract
 
-~~~text
-capability:             object_intent_dynamics_323
-default manifest:       schema 30
-optional B-spine:       schema 31 only when explicitly selected
-registered layout:      clearvla_mainline layout 2
-component selection:    mainline-modular-v1
-topology:               G1 G2 G3 / W1 W2 / P1 P2 P3
-future intervals:       4-8 / 8-16 / 16-32 / 32-48
-global objects:         K=4 plus explicit null mass
-visual history:         DINO/raw at -8 / -4 / 0; two learned adjacent flows
-training:               one online encode, one formal velocity pass, one loss composition
-deployment:             proposal ODE, one W rebuild, refined ODE
-shared action core:     24 x 18 value/adjacent-difference/gripper field
-W action condition:     four interval means by default; opt-in causal 24-row prefix
-default config:         configs/mainline/object_intent_dynamics_323.json
-Pen launcher:           scripts/train_mainline.sh
-RDT-8 launcher:         scripts/train_rdt_multitask.sh
-checkpoint validation: scripts/validate_mainline_checkpoint.sh (read-only)
-working branch label:   codex/schema29-mainline (historical name, not semantics)
-~~~
+The historical default and the accumulated structural candidate are different
+explicit graphs. Do not read legacy scalar constants below as overriding a
+serialized candidate selection. Neither graph is promoted by passing unit tests.
 
-The default is the Schema28-core recovery behavior under the schema-30 ABI,
-with a profile-owned continuous-gripper boundary and outlet-scoped binary
-adaptations. The shared action codec, G/S/W/P graph, training call count and
-two-pass deployment lifecycle are common across outlets. CALVIN and the
-repaired ManiSkill v2 base change only their outlet sampler/chart and terminal
-binary-command behavior; the ManiSkill choice is explicit and does not change
-Pen/RDT/LIBERO defaults. The opt-in B-spine is an experiment selection, not a
-new default.
+| Boundary | Historical default/control | Cumulative candidate through M7c |
+|---|---|---|
+| Configuration | `object_intent_dynamics_323.json` | `structural_rebuild_m6n_calvin.json` |
+| Topology | G1/G2/G3, S, W1/W2, P1/P2/P3 | Same responsibilities with versioned typed interfaces |
+| Physical future grid | `legacy_48_v1`: 4–8, 8–16, 16–32, 32–48 | `control_aligned_24_v1`: action [0,4), [4,8), [8,16), [16,24); successor supports (lo,hi] |
+| W action ownership | Means or clipped 24-row prefixes under selected control | Candidate prefixes 4/8/16/24; independent matched observed-action W supervision |
+| Target identity | Legacy independent reads or explicit shared prior | One soft K+null operation binding across S/coarse/P1/P2 |
+| Spatial evidence | Historical local 7×7 candidates | Declared full current-image support; P1 real 3×3 reads at candidate positions |
+| History | Historical paired-row control | Source-timestamped state/control streams and source masks |
+| Training | Historical one-velocity graph | One causal G/S encoding; separate supervised W; interior velocity plus clean endpoint head forward on the SAME online cache |
+| Deployment | Proposal, one W rebuild, refined pass | Same lifecycle; physical clocks and current observation are immutable through ODE |
+| Native command | Outlet-owned chart | Confirmed applied command owns recording/history, not an unexecuted proposal |
+| Execution phase | Historical restored control | Engine/eval/deployment use completed-update count; no task clock |
+| Shared action field | 24 × 18 value/difference/gripper chart | Unchanged; native CALVIN 7-D command and model 10-D state remain distinct |
+| Working branch | Historical branches are controls | `codex/structural-rebuild-20260921` only |
+
+The default remains schema-30 recovery with explicit outlet adaptations and
+optional schema-31 B-spine controls. Registered layout and component selection
+remain `clearvla_mainline` layout 2 and `mainline-modular-v1`. Camera roles,
+source history times, future control time and numerical solver time are not
+interchangeable. Configuration, manifest and deployment ABI are authoritative;
+never reinterpret a legacy checkpoint as the accumulated candidate by relabeling
+its tensors. Pen/RDT/LIBERO defaults are not implicitly changed.
 
 ## Default and opt-in selections
 
@@ -1336,9 +1396,10 @@ Current checkpoint observations, when needed, live in the temporary
 
 ## Non-negotiable invariants
 
-1. Camera, spatial, local-M, global-K, N=49, interval, horizon, basis and type
-   axes stay real until a named consumer. Reduced evidence cannot be recreated
-   with expand and called original evidence.
+1. Camera, spatial, local-M, global-K, declared candidate-support N, interval,
+   horizon, basis and type axes stay real until a named consumer. N=49 belongs
+   to the legacy local chart; full-support candidates keep their declared chart.
+   Reduced evidence cannot be recreated with expand and called original evidence.
 2. Online evidence keeps ordinary autograd unless this contract names a
    no-grad Teacher or audit scope. Activation gradients do not substitute for
    parameter-owner VJP.
@@ -1346,18 +1407,21 @@ Current checkpoint observations, when needed, live in the temporary
    target or route quota.
 4. S owns intent. It cannot manufacture W support/value or enter W through a
    hidden second path.
-5. W is the only future-world producer. ControlledTransition consumes policy
-   transition evidence and cannot create another world.
+5. W owns candidate-action physical-world prediction. S may predict explicitly
+   typed demonstration outcomes, not another candidate-action rollout. CT
+   conditions decoder features and cannot claim physical world/error semantics.
 6. Physical validity and camera support are producer-owned. Confidence or
    allocation share cannot silently replace them. Every S/coarse/W K read
    receives that support; invalid rows are quarantined before normalization
    and object-axis reduction, and an all-invalid row has a finite zero-output
    fallback.
-7. P1 retains N=49 and its real 3x3 detail read until factual selection is
-   complete.
-8. Semantic K and geometry K*C selection are independent and complementary.
-   They do not compete in one type softmax, and physical interval selection has
-   no learned null.
+7. P1 retains the selected support chart and its real 3x3 local detail reads
+   until factual selection. Full-support mode reads local regions at each
+   candidate position before posterior averaging, not at an average location.
+8. Semantic and geometry values have separate owners. Legacy controls may use
+   independent K/K*C posteriors; shared-operation mode MUST keep the common K
+   marginal and null mass, allowing geometry to choose a view within each K.
+   Types do not compete in one softmax; physical interval selection has no null.
 9. Neutral P2 is algebraically neutral: zero effect and interaction leave the
    protected factual consequence unchanged.
 10. The V120 seed, terminal contracts, CVAE/workspace, Evidence MMDiT,
@@ -1365,8 +1429,11 @@ Current checkpoint observations, when needed, live in the temporary
 11. The shared 18-D value/adjacent-difference action field and cumulative
     decode cannot be replaced for one outlet. Outlet-native conversions stay
     at the adapter/finalizer boundary.
-12. Future observation/action/state can affect detached Teacher or targets
-    only; changing it cannot change deployed action.
+12. Future observation/action/state belongs to training-only targets, Teacher,
+    matched observed-action W or clean head supervision; none can populate
+    the online candidate cache. At fixed weights/online input/noise, changing
+    future labels cannot change deployed action. Training updates may of course
+    change later weights; this is not a ban on supervised learning.
 13. Every trainable parameter has exactly one optimizer owner. Decoder-local
     clipping precedes global clipping; finite post-clip values cannot hide a
     missing raw owner gradient.
@@ -1378,9 +1445,12 @@ Current checkpoint observations, when needed, live in the temporary
     contracts. `FlowStepContext` may enter the bottom flow, while raw language,
     color/object pointers and role logits may not; object binding must be
     resolved upstream and cross the seam only as a compiled physical condition.
-17. A sequence-conditioned W may read only the known 24-row physical prefix.
-    Its four interval reads end at 8, 16, 24 and 24; it cannot synthesize rows
-    25--48, consume future supervision or replace the one-rebuild Q5 lifecycle.
+17. Online sequence-conditioned W reads only the actual candidate control
+    prefix under its declared FutureTimeGrid and CandidateControlDomain. In
+    aligned mode endpoints are 4/8/16/24. Legacy 8/16/24/24 clipping is a control,
+    not an aligned forecast. Unknown controls cannot become synthetic zeros.
+    Observed-action training branches use separately typed matched labels and
+    never replace online W or the one-rebuild Q5 lifecycle.
 
 ## Typed boundary summary
 
@@ -1390,16 +1460,16 @@ Current checkpoint observations, when needed, live in the temporary
 | FutureSupervision | Disjoint training-only future action/state/DINO evidence |
 | ObjectFactSet | K=4 physical objects plus explicit null and observable object/camera mass |
 | ActionIntentDock | Public S interval/history/K memory plus producer-owned K validity mask; no typed fact re-entry |
-| PolicyIntentDock | Reduced typed S context for P2/P3; opt-in shared FP32 target-K address |
+| PolicyIntentDock | Typed task/context with shared operation binding in the cumulative mode; observed change and expected outcome remain separate |
 | PhysicalActionCondition | Four physical interval means plus current-anchored deltas |
 | PhysicalActionSequenceCondition | Exact known 24-row source action, canonical value/delta, current boundary, row times and FP32 outlet/chart/normalizer identity |
-| ObjectWorldBelief | Compact current G belief; no S/Teacher/noisy action |
+| ObjectWorldBelief | Current G facts with versioned observed robot/view conditions; no S/Teacher/noisy action |
 | CandidateWorld | One exact action condition atomically paired with FutureObjectDynamics |
 | FutureObjectDynamics | Semantic successor/delta and camera-resolved transport/covariance |
 | FactualPrecisionDock | Completed protected P1 detail; no new reader or compression |
 | CompletedP1PolicyState | Static factual base separate from dynamic action/time residual |
 | SelectedIntervalEvidence | Interval-retaining semantic/geometry values with no-null physical terminal |
-| ControlledTransitionSource | Exact completed G3 rollout, built once per observation |
+| ControlledTransitionSource | Completed current G3 feature chart, built once per observation; NOT a physical rollout |
 
 ## Registered component hierarchy
 

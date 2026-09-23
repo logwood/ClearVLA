@@ -1,5 +1,29 @@
 # ClearVLA current decision ledger
 
+## Current cumulative closure boundary (M7)
+
+M7a–M7c implement the engine phase, language pre-projection support, and source
+preflight corrections described in the architecture contract. Do not keep
+listing those original failure mechanisms as unfixed once their exact source
+and tests are confirmed. They add no neural parameters and do not settle object
+association, task progress or hardware execution behavior.
+
+M7d reconciles stale typed structural/top test contracts without weakening
+numerical assertions. M7e prevents a historical baseline failure from suppressing
+current testing; failures still propagate. Latest supported-runtime CI lacked
+both imageio and cv2, causing the old StackCube trace/video path to fail. A video
+backend from the existing project vision extra is needed for that inventory;
+record/import checks alone do not install or validate it.
+
+Outstanding acceptance: full current-source selected inventory, supported
+Python/Torch environment, CUDA/BF16/cache/resource probes, formal-data semantics,
+external CALVIN evaluator and physical task behavior. Baseline resource-killed
+runs and partial pytest dots remain unresolved until independently rerun.
+Reference/model/step/mode ownership still does not detect in-place source tensor
+mutation or optimizer changes outside the engine. Consumers must re-encode.
+
+## Earlier acceptance boundaries still applicable
+
 ## M6l–M6p remaining acceptance boundary
 
 Execution selector/value ownership, clean endpoint head supervision and

@@ -82,6 +82,7 @@ def test_online_context_has_prediction_but_no_teacher_or_future_target() -> None
         "intent",
         "coarse_action",
         "candidate_world",
+        "current_world_belief",
     }
     assert not names & {"teacher", "teacher_dynamics", "future_supports", "future_target"}
 
@@ -94,6 +95,10 @@ def test_action_condition_and_candidate_world_remain_one_cache_pair() -> None:
     assert deployment.predicted_dynamics is context.predicted_dynamics
     assert deployment.candidate_world is context.candidate_world
     assert context.action_condition.interval_action is context.coarse_action.action_prediction
+    assert context.current_world_belief is not None
+    assert deployment.belief is context.current_world_belief
+    assert deployment.belief.content is context.facts.content
+    assert deployment.belief.camera_coordinates is context.facts.camera_coordinates
 
     copied_condition = replace(
         context.action_condition,
