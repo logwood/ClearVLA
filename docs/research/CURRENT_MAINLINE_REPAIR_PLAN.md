@@ -335,13 +335,22 @@ Prepare an opt-in `hdf5_indexed_lazy_v1` reader with these boundaries:
    fail-closed. A stale or incomplete index, invalid dataset key, changed file
    identity or non-finite selected row must reject the lazy path rather than
    silently fall back midway through a run.
-4. Add a loader-only matched verification: eager versus lazy first batches
-   must have identical episode identities, normalized bytes, camera/token bytes,
-   masks, normalizer digest and sampler/RNG continuation. Record cold index
-   time, first-batch time, warm steady-state throughput, worker RSS and open
-   descriptors. No model forward or optimizer step is needed for this gate.
+  4. Add a loader-only matched verification: eager versus lazy first batches
+     must have identical episode identities, normalized bytes, camera/token bytes,
+     masks, normalizer digest and sampler/RNG continuation. Record cold index
+     time, first-batch time, warm steady-state throughput, worker RSS and open
+     descriptors. No model forward or optimizer step is needed for this gate.
 
-The legacy eager path remains the default until this gate passes. The index
+  The implementation boundary is deliberately dataset-agnostic: an immutable
+  source fingerprint plus an ordered `RowRequest` and `EpisodeRowReader`
+  protocol is the shared contract in `clearvla/data/index_contract.py`. HDF5
+  supplies the first adapter; NPY, sharded archives and future remote stores
+  can implement the same identity, fingerprint, field-shape and ordered-row
+  operations without changing the sampler or model-facing batch contract. A
+  backend may canonicalize rows for its storage library, but it must restore
+  the caller's order and reject stale source identity before returning data.
+
+  The legacy eager path remains the default until this gate passes. The index
 format and lazy reader must be reviewed as one source unit; do not claim a
 training speedup from the current NPY `pread` measurements alone.
 
