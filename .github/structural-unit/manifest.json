@@ -1,0 +1,17 @@
+{
+  "schema": "verified-unit-patch-v1",
+  "unit": "M8i",
+  "base": "06e7519bfc7953376ed8766ec97153d3166af996",
+  "base_tree": "c0bf02f14d7140c4798c5f11a72c667ac30d3aeb",
+  "transport_parent": "06e7519bfc7953376ed8766ec97153d3166af996",
+  "source_result_tree": "433e11e0859b51ca6317b3432ff11e039396748f",
+  "patch_bytes": 1584,
+  "patch_sha256": "489f2a65e899844f34add90583a6992edcfdb01232ea9712c88fc7d472082198",
+  "parts": [
+    {
+      "path": ".github/structural-unit/part-00.txt",
+      "length": 1084,
+      "blob_sha": "f1264126b38528031baae5f7984f48379dbbe14f"
+    }
+  ]
+}
