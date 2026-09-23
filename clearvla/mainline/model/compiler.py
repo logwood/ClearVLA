@@ -35,9 +35,9 @@ from .target_binding import LOCAL_TARGET_READERS, SHARED_TARGET_BINDING, masked_
 from .types import (
     CandidateWorld,
     FutureObjectDynamics,
+    ObjectIntentState,
     PhysicalActionCondition,
     PolicyIntentDock,
-    ObjectIntentState,
     normalized_entropy,
 )
 from .view_geometry import ViewConditionedTransport

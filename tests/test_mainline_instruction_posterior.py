@@ -12,14 +12,18 @@ import torch
 from test_mainline_endpoint_supervision import _config as base_config
 from test_mainline_operation_expectation import _batch
 from test_mainline_state_features import _model_engine
-from clearvla.mainline.config import config_from_mapping, load_config
+
 from clearvla.mainline.checkpoint import active_source_snapshot
+from clearvla.mainline.config import config_from_mapping, load_config
 from clearvla.mainline.instruction_change import (
-    POSTERIOR_REFERENCE_CHANGE, TYPED_REFERENCE_CHANGE, instruction_change_metadata,
+    POSTERIOR_REFERENCE_CHANGE,
+    TYPED_REFERENCE_CHANGE,
+    instruction_change_metadata,
 )
 from clearvla.mainline.model.instruction_change import TypedChangeValueRead
 from clearvla.mainline.model.instruction_posterior import (
-    PosteriorChangeValueRead, PosteriorInstructionChangePlanRead,
+    PosteriorChangeValueRead,
+    PosteriorInstructionChangePlanRead,
     PosteriorInstructionReferenceRead,
 )
 from clearvla.mainline.model.target_binding import TargetBinding
@@ -132,6 +136,7 @@ def test_zero_measured_change_and_missing_support(production,case,bf16):
             facts=st.top.facts,binding=cache.top.intent.target_binding)
         plan=_plan()
         prepared=plan.prepare(ev)
+        assert prepared.joint is not None
         assert prepared.content.count_nonzero()==prepared.image.count_nonzero()==prepared.joint.count_nonzero()==0
         assert ev.posterior.current_probability.dtype==torch.float32
         assert torch.isfinite(prepared.status).all()
@@ -172,11 +177,13 @@ def test_equal_centers_entropies_are_not_equal_distributions(production):
     assert all(torch.equal(x,y) for x,y in zip(old(old_a),old(old_b)))
     r=_values()
     # Explicit learned-layer fixture, not a production fixed coordinate rule.
+    first, last = r.image[0], r.image[2]
+    assert isinstance(first, torch.nn.Linear) and isinstance(last, torch.nn.Linear)
     with torch.no_grad():
-        r.image[0].weight.zero_()
-        r.image[0].weight[0]=torch.tensor([1.,1.])
-        r.image[2].weight.zero_()
-        r.image[2].weight[0,0]=1.
+        first.weight.zero_()
+        first.weight[0]=torch.tensor([1.,1.])
+        last.weight.zero_()
+        last.weight[0,0]=1.
     actual=r.prepare(contrast).image
     assert actual.abs().sum()>0 and r.prepare(same).image.count_nonzero()==0
 
@@ -201,7 +208,7 @@ def test_joint_read_preserves_content_position_dependence(production):
         r.joint_output.weight[0,0]=1.
     v=r.prepare(e)
     assert v.content.count_nonzero()==v.image.count_nonzero()==0
-    assert v.joint.abs().sum()>0
+    assert v.joint is not None and v.joint.abs().sum()>0
 
 
 @pytest.mark.parametrize('scale',[0.,.01,.5,1.])
@@ -413,6 +420,7 @@ def test_future_label_work_leaves_posterior_unchanged(production):
 
 def test_exact_checkpoint_and_mode_owned_ABI(tmp_path,monkeypatch):
     import test_mainline_target_binding as old
+
     from clearvla.mainline.runtime.deployment import validate_deployment_abi
     original=old.build_deployment_abi
     def build(*a,**kw):
@@ -482,6 +490,7 @@ def test_masked_payload_forward_and_weight_VJP_quarantine(production,bf16):
     with torch.autocast('cpu',dtype=torch.bfloat16,enabled=bf16):
         out=r(e)
         loss=sum(x.float().square().mean() for x in out)
+        assert isinstance(loss, torch.Tensor)
     assert all(torch.isfinite(x).all() for x in out)
     loss.backward()
     assert all(x.grad is not None and torch.isfinite(x.grad).all() for x in r.parameters())

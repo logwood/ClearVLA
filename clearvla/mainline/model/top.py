@@ -26,8 +26,8 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..future_time import LEGACY_FUTURE_TIME
-from ..instruction_reference import InstructionReference
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE
+from ..instruction_reference import InstructionReference
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..temporal import HistoryTiming
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState

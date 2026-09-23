@@ -9,8 +9,8 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..config import ExperimentConfig
-from ..instruction_reference import InstructionReference
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE, TYPED_CHANGE_MODES
+from ..instruction_reference import InstructionReference
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
 from ..operation_expectation import OBJECT_OUTCOME_INTENT
 from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT

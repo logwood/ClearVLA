@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
+
 from .instruction_posterior import InstructionPosterior
 
 if TYPE_CHECKING:

@@ -9,14 +9,20 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 import torch
 from test_mainline_checkpoint import _dataset
 from test_mainline_endpoint_supervision import _config
+from test_mainline_instruction_change import _batch
 from test_mainline_state_features import _model_engine
 
-from clearvla.mainline.checkpoint import ArtifactIdentity, build_checkpoint_identity
+from clearvla.mainline.checkpoint import (
+    ArtifactIdentity,
+    CheckpointIdentity,
+    build_checkpoint_identity,
+)
 from clearvla.mainline.config import ExperimentConfig
 from clearvla.mainline.runtime.checkpoints import (
     load_checkpoint_exact,
@@ -65,7 +71,7 @@ def test_nonfinite_loss_with_finite_derivative_cannot_update(bad, monkeypatch):
 
     monkeypatch.setattr(engine, '_forward', fault)
     with pytest.raises(FloatingPointError, match='non-finite training loss'):
-        engine.train_step(None)
+        engine.train_step(_batch())
     _tree_equal(before_model, model.state_dict())
     _tree_equal(before_optimizer, engine.optimizer.state_dict())
     _tree_equal(before_schedule, engine.schedule.state_dict())
@@ -85,7 +91,22 @@ def checkpoint_identity(tmp_path_factory):
     )
 
 
-def _checkpoint(tmp_path: Path, identity):
+class CheckpointArguments(TypedDict):
+    model: torch.nn.Linear
+    optimizer: torch.optim.AdamW
+    schedule: WarmupCosineSchedule
+    config: ExperimentConfig
+    identity: CheckpointIdentity
+
+
+class CheckpointClocks(TypedDict):
+    epoch: int
+    global_step: int
+
+
+def _checkpoint(
+    tmp_path: Path, identity: CheckpointIdentity,
+) -> tuple[Path, CheckpointArguments]:
     torch.manual_seed(924)
     config = ExperimentConfig()
     model = torch.nn.Linear(3, 2)
@@ -100,12 +121,12 @@ def _checkpoint(tmp_path: Path, identity):
     save_checkpoint(path, model=model, optimizer=optimizer, schedule=schedule,
                     config=config, identity=identity, epoch=1, global_step=1,
                     best_metric=None)
-    kwargs = dict(model=model, optimizer=optimizer, schedule=schedule,
+    kwargs = CheckpointArguments(model=model, optimizer=optimizer, schedule=schedule,
                   config=config, identity=identity)
     return path, kwargs
 
 
-def _reject_without_mutation(path, kwargs):
+def _reject_without_mutation(path: Path, kwargs: CheckpointArguments) -> None:
     with torch.no_grad():
         for p in kwargs['model'].parameters():
             p.add_(5.0)
@@ -150,7 +171,7 @@ def test_exact_resume_rejects_optimizer_semantic_drift(tmp_path, checkpoint_iden
 def test_save_rejects_coerced_clock_without_creating_checkpoint(tmp_path, checkpoint_identity, field, bad):
     _, kwargs = _checkpoint(tmp_path, checkpoint_identity)
     destination = tmp_path / 'invalid.pt'
-    clocks = dict(epoch=1, global_step=1)
+    clocks = CheckpointClocks(epoch=1, global_step=1)
     clocks[field] = bad
     with pytest.raises(ValueError):
         save_checkpoint(destination, **kwargs, **clocks, best_metric=None)
@@ -159,7 +180,7 @@ def test_save_rejects_coerced_clock_without_creating_checkpoint(tmp_path, checkp
 
 def test_valid_exact_resume_next_update_is_bit_exact(tmp_path, checkpoint_identity):
     path, kwargs = _checkpoint(tmp_path, checkpoint_identity)
-    model, optimizer, schedule = (kwargs[k] for k in ('model', 'optimizer', 'schedule'))
+    model, optimizer, schedule = kwargs['model'], kwargs['optimizer'], kwargs['schedule']
 
     def step():
         optimizer.zero_grad(set_to_none=True)

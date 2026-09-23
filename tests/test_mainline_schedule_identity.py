@@ -1,16 +1,24 @@
 """Curve/owner admission and real AdamW continuation, not skill qualification."""
 from __future__ import annotations
+
 import copy
 import math
 from typing import Any
+
 import pytest
 import torch
 from test_mainline_takeover_admission import (
-    _checkpoint, _reject_without_mutation, _tree_equal,
+    _checkpoint,
+    _reject_without_mutation,
+    _tree_equal,
+)
+from test_mainline_takeover_admission import (
     checkpoint_identity as checkpoint_identity,
 )
+
 from clearvla.mainline.runtime.checkpoints import load_checkpoint_exact, save_checkpoint
 from clearvla.mainline.training.optimizer import WarmupCosineSchedule
+
 
 @pytest.mark.parametrize("kw", [{"total_steps": 80}, {"warmup_steps": 4}, {"minimum_ratio": .2}])
 def test_curve_drift_is_rejected_before_state_mutation(tmp_path, checkpoint_identity, kw):
@@ -83,7 +91,7 @@ def test_group_reordering_rejected_before_lr_or_clock_change():
 
 def test_multistep_exact_resume_preserves_weights_moments_rng_curve(tmp_path, checkpoint_identity):
     path, args = _checkpoint(tmp_path, checkpoint_identity)
-    m,o,s = [args[k] for k in ("model","optimizer","schedule")]
+    m,o,s = args["model"], args["optimizer"], args["schedule"]
     # Saving already captured this global RNG; no unrelated draws precede run.
     def run():
         trace=[]
