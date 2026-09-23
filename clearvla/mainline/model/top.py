@@ -27,6 +27,7 @@ from torch import Tensor, nn
 
 from ..future_time import LEGACY_FUTURE_TIME
 from ..instruction_reference import InstructionReference
+from ..instruction_change import POSTERIOR_REFERENCE_CHANGE
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..temporal import HistoryTiming
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
@@ -275,6 +276,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             entity_chart_mode=entity_chart_mode,
             entity_history_mode=entity_history_mode,
             entity_motion_mode=entity_motion_mode,
+            retain_image_source=instruction_change_mode == POSTERIOR_REFERENCE_CHANGE,
         )
         self.intent = StatelessObjectIntentOrganizer(
             future_time_grid_mode=future_time_grid_mode,
@@ -643,6 +645,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             facts=facts,
             collect_diagnostics=collect_diagnostics,
         )
+        intent = self.plan_compiler.prepare_instruction_values(intent)
         action_intent = intent.action_dock()
         coarse = self.coarse_action(
             action_intent,

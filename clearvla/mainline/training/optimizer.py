@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from collections.abc import Mapping
 
 import torch
 from torch import Tensor, nn
@@ -250,69 +251,115 @@ def build_optimizer(
 
 
 class WarmupCosineSchedule:
-    """Step-owned learning-rate schedule with serializable scalar state."""
+    """Completed-update clock with an explicit exact-resume curve identity.
 
-    def __init__(
-        self,
-        optimizer: torch.optim.Optimizer,
-        *,
-        warmup_steps: int,
-        total_steps: int,
-        minimum_ratio: float,
-    ) -> None:
+    The LR formula is unchanged. Legacy two-field states cannot establish curve
+    identity and are not silently migrated. Rejected loads do not mutate groups.
+    """
+
+    STATE_SCHEMA = "clearvla-warmup-cosine-v2"
+
+    def __init__(self, optimizer: torch.optim.Optimizer, *, warmup_steps: int,
+                 total_steps: int, minimum_ratio: float) -> None:
         self.optimizer = optimizer
-        self.warmup_steps = int(warmup_steps)
-        self.total_steps = int(total_steps)
+        self.warmup_steps = self._integer(warmup_steps, "warmup_steps", positive=True)
+        self.total_steps = self._integer(total_steps, "total_steps", positive=True)
+        if isinstance(minimum_ratio, bool) or not isinstance(minimum_ratio, (int, float)):
+            raise ValueError("minimum LR ratio must be finite and in (0,1]")
         self.minimum_ratio = float(minimum_ratio)
-        if self.warmup_steps <= 0 or self.total_steps <= 0:
-            raise ValueError("schedule steps must be positive")
-        if not 0.0 < self.minimum_ratio <= 1.0:
-            raise ValueError("minimum LR ratio must be in (0,1]")
-        self.base_lrs = tuple(float(group["lr"]) for group in optimizer.param_groups)
+        self.curve_identity()
+        # Loading optimizer state can replace dictionaries, but not parameter
+        # identities or their ordering. These references are runtime-only.
+        self._parameter_groups = tuple(tuple(g["params"]) for g in optimizer.param_groups)
+        self.base_lrs = self._rates(tuple(g["lr"] for g in optimizer.param_groups))
         self.step_index = 0
         self._apply_current_ratio()
 
+    @staticmethod
+    def _integer(value: object, name: str, *, positive: bool = False) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value < int(positive):
+            raise ValueError(f"scheduler {name} must be a {'positive' if positive else 'nonnegative'} integer")
+        return value
+
+    @staticmethod
+    def _rates(value: object) -> tuple[float, ...]:
+        if not isinstance(value, (tuple, list)) or not value:
+            raise ValueError("scheduler base learning rates are invalid")
+        if any(isinstance(x, bool) or not isinstance(x, (int, float))
+               or not math.isfinite(x) or x < 0.0 for x in value):
+            raise ValueError("scheduler base learning rates must be finite and nonnegative")
+        return tuple(float(x) for x in value)
+
+    def curve_identity(self) -> dict[str, object]:
+        self._integer(self.warmup_steps, "warmup_steps", positive=True)
+        self._integer(self.total_steps, "total_steps", positive=True)
+        if type(self.minimum_ratio) is not float or not math.isfinite(self.minimum_ratio) or not 0.0 < self.minimum_ratio <= 1.0:
+            raise ValueError("minimum LR ratio must be a finite float in (0,1]")
+        return {"algorithm": "warmup-cosine-clamped-v1",
+                "clock": "completed-updates-next-update-lr-v1",
+                "warmup_steps": self.warmup_steps, "total_steps": self.total_steps,
+                "minimum_ratio": self.minimum_ratio}
+
+    def validate_optimizer(self, optimizer: torch.optim.Optimizer) -> None:
+        if optimizer is not self.optimizer:
+            raise ValueError("scheduler belongs to another optimizer")
+        live = optimizer.param_groups
+        if len(live) != len(self._parameter_groups) or any(
+            len(group["params"]) != len(saved)
+            or any(a is not b for a, b in zip(group["params"], saved, strict=True))
+            for group, saved in zip(live, self._parameter_groups, strict=True)
+        ):
+            raise ValueError("scheduler optimizer parameter-group ownership changed")
+        if len(self._rates(self.base_lrs)) != len(live):
+            raise ValueError("scheduler optimizer group count changed")
+
     def ratio(self, step: int) -> float:
-        step = max(int(step), 0)
+        step = self._integer(step, "step index")
         if step < self.warmup_steps:
             return float(step + 1) / float(self.warmup_steps)
-        progress = min(
-            max(
-                (step - self.warmup_steps) / float(max(self.total_steps - self.warmup_steps, 1)),
-                0.0,
-            ),
-            1.0,
-        )
+        progress = min(max((step - self.warmup_steps)
+                           / float(max(self.total_steps - self.warmup_steps, 1)), 0.0), 1.0)
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         return self.minimum_ratio + (1.0 - self.minimum_ratio) * cosine
 
     def step(self) -> float:
+        self.validate_optimizer(self.optimizer)
+        self.curve_identity()
+        self._integer(self.step_index, "step index")
         self.step_index += 1
         return self._apply_current_ratio()
 
     def _apply_current_ratio(self) -> float:
+        self.validate_optimizer(self.optimizer)
         ratio = self.ratio(self.step_index)
         for base, group in zip(self.base_lrs, self.optimizer.param_groups, strict=True):
             group["lr"] = base * ratio
         return ratio
 
     def state_dict(self) -> dict[str, object]:
-        return {"step_index": self.step_index, "base_lrs": self.base_lrs}
+        self.validate_optimizer(self.optimizer)
+        self._integer(self.step_index, "step index")
+        return {"schema": self.STATE_SCHEMA, "curve": self.curve_identity(),
+                "step_index": self.step_index, "base_lrs": self._rates(self.base_lrs)}
+
+    def validate_state_dict(self, value: Mapping[str, object]) -> tuple[int, tuple[float, ...]]:
+        self.validate_optimizer(self.optimizer)
+        if set(value) != {"schema", "curve", "step_index", "base_lrs"} or value.get("schema") != self.STATE_SCHEMA:
+            raise ValueError("scheduler state lacks the complete v2 curve identity; legacy exact resume is rejected")
+        curve, expected = value.get("curve"), self.curve_identity()
+        if not isinstance(curve, Mapping) or set(curve) != set(expected) or any(
+            type(curve[k]) is not type(v) or curve[k] != v for k, v in expected.items()
+        ):
+            raise ValueError("scheduler curve identity differs")
+        step, base_lrs = self._integer(value.get("step_index"), "step index"), self._rates(value.get("base_lrs"))
+        if base_lrs != self._rates(self.base_lrs):
+            raise ValueError("scheduler base learning rates differ")
+        return step, base_lrs
 
     def load_state_dict(self, value: dict[str, object]) -> None:
-        raw_base_lrs = value.get("base_lrs")
-        raw_step = value.get("step_index")
-        if not isinstance(raw_base_lrs, (tuple, list)):
-            raise ValueError("scheduler base learning rates are invalid")
-        if not isinstance(raw_step, int):
-            raise ValueError("scheduler step index is invalid")
-        base_lrs = tuple(float(item) for item in raw_base_lrs)
-        if len(base_lrs) != len(self.optimizer.param_groups):
-            raise ValueError("scheduler optimizer group count changed")
-        self.base_lrs = base_lrs
-        self.step_index = raw_step
+        step, base_lrs = self.validate_state_dict(value)
+        self.base_lrs, self.step_index = base_lrs, step
         self._apply_current_ratio()
-
 
 def gradient_diagnostics(
     model: nn.Module,

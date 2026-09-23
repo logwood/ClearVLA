@@ -10,6 +10,7 @@ from torch import Tensor, nn
 
 from ..config import ExperimentConfig
 from ..instruction_reference import InstructionReference
+from ..instruction_change import POSTERIOR_REFERENCE_CHANGE, TYPED_CHANGE_MODES
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
 from ..operation_expectation import OBJECT_OUTCOME_INTENT
 from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT
@@ -147,11 +148,18 @@ class OnlinePolicyCache:
             if op.binding is not self.top.intent.target_binding or op.camera_names != tuple(config.data.camera_names):
                 raise ValueError("operation expectation target or named camera provenance differs")
         change = self.top.intent.instruction_change
-        if (change is not None) != (config.top.instruction_change_mode == "typed_reference_v1"):
+        if (change is not None) != (config.top.instruction_change_mode in TYPED_CHANGE_MODES):
             raise ValueError("instruction change cache differs from configured mode")
         if (self.instruction_reference is not None) != (change is not None):
             raise ValueError("instruction change cache lost its reference owner")
+        prepared=self.top.intent.instruction_plan_values
+        if (prepared is not None) != (config.top.instruction_change_mode == POSTERIOR_REFERENCE_CHANGE):
+            raise ValueError("instruction posterior cache is not prepared for the selected graph")
         if change is not None:
+            if (change.posterior is not None) != (config.top.instruction_change_mode == POSTERIOR_REFERENCE_CHANGE):
+                raise ValueError("instruction posterior evidence differs from configured mode")
+            if prepared is not None and prepared.evidence is not change:
+                raise ValueError("instruction prepared cache belongs to another source")
             if change.reference is not self.instruction_reference:
                 raise ValueError("instruction change cache belongs to another instruction reference")
             if change.current_state is not self.history.state:
@@ -643,6 +651,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             facts=facts,
             collect_diagnostics=collect_diagnostics,
         )
+        intent = self.policy_compiler.plan_compiler.prepare_instruction_values(intent)
         action_intent = intent.action_dock()
         coarse = self.intent.propose_action(
             action_intent,
@@ -787,7 +796,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         cache = OnlinePolicyCache(
             robot_feedback=robot_feedback,
             instruction_reference=(conditioned_policy_input.instruction_reference
-                                   if self.config.top.instruction_change_mode == "typed_reference_v1" else None),
+                                   if self.config.top.instruction_change_mode in TYPED_CHANGE_MODES else None),
             top=context.deployment_cache(),
             factual_dock=factual_dock,
             transition_source=transition_source,

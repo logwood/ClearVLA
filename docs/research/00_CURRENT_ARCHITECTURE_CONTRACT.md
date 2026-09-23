@@ -1,3 +1,67 @@
+## Soft G3 posterior instruction evidence candidate (2026-09-23)
+
+`top.instruction_change_mode=g3_posterior_reference_v1` requires the current-image
+G3 chart, causal instruction reference, shared target law and typed P3. The
+cumulative config is `structural_rebuild_g3_posterior_calvin.json`; M6n remains
+an unchanged experimental control, not an automatic checkpoint alias.
+
+The actual G3 log read and original local location law are retained and pushed
+onto the full native DINO chart. Same current-patch queries softly read both
+current and reference images, with a learned null competing with every real
+key. The current G3 law mixes the conditional matches AFTER softmax. No K-slot,
+argmax, threshold, task string or instruction age selects a correspondence.
+This is not a calibrated or persistent physical-ID guarantee.
+
+S and P3 independently project content, coordinates and their joint features
+BEFORE expectation, instead of forcing every observation through its centroid
+and entropy. These finite learned features can still collapse or fail to
+distinguish some distributions. Both correspondence-null and operated-target-null
+retain their real mass. Image summaries are null-aware moments, not calibrated
+physical displacement. Source availability and match entropy remain status,
+not a progress value, success label or target-conditioned visual fact.
+
+P3 projections are built once in online encoding, owned by the evidence and
+reader, and passed through the actual intent/policy dock. ODE calls consume
+these projections without reopening images or adding a W build. Identical
+comparable observations yield exactly zero measured content/image/joint change;
+status alone cannot generate a P3 change value. Robot feature change is separate.
+Future Teacher labels cannot enter this observed comparison. This candidate
+still lacks a desired-relation target, calibrated object association and an
+object-matched prediction-versus-observation record for actual executed controls.
+It must not be described as a learned feedback policy or a task-progress model.
+
+Source preservation precedes milestone acceptance. Exact test inventories and
+failed/timeout records are in the checkpoint report, not inferred from pytest
+dots. Production runtime/GPU/real-data/physics qualification remains separate.
+
+## Continuation: complete scheduler curve identity (2026-09-23)
+
+WarmupCosineSchedule now serializes its v2 schema, unchanged formula/clock,
+warmup/total/minimum-ratio definition, base LRs and completed step. Exact restore
+and standalone schedule loads admit the full curve before mutation. Save/load
+also verify the actual optimizer owner; runtime parameter-group references reject
+reordering without depending on replaceable group dictionaries. The old two-field
+state is not silently migrated. Valid LR arithmetic is unchanged, including the
+existing total<=warmup convention. No model parameters, task state or solver work
+are added. CPU checks are scoped to recorded tests, not GPU/data/skill acceptance.
+
+## 2026-09-23 takeover candidate — training/update and resume admission
+
+Continues the published M8g tree c15627029b45af116eadc25ee6a6328da76e695e,
+without a new neural mode, checkpoint migration, solver/W call or workflow change.
+The training scalar must be finite before diagnostic VJPs, backward and optimizer
+work; a nonfinite additive loss can have finite gradients. Rejection does not
+claim to roll back already executed forward/RNG activity or every mutable buffer.
+Checkpoint epoch/global/schedule clocks must be nonnegative Python integers,
+not coerced bools, floats or strings. Validate before file creation or live
+model/state loading, including model-only validation/initialization entry points.
+Exact resume additionally compares fixed optimizer options by type and finite
+value, separately from parameter-ID mapping and the time-dependent LR check.
+It cannot certify an arbitrary custom optimizer's internal behavior or infer the
+entire future scheduler curve from the old step/base-LR-only schedule payload.
+Local tests and preserved source are not supported-runtime, GPU, real-data or
+closed-loop acceptance. Existing finite numerical paths are retained.
+
 ## M8g — expose the controller phase in production qualification (2026-09-23)
 
 Fresh-weight inference defaults to the zero-update execution clock. It cannot

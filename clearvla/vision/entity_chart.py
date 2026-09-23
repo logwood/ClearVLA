@@ -295,3 +295,25 @@ def pushforward_log_to_current_image(
             result.reshape(batch, objects, cameras, rows, columns),
             supported.reshape(batch, objects, cameras, rows, columns),
         )
+
+
+@dataclass(frozen=True)
+class ObjectImageReadSource:
+    """The actual G3 log read and its spatial chart, before image discretization.
+
+    Reprojecting this measure to a native DINO chart does not upsample a
+    barycenter or treat query indices as image coordinates. No exp/log roundtrip.
+    """
+    log_measure: Tensor             # [B,K,C,Yq,Xq,M]
+    supported: Tensor               # Boolean same axes
+    spatial: CurrentImageSupport
+
+    def on_image(self, *, rows: int, columns: int) -> ImageLogMeasure:
+        return pushforward_log_to_current_image(
+            self.log_measure, self.supported, self.spatial, rows=rows, columns=columns
+        )
+
+    def permute(self, index: Tensor) -> "ObjectImageReadSource":
+        return ObjectImageReadSource(
+            self.log_measure[:, index], self.supported[:, index], self.spatial
+        )

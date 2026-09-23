@@ -1,3 +1,17 @@
+## Continuation: distribution-sensitive G3 → S/P3 candidate (2026-09-23)
+
+A source-owned soft correspondence/read candidate is now implemented as
+`g3_posterior_reference_v1` with a separate cumulative config. It closes the
+full-posterior-to-centroid consumer bottleneck, not persistent object identity,
+desired goal relations, or object-matched executed-action prediction error.
+The next structural work must supply these distinct causal/label owners rather
+than relabel the instruction-start contrast as task progress or physical error.
+
+Exact-resume schedule state now includes its full curve and optimizer ownership.
+Old two-field schedule states are not silently accepted as exact resume. Neither
+this repair nor the new candidate changes master, workflows, server jobs or XVLA.
+Full current-runtime and real-data acceptance is not implied by source preservation.
+
 ## M8a–M8g: bounded production and CALVIN execution admission
 
 Seven local source units complete; see the current architecture contract for

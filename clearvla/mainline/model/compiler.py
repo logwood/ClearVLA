@@ -12,7 +12,8 @@ from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import (
     INSTRUCTION_CHANGE_MODES,
     MIXED_REFERENCE_CHANGE,
-    TYPED_REFERENCE_CHANGE,
+    POSTERIOR_REFERENCE_CHANGE,
+    TYPED_CHANGE_MODES,
 )
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
@@ -21,6 +22,7 @@ from ..robot_execution import RobotResponseFeedback
 from .action_codec import ACTION_BAND_ENDS
 from .horizon_coordination import P3HorizonContext, TypedHorizonCoordinator
 from .instruction_change import InstructionChangePlanRead
+from .instruction_posterior import PosteriorInstructionChangePlanRead
 from .operation_expectation import OperationExpectationPlanRead
 from .robot_execution import RobotExecutionObserver
 from .routing import (
@@ -35,6 +37,7 @@ from .types import (
     FutureObjectDynamics,
     PhysicalActionCondition,
     PolicyIntentDock,
+    ObjectIntentState,
     normalized_entropy,
 )
 from .view_geometry import ViewConditionedTransport
@@ -1475,7 +1478,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
         self.coordination_mode = coordination_mode
         if instruction_change_mode not in INSTRUCTION_CHANGE_MODES:
             raise ValueError("unknown instruction change P3 consumer")
-        if instruction_change_mode == TYPED_REFERENCE_CHANGE and coordination_mode != TYPED_HORIZON_PLAN:
+        if instruction_change_mode in TYPED_CHANGE_MODES and coordination_mode != TYPED_HORIZON_PLAN:
             raise ValueError("typed instruction change requires typed P3")
         self.operation_read = None
         if operation_intent_mode == OBJECT_OUTCOME_INTENT:
@@ -1485,9 +1488,11 @@ class ObjectPolicyPlanCompiler(nn.Module):
                 hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
         elif operation_intent_mode != POSTERIOR_INTENT:
             raise ValueError("unknown operation expectation consumer")
+        change_reader_type = (PosteriorInstructionChangePlanRead if instruction_change_mode == POSTERIOR_REFERENCE_CHANGE
+                              else InstructionChangePlanRead)
         self.instruction_change_read = (
-            InstructionChangePlanRead(hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
-            if instruction_change_mode == TYPED_REFERENCE_CHANGE else None
+            change_reader_type(hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
+            if instruction_change_mode in TYPED_CHANGE_MODES else None
         )
         if robot_feedback_mode not in {"none", "one_step_proprioceptive_v1"}:
             raise ValueError("unknown robot feedback mode")
@@ -1517,6 +1522,16 @@ class ObjectPolicyPlanCompiler(nn.Module):
         self.state_change_temporal = nn.Linear(hidden, hidden, bias=False)
         self.state_change_lane = nn.Linear(hidden, hidden, bias=False)
         del removed_aliases
+
+    def prepare_instruction_values(self, intent: ObjectIntentState) -> ObjectIntentState:
+        if isinstance(self.instruction_change_read, PosteriorInstructionChangePlanRead):
+            if intent.instruction_change is None:
+                raise ValueError("posterior P3 preparation requires causal instruction evidence")
+            return replace(
+                intent,
+                instruction_plan_values=self.instruction_change_read.prepare(intent.instruction_change),
+            )
+        return intent
 
     def forward(
         self,
@@ -1585,7 +1600,13 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if self.instruction_change_read is not None:
             if intent.instruction_change is None:
                 raise ValueError("P3 requires the typed instruction observation change")
-            state_change_raw = state_change_raw + self.instruction_change_read(intent.instruction_change, temporal_private)
+            if isinstance(self.instruction_change_read, PosteriorInstructionChangePlanRead):
+                state_change_raw = state_change_raw + self.instruction_change_read(
+                    intent.instruction_change,temporal_private,prepared=intent.instruction_plan_values)
+            else:
+                if intent.instruction_plan_values is not None:
+                    raise ValueError("legacy P3 cannot consume posterior prepared values")
+                state_change_raw = state_change_raw + self.instruction_change_read(intent.instruction_change, temporal_private)
         elif intent.instruction_change is not None:
             raise ValueError("typed instruction change supplied to an unselected P3")
         if self.robot_observer is not None:

@@ -10,13 +10,15 @@ from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import (
     INSTRUCTION_CHANGE_MODES,
     MIXED_REFERENCE_CHANGE,
-    TYPED_REFERENCE_CHANGE,
+    POSTERIOR_REFERENCE_CHANGE,
+    TYPED_CHANGE_MODES,
 )
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
 from .instruction_change import TypedInstructionReferenceRead
+from .instruction_posterior import PosteriorInstructionReferenceRead
 from .instruction_progress import InstructionReferenceRead
 from .operation_expectation import ObjectOperationPredictor, OperationExpectationRead
 from .routing import register_gradient_rms_metric, smooth_rms_contract
@@ -310,7 +312,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.time_grid = resolve_future_time(future_time_grid_mode)
         if instruction_change_mode not in INSTRUCTION_CHANGE_MODES:
             raise ValueError("unknown instruction change consumer")
-        if instruction_change_mode == TYPED_REFERENCE_CHANGE and instruction_reference_mode != INSTRUCTION_START_REFERENCE:
+        if instruction_change_mode in TYPED_CHANGE_MODES and instruction_reference_mode != INSTRUCTION_START_REFERENCE:
             raise ValueError("typed change requires an instruction observation reference")
         self.instruction_change_mode = instruction_change_mode
         if instruction_reference_mode not in {"none", INSTRUCTION_START_REFERENCE}:
@@ -416,9 +418,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
             self.target_state = nn.Linear(state_dim, hidden, bias=False)
             self.target_view = nn.Embedding(len(camera_names), hidden)
 
-        self.instruction_progress: InstructionReferenceRead | TypedInstructionReferenceRead | None
-        if instruction_change_mode == TYPED_REFERENCE_CHANGE:
-            self.instruction_progress = TypedInstructionReferenceRead(
+        self.instruction_progress: InstructionReferenceRead | TypedInstructionReferenceRead | PosteriorInstructionReferenceRead | None
+        if instruction_change_mode in TYPED_CHANGE_MODES:
+            reader_type = (PosteriorInstructionReferenceRead if instruction_change_mode == POSTERIOR_REFERENCE_CHANGE
+                           else TypedInstructionReferenceRead)
+            self.instruction_progress = reader_type(
                 hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
         else:
             self.instruction_progress = (
@@ -759,7 +763,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if self.instruction_progress is not None:
             if instruction_reference is None or current_dino is None or target_binding is None:
                 raise ValueError("instruction progress requires causal reference and shared binding")
-            if isinstance(self.instruction_progress, TypedInstructionReferenceRead):
+            if isinstance(self.instruction_progress, (TypedInstructionReferenceRead, PosteriorInstructionReferenceRead)):
                 progress, instruction_change = self.instruction_progress(
                     reference=instruction_reference, current_dino=current_dino,
                     current_state=state, facts=facts, binding=target_binding,

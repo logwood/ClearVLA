@@ -298,6 +298,38 @@ def _restore_rng(value: Mapping[str, object]) -> None:
         torch.cuda.set_rng_state_all(list(cuda))
 
 
+def _nonnegative_checkpoint_int(value: object, *, name: str) -> int:
+    """Admit serialized clocks without truncation or bool/string coercion."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"checkpoint {name} must be a non-negative integer")
+    return value
+
+
+def _optimizer_option_equal(saved: object, current: object) -> bool:
+    """Compare fixed optimizer semantics, not its evolving LR or moments."""
+
+    if type(saved) is not type(current):
+        return False
+    if isinstance(saved, Tensor) and isinstance(current, Tensor):
+        return (
+            saved.shape == current.shape
+            and saved.dtype == current.dtype
+            and bool(torch.isfinite(saved).all())
+            and bool(torch.isfinite(current).all())
+            and torch.equal(saved.to(device=current.device), current)
+        )
+    if isinstance(saved, (tuple, list)) and isinstance(current, (tuple, list)):
+        return len(saved) == len(current) and all(
+            _optimizer_option_equal(a, b) for a, b in zip(saved, current, strict=True)
+        )
+    if isinstance(saved, float) and isinstance(current, float):
+        return math.isfinite(saved) and math.isfinite(current) and saved == current
+    if saved is None or isinstance(saved, (bool, int, str)):
+        return saved == current
+    return False
+
+
 def _validate_optimizer_state(
     saved_optimizer: Mapping[str, object],
     *,
@@ -324,6 +356,16 @@ def _validate_optimizer_state(
             raise ValueError("exact resume optimizer group is not a mapping")
         if set(saved_group_raw) != set(current_group_raw):
             raise ValueError("exact resume optimizer group fields differ")
+        # State loading overwrites these options as well as the moments.
+        # Matching field names/config identity is not enough to certify the
+        # serialized betas, epsilon, decay or optimization direction. LR is
+        # time-dependent and is checked against the schedule below; parameter
+        # IDs are remapped through the existing ownership checks.
+        for option in set(saved_group_raw).difference({"params", "lr"}):
+            if not _optimizer_option_equal(
+                saved_group_raw[option], current_group_raw[option]
+            ):
+                raise ValueError(f"exact resume optimizer option {option!r} differs")
         saved_ids = saved_group_raw.get("params")
         current_ids = current_group_raw.get("params")
         live_parameters = live_group.get("params")
@@ -432,12 +474,22 @@ def save_checkpoint(
     config.validate()
     identity.validate()
     component_selection = _resolved_component_selection(model, config)
-    if int(epoch) < 0 or int(global_step) < 0:
-        raise ValueError("checkpoint epoch/global step must be non-negative")
-    if int(schedule.step_index) != int(global_step):
+    epoch = _nonnegative_checkpoint_int(epoch, name="epoch")
+    global_step = _nonnegative_checkpoint_int(global_step, name="global_step")
+    schedule_step = _nonnegative_checkpoint_int(schedule.step_index, name="schedule step")
+    if schedule_step != global_step:
         raise ValueError("checkpoint schedule step must equal the global step")
     if best_metric is not None and not math.isfinite(float(best_metric)):
         raise ValueError("checkpoint best metric must be finite")
+    schedule.validate_optimizer(optimizer)
+    schedule_state = schedule.state_dict()
+    ratio = schedule.ratio(global_step)
+    for base, group in zip(schedule.base_lrs, optimizer.param_groups, strict=True):
+        lr = group.get("lr")
+        if (isinstance(lr, bool) or not isinstance(lr, (int, float))
+            or not math.isfinite(lr)
+            or not math.isclose(lr, base * ratio, rel_tol=1e-12, abs_tol=0.0)):
+            raise ValueError("checkpoint optimizer learning rate differs from schedule")
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -447,9 +499,9 @@ def save_checkpoint(
         "component_selection": component_selection.as_dict(),
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
-        "schedule": schedule.state_dict(),
-        "epoch": int(epoch),
-        "global_step": int(global_step),
+        "schedule": schedule_state,
+        "epoch": epoch,
+        "global_step": global_step,
         "best_metric": best_metric,
         "data_state": None if data_state is None else dict(data_state),
         "rng": _rng_state(),
@@ -592,14 +644,18 @@ def load_checkpoint_exact(
     )
     if not isinstance(saved_schedule, Mapping):
         raise ValueError("exact resume checkpoint has no schedule state mapping")
+    schedule.validate_optimizer(optimizer)
+    schedule.validate_state_dict(saved_schedule)
     base_lrs = saved_schedule.get("base_lrs")
     if not isinstance(base_lrs, (tuple, list)) or len(base_lrs) != len(saved_groups):
         raise ValueError("exact resume schedule group ownership differs")
     try:
-        restored_schedule_step = int(saved_schedule["step_index"])
+        restored_schedule_step = _nonnegative_checkpoint_int(
+            saved_schedule["step_index"], name="schedule step"
+        )
         restored_base_lrs = tuple(float(value) for value in base_lrs)
-        restored_epoch = int(payload["epoch"])
-        restored_step = int(payload["global_step"])
+        restored_epoch = _nonnegative_checkpoint_int(payload["epoch"], name="epoch")
+        restored_step = _nonnegative_checkpoint_int(payload["global_step"], name="global_step")
         restored_best = (
             None if payload.get("best_metric") is None else float(payload["best_metric"])
         )
@@ -768,8 +824,8 @@ def load_checkpoint_for_validation(
         ):
             raise ValueError(f"model state {name!r} is non-finite")
     try:
-        restored_epoch = int(payload["epoch"])
-        restored_step = int(payload["global_step"])
+        restored_epoch = _nonnegative_checkpoint_int(payload["epoch"], name="epoch")
+        restored_step = _nonnegative_checkpoint_int(payload["global_step"], name="global_step")
         restored_best = (
             None if payload.get("best_metric") is None else float(payload["best_metric"])
         )
@@ -1487,8 +1543,8 @@ def load_checkpoint_for_initialization(
         ):
             raise ValueError(f"model state {name!r} is non-finite")
     try:
-        restored_epoch = int(payload["epoch"])
-        restored_step = int(payload["global_step"])
+        restored_epoch = _nonnegative_checkpoint_int(payload["epoch"], name="epoch")
+        restored_step = _nonnegative_checkpoint_int(payload["global_step"], name="global_step")
         restored_best = (
             None if payload.get("best_metric") is None else float(payload["best_metric"])
         )

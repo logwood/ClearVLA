@@ -1073,6 +1073,16 @@ class MainlineTrainingEngine:
                 generator=self.train_flow_generator,
                 condition_generator=self.train_condition_generator,
             )
+        # A nonfinite additive objective can still have finite derivatives.
+        # Admit the scalar before diagnostic VJPs, backward or optimizer work;
+        # checking gradient norms alone does not protect accepted updates.
+        if ledger.total.ndim != 0:
+            raise ValueError("training loss must be a scalar")
+        if not bool(torch.isfinite(ledger.total.detach())):
+            label = self._nonfinite_scalar_label(ledger.total)
+            raise FloatingPointError(
+                f"non-finite training loss ({label}) at completed step {self.global_step}"
+            )
         if collect_diagnostics:
             # Keep the joint arm/gripper route intact.  These probes expose
             # where the real training losses pull the B-spine; they do not

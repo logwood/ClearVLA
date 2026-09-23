@@ -63,7 +63,7 @@ from ..gripper_contract import (
 )
 from ..instruction_change import (
     MIXED_REFERENCE_CHANGE,
-    TYPED_REFERENCE_CHANGE,
+    TYPED_CHANGE_MODES,
     instruction_change_metadata,
 )
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, instruction_reference_metadata
@@ -397,8 +397,8 @@ def build_deployment_abi(
            if config.bottom.evidence_value_mode == MAGNITUDE_EVIDENCE else {}),
         **({"operation_expectation": operation_expectation_metadata(tuple(config.data.camera_names))}
            if config.top.operation_intent_mode == OBJECT_OUTCOME_INTENT else {}),
-        **({"instruction_change": instruction_change_metadata(tuple(config.data.camera_names))}
-           if config.top.instruction_change_mode == TYPED_REFERENCE_CHANGE else {}),
+        **({"instruction_change": instruction_change_metadata(tuple(config.data.camera_names), config.top.instruction_change_mode)}
+           if config.top.instruction_change_mode in TYPED_CHANGE_MODES else {}),
         **({"robot_execution": robot_execution_metadata()} if config.top.robot_feedback_mode != "none" else {}),
         **({"p3_coordination": p3_coordination_metadata()}
            if config.top.p3_coordination_mode == TYPED_HORIZON_PLAN else {}),
@@ -555,11 +555,11 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     elif operation_mode != POSTERIOR_INTENT or "operation_expectation" in abi:
         raise ValueError("unexpected operation expectation ABI")
     change_mode = graph_top.get("instruction_change_mode", MIXED_REFERENCE_CHANGE)
-    if change_mode == TYPED_REFERENCE_CHANGE:
+    if change_mode in TYPED_CHANGE_MODES:
         cameras = observation.get("camera_names")
         if not isinstance(cameras, list) or not all(isinstance(n, str) for n in cameras):
             raise ValueError("instruction change ABI requires named cameras")
-        if abi.get("instruction_change") != instruction_change_metadata(tuple(cameras)):
+        if abi.get("instruction_change") != instruction_change_metadata(tuple(cameras), change_mode):
             raise ValueError("instruction change ABI semantics mismatch")
     elif change_mode != MIXED_REFERENCE_CHANGE or "instruction_change" in abi:
         raise ValueError("instruction change ABI is unselected or unknown")

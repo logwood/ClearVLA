@@ -15,12 +15,14 @@ from clearvla.vision.entity_chart import (
     QUERY_CHART,
     CurrentImageSupport,
     ImageLogMeasure,
+    ObjectImageReadSource,
 )
 from clearvla.vision.entity_history import ObservedEntityHistory
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
 
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import InstructionChangeEvidence
+from ..instruction_posterior import InstructionChangeValues
 from ..manifest import INTERVALS
 from ..operation_expectation import OperationExpectation
 from ..transition_condition import SUMMED_TRANSITION, validate_transition_condition_mode
@@ -544,6 +546,7 @@ class ObjectFactSet:
     latest_flow_steps: Tensor | None = None  # [B], producer time, not model confidence
     object_chart_mode: str = QUERY_CHART
     current_image_measure: ImageLogMeasure | None = None
+    current_image_source: ObjectImageReadSource | None = None
 
     @property
     def batch(self) -> int:
@@ -644,6 +647,12 @@ class ObjectFactSet:
         if self.current_image_measure is not None:
             if self.current_image_measure.log_mass.shape != self.object_to_chart.shape:
                 raise ValueError("object image measure has different axes")
+        if self.current_image_source is not None:
+            src=self.current_image_source
+            if src.spatial is not self.dense_chart.current_image_support or self.current_image_measure is None:
+                raise ValueError("G3 image source lost the actual spatial owner")
+            if src.log_measure.shape != self.candidate_assignment.shape or src.supported.shape != src.log_measure.shape:
+                raise ValueError("G3 image source lost actual local candidate axes")
         candidates = self.dense_chart.candidate_content
         _shape(
             self.candidate_assignment,
@@ -673,6 +682,7 @@ class ObjectFactSet:
         index = permutation.to(device=self.content.device, dtype=torch.long)
         return ObjectFactSet(
             dense_chart=self.dense_chart,
+            current_image_source=None if self.current_image_source is None else self.current_image_source.permute(index),
             object_chart_mode=self.object_chart_mode,
             current_image_measure=(
                 ImageLogMeasure(self.current_image_measure.log_mass[:, index], self.current_image_measure.supported[:, index])
@@ -1020,6 +1030,7 @@ class PolicyIntentDock:
     typed_interval_residual_value: Tensor  # [B,I,K,3,R]
     target_binding: TargetBinding | None = None
     instruction_change: InstructionChangeEvidence | None = None
+    instruction_plan_values: InstructionChangeValues | None = None
     operation_expectation: OperationExpectation | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
@@ -1049,6 +1060,10 @@ class PolicyIntentDock:
                 raise ValueError("operation expectation cannot reselect the target")
             if self.operation_expectation.time_grid_mode != self.time_grid_mode:
                 raise ValueError("operation expectation/intent time chart mismatch")
+        if self.instruction_plan_values is not None:
+            self.instruction_plan_values.validate(hidden=hidden)
+            if self.instruction_plan_values.evidence is not self.instruction_change:
+                raise ValueError("prepared instruction read belongs to another evidence source")
         if self.instruction_change is not None:
             self.instruction_change.validate()
             if self.instruction_change.binding is not self.target_binding:
@@ -1103,6 +1118,7 @@ class ObjectIntentState:
     target_binding: TargetBinding | None = None
     target_evidence: TargetEvidence | None = None
     instruction_change: InstructionChangeEvidence | None = None
+    instruction_plan_values: InstructionChangeValues | None = None
     operation_expectation: OperationExpectation | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
@@ -1171,6 +1187,7 @@ class ObjectIntentState:
             temporal_control=self.temporal_queries,
             state_change_evidence=self.state_change_evidence,
             instruction_change=self.instruction_change,
+            instruction_plan_values=self.instruction_plan_values,
             operation_expectation=self.operation_expectation,
             target_object_address_logit=self.target_object_address_logit,
             typed_common_value=self.typed_common_value,
@@ -1188,6 +1205,10 @@ class ObjectIntentState:
                 raise ValueError("operation expectation cannot reselect the target")
             if self.operation_expectation.time_grid_mode != self.time_grid_mode:
                 raise ValueError("operation expectation/intent time chart mismatch")
+        if self.instruction_plan_values is not None:
+            self.instruction_plan_values.validate(hidden=hidden)
+            if self.instruction_plan_values.evidence is not self.instruction_change:
+                raise ValueError("prepared instruction read belongs to another evidence source")
         if self.instruction_change is not None:
             self.instruction_change.validate()
             if self.instruction_change.binding is not self.target_binding:
@@ -1295,6 +1316,8 @@ class ObjectIntentState:
             object_tokens=self.object_tokens[:, index],
             target_binding=binding,
             instruction_change=change,
+            instruction_plan_values=(None if self.instruction_plan_values is None or change is None else
+                                     self.instruction_plan_values.permute(index,change)),
             operation_expectation=operation,
             target_evidence=None if self.target_evidence is None else self.target_evidence.permute(index),
             public_interval_carrier=self.public_interval_carrier,

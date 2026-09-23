@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from clearvla.vision.entity_chart import (
     CURRENT_IMAGE_CHART,
     QUERY_CHART,
+    ObjectImageReadSource,
     current_image_grid,
     pushforward_log_to_current_image,
 )
@@ -232,8 +233,12 @@ class DenseObjectGrounder(nn.Module):
         entity_chart_mode: str = QUERY_CHART,
         entity_history_mode: str = NO_ENTITY_HISTORY,
         entity_motion_mode: str = QUERY_ANCHOR_MOTION,
+        retain_image_source: bool = False,
     ) -> None:
         super().__init__()
+        self.retain_image_source = retain_image_source
+        if retain_image_source and entity_chart_mode != CURRENT_IMAGE_CHART:
+            raise ValueError("posterior instruction reads require the actual current-image G3 chart")
         self.hidden = int(hidden)
         self.content_dim = int(content_dim)
         self.route_dim = int(route_dim)
@@ -913,6 +918,11 @@ class DenseObjectGrounder(nn.Module):
             dense_chart=chart,
             object_chart_mode=self.entity_chart_mode,
             current_image_measure=image_measure,
+            current_image_source=(ObjectImageReadSource(
+                read_log_probability.reshape(batch,self.objects,*candidate_shape),
+                read_support.reshape(batch,self.objects,*candidate_shape),
+                chart.current_image_support,
+            ) if self.retain_image_source and chart.current_image_support is not None else None),
             content=content,
             semantic=semantic,
             appearance=appearance,

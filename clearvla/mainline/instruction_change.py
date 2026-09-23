@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
+from .instruction_posterior import InstructionPosterior
 
 if TYPE_CHECKING:
     from .instruction_reference import InstructionReference
@@ -18,16 +19,31 @@ if TYPE_CHECKING:
 
 MIXED_REFERENCE_CHANGE = "mixed_reference_v1"
 TYPED_REFERENCE_CHANGE = "typed_reference_v1"
-INSTRUCTION_CHANGE_MODES = (MIXED_REFERENCE_CHANGE, TYPED_REFERENCE_CHANGE)
+POSTERIOR_REFERENCE_CHANGE = "g3_posterior_reference_v1"
+TYPED_CHANGE_MODES = (TYPED_REFERENCE_CHANGE, POSTERIOR_REFERENCE_CHANGE)
+INSTRUCTION_CHANGE_MODES = (MIXED_REFERENCE_CHANGE, *TYPED_CHANGE_MODES)
 
 
-def instruction_change_metadata(camera_names: tuple[str, ...]) -> dict[str, object]:
+def instruction_change_metadata(camera_names: tuple[str, ...], mode: str = TYPED_REFERENCE_CHANGE) -> dict[str, object]:
     if (
         not camera_names
         or len(set(camera_names)) != len(camera_names)
         or any(not n for n in camera_names)
     ):
         raise ValueError("instruction change requires unique named camera charts")
+    if mode not in TYPED_CHANGE_MODES:
+        raise ValueError("unknown typed instruction change mode")
+    if mode == POSTERIOR_REFERENCE_CHANGE:
+        base = instruction_change_metadata(camera_names, TYPED_REFERENCE_CHANGE)
+        return {**base, "schema": "g3-posterior-instruction-change-v1", "mode": mode,
+                "matching": "full-G3-current-image-law-mixture-of-shared-current-patch-queries-with-learned-null",
+                "values": ["nonlinear-content-posterior-difference", "nonlinear-image-posterior-difference",
+                           "nonlinear-joint-content-image-posterior-difference", "robot-state-feature-difference",
+                           "separate-entropy-null-and-source-status"],
+                "source": "G3-log-read-pushforward-directly-to-native-chart-not-public-canvas-upsample",
+                "null": "correspondence-null-distinct-from-S-target-null-neither-renormalized-away",
+                "P3": "independent-projections-prepared-once-no-visual-bank-reopen-in-ODE",
+                "limits": "apparent-null-aware-evidence-not-calibrated-motion-goal-error-success-or-persistent-ID"}
     return {
         "schema": "typed-instruction-observation-change-v1",
         "mode": TYPED_REFERENCE_CHANGE,
@@ -54,15 +70,16 @@ def instruction_change_metadata(camera_names: tuple[str, ...]) -> dict[str, obje
 @dataclass(frozen=True)
 class InstructionChangeEvidence:
     content_delta: Tensor  # FP32 [B,K,C,D]
-    image_delta: Tensor  # FP32 [B,K,C,2], centroid difference in each image chart
+    image_delta: Tensor  # FP32 [B,K,C,2], null-aware moment in posterior mode
     robot_delta: Tensor  # FP32 [B,S], feature change, not twist/object motion
-    match_status: Tensor  # FP32 [B,K,C,6], ambiguity and source-availability facts
+    match_status: Tensor  # FP32 [B,K,C,6 or 8], ambiguity/source facts, not change
     view_observed: Tensor  # bool [B,K,C], comparable source support
     view_weight: Tensor  # FP32 [B,K,C], within-object source-view read
     binding: TargetBinding
     current_state: Tensor
     reference: InstructionReference
     camera_names: tuple[str, ...]
+    posterior: InstructionPosterior | None = None
 
     def validate(self, *, hidden_content: int | None = None, strict: bool = False) -> None:
         if self.content_delta.ndim != 4:
@@ -76,8 +93,9 @@ class InstructionChangeEvidence:
             raise ValueError("instruction change lost named camera chart")
         if self.image_delta.shape != (batch, objects, cameras, 2):
             raise ValueError("instruction image change lost per-object/per-view axes")
-        if self.match_status.shape != (batch, objects, cameras, 6):
-            raise ValueError("instruction match status must remain separate [B,K,C,6]")
+        status_width = 8 if self.posterior is not None else 6
+        if self.match_status.shape != (batch, objects, cameras, status_width):
+            raise ValueError("instruction match status must remain separate with mode-owned width")
         if (
             self.view_observed.shape != (batch, objects, cameras)
             or self.view_observed.dtype != torch.bool
@@ -107,6 +125,12 @@ class InstructionChangeEvidence:
             for x in (*values, self.view_observed, self.binding.log_probability)
         ):
             raise ValueError("instruction change belongs to another observation device")
+        if self.posterior is not None:
+            self.posterior.validate(strict=strict)
+            if self.posterior.reference is not self.reference.dino:
+                raise ValueError("posterior lost its instruction reference source")
+            if self.posterior.current.shape[0:2] != (batch,cameras) or self.posterior.current.shape[-1] != width:
+                raise ValueError("posterior source chart differs from typed evidence")
         if strict:
             self.binding.validate(batch=batch, objects=objects, device=self.current_state.device)
             masked = (
@@ -135,4 +159,5 @@ class InstructionChangeEvidence:
             view_observed=self.view_observed[:, index],
             view_weight=self.view_weight[:, index],
             binding=binding,
+            posterior=None if self.posterior is None else self.posterior.permute(index),
         )

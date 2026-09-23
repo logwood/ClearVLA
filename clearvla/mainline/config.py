@@ -51,7 +51,8 @@ from .gripper_contract import (
 from .instruction_change import (
     INSTRUCTION_CHANGE_MODES,
     MIXED_REFERENCE_CHANGE,
-    TYPED_REFERENCE_CHANGE,
+    POSTERIOR_REFERENCE_CHANGE,
+    TYPED_CHANGE_MODES,
 )
 from .manifest import ARCHITECTURE_MANIFEST
 from .operation_expectation import OBJECT_OUTCOME_INTENT, OPERATION_INTENT_MODES, POSTERIOR_INTENT
@@ -511,12 +512,14 @@ class TopConfig:
             raise ValueError("object operation outcomes require shared target, aligned time and typed P3")
         if self.instruction_change_mode not in INSTRUCTION_CHANGE_MODES:
             raise ValueError("unknown instruction_change_mode")
-        if self.instruction_change_mode == TYPED_REFERENCE_CHANGE and (
+        if self.instruction_change_mode in TYPED_CHANGE_MODES and (
             self.instruction_reference_mode != "instruction_start_observation_v1"
             or self.target_binding_mode != "shared_operation_v1"
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
         ):
             raise ValueError("typed instruction change requires reference, shared target and typed P3")
+        if self.instruction_change_mode == POSTERIOR_REFERENCE_CHANGE and self.entity_chart_mode != "current_image_support_v1":
+            raise ValueError("posterior instruction change requires the current-image G3 chart")
         if self.robot_feedback_mode not in {"none", "one_step_proprioceptive_v1"}:
             raise ValueError("unknown robot_feedback_mode")
         if self.robot_feedback_mode != "none" and (
