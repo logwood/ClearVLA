@@ -2354,8 +2354,8 @@ class FutureObjectDynamics:
 
 
 @dataclass(frozen=True)
-class ObservedActionSequenceCondition:
-    """Training-only physical controls through the full labelled world horizon.
+class RecordedActionSequenceCondition:
+    """Canonical chart shared by separately typed recorded-control sources.
 
     Not a subtype of a deployment action condition. Known rows are a source-
     owned prefix; missing rows are quarantined and do not advance the recurrence.
@@ -2401,8 +2401,10 @@ class ObservedActionSequenceCondition:
         ], dim=1)
 
     def validate(self, *, action_dim: int) -> None:
-        if self.schema != "observed-world-action-sequence-v1":
-            raise ValueError("unknown observed action supervision schema")
+        expected_schema = ("executed-world-action-sequence-v1"
+            if isinstance(self, ExecutedActionSequenceCondition) else "observed-world-action-sequence-v1")
+        if self.schema != expected_schema:
+            raise ValueError("unknown recorded action source schema")
         if self.source_action.ndim != 3:
             raise ValueError("observed world action must be [B,Tw,A]")
         horizon = max(upper for _, upper in resolve_future_time(self.time_grid_mode).bounds)
@@ -2430,6 +2432,16 @@ class ObservedActionSequenceCondition:
         expected = torch.arange(1, horizon + 1, device=self.device, dtype=self.row_end.dtype)
         if not torch.equal(self.row_end, expected[None, :, None].expand(self.batch, -1, -1)):
             raise ValueError("observed action time must retain actual contiguous control steps")
+
+
+@dataclass(frozen=True)
+class ObservedActionSequenceCondition(RecordedActionSequenceCondition):
+    """Future labels, never acknowledged controls or a deployment candidate."""
+
+@dataclass(frozen=True)
+class ExecutedActionSequenceCondition(RecordedActionSequenceCondition):
+    """Already executed recorded controls; never future labels or proposals."""
+    schema: str = "executed-world-action-sequence-v1"
 
 
 @dataclass(frozen=True)

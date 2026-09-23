@@ -1,3 +1,18 @@
+## Executed-control discrepancy continuation (2026-09-23)
+
+The causal confirmed-control window, shared past G/W1 retrodiction, frozen
+observation metric and independent soft/null P3 read are implemented as an
+explicit candidate. Full producer/consumer and cost boundaries are in the
+current architecture contract. Preserve source before whole-milestone CI.
+
+Next obligations remain supported runtime/GPU/real data qualification, finite
+learning and trained-policy behavioral comparisons. Audit S outcome/terminal
+label provenance before any desired-relation target; do not rename measured
+feature discrepancy as progress, or weak language boundaries as success.
+Persistent physical object identity and genuine goal feedback remain open.
+Container-reset recovery has a new source identity; prior lost test progress
+must not be merged into its new run counts.
+
 ## Continuation: distribution-sensitive G3 → S/P3 candidate (2026-09-23)
 
 A source-owned soft correspondence/read candidate is now implemented as

@@ -11913,6 +11913,11 @@ class FlowDINOEvidenceEncoder(nn.Module):
             return self.teacher_norm(pooled).float()
 
     @torch.no_grad()
+    def object_observation_supports(self,visual: Tensor) -> Tensor:
+        """Same frozen pooled W measurement chart, not native-token resolution."""
+        return self._teacher_content_grid(visual).detach()
+
+    @torch.no_grad()
     def object_teacher_supports(self, visual: Tensor) -> Tensor:
         """Public full-width future support chart for the new teacher only.
 

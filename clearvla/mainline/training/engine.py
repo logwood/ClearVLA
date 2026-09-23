@@ -133,6 +133,10 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
         )
         values["online.state_history"] = quarantine(history.state_history, timing.state_observed)
         values["online.executed_history"] = quarantine(history.executed_action_history, timing.action_executed)
+    world_window=history.executed_world_window
+    if world_window is not None:
+        for name in ("dino_history","raw_rgb","state","action_state","commands"):
+            values["online.executed_world."+name]=quarantine(getattr(world_window,name),world_window.observed)
     robot_step = history.executed_robot_step
     if robot_step is not None:
         robot_step.validate(

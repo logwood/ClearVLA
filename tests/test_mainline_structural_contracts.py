@@ -37,6 +37,7 @@ from clearvla.mainline.model.observation import (
     _flow_parameter_to_displacement,
     _sample_feature_chart,
 )
+from clearvla.mainline.model.observation_association import ObjectObservationAssociation
 from clearvla.mainline.model.policy import OnlinePolicyCache
 from clearvla.mainline.model.routing import smooth_rms_contract
 from clearvla.mainline.model.teacher import ObjectFutureTeacher
@@ -3710,7 +3711,7 @@ def test_teacher_keeps_row_softmax_and_exports_no_status_or_address() -> None:
     )
     assert tuple(target.transport_mean.shape) == (1, 4, 4, 1, 2)
     assert tuple(target.transport_covariance.shape) == (1, 4, 4, 1, 3)
-    source = inspect.getsource(ObjectFutureTeacher)
+    source = inspect.getsource(ObjectObservationAssociation)
     assert "torch.softmax(torch.cat((candidate_flat, null_logit)" in source
     assert "_partial_assignment" not in source
     for removed in (

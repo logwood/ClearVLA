@@ -19,6 +19,34 @@ from .contracts import ACTION_DIM, CAMERA_NAMES, STATE_DIM, PolicyObservation
 
 
 @dataclass(frozen=True)
+class ExecutedWorldSnapshot:
+    """Older physical observation and acknowledged controls, not proposals."""
+    anchor_index: int
+    rgb_history: Mapping[str,np.ndarray]
+    state: np.ndarray
+    action_state: np.ndarray
+    commands: np.ndarray
+    visual_offsets: np.ndarray
+    observed: bool
+
+    def validate(self, *, now: int) -> None:
+        if type(self.observed) is not bool or type(self.anchor_index) is not int or self.anchor_index!=max(now-4,0):
+            raise ValueError("executed world source has invalid anchor")
+        if self.observed and now<4:
+            raise ValueError("executed world cannot observe pre-reset controls")
+        if not np.array_equal(self.visual_offsets,sparse_history_clock(self.anchor_index)["history_state_offsets"]):
+            raise ValueError("executed world source clock differs")
+        if tuple(self.rgb_history)!=CAMERA_NAMES:
+            raise ValueError("executed world source camera identity differs")
+        for camera in CAMERA_NAMES:
+            image=self.rgb_history[camera]
+            if image.ndim!=4 or image.shape[0]!=3 or image.shape[-1]!=3 or image.dtype!=np.uint8:
+                raise ValueError("executed world needs three raw RGB observations")
+        for value,shape in ((self.state,(STATE_DIM,)),(self.action_state,(ACTION_DIM,)),(self.commands,(4,ACTION_DIM))):
+            if value.shape!=shape or (self.observed and not np.isfinite(value).all()):
+                raise ValueError("executed world state/commands malformed")
+
+@dataclass(frozen=True)
 class HistorySnapshot:
     """One deployment input before normalization and DINO encoding."""
 
@@ -29,11 +57,24 @@ class HistorySnapshot:
     state_history: np.ndarray  # [3,7]
     executed_action_history: np.ndarray  # [8,7]
     previous_state: np.ndarray | None = None  # exact o[t-1], not sparse -4/-8
+    executed_world: ExecutedWorldSnapshot | None = None
 
     def timing_arrays(self) -> dict[str, np.ndarray]:
         return sparse_history_clock(self.time_index)
 
     def validate(self) -> None:
+        if self.executed_world is not None:
+            self.executed_world.validate(now=self.time_index)
+            w=self.executed_world
+            if w.observed:
+                if not np.array_equal(w.state,self.state_history[1]):
+                    raise ValueError("executed world state disagrees with current history")
+                for camera in CAMERA_NAMES:
+                    if not np.array_equal(w.rgb_history[camera][1:],self.rgb_history[camera][:2]):
+                        raise ValueError("executed world images disagree with current history")
+                for j,offset in enumerate((-4,-3,-2,-1)):
+                    if offset in EXECUTED_ACTION_OFFSETS and not np.array_equal(w.commands[j],self.executed_action_history[EXECUTED_ACTION_OFFSETS.index(offset)]):
+                        raise ValueError("executed world command differs from confirmed history")
         if self.previous_state is not None:
             if self.time_index == 0 or self.previous_state.shape != (STATE_DIM,) or not np.isfinite(self.previous_state).all():
                 raise ValueError("previous robot state requires a real one-step predecessor")
@@ -77,9 +118,12 @@ class CausalHistory:
     state is retained here.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, executed_world: bool = False) -> None:
+        if type(executed_world) is not bool:
+            raise TypeError("executed world history selection must be boolean")
+        self.executed_world=executed_world
         self._observations: deque[PolicyObservation] = deque(
-            maxlen=1 - min(VISUAL_OFFSETS + STATE_OFFSETS)
+            maxlen=13 if executed_world else 1-min(VISUAL_OFFSETS+STATE_OFFSETS)
         )
         self._actions: deque[np.ndarray] = deque(maxlen=-min(EXECUTED_ACTION_OFFSETS))
         self._time_index = 0
@@ -159,7 +203,18 @@ class CausalHistory:
             axis=0,
         ).astype(np.float32)
         current = self._observations[-1]
+        world=None
+        if self.executed_world:
+            anchor=max(now-4,0)
+            old=self._observation_at(anchor)
+            world=ExecutedWorldSnapshot(anchor_index=anchor,
+                rgb_history={camera:np.stack([self._observation_at(anchor+offset).rgb[camera] for offset in VISUAL_OFFSETS],0) for camera in CAMERA_NAMES},
+                state=np.asarray(old.state,dtype=np.float32).copy(),
+                action_state=np.asarray(old.action_state,dtype=np.float32).copy(),
+                commands=(np.stack([self._action_at(t) for t in range(now-4,now)],0).copy() if now>=4 else np.zeros((4,ACTION_DIM),dtype=np.float32)),
+                visual_offsets=sparse_history_clock(anchor)["history_state_offsets"],observed=now>=4)
         result = HistorySnapshot(
+            executed_world=world,
             time_index=now,
             previous_state=None if now == 0 else np.asarray(self._observation_at(now - 1).state, dtype=np.float32).copy(),
             rgb_history=rgb,
@@ -178,5 +233,6 @@ __all__ = [
     "VISUAL_OFFSETS",
     "CausalHistory",
     "HistorySnapshot",
+    "ExecutedWorldSnapshot",
 ]
 

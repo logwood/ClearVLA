@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 import torch
 from torch import Tensor, nn
 
+from ..executed_world import EXECUTED_WORLD_FEEDBACK, ExecutedWorldPlanValues
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import (
     INSTRUCTION_CHANGE_MODES,
@@ -20,6 +21,7 @@ from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_
 from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from ..robot_execution import RobotResponseFeedback
 from .action_codec import ACTION_BAND_ENDS
+from .executed_world import ExecutedWorldPlanRead
 from .horizon_coordination import P3HorizonContext, TypedHorizonCoordinator
 from .instruction_change import InstructionChangePlanRead
 from .instruction_posterior import PosteriorInstructionChangePlanRead
@@ -1464,7 +1466,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
 
     def __init__(self, *, hidden: int, horizon: int, basis: int, future_time_grid_mode: str = LEGACY_FUTURE_TIME,
                  coordination_mode: str = POINTWISE_PLAN, heads: int = 1,
-                 robot_feedback_mode: str = "none", state_dim: int = 7, action_dim: int = 7,
+                 robot_feedback_mode: str = "none", world_feedback_mode: str = "none", state_dim: int = 7, action_dim: int = 7,
                  instruction_change_mode: str = MIXED_REFERENCE_CHANGE, content_dim: int = 768,
                  operation_intent_mode: str = POSTERIOR_INTENT,
                  camera_names: tuple[str, ...] = ("top", "wrist")) -> None:
@@ -1500,6 +1502,12 @@ class ObjectPolicyPlanCompiler(nn.Module):
             raise ValueError("robot feedback requires typed horizon P3")
         self.robot_observer = (RobotExecutionObserver(state_dim=state_dim, action_dim=action_dim, hidden=hidden)
                                if robot_feedback_mode != "none" else None)
+        if world_feedback_mode not in {"none",EXECUTED_WORLD_FEEDBACK}:
+            raise ValueError("unknown executed world feedback reader")
+        if world_feedback_mode != "none" and coordination_mode != TYPED_HORIZON_PLAN:
+            raise ValueError("executed world feedback requires typed P3")
+        self.world_feedback_read=(ExecutedWorldPlanRead(hidden=hidden,content_dim=content_dim,
+            camera_names=camera_names) if world_feedback_mode != "none" else None)
         self.coordinator: TypedHorizonCoordinator | None = None
         if coordination_mode == TYPED_HORIZON_PLAN:
             if not self.time_grid.aligned:
@@ -1541,6 +1549,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
         intent: PolicyIntentDock,
         action_query: Tensor,
         robot_feedback: RobotResponseFeedback | None = None,
+        world_feedback: ExecutedWorldPlanValues | None = None,
         collect_diagnostics: bool = True,
     ) -> tuple[ObjectPolicyPlanDeltaBank, dict[str, Tensor]]:
         expected = (int(action_query.shape[0]), self.horizon, self.basis, self.hidden)
@@ -1597,6 +1606,12 @@ class ObjectPolicyPlanCompiler(nn.Module):
             temporal_raw = temporal_raw + self.operation_read(intent.operation_expectation, temporal_private)
         elif intent.operation_expectation is not None:
             raise ValueError("unexpected operation expectation in legacy P3")
+        if self.world_feedback_read is not None:
+            if world_feedback is None:
+                raise ValueError("executed world P3 reader requires prepared causal evidence")
+            state_change_raw=state_change_raw+self.world_feedback_read(world_feedback,temporal_private,intent.target_binding)
+        elif world_feedback is not None:
+            raise ValueError("executed world feedback supplied to unselected P3")
         if self.instruction_change_read is not None:
             if intent.instruction_change is None:
                 raise ValueError("P3 requires the typed instruction observation change")

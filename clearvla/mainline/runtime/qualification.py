@@ -20,6 +20,7 @@ from clearvla.data.window_boundaries import OBSERVED_TAIL_V1
 
 from ..config import ExperimentConfig
 from ..data.normalizer import ArrayNormalizer
+from ..executed_world import ExecutedWorldWindow
 from ..future_time import resolve_future_time
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..interfaces import (
@@ -155,10 +156,24 @@ def synthetic_batch(
             mask(count, dims.num_cameras, dims.patches_per_camera),
             torch.full((count,), 8, dtype=torch.long, device=device),
         )
+    raw=rand(count,dims.visual_history_length,dims.num_cameras,3,raw_side,raw_side)
+    world_window=None
+    if config.top.world_feedback_mode!="none":
+        commands=rand(count,4,dims.action_dim)
+        commands[...,-1]=1.
+        if timing is None:
+            raise ValueError("synthetic executed world requires physical history chart")
+        for j,offset in enumerate((-4,-3,-2,-1)):
+            for i,t in enumerate((-24,-16,-12,-8,-6,-4,-2,-1)):
+                if offset==t:
+                    commands[:,j]=executed[:,i]
+        world_window=ExecutedWorldWindow(
+            dino_history=torch.cat((rand(count,1,dims.num_cameras,dims.patches_per_camera,dims.visual_token_dim),dino[:,:2]),1),
+            raw_rgb=torch.cat((rand(count,1,dims.num_cameras,3,raw_side,raw_side),raw[:,:2]),1),
+            state=history[:,1].clone(),action_state=rand(count,dims.action_dim),commands=commands,observed=mask(count),
+            visual_offsets=torch.tensor([[-8,-4,0]],device=device).expand(count,-1).clone())
     online = OnlinePolicyInput(
-        CurrentObservation(
-            dino, rand(count, dims.visual_history_length, dims.num_cameras, 3, raw_side, raw_side)
-        ),
+        CurrentObservation(dino,raw),
         ObservableHistory(
             state,
             action_state,
@@ -167,6 +182,7 @@ def synthetic_batch(
             executed,
             timing=timing,
             executed_robot_step=robot_step,
+            executed_world_window=world_window,
         ),
         GoalCondition(
             rand(count, dims.goal_max_tokens, dims.goal_token_dim),

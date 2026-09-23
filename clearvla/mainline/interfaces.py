@@ -22,6 +22,7 @@ from torch import Tensor
 from clearvla.data.window_boundaries import OBSERVED_TAIL_V1
 
 from .config import ExperimentConfig
+from .executed_world import ExecutedWorldWindow
 from .future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from .instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from .robot_execution import ExecutedRobotStep
@@ -137,6 +138,7 @@ class ObservableHistory:
     executed_action_history: Tensor  # [B,Ha,A]
     timing: HistoryTiming | None = None  # required by timestamped_streams_v1
     executed_robot_step: ExecutedRobotStep | None = None
+    executed_world_window: ExecutedWorldWindow | None = None
 
     @property
     def batch(self) -> int:
@@ -145,6 +147,12 @@ class ObservableHistory:
     def validate(self, config: ExperimentConfig) -> None:
         dims = config.dimensions
         batch = self.batch
+        if config.top.world_feedback_mode != "none":
+            if self.executed_world_window is None:
+                raise ValueError("selected world feedback requires its causal executed window")
+            self.executed_world_window.validate(config,batch=batch,device=self.state.device)
+        elif self.executed_world_window is not None:
+            raise ValueError("executed world window supplied to unselected graph")
         if config.top.robot_feedback_mode != "none":
             if self.executed_robot_step is None:
                 raise ValueError("selected robot feedback graph requires the adjacent executed step")

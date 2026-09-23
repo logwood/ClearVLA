@@ -39,6 +39,7 @@ from clearvla.data.window_boundaries import (
 from clearvla.vision.decoded_image_store import DecodedImageStore
 from clearvla.vision.online_store import OnlineVisualStore
 
+from ..executed_world import EXECUTED_WORLD_FEEDBACK
 from ..instruction_reference import INSTRUCTION_START_REFERENCE
 from .normalizer import ArrayNormalizer
 from .token_store import DinoV2TokenStore
@@ -60,11 +61,18 @@ class ObservedStateDatasetConfig:
     emit_history_timing: bool = False
     instruction_reference_mode: str = "none"
     robot_feedback_mode: str = "none"
+    world_feedback_mode: str = "none"
     state_feature_mode: str = NATIVE_AFFINE_STATE
     state_profile: str = "identity_7d_pen"
     window_boundary_contract: str = STRICT_COMPLETE_V1
 
     def validate(self) -> None:
+        if self.world_feedback_mode not in {"none",EXECUTED_WORLD_FEEDBACK}:
+            raise ValueError("unknown executed world source producer")
+        if self.world_feedback_mode!="none" and (
+            not self.emit_history_timing or self.state_profile!="calvin_relative_7d_v1"
+            or self.world_horizon!=24 or self.support_stride!=4 or self.state_history_offsets!=(-8,-4,0)):
+            raise ValueError("executed world source requires aligned CALVIN history and W endpoints")
         if self.robot_feedback_mode not in {"none", "one_step_proprioceptive_v1"}:
             raise ValueError("unknown robot feedback producer")
         if self.robot_feedback_mode != "none" and (not self.emit_history_timing or
@@ -661,6 +669,27 @@ class ObservedStateWindowDataset(Dataset):
                 "robot_step_observed": torch.tensor(available, dtype=torch.bool),
                 "robot_step_offsets": torch.tensor([-1, -1, 0] if available else [0, 0, 0], dtype=torch.long),
             }
+        world_fields: dict[str,torch.Tensor]={}
+        if cfg.world_feedback_mode!="none":
+            available=center>=4 and (episode.terminal_state_index is None or center<=episode.terminal_state_index)
+            anchor=max(center-4,0)
+            indices=np.maximum(anchor+np.asarray((-8,-4,0),dtype=np.int64),0)
+            oldest=self.image_store.load_window(episode,indices[:1])
+            old_rgb=torch.cat((_camera_stack(oldest,self.camera_names).float()/255.,history_rgb[:2]),0)
+            old_state=encode_state_features(np.asarray(states_raw[anchor],dtype=np.float32),self.state_normalizer,
+                mode=cfg.state_feature_mode,profile=cfg.state_profile)
+            boundary=self.action_normalizer.encode(np.asarray(action_states_raw[anchor],dtype=np.float32))
+            commands=(self.action_normalizer.encode(np.asarray(actions_raw[center-4:center],dtype=np.float32))
+                      if available else np.zeros((4,actions_raw.shape[-1]),dtype=np.float32))
+            world_fields={
+                "executed_world_keys":torch.from_numpy(np.stack((np.full(3,ref.episode_idx,dtype=np.int64),indices),1)),
+                "executed_world_rgb":old_rgb if available else torch.zeros_like(old_rgb),
+                "executed_world_state":torch.from_numpy(old_state if available else np.zeros_like(old_state)),
+                "executed_world_action_state":torch.from_numpy(boundary if available else np.zeros_like(boundary)),
+                "executed_world_commands":torch.from_numpy(commands),
+                "executed_world_observed":torch.tensor(available,dtype=torch.bool),
+                "executed_world_offsets":torch.from_numpy(sparse_history_clock(anchor)["history_state_offsets"]),
+            }
         reference_fields: dict[str, torch.Tensor] = {}
         if cfg.instruction_reference_mode == INSTRUCTION_START_REFERENCE:
             start = self.instruction_starts[ref.episode_idx]
@@ -673,6 +702,7 @@ class ObservedStateWindowDataset(Dataset):
                 )),
             }
         return {
+            **world_fields,
             **reference_fields,
             **step_fields,
             **future_support,
@@ -788,8 +818,13 @@ class CachedTokenPolicyWindowDataset(Dataset):
         # result buffers in every DataLoader sample while preserving the
         # exact current/future ownership split in the returned mapping.
         reference_key = sample.pop("instruction_reference_key", None)
-        keys = (history_keys, future_keys) if reference_key is None else (history_keys, future_keys, reference_key)
-        token_rows = self.token_store.load_batch(torch.cat(keys, dim=0))
+        executed_keys=sample.pop("executed_world_keys",None)
+        keys=[history_keys,future_keys]
+        if reference_key is not None:
+            keys.append(reference_key)
+        if executed_keys is not None:
+            keys.append(executed_keys)
+        token_rows=self.token_store.load_batch(torch.cat(keys,dim=0))
         history_rows = int(history_keys.shape[0])
         future_end = history_rows + int(future_keys.shape[0])
         sample["history_dinov2_tokens"] = token_rows[:history_rows]
@@ -797,6 +832,11 @@ class CachedTokenPolicyWindowDataset(Dataset):
         if reference_key is not None:
             sample["instruction_reference_dino"] = token_rows[future_end]
             sample["instruction_reference_observed"] = torch.ones(token_rows[future_end].shape[:-1], dtype=torch.bool)
+        if executed_keys is not None:
+            first=future_end+(0 if reference_key is None else int(reference_key.shape[0]))
+            sample["executed_world_dino"]=token_rows[first:first+int(executed_keys.shape[0])]
+            if not bool(sample["executed_world_observed"]):
+                sample["executed_world_dino"]=torch.zeros_like(sample["executed_world_dino"])
         sample["target_future_offsets"] = sample.pop("future_offsets")
         return sample
 

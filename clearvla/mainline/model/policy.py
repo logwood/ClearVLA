@@ -9,9 +9,10 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..config import ExperimentConfig
+from ..executed_world import ExecutedWorldFeedback, ExecutedWorldPlanValues, ExecutedWorldWindow
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE, TYPED_CHANGE_MODES
 from ..instruction_reference import InstructionReference
-from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
+from ..interfaces import CurrentObservation, FutureSupervision, ObservableHistory, OnlinePolicyInput
 from ..operation_expectation import OBJECT_OUTCOME_INTENT
 from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT
 from ..robot_execution import RobotResponseFeedback
@@ -134,10 +135,22 @@ class OnlinePolicyCache:
     action_history_keep: Tensor
     role_table: Tensor
     robot_feedback: RobotResponseFeedback | None = None
+    world_feedback: ExecutedWorldPlanValues | None = None
     instruction_reference: InstructionReference | None = None
 
     def validate(self, config: ExperimentConfig) -> None:
         self.history.validate(config)
+        if (self.world_feedback is not None)!=(config.top.world_feedback_mode!="none"):
+            raise ValueError("executed world feedback cache differs from selected graph")
+        if self.world_feedback is not None:
+            fb=self.world_feedback
+            fb.feedback.validate()
+            if fb.current_facts.content is not self.top.belief.content:
+                raise ValueError("executed world feedback belongs to another current chart")
+            if fb.feedback.window is not self.history.executed_world_window:
+                raise ValueError("executed world feedback belongs to another source window")
+            if fb.binding is not self.top.intent.target_binding:
+                raise ValueError("executed world feedback belongs to another operated target")
         op = self.top.intent.operation_expectation
         if (op is not None) != (config.top.operation_intent_mode == OBJECT_OUTCOME_INTENT):
             raise ValueError("operation expectation cache differs from configured mode")
@@ -318,6 +331,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             p2_geometry_mode=top.p2_geometry_mode,
             p3_coordination_mode=top.p3_coordination_mode,
             robot_feedback_mode=top.robot_feedback_mode,
+            world_feedback_mode=top.world_feedback_mode,
             target_binding_mode=top.target_binding_mode,
             instruction_reference_mode=top.instruction_reference_mode,
             instruction_change_mode=top.instruction_change_mode,
@@ -537,6 +551,83 @@ class ClearVLAMainlinePolicy(nn.Module):
 
         self.outlet_adapter.configure_action_normalizer(normalizer)
 
+    def _admit_executed_world_source(self, policy_input: OnlinePolicyInput,
+                                      window: ExecutedWorldWindow) -> None:
+        """Source agreement before neural/RNG work; never per ODE node."""
+        window.validate(self.config,batch=policy_input.batch,device=policy_input.device,strict=True)
+        timing=policy_input.history.timing
+        if timing is None:
+            raise ValueError("executed world comparison requires physical times")
+        observed=window.observed
+        if bool((observed & (timing.state_offsets[:,1]!=-4)).any()):
+            raise ValueError("executed world anchor precedes actual episode")
+        if bool((observed & (window.visual_offsets[:,1]-4!=timing.state_offsets[:,0])).any()):
+            raise ValueError("executed world visual anchor and current clock disagree")
+        def same(left: Tensor,right: Tensor,name: str) -> None:
+            mask=observed.reshape(observed.shape[0],*([1]*(left.ndim-1)))
+            if not torch.equal(torch.where(mask,left,0.),torch.where(mask,right,0.)):
+                raise ValueError(f"executed world {name} disagrees with observed history")
+        same(window.state,policy_input.history.state_history[:,1],"state")
+        same(window.dino_history[:,1:],policy_input.observation.dino_history[:,:2],"DINO source")
+        same(window.raw_rgb[:,1:],policy_input.observation.raw_rgb[:,:2],"RGB source")
+        for index,offset in enumerate((-4,-3,-2,-1)):
+            matches=timing.action_offsets==offset
+            admitted=matches & timing.action_executed & observed[:,None]
+            if bool((observed & matches.any(1) & ~admitted.any(1)).any()):
+                raise ValueError("executed world command claims unavailable history")
+            left=window.commands[:,index,None].expand_as(policy_input.history.executed_action_history)
+            if not torch.equal(torch.where(admitted[...,None],left,0.),
+                torch.where(admitted[...,None],policy_input.history.executed_action_history,0.)):
+                raise ValueError("executed world commands disagree with sparse history")
+
+    @torch.no_grad()
+    def _replay_executed_world(self, policy_input: OnlinePolicyInput,
+                               role: Tensor) -> ExecutedWorldFeedback:
+        """Current-weight retrodiction from past facts and confirmed controls.
+
+        Not a saved ex-ante forecast. Current images only enter the subsequent
+        observed measurement. Future label aggregation/recognizer is not used.
+        """
+        window=policy_input.history.executed_world_window
+        if window is None:
+            raise ValueError("executed world replay lost source window")
+        batch=policy_input.batch
+        def safe(x: Tensor) -> Tensor:
+            return torch.where(window.observed.reshape(batch,*([1]*(x.ndim-1))),x,0.)
+        prepared=self.observation.prepare(CurrentObservation(safe(window.dino_history),safe(window.raw_rgb)),
+            source_offsets=window.visual_offsets,training_mask=False,geometry_supervision=False,collect_diagnostics=False)
+        canvas,slices=self.bridge.build_grounding_seed(state=safe(window.state),
+            rollout_init=prepared.pack.future_queries,role=role.detach())
+        bank,_=self.observation.build_grounding_bank(prepared,canvas,slices,collect_diagnostics=False)
+        progressive=self.observation.begin_progressive_grounding(bank)
+        progressive,_,_=self.grounding.build_current(canvas=canvas,slices=slices,
+            visual_memory=bank.visual_memory,visual_value_memory=bank.visual_value_memory,
+            visual_memory_observed=bank.visual_memory_observed,state=progressive,
+            advance=self.observation.advance_progressive_grounding,collect_diagnostics=False)
+        evidence,_=self.observation.finalize_grounding(bank,progressive,collect_diagnostics=False)
+        past_facts,_=self.grounding.materialize_facts(evidence.local_facts,collect_diagnostics=False)
+        controls=self.outlet_adapter.executed_world_condition(safe(window.commands),safe(window.action_state),window.observed)
+        predicted=self.world.dynamics.predict_executed_endpoint(
+            facts=past_facts.world_belief(robot_observation=RobotWorldObservation(
+                state=safe(window.state),feature_mode=self.config.top.state_feature_mode)),action=controls)
+        current=policy_input.observation.dino_history
+        grid=self.observation.observation_supports(safe(current[:,-1:]))
+        measured=self.training_targets.teacher.measure_observations(facts=past_facts,observations=grid,
+            relative_offsets=torch.full((batch,1),4,device=current.device,dtype=torch.long),observed=window.observed[:,None])
+        views=(measured.camera_legal[...,0]>0) & window.observed[:,None,None]
+        semantic=measured.successor_per_support[:,0]-measured.current_reference[:,0]-predicted.semantic.float()
+        image=measured.transport_per_support[:,0]-predicted.image.float()
+        feedback=ExecutedWorldFeedback(
+            semantic=torch.where(views.any(-1)[...,None],semantic,0.).float(),
+            image=torch.where(views[...,None],image,0.).float(),
+            covariance=torch.where(views[...,None],measured.covariance_per_support[:,0]+predicted.covariance.float(),0.),
+            null=measured.null_probability[:,0].float(),posterior=measured.candidate_posterior[:,0].flatten(-2).float(),
+            past_content=torch.where(views.any(-1)[...,None],past_facts.content,0.).float(),
+            view_observed=views,window=window,current_dino=current,camera_names=tuple(self.config.data.camera_names),
+            measurement_shape=(int(grid.shape[-3]),int(grid.shape[-2])))
+        feedback.validate()
+        return feedback
+
     def encode_online(
         self,
         policy_input: OnlinePolicyInput,
@@ -560,6 +651,9 @@ class ClearVLAMainlinePolicy(nn.Module):
                 device=policy_input.device,
                 strict=True,
             )
+        executed_window=policy_input.history.executed_world_window
+        if executed_window is not None:
+            self._admit_executed_world_source(policy_input,executed_window)
         step = policy_input.history.executed_robot_step
         if step is not None:
             step.validate(batch=batch, state_dim=self.config.dimensions.state_dim,
@@ -652,6 +746,13 @@ class ClearVLAMainlinePolicy(nn.Module):
             collect_diagnostics=collect_diagnostics,
         )
         intent = self.policy_compiler.plan_compiler.prepare_instruction_values(intent)
+        world_feedback=None
+        reader=self.policy_compiler.plan_compiler.world_feedback_read
+        if reader is not None:
+            if intent.target_binding is None:
+                raise ValueError("executed world feedback lost current target")
+            feedback=self._replay_executed_world(conditioned_policy_input,role_table)
+            world_feedback=reader.prepare(feedback,facts,intent.target_binding)
         action_intent = intent.action_dock()
         coarse = self.intent.propose_action(
             action_intent,
@@ -794,6 +895,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             collect_diagnostics=collect_diagnostics,
         )
         cache = OnlinePolicyCache(
+            world_feedback=world_feedback,
             robot_feedback=robot_feedback,
             instruction_reference=(conditioned_policy_input.instruction_reference
                                    if self.config.top.instruction_change_mode in TYPED_CHANGE_MODES else None),
@@ -969,6 +1071,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         compiled, top_metrics = self.policy_compiler.compile(
             cache.top,
             robot_feedback=cache.robot_feedback,
+            world_feedback=cache.world_feedback,
             p1_state=p1_state,
             action_query=action_query,
             collect_diagnostics=collect_diagnostics,

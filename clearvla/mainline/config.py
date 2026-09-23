@@ -489,6 +489,7 @@ class TopConfig:
     p2_geometry_mode: str = POOLED_TRANSPORT
     p3_coordination_mode: str = POINTWISE_PLAN
     robot_feedback_mode: str = "none"
+    world_feedback_mode: str = "none"
     # Explicit new behavior; legacy checkpoints keep their existing history chart.
     history_encoding_mode: str = "paired_rows_v1"
     state_feature_mode: str = NATIVE_AFFINE_STATE
@@ -502,6 +503,18 @@ class TopConfig:
     operation_intent_mode: str = POSTERIOR_INTENT
 
     def validate(self) -> None:
+        if self.world_feedback_mode not in {"none","executed_four_step_world_v1"}:
+            raise ValueError("unknown world_feedback_mode")
+        if self.world_feedback_mode != "none" and (
+            self.future_time_grid_mode != "control_aligned_24_v1"
+            or self.world_action_condition_mode != "sequence_prefix_v1"
+            or self.world_control_mode != "known_prefix_v1"
+            or self.world_robot_condition_mode != "observed_state_views_v1"
+            or self.entity_chart_mode != "current_image_support_v1"
+            or self.target_binding_mode != "shared_operation_v1"
+            or self.p3_coordination_mode != TYPED_HORIZON_PLAN
+            or self.history_encoding_mode != TIMED_HISTORY_ENCODING):
+            raise ValueError("executed world feedback requires aligned sequence W, current-image G3, shared target and typed P3")
         if self.operation_intent_mode not in OPERATION_INTENT_MODES:
             raise ValueError("unknown operation_intent_mode")
         if self.operation_intent_mode == OBJECT_OUTCOME_INTENT and (
@@ -1103,6 +1116,11 @@ class ExperimentConfig:
             raise ValueError("current-image entities require completed G3 and coupled full support")
         if self.top.entity_context_mode == "completed_g3_v1" and self.observation.candidate_support_mode != "full_posterior_lattice_v1":
             raise ValueError("completed G3 context requires actual full posterior coordinates")
+        if self.top.world_feedback_mode != "none" and (
+            self.data.data_profile != "calvin_relative_7d_v1"
+            or self.top.state_feature_mode != CALVIN_ROTATION6D_STATE
+            or self.observation.source_time_mode != "source_history_steps_v1"):
+            raise ValueError("executed world feedback needs declared CALVIN source-time producer")
         if self.top.robot_feedback_mode != "none":
             if self.data.data_profile != "calvin_relative_7d_v1" or self.top.state_feature_mode != CALVIN_ROTATION6D_STATE:
                 raise ValueError("robot response needs the declared CALVIN feature/command producer")
@@ -1299,6 +1317,8 @@ class ExperimentConfig:
             cast(dict[str, object], payload["top"]).pop("operation_intent_mode")
         if self.top.instruction_change_mode == MIXED_REFERENCE_CHANGE:
             cast(dict[str, object], payload["top"]).pop("instruction_change_mode")
+        if self.top.world_feedback_mode == "none":
+            cast(dict[str,object],payload["top"]).pop("world_feedback_mode")
         if self.top.robot_feedback_mode == "none":
             cast(dict[str, object], payload["top"]).pop("robot_feedback_mode")
         if self.objectives.robot_response == 0:

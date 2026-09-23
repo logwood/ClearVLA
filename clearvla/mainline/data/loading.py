@@ -63,6 +63,7 @@ from clearvla.vision.online_store import OnlineVisualStore
 from clearvla.vision.preprocessing import PreprocessConfig
 
 from ..config import ExperimentConfig
+from ..executed_world import ExecutedWorldWindow
 from ..future_time import resolve_future_time
 from ..gripper_contract import is_binary_gripper_mode
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
@@ -524,6 +525,7 @@ def _load_mainline_data(
         emit_history_timing=config.top.history_encoding_mode == TIMED_HISTORY_ENCODING,
         instruction_reference_mode=config.top.instruction_reference_mode,
         robot_feedback_mode=config.top.robot_feedback_mode,
+        world_feedback_mode=config.top.world_feedback_mode,
         state_feature_mode=config.top.state_feature_mode,
         state_profile=profile.name,
         world_horizon=resolve_future_time(config.top.future_time_grid_mode).horizon,
@@ -1135,6 +1137,16 @@ def to_training_batch(
             observed=_device_tensor(batch, "instruction_reference_observed", device=device),
             age_steps=_device_tensor(batch, "instruction_reference_age", device=device),
         )
+    world_window=None
+    if config.top.world_feedback_mode!="none":
+        world_window=ExecutedWorldWindow(
+            dino_history=_device_tensor(batch,"executed_world_dino",device=device),
+            raw_rgb=_device_tensor(batch,"executed_world_rgb",device=device,dtype=torch.float32),
+            state=_device_tensor(batch,"executed_world_state",device=device,dtype=torch.float32),
+            action_state=_device_tensor(batch,"executed_world_action_state",device=device,dtype=torch.float32),
+            commands=_device_tensor(batch,"executed_world_commands",device=device,dtype=torch.float32),
+            observed=_device_tensor(batch,"executed_world_observed",device=device),
+            visual_offsets=_device_tensor(batch,"executed_world_offsets",device=device))
     robot_step = None
     if config.top.robot_feedback_mode != "none":
         robot_step = ExecutedRobotStep(
@@ -1151,6 +1163,7 @@ def to_training_batch(
         ),
         history=ObservableHistory(
             executed_robot_step=robot_step,
+            executed_world_window=world_window,
             state=_device_tensor(batch, "state", device=device, dtype=torch.float32),
             action_state=action_state,
             timing=timing,

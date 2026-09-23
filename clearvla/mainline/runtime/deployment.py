@@ -54,6 +54,7 @@ from ..endpoint_supervision import (
     NO_ENDPOINT_SUPERVISION,
     endpoint_supervision_metadata,
 )
+from ..executed_world import EXECUTED_WORLD_FEEDBACK, executed_world_metadata
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
@@ -399,6 +400,7 @@ def build_deployment_abi(
            if config.top.operation_intent_mode == OBJECT_OUTCOME_INTENT else {}),
         **({"instruction_change": instruction_change_metadata(tuple(config.data.camera_names), config.top.instruction_change_mode)}
            if config.top.instruction_change_mode in TYPED_CHANGE_MODES else {}),
+        **({"executed_world":executed_world_metadata()} if config.top.world_feedback_mode!="none" else {}),
         **({"robot_execution": robot_execution_metadata()} if config.top.robot_feedback_mode != "none" else {}),
         **({"p3_coordination": p3_coordination_metadata()}
            if config.top.p3_coordination_mode == TYPED_HORIZON_PLAN else {}),
@@ -563,6 +565,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
             raise ValueError("instruction change ABI semantics mismatch")
     elif change_mode != MIXED_REFERENCE_CHANGE or "instruction_change" in abi:
         raise ValueError("instruction change ABI is unselected or unknown")
+    feedback_mode=graph_top.get("world_feedback_mode","none")
+    if feedback_mode==EXECUTED_WORLD_FEEDBACK:
+        if abi.get("executed_world")!=executed_world_metadata():
+            raise ValueError("executed world feedback ABI semantics mismatch")
+    elif feedback_mode!="none" or "executed_world" in abi:
+        raise ValueError("executed world feedback ABI is unselected or unknown")
     robot_mode = graph_top.get("robot_feedback_mode", "none")
     if robot_mode == "one_step_proprioceptive_v1":
         if abi.get("robot_execution") != robot_execution_metadata():

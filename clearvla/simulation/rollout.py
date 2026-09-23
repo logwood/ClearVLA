@@ -227,7 +227,7 @@ def run_episode(
         reset = initial_reset
     reset.observation.validate()
     policy.reset()
-    history = CausalHistory()
+    history = CausalHistory(executed_world=getattr(policy,"requires_executed_world_history",False))
     history.reset(
         reset.observation,
         reset_action=environment.hold_action(reset.observation),

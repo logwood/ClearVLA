@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..executed_world import ExecutedWorldPlanValues
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import is_binary_gripper_selection
 from ..interfaces import CurrentObservation, ObservableHistory, OnlinePolicyInput
@@ -61,6 +62,7 @@ from .types import (
     CandidateWorld,
     CompletedP1PolicyState,
     ControlledTransitionState,
+    ExecutedActionSequenceCondition,
     FactualPrecisionDock,
     FlowStepContext,
     LocalFactSet,
@@ -72,6 +74,7 @@ from .types import (
     OutletPhysicalActionCondition,
     PhysicalActionCondition,
     PhysicalActionSequenceCondition,
+    RecordedActionSequenceCondition,
     SupervisedWorld,
     WorldActionCondition,
     intersect_object_camera_validity,
@@ -151,6 +154,8 @@ class ConditioningStage(nn.Module):
             )
         conditioned_history = replace(
             policy_input.history,
+            executed_world_window=(None if policy_input.history.executed_world_window is None else
+                                   policy_input.history.executed_world_window.without_actions(history_keep)),
             executed_robot_step=(None if policy_input.history.executed_robot_step is None else
                                  policy_input.history.executed_robot_step.without_actions(history_keep)),
             timing=None if timing is None else timing.without_actions(history_keep),
@@ -182,6 +187,10 @@ class ObservationStage(nn.Module):
 
     def teacher_supports(self, tokens: Tensor) -> Tensor:
         return self.compiler.teacher_supports(tokens)
+
+    def observation_supports(self,tokens: Tensor) -> Tensor:
+        """Existing frozen W chart, without future-label lookup or aggregation."""
+        return self.compiler.encoder.object_observation_supports(tokens)
 
     def prepare(
         self,
@@ -869,6 +878,7 @@ class PolicyCompilerStage(nn.Module):
         p1_state: CompletedP1PolicyState,
         action_query: Tensor,
         robot_feedback: RobotResponseFeedback | None = None,
+        world_feedback: ExecutedWorldPlanValues | None = None,
         collect_diagnostics: bool = False,
     ) -> tuple[CompiledPolicyState, dict[str, Tensor]]:
         context.validate(hidden=self.hidden, horizon=self.horizon)
@@ -917,6 +927,7 @@ class PolicyCompilerStage(nn.Module):
         )
         plan, plan_metrics = self.plan_compiler(
             robot_feedback=robot_feedback,
+            world_feedback=world_feedback,
             p1_policy_residual=p1_state.policy_query_residual,
             consequence=consequence,
             intent=context.intent.policy_dock(),
@@ -961,7 +972,11 @@ class PolicyCompilerStage(nn.Module):
 
 
 class TrainingTargetsStage(nn.Module):
-    """Teacher-G and recognizer targets; inaccessible from deployment APIs."""
+    """Future-label/recognizer paths plus the established frozen metric owner.
+
+    Only the inherited observation-only association may measure admitted causal
+    data online. Future-label forward and recognizer remain training-only.
+    """
 
     def __init__(
         self,
@@ -1798,16 +1813,32 @@ class OutletAdapter(nn.Module):
         return condition
 
     @torch.no_grad()
-    def observed_world_condition(
-        self, action: Tensor, current_action: Tensor, observed: Tensor | None = None,
-    ) -> ObservedActionSequenceCondition:
-        """Canonicalize labelled controls using the SAME outlet's 24-row chart.
+    def observed_world_condition(self, action: Tensor, current_action: Tensor,
+                                 observed: Tensor | None = None) -> ObservedActionSequenceCondition:
+        result=self._recorded_world_condition(action,current_action,observed,ObservedActionSequenceCondition)
+        assert isinstance(result,ObservedActionSequenceCondition)
+        return result
 
-        Compose complete chart blocks with the previous physical boundary.
-        Joining relative-command blocks also carries the cumulative arm value;
-        it does not restart the displacement at row 24. This is supervision,
-        not an extension of the 24-row deployment proposal contract.
-        """
+    @torch.no_grad()
+    def executed_world_condition(self, commands: Tensor, current_action: Tensor,
+                                 available: Tensor) -> ExecutedActionSequenceCondition:
+        if commands.ndim!=3 or commands.shape[1:]!=(4,self.action_dim):
+            raise ValueError("executed W requires every actual four-prefix command")
+        if available.shape!=commands.shape[:1] or available.dtype!=torch.bool:
+            raise ValueError("executed W support must be bool [B]")
+        if not self.time_grid.aligned:
+            raise ValueError("executed W requires the first aligned four-step endpoint")
+        padded=commands.new_zeros((commands.shape[0],self.time_grid.horizon,self.action_dim))
+        padded[:,:4]=commands
+        support=torch.zeros(padded.shape[:2],device=commands.device,dtype=torch.bool)
+        support[:,:4]=available[:,None]
+        boundary=torch.where(available[:,None],current_action,0.)
+        result=self._recorded_world_condition(padded,boundary,support,ExecutedActionSequenceCondition)
+        assert isinstance(result,ExecutedActionSequenceCondition)
+        return result
+
+    def _recorded_world_condition(self, action: Tensor, current_action: Tensor,
+            observed: Tensor | None, condition_type: type[RecordedActionSequenceCondition]) -> RecordedActionSequenceCondition:
         if self.world_action_condition_mode != "sequence_prefix_v1":
             raise ValueError("observed W supervision requires sequence-prefix mode")
         horizon = self.time_grid.horizon
@@ -1846,7 +1877,7 @@ class OutletAdapter(nn.Module):
             deltas.append(identity.canonical_delta)
         assert identity is not None
         keep = mask[..., None]
-        condition = ObservedActionSequenceCondition(
+        condition = condition_type(
             time_grid_mode=self.time_grid.mode,
             source_action=torch.where(keep, safe, torch.zeros_like(safe)),
             canonical_value=torch.where(keep, torch.cat(values, dim=1), torch.zeros_like(safe)),

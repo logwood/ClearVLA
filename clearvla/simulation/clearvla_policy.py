@@ -11,6 +11,7 @@ import torch
 from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.data.instructions import normalize_instruction
 from clearvla.data.state_features import encode_state_features
+from clearvla.mainline.executed_world import ExecutedWorldWindow
 from clearvla.mainline.gripper_contract import (
     VALID_GRIPPER_OUTPUT_MODES,
     is_binary_gripper_mode,
@@ -124,6 +125,10 @@ class ClearVLACheckpointPolicy:
         self._instruction_last_step = None
         self._instruction_anchor_text = text
 
+    @property
+    def requires_executed_world_history(self) -> bool:
+        return self.bundle.config.top.world_feedback_mode!="none"
+
     def reset(self) -> None:
         self._instruction_anchor = None
         self._instruction_anchor_step = None
@@ -209,13 +214,15 @@ class ClearVLACheckpointPolicy:
     ) -> tuple[np.ndarray, OnlinePolicyInput]:
         """Expose the already-encoded causal input to an external frozen reader.
 
-        The ordinary action path is unchanged. No extra DINO/online encode,
-        Teacher, reward, simulator object pose or future target is introduced.
+        The default path is unchanged. Executed-world mode encodes older source
+        images explicitly. No reward, simulator pose or future label enters.
         """
         history.validate()
         if not instruction.strip():
             raise ValueError("ClearVLA rollout instruction must be non-empty")
         config = self.bundle.config
+        if self.requires_executed_world_history and history.executed_world is None:
+            raise ValueError("checkpoint requires the extended confirmed-command history")
         goal_tokens, goal_mask = self._goal(instruction)
         dino, images = self.encoder.encode(history.rgb_history, self.preprocessing)
         raw_rgb = (
@@ -272,6 +279,29 @@ class ClearVLACheckpointPolicy:
                 owned.dino, owned.state, owned.observed,
                 torch.tensor([history.time_index - self._instruction_anchor_step], dtype=torch.long, device=self.device),
             )
+        world_window=None
+        if self.requires_executed_world_history:
+            source=history.executed_world
+            if source is None:
+                raise ValueError("checkpoint requires extended confirmed-command history")
+            source.validate(now=history.time_index)
+            if source.observed:
+                # Three-frame encoder ABI adds one encoder call; reuse the two
+                # identical overlapping frames from the current cached batch.
+                old_dino,images=self.encoder.encode(source.rgb_history,self.preprocessing)
+                old_dino=torch.cat((old_dino[:1],dino[:2]),0)
+                old_rgb=torch.from_numpy(np.ascontiguousarray(images[:1])).permute(0,1,4,2,3)
+                old_rgb=old_rgb.unsqueeze(0).to(device=self.device,dtype=torch.float32)/255.
+                old_rgb=torch.cat((old_rgb,raw_rgb[:,:2]),1)
+            else:
+                old_dino=torch.zeros_like(dino)
+                old_rgb=torch.zeros_like(raw_rgb)
+            world_window=ExecutedWorldWindow(dino_history=old_dino.unsqueeze(0),raw_rgb=old_rgb,
+                state=self._normal(source.state[None],action=False) if source.observed else torch.zeros_like(current_state),
+                action_state=self._normal(source.action_state[None],action=True) if source.observed else torch.zeros_like(action_state),
+                commands=self._normal(source.commands[None],action=True) if source.observed else torch.zeros((1,4,config.dimensions.action_dim),device=self.device),
+                observed=torch.tensor([source.observed],device=self.device,dtype=torch.bool),
+                visual_offsets=torch.from_numpy(source.visual_offsets[None]).to(self.device))
         robot_step = None
         if config.top.robot_feedback_mode != "none":
             if history.time_index > 0 and history.previous_state is None:
@@ -292,6 +322,7 @@ class ClearVLACheckpointPolicy:
             ),
             history=ObservableHistory(
                 executed_robot_step=robot_step,
+                executed_world_window=world_window,
                 state=current_state,
                 action_state=action_state,
                 timing=timing,

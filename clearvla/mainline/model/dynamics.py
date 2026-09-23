@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..executed_world import ExecutedWorldPrediction
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..world_control import (
     KNOWN_PREFIX_WORLD_CONTROL,
@@ -24,12 +25,13 @@ from .routing import (
     smooth_rms_contract,
 )
 from .types import (
+    ExecutedActionSequenceCondition,
     FutureObjectDynamics,
     ObjectFactSet,
     ObjectWorldBelief,
-    ObservedActionSequenceCondition,
     PhysicalActionCondition,
     PhysicalActionSequenceCondition,
+    RecordedActionSequenceCondition,
     WorldActionCondition,
 )
 
@@ -437,6 +439,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
         self.hidden = int(hidden)
+        self.action_dim = int(action_dim)
         self.content_dim = int(content_dim)
         self.normalization_floor = float(normalization_floor)
         if self.normalization_floor <= 0.0:
@@ -730,7 +733,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     def _base(
         self,
         facts: ObjectFactSet | ObjectWorldBelief,
-        action: WorldActionCondition | ObservedActionSequenceCondition,
+        action: WorldActionCondition | RecordedActionSequenceCondition,
         *,
         collect_diagnostics: bool,
         robot_relation: RobotObjectRelation | None = None,
@@ -744,12 +747,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 raise TypeError("interval-mean W requires PhysicalActionCondition")
             action.validate(action_dim=action_dim)
         else:
-            if not isinstance(action, (PhysicalActionSequenceCondition, ObservedActionSequenceCondition)):
+            if not isinstance(action, (PhysicalActionSequenceCondition, RecordedActionSequenceCondition)):
                 raise TypeError(
                     "sequence-prefix W requires PhysicalActionSequenceCondition"
                 )
             action.validate(action_dim=action_dim)
-            if isinstance(action, ObservedActionSequenceCondition) and action.time_grid_mode != self.time_grid.mode:
+            if isinstance(action, RecordedActionSequenceCondition) and action.time_grid_mode != self.time_grid.mode:
                 raise ValueError("W supervision action uses a different time grid")
         validity = self._safe_object_validity(facts).to(device=facts.content.device)
         safe_content = self._supported_object_values(facts.content, validity)
@@ -766,7 +769,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             )
             transport_prior = self.object_transport_prior(safe_transport_prior.to(dtype=facts.content.dtype))
         gradient_metrics: dict[str, Tensor] = {}
-        if isinstance(action, (PhysicalActionSequenceCondition, ObservedActionSequenceCondition)):
+        if isinstance(action, (PhysicalActionSequenceCondition, RecordedActionSequenceCondition)):
             if (
                 self.sequence_time_condition is None
                 or self.sequence_action_recurrence is None
@@ -786,7 +789,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             )
             row_time = (
                 action.row_end.to(device=objects.device, dtype=objects.dtype)
-                / float(action.control_time_scale if isinstance(action, ObservedActionSequenceCondition) else action.horizon)
+                / float(action.control_time_scale if isinstance(action, RecordedActionSequenceCondition) else action.horizon)
             )
             time_carrier = self.sequence_time_condition(row_time)
             recurrent_input, _ = smooth_rms_contract(
@@ -802,7 +805,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 )
                 recurrent_state = (
                     torch.where(action.observed[:, row_index, None], next_state, recurrent_state)
-                    if isinstance(action, ObservedActionSequenceCondition) else next_state
+                    if isinstance(action, RecordedActionSequenceCondition) else next_state
                 )
                 prefix_states.append(recurrent_state)
             action_carrier = torch.stack(
@@ -810,7 +813,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                     prefix_states[prefix_end - 1]
                     for prefix_end in (
                         self.time_grid.endpoints
-                        if isinstance(action, ObservedActionSequenceCondition)
+                        if isinstance(action, RecordedActionSequenceCondition)
                         else tuple(min(end, action.horizon) for end in self.time_grid.endpoints)
                     )
                 ],
@@ -913,7 +916,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             .mean()
             .sqrt(),
         }
-        if isinstance(action, (PhysicalActionSequenceCondition, ObservedActionSequenceCondition)):
+        if isinstance(action, (PhysicalActionSequenceCondition, RecordedActionSequenceCondition)):
             metrics.update(
                 {
                     "object_w_physical_action_sequence_source_rms": action.source_action.detach()
@@ -1303,11 +1306,29 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             ).mean()
         return metrics
 
+    def predict_executed_endpoint(self, *, facts: ObjectWorldBelief,
+                                  action: ExecutedActionSequenceCondition) -> ExecutedWorldPrediction:
+        """Current-weight retrodiction; only existing first four-step endpoint."""
+        if not isinstance(action, ExecutedActionSequenceCondition) or not self.time_grid.aligned:
+            raise ValueError("executed W endpoint requires its own aligned control record")
+        action.validate(action_dim=self.action_dim)
+        complete=action.observed[:,:4].all(1)
+        empty=~action.observed[:,:4].any(1)
+        if bool(action.observed[:,4:].any()) or not bool((complete|empty).all()):
+            raise ValueError("executed endpoint requires exactly four controls or an absent transition")
+        _,state,_=self.forward_w1(facts=facts,action=action,collect_diagnostics=False)
+        field,_=self._field_with_diagnostics(facts=facts,typed_common=state.common_typed,
+            typed_interval_innovation=state.near_interval_innovation,
+            diagnostic_prefix=None,robot_relation=state.robot_relation)
+        field.validate(expected_intervals=2)
+        return ExecutedWorldPrediction(field.semantic_delta[:,0],field.transport_mean[:,0],
+                                       field.transport_covariance[:,0],action,complete)
+
     def forward_w1(
         self,
         *,
         facts: ObjectFactSet | ObjectWorldBelief,
-        action: WorldActionCondition | ObservedActionSequenceCondition,
+        action: WorldActionCondition | RecordedActionSequenceCondition,
         collect_diagnostics: bool = False,
     ) -> tuple[FutureObjectDynamics | None, ObjectW1WorkingState, dict[str, Tensor]]:
         relation = self._robot_relation(facts)
@@ -1328,7 +1349,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             object_support=object_support,
         )
         common_before = common_batch[:, 0]
-        if isinstance(action, (PhysicalActionSequenceCondition, ObservedActionSequenceCondition)):
+        if isinstance(action, (PhysicalActionSequenceCondition, RecordedActionSequenceCondition)):
             # A shared action-dependent common would let W1 interval 1's
             # <=16-row prefix leak back into interval 0.  Keep common factual
             # in sequence mode; the per-interval typed path remains action

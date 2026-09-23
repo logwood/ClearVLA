@@ -141,7 +141,7 @@ class RemotePolicyClient:
 class PolicyBridge:
     def __init__(self, policy) -> None:
         self.policy = policy
-        self.history = CausalHistory()
+        self.history = CausalHistory(executed_world=getattr(policy,"requires_executed_world_history",False))
         self.initialized = False
 
     def health(self) -> dict[str, Any]:

@@ -1,3 +1,53 @@
+## Executed-control world discrepancy candidate (2026-09-23)
+
+Explicit `top.world_feedback_mode=executed_four_step_world_v1` is selected in
+`structural_rebuild_executed_world_calvin.json`. Older configs stay unchanged.
+This requires the declared CALVIN state/command/time chart, aligned sequence W,
+current-image G3, shared soft target selection and typed P3.
+
+At observation o[t] before a[t], the input owns state/boundary at t-4, its causal
+visual source (reset-clipped t-12,t-8,t-4), and EVERY acknowledged/recorded command
+a[t-4:t]. The older sparse history cannot supply t-3. Dataset, grouped token
+loader, typed batch, bounded history, bridge and policy carry the same record.
+Selected history retains 13 observations; default stays 9. Before four actual
+steps the transition is unknown. Instruction changes keep physical history;
+only environment reset clears it. History action dropout invalidates it too.
+
+One detached shared G/W1 replay uses the older input and confirmed controls
+under CURRENT weights, exporting only the existing four-step endpoint. This
+is RETRODICTION, not a forecast saved before execution. No current image,
+language, task age or future target enters this W query. An observation-only
+frozen association primitive measures the current frame against the old G
+chart. Its metric/checkpoint parameter names and original soft/null equations
+are shared with W labels; future-label forward/recognizer are not called online.
+The measurement is the existing POOLED NORMALIZED W grid, not native-token
+resolution, calibrated 3D motion, physical contact or persistent object ID.
+
+Current and old K are softly matched through common-current-image support and
+learned Q/K plus learned null; slot indices do not establish identity. Soft
+support overlap accounts for the grid cell measure. No argmax, confidence
+threshold, task keyword or instruction-age rule selects a match. Discrepancy,
+source W/G and factual match inputs are detached. P3 reader parameters and the
+existing operated-target selection receive policy gradients. Zero error or
+absent/null correspondence yields zero feedback regardless of status; the whole
+policy is not forced to zero. Covariance modulates error reading but is not a
+calibrated error bound. Prepared values are cached once and checked for exact
+source/reader/target ownership before the real P3 action consumer.
+
+Cost is explicit: one extra prior G and W1 per encoding, no extra W2. Normal
+two-pass sampling has three W1 and two W2 calls, not two worlds total. The
+three-frame DINO adapter also runs one extra old-source encoder batch, reusing
+the two overlapping current-cache frames exactly. No per-ODE image reopening.
+S's desired terminal relationship, calibrated object association, real-data
+learning, GPU resources and physics remain open. A source_end index is not
+silently promoted to success or a progress label. No formal training, legacy
+checkpoint migration, workflow/master change or XVLA upgrade is implied.
+
+The execution container reset before the first source packet was fully saved.
+Recovery was performed on the independently hash-verified prior source tree;
+rebuilt commits/tests are new identities. Lost/incomplete results are not part
+of the new acceptance totals. See delivered recovery note and exact-source logs.
+
 ## Soft G3 posterior instruction evidence candidate (2026-09-23)
 
 `top.instruction_change_mode=g3_posterior_reference_v1` requires the current-image
