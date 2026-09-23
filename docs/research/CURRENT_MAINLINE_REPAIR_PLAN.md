@@ -310,6 +310,41 @@ six-episode I/O experiments do not certify full-data recovery or training
 speedup. Identity/content mismatch is a hard failure; legacy fallback is an
 explicit recorded configuration, never a silent mid-run switch.
 
+### 1b-HDF5. Separate episode admission from sample reads
+
+The current `pread` unit does not remove the remaining cold-start bottleneck:
+`load_episodes` still opens every manifest-selected HDF5 episode and
+materializes action/state arrays before the first DataLoader batch, while the
+CALVIN raw overlay also validates its source trajectory/frame chart during
+admission. The active GPU4 B8 smoke is intentionally being left untouched
+while these phases are separated by timing; its long external-disk wait is a
+loader-admission observation, not a model failure. This is a separate loader
+issue and does not authorize a new training run.
+
+Prepare an opt-in `hdf5_indexed_lazy_v1` reader with these boundaries:
+
+1. Build or load a compact, immutable episode index containing root-relative
+   identity, resolved dataset keys, shapes, lengths, contract attributes,
+   normalizer/statistics digests and source-file size/mtime/hash. Do not read
+   full action/state arrays during index admission.
+2. Keep the existing manifest order and `torch.Generator` ownership. Workers
+   open HDF5 files only when a sample is requested, using a bounded per-worker
+   handle/row cache. Do not let lazy reads change episode, frame, camera or
+   repeated-row order.
+3. Keep raw-overlay endpoint validation and terminal-padding semantics
+   fail-closed. A stale or incomplete index, invalid dataset key, changed file
+   identity or non-finite selected row must reject the lazy path rather than
+   silently fall back midway through a run.
+4. Add a loader-only matched verification: eager versus lazy first batches
+   must have identical episode identities, normalized bytes, camera/token bytes,
+   masks, normalizer digest and sampler/RNG continuation. Record cold index
+   time, first-batch time, warm steady-state throughput, worker RSS and open
+   descriptors. No model forward or optimizer step is needed for this gate.
+
+The legacy eager path remains the default until this gate passes. The index
+format and lazy reader must be reviewed as one source unit; do not claim a
+training speedup from the current NPY `pread` measurements alone.
+
 ### 1c. Evaluate the historical V1 before deciding whether to retire its trainer
 
 The authorized bounded panel is complete. It evaluated the frozen
