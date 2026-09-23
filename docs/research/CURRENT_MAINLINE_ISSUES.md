@@ -643,3 +643,19 @@ robot and visual labels have independent support. Numeric prediction and direct
 P3/S use are now testable in declared feature charts, not an arbitrary detached
 latent. This does NOT resolve imperfect G/Teacher correspondence, missing world
 calibration, or physical task-progress/success identification. Those remain open.
+
+
+### M6k addressed: CT proposal ingress erased source distinctions
+
+Old CT adds action, protected P1/P2 and policy precision before centered
+normalization, then normalizes the result again in coefficient reads. Its
+learned-neutral context contains action-dependent protected facts, so it cannot
+be interpreted as a fixed physical no-op reference. P3 optional plan lanes are
+not direct inputs there (they still have an independent bottom path).
+
+New typed CT separates raw source values, gives plan/change direct conditioning,
+and uses a structural zero-feature reference. It resolves those coding/dataflow
+constraints, not the general learning/physics problem. Bias-free low-rank values
+remain nonlinear and can underutilize inputs after training. The full current
+controller still contains normalized value reads and terminal head contexts;
+these require explicit review rather than a claim of end-to-end amplitude preservation.

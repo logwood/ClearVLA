@@ -367,3 +367,18 @@ bottom protection/value/delta/outlet paths with the new task/observed/expected
 owners; (3) preserve actual-command and physical entity provenance when improving
 progress or endpoint feedback. Do not indefinitely grow additional parallel
 heads that reproduce an existing owner's role. Restore/push small units promptly.
+
+
+### M6k CT typed source closure
+
+The compiler now supplies named consequence owners instead of only a summed
+post-P2 trajectory. CT separately interprets eight dynamic value sources and
+four context sources; modular/restored bottom and ABI admit the same semantics.
+A parameter-free zero-feature origin replaces the learned-neutral computation
+only in the new mode. P3 direct lanes and the protected G3 selector remain.
+
+Next bounded unit: controller recurrent memory/candidate-value normalization,
+Q5 endpoint heads, native command/clipping history. Check actual downstream
+consumers rather than extending CT into a redundant physical world model.
+Record accumulated milestone failures and resource cost, without postponing
+small source commits behind CI. Persistent identity/goal progress is still open.

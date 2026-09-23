@@ -20,6 +20,7 @@ from ..gripper_contract import is_binary_gripper_selection
 from ..interfaces import CurrentObservation, ObservableHistory, OnlinePolicyInput
 from ..robot_execution import RobotResponseFeedback
 from ..supervision import FutureLabelSupport, supported_mean
+from ..transition_condition import SUMMED_TRANSITION, validate_transition_condition_mode
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
 from ..v120_core.primitives import TimeEmbedding
 from ..v120_core.role_delta_attnres import PolicyRoleDeltaBank
@@ -1088,6 +1089,7 @@ class ExecutionBottomStage(nn.Module):
         core_config: Any,
         layer_contract_heads: nn.ModuleList,
         decoder: nn.Module,
+        transition_condition_mode: str = SUMMED_TRANSITION,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -1095,6 +1097,8 @@ class ExecutionBottomStage(nn.Module):
         self.basis = int(basis)
         self.physical_action_dim = int(physical_action_dim)
         self.core_config = core_config
+        validate_transition_condition_mode(transition_condition_mode)
+        self.transition_condition_mode = transition_condition_mode
         self.layer_contract_heads = layer_contract_heads
         self.decoder = decoder
 
@@ -1138,6 +1142,8 @@ class ExecutionBottomStage(nn.Module):
         """Apply V120's spatial-anchor pooling to the centered transition."""
 
         transition.validate(hidden=self.hidden)
+        if transition.condition_mode != self.transition_condition_mode:
+            raise ValueError("bottom transition value semantics mismatch")
         batch, rows, hidden = transition.value.shape
         grid = (
             int(self.core_config.num_cameras)

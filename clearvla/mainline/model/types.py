@@ -23,6 +23,7 @@ from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import InstructionChangeEvidence
 from ..manifest import INTERVALS
 from ..operation_expectation import OperationExpectation
+from ..transition_condition import SUMMED_TRANSITION, validate_transition_condition_mode
 from ..world_control import CandidateControlDomain
 from ..world_robot import RobotWorldObservation
 from .target_binding import TargetBinding, TargetEvidence
@@ -2075,17 +2076,20 @@ class ControlledTransitionState:
     """Action-centred low-rank transition evidence consumed read-only below P.
 
     ``selector`` is the completed G3 feature chart, NOT a physical W rollout.
-    ``value`` is a noisy-plan-conditioned coefficient response minus a learned
-    neutral-context response. It is a decoder feature, not a calibrated no-op
-    physical counterfactual or a measured robot/object execution error.
+    ``value`` is a decoder feature. In summed_legacy_v1 its coefficients subtract
+    a learned context response; typed_plan_v1 instead uses a structural zero-
+    feature origin, separate source values and typed plan attention. Neither is
+    a calibrated no-op counterfactual or measured physical execution error.
     """
 
     selector: Tensor  # [B,I*C*8*8,H] -- 512 V120 spatial transition rows
     value: Tensor  # [B,I*C*8*8,H]
     action_coefficients: Tensor  # [B,I*C*8*8,R]
     neutral_coefficients: Tensor  # [B,I*C*8*8,R]
+    condition_mode: str = SUMMED_TRANSITION
 
     def validate(self, *, hidden: int) -> None:
+        validate_transition_condition_mode(self.condition_mode)
         if self.selector.ndim != 3 or tuple(self.selector.shape) != tuple(
             self.value.shape
         ):

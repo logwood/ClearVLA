@@ -30,8 +30,8 @@ from clearvla.data.window_boundaries import (
     WINDOW_BOUNDARY_CONTRACTS,
 )
 
-from .bottom_evidence import NORMALIZED_EVIDENCE, validate_evidence_value_mode
-from .future_time import LEGACY_FUTURE_TIME, resolve_future_time
+from .bottom_evidence import MAGNITUDE_EVIDENCE, NORMALIZED_EVIDENCE, validate_evidence_value_mode
+from .future_time import CONTROL_ALIGNED_FUTURE_TIME, LEGACY_FUTURE_TIME, resolve_future_time
 from .gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
     CONTINUOUS_GRIPPER_OUTPUT_MODE,
@@ -48,6 +48,11 @@ from .operation_expectation import OBJECT_OUTCOME_INTENT, OPERATION_INTENT_MODES
 from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from .p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from .temporal import TIMED_HISTORY_ENCODING
+from .transition_condition import (
+    SUMMED_TRANSITION,
+    TYPED_TRANSITION,
+    validate_transition_condition_mode,
+)
 from .v120_core.bspine import (
     BSPINE0_BASIS_DIGEST,
     BSPINE0_CONTROL_POINTS,
@@ -618,6 +623,7 @@ class TopConfig:
 
 @dataclass(frozen=True)
 class BottomConfig:
+    transition_condition_mode: str = SUMMED_TRANSITION
     evidence_value_mode: str = NORMALIZED_EVIDENCE
     flow_time_distribution: str = "v120_mirrored_beta_1_5_1"
     evidence_depth: int = 3
@@ -666,6 +672,9 @@ class BottomConfig:
     bspine_action_group_mask: str = ""
 
     def validate(self) -> None:
+        validate_transition_condition_mode(self.transition_condition_mode)
+        if self.transition_condition_mode == TYPED_TRANSITION and self.controlled_delta_dropout != 0.0:
+            raise ValueError("typed transition uses deterministic per-ODE attention; dropout must be zero")
         validate_evidence_value_mode(self.evidence_value_mode)
         if self.flow_time_distribution != "v120_mirrored_beta_1_5_1":
             raise ValueError("formal training uses the mirrored V120 beta_1_5_1 flow time")
@@ -1029,6 +1038,12 @@ class ExperimentConfig:
             self.runtime,
         ):
             section.validate()
+        if self.bottom.transition_condition_mode == TYPED_TRANSITION and (
+            self.bottom.evidence_value_mode != MAGNITUDE_EVIDENCE
+            or self.top.p3_coordination_mode != TYPED_HORIZON_PLAN
+            or self.top.future_time_grid_mode != CONTROL_ALIGNED_FUTURE_TIME
+        ):
+            raise ValueError("typed transition requires magnitude evidence and control-aligned typed P3")
         grid = resolve_future_time(self.top.future_time_grid_mode)
         if self.dimensions.future_supports != len(grid.support_offsets):
             raise ValueError("future support count and time grid disagree")
@@ -1250,6 +1265,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.bottom.transition_condition_mode == SUMMED_TRANSITION:
+            cast(dict[str, object], payload["bottom"]).pop("transition_condition_mode")
         if self.bottom.evidence_value_mode == NORMALIZED_EVIDENCE:
             cast(dict[str, object], payload["bottom"]).pop("evidence_value_mode")
         if self.top.operation_intent_mode == POSTERIOR_INTENT:

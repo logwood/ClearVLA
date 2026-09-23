@@ -122,6 +122,7 @@ class RestoredV120EvidenceBottom(nn.Module):
         config.validate()
         dims = config.dimensions
         bottom = config.bottom
+        self.transition_condition_mode = bottom.transition_condition_mode
         self.hidden = int(dims.hidden_size)
         self.horizon = int(dims.action_horizon)
         self.basis = int(dims.action_basis_tokens)
@@ -505,6 +506,8 @@ class RestoredV120EvidenceBottom(nn.Module):
         """Apply V120's spatial-anchor pooling to the centered transition."""
 
         transition.validate(hidden=self.hidden)
+        if transition.condition_mode != self.transition_condition_mode:
+            raise ValueError("bottom transition value semantics mismatch")
         batch, rows, hidden = transition.value.shape
         grid = int(self.core_config.num_cameras) * int(self.core_config.future_grid_size) ** 2
         anchors = int(self.core_config.future_anchors)

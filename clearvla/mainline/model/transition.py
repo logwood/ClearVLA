@@ -1,4 +1,4 @@
-"""Recovered V120 per-ODE action-centred controlled transition."""
+"""Per-ODE G3/noisy-plan feature conditioner with explicitly versioned ingress."""
 
 from __future__ import annotations
 
@@ -8,14 +8,20 @@ from typing import cast
 import torch
 from torch import Tensor, nn
 
+from ..transition_condition import (
+    SUMMED_TRANSITION,
+    TYPED_TRANSITION,
+    validate_transition_condition_mode,
+)
 from ..v120_core.profile import build_v120_policy_config
 from ..v120_core.trunk_primitives import (
     ControlledResidualLatentDynamics,
     TrunkPrimitiveConfig,
 )
 from .action_contract import V120SeedContext
-from .compiler import ObjectPolicyPlanDeltaBank
+from .compiler import ObjectConsequenceState, ObjectPolicyPlanDeltaBank
 from .routing import AffineVarianceFlooredCenteredNorm
+from .typed_transition import TransitionPlanEvidence, TypedPlanTransition
 from .types import (
     ControlledTransitionSource,
     ControlledTransitionState,
@@ -23,12 +29,14 @@ from .types import (
 
 
 class ControlledTransitionDynamics(nn.Module):
-    """Static protected G3 source plus dynamic V120 action/neutral coefficients."""
+    """Protected G3 source with legacy or source-typed coefficient computation."""
 
     INTERVENTION_MODES = ("delta_neutral",)
 
     @property
     def action_queries(self) -> nn.Parameter:
+        if self.typed_transition is not None:
+            return self.typed_transition.action_queries
         return self.v120_transition.action_queries
 
     def __init__(
@@ -46,8 +54,12 @@ class ControlledTransitionDynamics(nn.Module):
         action_tokens: int = 8,
         normalization_floor: float = 0.25,
         dropout: float = 0.0,
+        condition_mode: str = SUMMED_TRANSITION,
     ) -> None:
         super().__init__()
+        validate_transition_condition_mode(condition_mode)
+        self.condition_mode = condition_mode
+        self.typed_transition: TypedPlanTransition | None = None
         del content_dim, state_dim, action_dim
         self.hidden = int(hidden)
         self.rank = int(rank)
@@ -58,6 +70,15 @@ class ControlledTransitionDynamics(nn.Module):
         self.executed_rows = 7
         if self.cameras != 2:
             raise ValueError("the recovered V120 transition requires two cameras")
+        self._eval_intervention = "none"
+        if condition_mode == TYPED_TRANSITION:
+            if dropout != 0.0:
+                raise ValueError("typed transition requires zero per-ODE dropout")
+            self.typed_transition = TypedPlanTransition(
+                hidden=self.hidden, heads=int(heads), horizon=self.horizon,
+                basis=self.basis, rank=self.rank, action_tokens=int(action_tokens),
+            )
+            return
         # This is the extracted V120 terminal trajectory normalization.  It
         # belongs immediately after the P2 residual write and before the
         # controlled action reader.  Moving it earlier or dropping it changes
@@ -183,6 +204,56 @@ class ControlledTransitionDynamics(nn.Module):
             dim=1,
         )
 
+    def _typed_forward(
+        self, source: ControlledTransitionSource, action_query: Tensor,
+        plan: ObjectPolicyPlanDeltaBank, seed: V120SeedContext,
+        consequence: ObjectConsequenceState, collect_diagnostics: bool,
+    ) -> tuple[ControlledTransitionState, dict[str, Tensor]]:
+        module = self.typed_transition
+        if module is None:
+            raise RuntimeError("typed transition path has no registered owner")
+        evidence = TransitionPlanEvidence(action_query, consequence, plan, seed)
+        raw = module(source.selector, evidence)
+        primary = raw["rollout_delta_pred"]
+        coeff = raw["rollout_action_coeff"]
+        neutral = raw["rollout_neutral_coeff"]
+        mode = self._eval_intervention
+        if mode != "none":
+            if self.training or mode != "delta_neutral":
+                raise ValueError("controlled-transition interventions are evaluation-only")
+            value, coeff = torch.zeros_like(primary), neutral
+        else:
+            value = primary
+        result = ControlledTransitionState(
+            selector=source.selector, value=value, action_coefficients=coeff,
+            neutral_coefficients=neutral, condition_mode=TYPED_TRANSITION,
+        )
+        result.validate(hidden=self.hidden)
+        if not collect_diagnostics:
+            return result, {}
+        def rms(x: Tensor) -> Tensor:
+            return x.detach().float().square().mean().sqrt()
+        return result, {
+            "controlled_transition_value_rms": rms(value),
+            "controlled_transition_basis_rms": rms(raw["rollout_transition_basis"]),
+            "controlled_transition_centered_coefficient_abs_mean": (coeff-neutral).detach().float().abs().mean(),
+            "controlled_transition_delta_gain": module.delta_gain.detach().float().abs(),
+            "controlled_transition_dense_rows": value.new_tensor(value.shape[1]),
+            "controlled_transition_retained_rows": value.new_tensor(value.shape[1]),
+            "controlled_transition_action_token_rows": raw["typed_dynamic_rows"],
+            "controlled_transition_context_rows": raw["typed_context_rows"],
+            "controlled_transition_typed_plan": value.new_ones(()),
+            "controlled_transition_per_ode_action": value.new_ones(()),
+            "controlled_transition_learned_neutral": value.new_zeros(()),
+            "controlled_transition_policy_precision_rms": rms(plan.protected_policy_precision),
+            "controlled_transition_spatial_value_variation": value.detach().float().std(dim=1, unbiased=False).mean(),
+            "controlled_transition_intervention_active": value.new_tensor(float(mode != "none")),
+            "controlled_transition_intervention_network_executed": value.new_ones(()),
+            "controlled_transition_intervention_first_boundary_delta_rms": rms(primary-value),
+            "controlled_transition_intervention_action_neutral_identity_max_abs": (coeff-neutral).detach().float().abs().amax(),
+            "controlled_transition_intervention_selector_identity_max_abs": value.new_zeros(()),
+        }
+
     def forward(
         self,
         *,
@@ -190,11 +261,16 @@ class ControlledTransitionDynamics(nn.Module):
         action_query: Tensor,
         plan: ObjectPolicyPlanDeltaBank,
         seed: V120SeedContext,
+        consequence: ObjectConsequenceState | None = None,
         collect_diagnostics: bool = False,
     ) -> tuple[ControlledTransitionState, dict[str, Tensor]]:
-        """Evaluate real minus learned-neutral coefficients for this ODE step."""
+        """Evaluate the declared feature-reference operator for this ODE step."""
 
         source.validate(hidden=self.hidden)
+        if self.typed_transition is not None:
+            if consequence is None:
+                raise ValueError("typed transition requires separate P2 consequence owners")
+            return self._typed_forward(source, action_query, plan, seed, consequence, collect_diagnostics)
         expected_action = (
             int(source.selector.shape[0]),
             self.horizon,

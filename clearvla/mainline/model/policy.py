@@ -345,6 +345,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             rank=config.bottom.controlled_delta_rank,
             action_tokens=config.bottom.controlled_action_tokens,
             normalization_floor=config.bottom.normalization_floor,
+            condition_mode=config.bottom.transition_condition_mode,
             dropout=config.bottom.controlled_delta_dropout,
         )
         raw_bottom = RestoredV120EvidenceBottom(
@@ -470,6 +471,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             core_config=raw_bottom.core_config,
             layer_contract_heads=layer_contract_heads,
             decoder=decoder,
+            transition_condition_mode=config.bottom.transition_condition_mode,
         )
         self.training_targets = TrainingTargetsStage(
             teacher=teacher,
@@ -966,6 +968,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             source=cache.transition_source,
             action_query=action_query,
             plan=compiled.plan,
+            consequence=compiled.consequence,
             seed=seed_context,
             collect_diagnostics=collect_diagnostics,
         )

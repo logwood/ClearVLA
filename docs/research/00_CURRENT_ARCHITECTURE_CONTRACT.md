@@ -24,7 +24,7 @@ current-state coverage with source-owned future-label support**.
 M1c additionally implements native-state/feature-state separation; M1d adds
 source-timed visual history with one support contract through flow, G memory,
 S/W motion and Teacher. The latest explicit source candidate is
-`configs/mainline/structural_rebuild_m6j_calvin.json` (validation scope in handoff).
+`configs/mainline/structural_rebuild_m6k_calvin.json` (validation scope in handoff).
 M5a adds one soft operated-
 object distribution across actual S/coarse/P1/P2 readers; its detailed contract
 is below. M5b adds a causal instruction reference; M6a/b/c separate action-matched W
@@ -42,6 +42,51 @@ W-supervision and the deeper P redesign remain open. No learned behavior
 is established by these source changes. The user-authorized rebuild may revise
 historical implementation details; accepted source semantics belong here,
 future work in the repair plan, and test/publish status in the handoff.
+
+## M6k typed CT feature conditioning
+
+`bottom.transition_condition_mode=typed_plan_v1` requires magnitude-preserving
+bottom values, typed-horizon P3 and the control-aligned future grid. Default
+`summed_legacy_v1` retains the old constructor, parameter order, RNG and arithmetic;
+it is omitted from legacy config serialization. No weight/optimizer migration.
+
+ControlledTransition remains a decoder feature operator over completed G3,
+NOT the action-conditioned physical W or a measured execution response. Its
+input now preserves eight independent value owners: noisy action query, P1
+precision, semantic/geometry effects, their separate interactions, and P3
+plan/observed-change contributions. Each has a bias-free projection. All
+source/24-control-row/4-basis identities survive into the latent read; there
+is no pre-projection sum and no global direct-mean shortcut. Source IDs and
+row/basis addresses enter keys only. P1 current fact and the seed's complete
+state/history/execution rows condition the query, not an additive CT value.
+These history rows are existing encoded summaries, NOT newly claimed adjacent
+physical state/action pairs.
+
+Both attention stages preserve unnormalized values. A bias-free coefficient
+head plus tanh reads the latent values, then contracts them with the existing
+form of G3-aligned low-rank basis. Zero dynamic feature values give exact zero
+coefficients and write, even with nonzero source/type/context. Context/selector
+parameters have no value gradient in that zero case; source-value gradients can
+still learn. Small signals are not unit-normalized. The reference is a structural
+zero-feature origin: no learned neutral queries, neutral bias, unconsumed visual
+base head or extra neutral forward exists in the new mode. ZERO NATIVE ACTION
+DOES NOT MEAN ZERO QUERY (role/time content remains), so this is not a physical
+no-op guarantee. Legacy centering remains only in the explicitly old graph.
+
+The production compiler passes the SAME consequence record as its protected
+P3 carrier. New CT refuses a missing or independently reconstructed carrier;
+modular and restored bottom consumers check the value-mode tag. P3's existing
+protected/direct lanes remain unchanged: the new use in CT is plan-dependent
+conditioning, not a second residual alias added at the bottom. No future inputs,
+new W builds, DINO calls, solver steps, mutating ODE state or execution oracle.
+The existing delta-neutral probe still executes the selected network, then
+neutralizes only its output; diagnostics identify the new origin honestly.
+
+Remaining limits: nonlinear selectors/tanh/basis can change gains; no whole-
+policy scale law, calibrated physics, tracking or performance claim. CT latent
+compression remains learned; the effective sensitivity and computational cost
+need trained/GPU evaluation. Controller memory/value normalization, terminal
+heads/Q5 endpoints, native commands and milestone debt remain separate open work.
 
 ## M6j magnitude-preserving native evidence values
 

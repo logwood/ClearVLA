@@ -1,5 +1,26 @@
 # ClearVLA structural rebuild handoff
 
+## M6k source checkpoint — 2026-09-22 Pacific
+
+Recovered and hash-verified all 821 M6j sources and 891 archived items. Reproduced
+Git tree `967692a55d80bdd547523f0479e76d6f01ae34ce`, restoring the executable
+bit on scripts/check_structural_rebuild.sh. Remote base read at
+`b61233d206f88df7a95fecb25522be059ce4d7b5`. Local history remains synthetic.
+
+Implements typed CT ingress/value read/zero-feature reference and actual
+compiler-to-bottom/ABI wiring; read the current architecture M6k section.
+No workflow/master changes. Initial 36-case production/unit suite passed; a
+later expanded foreground call was interrupted at its time limit, not a pass.
+Final runs are split into disjoint bounded batches; exact statuses belong in
+the external checkpoint reports. Offline pinned wheels restored Ruff/Pyright;
+first static comparison found two new output-layer type-narrowing errors, fixed
+without ignore directives or changed arithmetic. Unrelated legacy debt retained.
+
+Preserve this small source unit before full milestone CI. Next audit the
+execution controller/value readers and Q5 terminal command training context,
+then the native command/history boundary. Do not claim M6/M9--M11 completion,
+physical no-op equivalence, calibrated errors or robot performance.
+
 ## Current M6j source checkpoint — 2026-09-22
 
 Recovered all 818 M6i source files, verifying all 977 manifest entries and exact

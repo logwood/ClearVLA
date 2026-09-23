@@ -71,6 +71,11 @@ from ..p2_geometry import POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, p2_geome
 from ..p3_coordination import POINTWISE_PLAN, TYPED_HORIZON_PLAN, p3_coordination_metadata
 from ..robot_execution import robot_execution_metadata
 from ..temporal import HISTORY_TIMING_CONTRACT, TIMED_HISTORY_ENCODING
+from ..transition_condition import (
+    SUMMED_TRANSITION,
+    TYPED_TRANSITION,
+    transition_condition_metadata,
+)
 from ..world_control import KNOWN_PREFIX_WORLD_CONTROL, LEGACY_WORLD_CONTROL, world_control_metadata
 from ..world_robot import NO_ROBOT_WORLD, OBSERVED_ROBOT_VIEWS, world_robot_metadata
 from .flow_schedule import DeploymentFlowSchedule
@@ -372,6 +377,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"transition_condition": transition_condition_metadata()}
+           if config.bottom.transition_condition_mode == TYPED_TRANSITION else {}),
         **({"bottom_evidence": bottom_evidence_metadata()}
            if config.bottom.evidence_value_mode == MAGNITUDE_EVIDENCE else {}),
         **({"operation_expectation": operation_expectation_metadata(tuple(config.data.camera_names))}
@@ -477,6 +484,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     if str(abi.get("graph_config_sha256", "")) != canonical_sha256(graph):
         raise ValueError("deployment ABI graph digest is inconsistent")
     graph_bottom = _mapping(graph.get("bottom"), name="graph_config.bottom")
+    transition_mode = graph_bottom.get("transition_condition_mode", SUMMED_TRANSITION)
+    if transition_mode == TYPED_TRANSITION:
+        if abi.get("transition_condition") != transition_condition_metadata():
+            raise ValueError("transition condition ABI semantics mismatch")
+    elif transition_mode != SUMMED_TRANSITION or "transition_condition" in abi:
+        raise ValueError("unknown or unselected transition condition ABI")
     evidence_mode = graph_bottom.get("evidence_value_mode", NORMALIZED_EVIDENCE)
     if evidence_mode == MAGNITUDE_EVIDENCE:
         if abi.get("bottom_evidence") != bottom_evidence_metadata():
