@@ -5009,6 +5009,26 @@ def test_deployment_cache_has_only_declared_causal_sources_and_no_future_labels(
         "role_table",
         "instruction_reference",
         "robot_feedback",
+        "world_feedback",
+    }
+    from clearvla.mainline.executed_world import (
+        ExecutedWorldFeedback,
+        ExecutedWorldPlanValues,
+        ExecutedWorldWindow,
+    )
+
+    # The new top-level cache value is an already-observed causal record, not
+    # a renamed FutureSupervision or a reference to Teacher target state.
+    assert {field.name for field in fields(ExecutedWorldWindow)} == {
+        "dino_history", "raw_rgb", "state", "action_state", "commands",
+        "observed", "visual_offsets",
+    }
+    assert {field.name for field in fields(ExecutedWorldFeedback)} == {
+        "semantic", "image", "covariance", "null", "posterior", "past_content",
+        "view_observed", "window", "current_dino", "camera_names", "measurement_shape",
+    }
+    assert {field.name for field in fields(ExecutedWorldPlanValues)} == {
+        "value", "feedback", "current_facts", "reader_identity", "binding",
     }
     # Deployment owns one compact belief. The optional current_world_belief
     # is an OnlineTopContext source; it is not a second deployment belief.
