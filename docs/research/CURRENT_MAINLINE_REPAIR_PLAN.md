@@ -379,6 +379,35 @@ Prepare an opt-in `hdf5_indexed_lazy_v1` reader with these boundaries:
   a loader-only process; no model, CUDA context, raw-overlay mutation or
   training output is involved.
 
+  ### Progressive admission direction
+
+  The full-manifest probe confirmed that opening every E1 HDF5 file is itself
+  the cold-start bottleneck. The next storage design is demand-driven:
+  construct the fixed manifest identity list without opening HDF5, admit only
+  the episode indices already selected by the immutable sampler contract, and
+  prefetch a bounded lookahead of those same indices in one background worker.
+  A request owns one deterministic metadata job; a failed job is raised and
+  never skipped or replaced. Optional per-episode records are written
+  atomically with source fingerprints, so a later process can reuse only
+  records whose contract and file identity still match.
+
+  This does not mean starting optimization before the data contract exists.
+  Split membership, profile projection, terminal/overlay semantics,
+  normalizer arrays, window refs, motion/event scores and sampler pools remain
+  frozen before a training iterator is created. “Train while indexing” means
+  the expensive numeric rows and image/token payloads can be read on demand
+  after those small deterministic inputs are pinned; it must not allow a
+  changing episode population to alter seed/order or normalization.
+
+  The opt-in `clearvla/data/progressive_hdf5.py` prototype was checked against
+  the full 2,165-episode train manifest. Constructor time was 28.7 ms because
+  it did not open HDF5. On a fixed seed-17 sample, first metadata admission
+  was 415 ms, selected eager admission was 42.4 s, and 32 selected action-row
+  checks matched byte-for-byte in 173 ms. This is a cold-start/storage result,
+  not permission to switch the mainline loader or claim end-to-end training
+  speed; the complete mainline terminal, CALVIN overlay, normalizer and
+  sampler gates remain mandatory.
+
 ### 1c. Evaluate the historical V1 before deciding whether to retire its trainer
 
 The authorized bounded panel is complete. It evaluated the frozen

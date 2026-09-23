@@ -82,9 +82,15 @@ class RowRequest:
 
     @classmethod
     def of(cls, field: str, rows: Sequence[int] | np.ndarray) -> "RowRequest":
-        array = np.asarray(rows, dtype=np.int64)
+        array = np.asarray(rows)
         if array.ndim != 1:
             raise ValueError(f"row request must be rank-1, got shape={array.shape}")
+        if array.size and array.dtype.kind not in "iu":
+            raise ValueError("row request indices must be integers")
+        if array.size and (array < 0).any():
+            raise ValueError("row request rows must be non-negative")
+        if array.size and int(array.max()) > np.iinfo(np.int64).max:
+            raise ValueError("row request exceeds int64 index range")
         values = tuple(int(row) for row in array)
         if not field:
             raise ValueError("row request field cannot be empty")

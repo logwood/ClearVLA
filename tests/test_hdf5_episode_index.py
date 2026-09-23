@@ -134,3 +134,18 @@ def test_worker_safe_reader_reuses_handles_and_survives_pickle(tmp_path: Path) -
     )
     reader.close()
     restored.close()
+
+
+def test_reader_revalidates_source_after_handle_reuse(tmp_path: Path) -> None:
+    episode = tmp_path / "episode.hdf5"
+    _write_episode(episode, 0.0)
+    entry = build_hdf5_episode_index(
+        tmp_path, "*.hdf5", cameras=("top", "wrist"), state_key="state"
+    )[0]
+    with HDF5RowReader(tmp_path, max_open_files=1) as reader:
+        reader.read_rows(entry, "action", [0])
+        reader.close()
+        with h5py.File(episode, "a") as handle:
+            handle["action"][0, 0] = 999.0
+        with pytest.raises(ValueError, match="changed since admission"):
+            reader.read_rows(entry, "action", [1])

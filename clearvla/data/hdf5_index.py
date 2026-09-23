@@ -24,12 +24,12 @@ from .hdf5_episode import (
     episode_identity,
 )
 from .index_contract import FingerprintMode, RowRequest, SourceFingerprint
+from .instructions import instruction_key, normalize_instruction
 from .schema import (
     ACTION_ALIASES,
     ACTION_STATE_ALIASES,
     CAMERA_ALIASES,
     STATE_ALIASES,
-    list_hdf5_datasets,
     resolve_key,
 )
 
@@ -43,6 +43,7 @@ def _validate_relative_file(value: str) -> str:
     if (
         not relative
         or pure.is_absolute()
+        or ":" in relative
         or "\\" in relative
         or any(part in {"", ".", ".."} for part in pure.parts)
         or pure.as_posix() != relative
@@ -229,18 +230,29 @@ def _entry_for_path(
     camera_key_overrides: Mapping[str, str] | None,
     fingerprint_mode: FingerprintMode,
 ) -> HDF5EpisodeIndexEntry:
-    datasets = list_hdf5_datasets(str(path))
-    resolved_action, resolved_state, resolved_action_state, camera_keys = _resolve_keys(
-        datasets,
-        action_key=action_key,
-        state_key=state_key,
-        action_state_key=action_state_key,
-        cameras=cameras,
-        camera_key_overrides=camera_key_overrides,
-    )
+    identity, _partition, task_id = episode_identity(root, path)
+    before = SourceFingerprint.from_path(path, mode=fingerprint_mode)
     with h5py.File(path, "r") as handle:
+        # Resolve the same finite alias candidates as the eager loader without
+        # visititems(): unrelated image datasets/groups need not be traversed.
+        candidates = [action_key, state_key, action_state_key]
+        candidates.extend(ACTION_ALIASES + STATE_ALIASES + ACTION_STATE_ALIASES)
+        for camera in cameras:
+            candidates.extend(CAMERA_ALIASES.get(camera, ()))
+            candidates.append((camera_key_overrides or {}).get(camera))
+        names = {
+            variant
+            for candidate in candidates if candidate
+            for variant in (candidate, candidate.lstrip("/"), candidate.replace(".", "/").lstrip("/"))
+        }
+        datasets = {name: {} for name in names if isinstance(handle.get(name), h5py.Dataset)}
+        resolved_action, resolved_state, resolved_action_state, camera_keys = _resolve_keys(
+            datasets, action_key=action_key, state_key=state_key,
+            action_state_key=action_state_key, cameras=cameras,
+            camera_key_overrides=camera_key_overrides,
+        )
         action = handle[resolved_action]
-        if action.ndim != 2:
+        if action.ndim != 2 or min(action.shape) < 1:
             raise ValueError(f"{path}: action must be rank-2, got {action.shape}")
         action_shape = tuple(int(v) for v in action.shape)
         state = handle[resolved_state] if resolved_state is not None else action
@@ -285,10 +297,33 @@ def _entry_for_path(
             if isinstance(raw_instruction, h5py.Dataset)
             else _attr(handle.attrs, "instruction")
         )
+        raw_language_key = _attr(handle.attrs, "language_key")
+        language_key = (
+            None if raw_language_key is None else str(raw_language_key).strip()
+        )
+        raw_task = _attr(handle.attrs, "task")
+        task = task_id if raw_task is None else str(raw_task).strip()
+        metadata_instruction = (
+            None
+            if instruction is None
+            else (
+                instruction
+                if isinstance(raw_instruction, h5py.Dataset)
+                else normalize_instruction(instruction)
+            )
+        )
+        if metadata_instruction is not None:
+            expected_language_key = instruction_key(metadata_instruction)
+            if language_key is None:
+                language_key = expected_language_key
+            elif language_key != expected_language_key:
+                raise ValueError(f"{path}: language_key does not identify its instruction")
+        elif language_key is not None:
+            raise ValueError(f"{path}: language_key exists without an instruction")
         metadata = {
-            "instruction": instruction,
-            "language_key": _attr(handle.attrs, "language_key"),
-            "task": _attr(handle.attrs, "task"),
+            "instruction": metadata_instruction,
+            "language_key": language_key,
+            "task": task,
             "valid_center_start": _attr(handle.attrs, "valid_center_start"),
             "valid_center_end": _attr(handle.attrs, "valid_center_end"),
             "strict_valid_center_start": _attr(handle.attrs, "strict_valid_center_start"),
@@ -301,8 +336,7 @@ def _entry_for_path(
             "context_start": _attr(handle.attrs, "context_start"),
             "source_trajectory_id": _attr(handle.attrs, "source_trajectory_id", ""),
         }
-    identity, _partition, _task = episode_identity(root, path)
-    stat = path.stat()
+    before.validate(path)
     return HDF5EpisodeIndexEntry(
         episode_id=identity,
         relative_path=path.resolve().relative_to(root.resolve()).with_suffix("").as_posix(),
@@ -315,10 +349,10 @@ def _entry_for_path(
         action_state_shape=action_state_shape,
         camera_lengths=camera_lengths,
         metadata=metadata,
-        file_size=int(stat.st_size),
-        mtime_ns=int(stat.st_mtime_ns),
+        file_size=int(before.size),
+        mtime_ns=int(before.mtime_ns),
         relative_file=path.resolve().relative_to(root.resolve()).as_posix(),
-        source_fingerprint=SourceFingerprint.from_path(path, mode=fingerprint_mode),
+        source_fingerprint=before,
         field_shapes=field_shapes,
         field_dtypes=field_dtypes,
     )
@@ -444,7 +478,6 @@ class HDF5RowReader:
         self.max_open_files = int(max_open_files)
         self._pid = os.getpid()
         self._handles: OrderedDict[str, h5py.File] = OrderedDict()
-        self._validated: set[str] = set()
 
     def _reset_after_fork(self) -> None:
         pid = os.getpid()
@@ -454,28 +487,25 @@ class HDF5RowReader:
         self._pid = pid
 
     def _path_for(self, entry: HDF5EpisodeIndexEntry) -> Path:
-        path = (
-            self.root / entry.relative_file
-            if entry.relative_file
-            else self.root / (entry.relative_path + ".hdf5")
-        )
+        if entry.relative_file:
+            relative_file = _validate_relative_file(entry.relative_file)
+            path = self.root / relative_file
+        else:
+            relative_path = _validate_relative_file(entry.relative_path)
+            path = self.root / (relative_path + ".hdf5")
         if not path.is_file() and not entry.relative_file:
-            path = self.root / (entry.relative_path + ".h5")
+            path = self.root / (relative_path + ".h5")
         if not path.is_file():
             raise FileNotFoundError(f"indexed episode is missing: {entry.episode_id}")
         return path
 
     def _validate_source(self, path: Path, entry: HDF5EpisodeIndexEntry) -> None:
-        key = str(path.resolve())
-        if key in self._validated:
-            return
         if entry.source_fingerprint is not None:
             entry.source_fingerprint.validate(path)
         else:
             stat = path.stat()
             if int(stat.st_size) != entry.file_size or int(stat.st_mtime_ns) != entry.mtime_ns:
                 raise ValueError(f"indexed episode changed since admission: {entry.episode_id}")
-        self._validated.add(key)
 
     def _handle_for(self, path: Path, entry: HDF5EpisodeIndexEntry) -> h5py.File:
         self._reset_after_fork()
@@ -530,14 +560,13 @@ class HDF5RowReader:
         if expected_dtype is not None and np.dtype(dataset.dtype).str != expected_dtype:
             raise ValueError(f"indexed HDF5 dataset dtype changed: {entry.episode_id}:{dataset_key}")
 
-        ordered = np.argsort(indices, kind="stable")
-        sorted_indices = indices[ordered]
-        if len(np.unique(sorted_indices)) != len(sorted_indices):
-            values = np.stack([np.asarray(dataset[int(row)]) for row in indices], axis=0)
+        unique, inverse = np.unique(indices, return_inverse=True)
+        # Consecutive windows use one hyperslab; arbitrary repeated history
+        # rows use one unique read and scatter back to the caller's order.
+        if int(unique[-1]) - int(unique[0]) + 1 == len(unique):
+            values = np.asarray(dataset[int(unique[0]):int(unique[-1]) + 1])[inverse]
         else:
-            values = np.asarray(dataset[sorted_indices])
-            inverse = np.argsort(ordered, kind="stable")
-            values = values[inverse]
+            values = np.asarray(dataset[unique])[inverse]
         if target_dtype is not None:
             values = np.asarray(values, dtype=np.dtype(target_dtype))
         if require_finite and np.issubdtype(values.dtype, np.number) and not np.isfinite(values).all():
@@ -552,8 +581,6 @@ class HDF5RowReader:
                 pass
         if hasattr(self, "_handles"):
             self._handles.clear()
-        if hasattr(self, "_validated"):
-            self._validated.clear()
 
     def __getstate__(self) -> dict[str, object]:
         # h5py handles are process-owned and must never cross a DataLoader
@@ -565,7 +592,6 @@ class HDF5RowReader:
         self.max_open_files = int(state["max_open_files"])
         self._pid = os.getpid()
         self._handles = OrderedDict()
-        self._validated = set()
 
     def __enter__(self) -> "HDF5RowReader":
         return self
@@ -578,6 +604,7 @@ class HDF5RowReader:
             self.close()
         except Exception:
             pass
+
 
 
 def read_hdf5_rows(root: Path, entry: HDF5EpisodeIndexEntry, dataset_key: str, rows: Sequence[int]) -> np.ndarray:
