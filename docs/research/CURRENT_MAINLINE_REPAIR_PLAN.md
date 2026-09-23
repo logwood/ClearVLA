@@ -364,6 +364,14 @@ Prepare an opt-in `hdf5_indexed_lazy_v1` reader with these boundaries:
   fitting, profile projection and production worker/RNG continuation remain
   separate gates.
 
+  A second loader-only gate on the same 32 episodes also matched the eager
+  action/state/action-state bytes and both serialized z-score normalizer
+  digests exactly (`bcf08bdf97bf40e1eb429436ed800a6adb409f40751d24d13b12910a0467923d`
+  and `d0e9beee83e162615a99b3917a91bad89ec40165518eb689776dbede42fda031`).
+  The lazy row phase took 87.6 ms after admission. This closes the prototype's
+  normalizer/field-byte gate for the sample, but not the full E1 terminal,
+  overlay, or worker-resume gate.
+
 ### 1c. Evaluate the historical V1 before deciding whether to retire its trainer
 
 The authorized bounded panel is complete. It evaluated the frozen
