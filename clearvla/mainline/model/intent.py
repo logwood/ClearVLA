@@ -620,7 +620,16 @@ class StatelessObjectIntentOrganizer(nn.Module):
     ) -> tuple[ObjectIntentState, dict[str, Tensor]]:
         if goal_tokens.ndim != 3 or goal_mask.ndim != 2:
             raise ValueError("intent organizer requires full T5 tokens and mask")
+        if tuple(goal_mask.shape) != tuple(goal_tokens.shape[:2]):
+            raise ValueError("intent goal mask must align with the T5 token axes")
         batch = int(goal_tokens.shape[0])
+        # Padding is not evidence. Mask BEFORE the first trainable projection:
+        # a zero gradient after attention cannot undo NaN * 0 in a Linear VJP.
+        goal_tokens = torch.where(
+            goal_mask.to(device=goal_tokens.device, dtype=torch.bool)[..., None],
+            goal_tokens,
+            torch.zeros_like(goal_tokens),
+        )
         goal_memory = self.goal_input(goal_tokens)
         goal_query = self.goal_queries.to(
             device=goal_memory.device, dtype=goal_memory.dtype

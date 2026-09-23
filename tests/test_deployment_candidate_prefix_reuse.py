@@ -36,7 +36,11 @@ class _TerminalHarness:
         return action
 
     @staticmethod
-    def predict_candidate_velocity(action: Tensor) -> Tensor:
+    def predict_candidate_velocity(
+        action: Tensor, *, arm_private_correction: Tensor | None = None
+    ) -> Tensor:
+        if arm_private_correction is not None:
+            raise ValueError("minimal prefix harness has no private-arm branch")
         return torch.stack(
             (
                 action[..., 0] + 0.25 * action[..., 1],

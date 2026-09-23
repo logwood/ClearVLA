@@ -104,9 +104,11 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
         "online.dino_history": batch.online.observation.dino_history,
         "online.raw": batch.online.observation.raw_rgb,
         "online.state": batch.online.history.state,
+        "online.action_state": batch.online.history.action_state,
+        "online.codec_gripper_boundary": batch.online.history.codec_gripper_boundary,
         "online.state_history": batch.online.history.state_history,
         "online.executed_history": batch.online.history.executed_action_history,
-        "online.goal": batch.online.goal.tokens,
+        "online.goal": quarantine(batch.online.goal.tokens, batch.online.goal.mask),
         "target.action": batch.action_target.normalized,
         "target.action_raw_units": batch.action_target.raw_units,
         "target.current_raw_units": batch.action_target.current_raw_units,
@@ -120,7 +122,17 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
         "future.action": batch.future.action_sequence,
         "future.state": batch.future.state_sequence,
     }
-    robot_step = batch.online.history.executed_robot_step
+    history = batch.online.history
+    timing = history.timing
+    if timing is not None:
+        timing.validate(
+            batch=history.batch, states=int(history.state_history.shape[1]),
+            actions=int(history.executed_action_history.shape[1]),
+            device=history.state.device, strict=True,
+        )
+        values["online.state_history"] = quarantine(history.state_history, timing.state_observed)
+        values["online.executed_history"] = quarantine(history.executed_action_history, timing.action_executed)
+    robot_step = history.executed_robot_step
     if robot_step is not None:
         for name in ("previous_state", "command"):
             values["online.robot_step." + name] = torch.where(robot_step.observed[:, None], getattr(robot_step, name), 0.0)
@@ -150,15 +162,18 @@ def validate_finite_training_batch(batch: TrainingBatch) -> None:
     invalid = [name for name, value in values.items() if not bool(torch.isfinite(value).all())]
     if invalid:
         raise ValueError(f"training batch contains non-finite tensors: {', '.join(invalid)}")
-    if support is not None and not torch.equal(
-        values["target.action"], values["future.action"][:, : values["target.action"].shape[1]]
-    ):
-        raise ValueError("policy and world supervision disagree on observed source actions")
     from ..future_time import resolve_future_time
     grid = resolve_future_time(batch.future.time_grid_mode)
     expected_offsets = batch.future.offsets.new_tensor(grid.support_offsets)[None].expand(batch.future.batch, -1)
     if not torch.equal(batch.future.offsets, expected_offsets):
         raise ValueError("future teacher offsets must match the declared physical time grid")
+    # Complete windows and real-tail windows share the same recorded action
+    # prefix. Omitting a support record means all rows are observed, not that
+    # the policy and world branches may train against conflicting commands.
+    if not torch.equal(
+        values["target.action"], values["future.action"][:, : values["target.action"].shape[1]]
+    ):
+        raise ValueError("policy and world supervision disagree on observed source actions")
 
 
 
@@ -987,6 +1002,10 @@ class MainlineTrainingEngine:
 
         batch.validate(self.config)
         self.model.eval()
+        # Checkpoint resumes and standalone validation may set global_step
+        # without first taking another training update. Use its canonical
+        # phase before either constructing or consuming the validation graph.
+        self.model.set_training_step(self.global_step)
         with _autocast(self.device, self.dtype):
             cache, training_state, metrics = self.model.encode_online(
                 batch.online,
@@ -1048,6 +1067,11 @@ class MainlineTrainingEngine:
         self.optimizer.step()
         self.schedule.step()
         self.global_step += 1
+        # global_step counts completed optimizer updates. Publish the same
+        # execution phase now that validation and deployment reconstruct from
+        # this count, instead of checkpointing the phase of the previous step.
+        # Backward is complete and diagnostic tensors own detached copies.
+        self.model.set_training_step(self.global_step)
         return TrainStepResult(
             loss=ledger.total.detach().float(),
             gradient_norm=gradient_norm.detach().float(),
@@ -1066,6 +1090,10 @@ class MainlineTrainingEngine:
         encoded: EncodedTrainingBatch | None = None,
     ) -> TrainStepResult:
         self.model.eval()
+        # Checkpoint resumes and standalone validation may set global_step
+        # without first taking another training update. Use its canonical
+        # phase before either constructing or consuming the validation graph.
+        self.model.set_training_step(self.global_step)
         with _autocast(self.device, self.dtype):
             if encoded is None:
                 ledger, metrics = self._forward(
