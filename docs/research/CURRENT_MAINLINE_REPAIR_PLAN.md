@@ -351,8 +351,18 @@ Prepare an opt-in `hdf5_indexed_lazy_v1` reader with these boundaries:
   the caller's order and reject stale source identity before returning data.
 
   The legacy eager path remains the default until this gate passes. The index
-format and lazy reader must be reviewed as one source unit; do not claim a
-training speedup from the current NPY `pread` measurements alone.
+  format and lazy reader must be reviewed as one source unit; do not claim a
+  training speedup from the current NPY `pread` measurements alone.
+
+  The latest read-only probe on 32 real CALVIN train episodes (fixed seed 17)
+  preserved identity order and selected row bytes. It measured 32.91 s for
+  the one-time metadata index, 6.2 ms to reload it, 144.4 ms for eager
+  admission, and 56.7 ms for the matched selected-row lazy read. Three warm
+  repeats with a bounded worker-local handle cache were 89.3 ms versus 96.3 ms
+  for the open-per-call control. These numbers support warm reuse but do not
+  establish end-to-end training speed; raw-overlay admission, normalizer
+  fitting, profile projection and production worker/RNG continuation remain
+  separate gates.
 
 ### 1c. Evaluate the historical V1 before deciding whether to retire its trainer
 

@@ -15,6 +15,7 @@ from clearvla.data.hdf5_index import (
     HDF5RowReader,
     build_hdf5_episode_index,
     load_hdf5_episode_index,
+    read_hdf5_rows,
     save_hdf5_episode_index,
 )
 
@@ -27,6 +28,7 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--index-out", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--fingerprint-mode", choices=("stat", "sha256"), default="stat")
+    parser.add_argument("--repeats", type=int, default=3)
     return parser.parse_args()
 
 
@@ -83,10 +85,12 @@ def main() -> None:
 
     rng = np.random.default_rng(args.seed)
     checks: list[dict[str, object]] = []
+    requests: list[tuple[object, np.ndarray]] = []
     lazy_started = time.perf_counter()
     with HDF5RowReader(index_root, max_open_files=16) as reader:
         for entry, episode in zip(restored, eager, strict=True):
             rows = np.sort(rng.choice(entry.action_shape[0], size=min(3, entry.action_shape[0]), replace=False))
+            requests.append((entry, rows))
             lazy_action = reader.read_rows(
                 entry, entry.action_key, rows, require_finite=True, target_dtype=np.float32
             )
@@ -106,6 +110,20 @@ def main() -> None:
             checks.append({"episode_id": entry.episode_id, "rows": rows.tolist()})
     lazy_seconds = time.perf_counter() - lazy_started
 
+    if args.repeats <= 0:
+        raise ValueError("repeats must be positive")
+    uncached_started = time.perf_counter()
+    for _ in range(args.repeats):
+        for entry, rows in requests:
+            read_hdf5_rows(index_root, entry, entry.action_key, rows)
+    uncached_repeated_seconds = time.perf_counter() - uncached_started
+    cached_reader_started = time.perf_counter()
+    with HDF5RowReader(index_root, max_open_files=16) as reader:
+        for _ in range(args.repeats):
+            for entry, rows in requests:
+                reader.read_rows(entry, entry.action_key, rows, require_finite=True)
+    cached_repeated_seconds = time.perf_counter() - cached_reader_started
+
     print(
         json.dumps(
             {
@@ -113,6 +131,7 @@ def main() -> None:
                 "episode_count": len(restored),
                 "seed": args.seed,
                 "fingerprint_mode": args.fingerprint_mode,
+                "repeats": args.repeats,
                 "identity_order_equal": [entry.episode_id for entry in restored]
                 == [episode.episode_id for episode in eager],
                 "row_bytes_equal": True,
@@ -120,6 +139,13 @@ def main() -> None:
                 "index_reload_seconds": index_load_seconds,
                 "eager_admission_seconds": eager_seconds,
                 "lazy_selected_rows_seconds": lazy_seconds,
+                "uncached_repeated_rows_seconds": uncached_repeated_seconds,
+                "cached_repeated_rows_seconds": cached_repeated_seconds,
+                "cached_reader_speedup": (
+                    uncached_repeated_seconds / cached_repeated_seconds
+                    if cached_repeated_seconds > 0
+                    else None
+                ),
                 "checks": checks,
             },
             indent=2,
