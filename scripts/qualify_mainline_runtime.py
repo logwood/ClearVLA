@@ -106,11 +106,29 @@ def bind_worker_to_parent() -> bool:
     if expected <= 1:
         raise ValueError("internal worker requires an owning qualification parent")
     libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+    if libc.prctl(1, kill_signal, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
         raise OSError(ctypes.get_errno(), "cannot bind worker lifetime to its parent")
     if os.getppid() != expected:
         raise RuntimeError("qualification parent exited before worker startup")
     return True
+
+
+def rss_peak_bytes() -> int | None:
+    """Return a portable process RSS sample when the platform exposes it."""
+    try:
+        import importlib
+
+        resource: Any = importlib.import_module("resource")
+    except (ImportError, ModuleNotFoundError):
+        return None
+    getrusage = getattr(resource, "getrusage", None)
+    usage_self = getattr(resource, "RUSAGE_SELF", None)
+    if getrusage is None or usage_self is None:
+        return None
+    value = int(getrusage(usage_self).ru_maxrss)
+    # Linux reports KiB; macOS and the Windows fallback report bytes or None.
+    return value * 1024 if sys.platform.startswith("linux") else value
 
 
 def child(a: argparse.Namespace) -> int:
@@ -120,8 +138,6 @@ def child(a: argparse.Namespace) -> int:
     try:
         report["parent_death_guard"] = bind_worker_to_parent()
         write_json(path, report)
-        import resource
-
         import torch
 
         from clearvla.mainline.config import load_config
@@ -166,7 +182,7 @@ def child(a: argparse.Namespace) -> int:
         def mark(stage: str) -> None:
             report.update(
                 stage=stage,
-                rss_peak_bytes=int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024,
+                rss_peak_bytes=rss_peak_bytes(),
             )
             if torch.cuda.is_available() and a.device.startswith("cuda"):
                 report["cuda_peak_allocated_bytes"] = torch.cuda.max_memory_allocated(a.device)
@@ -510,10 +526,16 @@ def main() -> int:
 
         def stop_worker() -> None:
             if worker.poll() is None:
-                try:
-                    os.killpg(worker.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if os.name == "posix":
+                    kill_group = getattr(os, "killpg", None)
+                    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+                    if kill_group is not None:
+                        try:
+                            kill_group(worker.pid, kill_signal)
+                        except ProcessLookupError:
+                            pass
+                else:
+                    worker.kill()
                 worker.wait(timeout=5)
 
         def interrupted(signum: int, frame: object) -> None:
