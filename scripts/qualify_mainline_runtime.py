@@ -37,9 +37,13 @@ def arguments() -> argparse.Namespace:
     )
     p.add_argument("--output", type=Path, required=True)
     p.add_argument(
-        "--operation", choices=("inspect", "data", "inference", "train-step"), default="inspect"
+        "--operation", choices=("inspect", "data", "inference", "train-step", "fit-batch"), default="inspect"
     )
-    p.add_argument("--source", choices=("synthetic", "real"), default="synthetic")
+    p.add_argument("--source", choices=("synthetic", "real"))
+    p.add_argument(
+        "--updates", type=int,
+        help="Explicit finite update budget for fit-batch only; repeats one admitted batch",
+    )
     p.add_argument("--device", default="cpu")
     p.add_argument("--dtype", choices=("fp32", "bf16"))
     p.add_argument("--batch-size", type=int, default=1)
@@ -56,6 +60,15 @@ def arguments() -> argparse.Namespace:
     p.add_argument("--timeout", type=float, default=300.0)
     p.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     a = p.parse_args()
+    if a.source is None:
+        if a.operation == "fit-batch":
+            p.error("fit-batch requires explicit --source real or synthetic")
+        a.source = "synthetic"
+    if a.operation == "fit-batch":
+        if a.updates is None or a.updates < 1:
+            p.error("fit-batch requires a positive explicit --updates budget")
+    elif a.updates is not None:
+        p.error("updates is valid only for fit-batch")
     if a.batch_size < 1 or not math.isfinite(a.timeout) or a.timeout <= 0:
         p.error("batch-size and finite timeout must be positive")
     if a.inference_step < 0 or (a.inference_step and a.operation != "inference"):
@@ -252,25 +265,50 @@ def child(a: argparse.Namespace) -> int:
             p.numel() for p in model.parameters() if p.requires_grad
         )
         dtype = resolve_compute_dtype(config)
-        if a.operation == "train-step":
+        if a.operation in {"train-step", "fit-batch"}:
             optimizer, _ = measured("build-optimizer", lambda: build_optimizer(model, config))
             engine = MainlineTrainingEngine(
                 model=model,
                 config=config,
                 optimizer=optimizer,
                 schedule=WarmupCosineSchedule(
-                    optimizer, warmup_steps=1, total_steps=2, minimum_ratio=0.1
+                    optimizer,
+                    warmup_steps=config.optimizer.warmup_steps if a.operation == "fit-batch" else 1,
+                    total_steps=a.updates if a.operation == "fit-batch" else 2,
+                    minimum_ratio=config.optimizer.min_lr_ratio if a.operation == "fit-batch" else 0.1,
                 ),
                 device=device,
                 dtype=dtype,
             )
             report["model_forward_attempted"] = True
-            result = measured(
-                "one-optimizer-update", lambda: engine.train_step(batch, collect_diagnostics=True)
-            )
-            if not torch.isfinite(result.loss):
-                raise FloatingPointError("non-finite one-step loss")
-            report.update(loss=float(result.loss), completed_optimizer_updates=engine.global_step)
+            if a.operation == "fit-batch":
+                from clearvla.mainline.runtime.learning_probe import probe_fixed_batch_learning
+
+                report["probe_schedule"] = {
+                    "state": engine.schedule.state_dict(),
+                    "scope": "configured warmup/minimum, requested finite horizon; not formal dataset schedule",
+                    "warmup_exceeds_budget": config.optimizer.warmup_steps > a.updates,
+                }
+
+                def learning_progress(trace: dict[str, Any]) -> None:
+                    report["fixed_batch_learning"] = trace
+                    report["completed_optimizer_updates"] = engine.global_step
+                    mark("fixed-batch-" + trace["stage"])
+
+                report["fixed_batch_learning"] = measured(
+                    "fixed-batch-learning",
+                    lambda: probe_fixed_batch_learning(
+                        engine, batch, updates=a.updates, on_progress=learning_progress
+                    ),
+                )
+                report["weights_after"] = "same fresh initialization after bounded updates; no checkpoint emitted"
+            else:
+                result = measured(
+                    "one-optimizer-update", lambda: engine.train_step(batch, collect_diagnostics=True)
+                )
+                if not torch.isfinite(result.loss):
+                    raise FloatingPointError("non-finite one-step loss")
+                report.update(loss=float(result.loss), completed_optimizer_updates=engine.global_step)
         else:
             model.eval()
             report["inference_phase_clock"] = {
@@ -372,6 +410,8 @@ def main() -> int:
         str(a.inference_step),
         "--worker",
     ]
+    if a.updates is not None:
+        command += ["--updates", str(a.updates)]
     if a.dtype is not None:
         command += ["--dtype", a.dtype]
     if a.allow_runtime_mismatch:

@@ -1,3 +1,38 @@
+## M8l — bounded fixed-batch learning measurement (2026-09-24 UTC)
+
+The runtime qualifier has an explicit `fit-batch` operation requiring both a
+source (`real` or `synthetic`) and a positive finite update count. It admits the
+same actual batch and model as the existing path, freshly encodes each engine
+call, and records every completed optimizer update plus fixed-seed before/after
+loss and endpoint-goal metrics. Evaluation restores CPU/active-CUDA random
+streams and module modes. It uses the real completed-update phase, not an
+emulated inference clock; before/after measurements may therefore differ in
+both weights and controller phase. Loss decrease is measured, not required or
+called held-out/physical success.
+
+The bounded diagnostic schedule keeps configured warmup and minimum LR ratio
+with the explicitly requested update horizon; it records that this is not the
+formal dataset schedule and never secretly shortens warmup. Missing real data,
+runtime/device mismatch, nonfinite computation, interruption or partial updates
+remain blocked/failed as applicable. No checkpoint is emitted, dependencies
+installed, existing server job changed, neural mode introduced, model parameter
+added, loss reweighted or action/W/ODE formula changed. The helper is numerical
+learning qualification, not a completed real-data experiment.
+
+## M8k — recovered spatial-causality audit (2026-09-24 UTC)
+
+The restored M8j source already has native reference-patch coordinates in the
+endpoint predictor's query/key/value tokens, before nonlinear attention and
+FFN reads. Do not infer missing spatial conditioning by changing CURRENT G3
+posteriors while keeping its instruction-start input fixed. That invariance is
+intentional. Same-content/same-centroid START layouts can change predicted
+endpoint laws and global robot relations; removing positions in a diagnostic
+copy removes the global distinction. Preserve this source/clock separation.
+This verifies a representational path, not learned physical correspondence or
+success. No extra spatial head or new neural mode is justified by that failed
+hypothesis. Controlled source probes and exact inventories stay outside this
+architecture ledger; no old partial test count is a new acceptance result.
+
 ## M8j — reference-conditioned annotated endpoint relation candidate (2026-09-23)
 
 `top.annotation_goal_mode=annotated_endpoint_relation_v1` is explicit in

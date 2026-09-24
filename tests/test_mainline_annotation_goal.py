@@ -173,8 +173,11 @@ def test_actual_first_command_gradients_reach_both_S_and_P3(production):
     pr = _reader(production)
     cache, _, _ = m.encode_online(b.online)
     out = m.velocity(cache, noisy_action_field=torch.randn(1, 24, 18), time=torch.tensor([0.4]))
+    position = predictor.position[0]
+    assert isinstance(position, torch.nn.Linear)
     parameters = [
         predictor.content.weight,
+        position.weight,
         predictor.origin.weight,
         predictor.robot.weight,
         sr.joint_output.weight,
@@ -392,9 +395,11 @@ def test_full_graph_CPU_bf16_gradient(production):
         out = m.velocity(cache, noisy_action_field=torch.randn(1, 24, 18), time=torch.tensor([0.4]))
     p = m.intent.organizer.endpoint_goal
     assert p is not None
+    position = p.position[0]
+    assert isinstance(position, torch.nn.Linear)
     grads = torch.autograd.grad(
         out.bottom.physical_velocity[:, 0].square().sum(),
-        [p.content.weight, p.origin.weight, _reader(production).output.weight],
+        [p.content.weight, position.weight, p.origin.weight, _reader(production).output.weight],
     )
     for g in grads:
         assert torch.isfinite(g).all() and g.count_nonzero() > 0

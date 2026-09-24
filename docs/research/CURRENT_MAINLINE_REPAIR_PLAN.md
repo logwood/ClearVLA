@@ -1,3 +1,23 @@
+## M8k/M8l continuation (2026-09-24 UTC)
+
+Continue from remotely saved M8j `4ba0fbbd731d82a80fd129362c27390b29029d14`,
+not the older last-visible chat boundary. Source already contains nonlinear
+position conditioning in the anchored goal predictor. Same-centroid layout,
+position-ablation and synthetic predictor-fitting controls contradict the
+claim that this saved predictor ignores start-space; do not add a redundant
+neural path on that premise. Current-observation and instruction-age invariance
+of the start-conditioned prior remain intentional. Both FP32 and CPU BF16
+first-action VJPs now explicitly include the existing position weights.
+
+The real-data prerequisite now has a bounded `fit-batch` qualifier using the
+actual training engine, fixed evaluation noise and per-update records. It does
+not claim held-out or closed-loop success, silently shorten warmup, replace
+missing recorded data, or migrate old weights. The next empirical gate remains
+actual cache/data admission, production GPU update/resources, a finite real-data
+learning comparison and the previously defined targeted physical rollout.
+Calibrated entity identity, terminal semantic correctness and physical goal
+progress remain unaccepted. Preserve source independently of full CI results.
+
 ## M8j: annotated-endpoint prior and remaining relation candidate
 
 Continue from independently restored f5ab2eef source (same tree as expanded
