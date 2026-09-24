@@ -1,3 +1,38 @@
+## M8m/M8n — bounded train/validation measurement (2026-09-24 UTC)
+
+`fit-heldout` is an explicit qualifier operation, NOT a new neural mode. Its
+real CALVIN lane audits the complete train/val episode inventory, including all
+training episodes used for the existing train-only normalizers. Distinct
+annotation filenames do not establish independence: shared raw trajectory IDs,
+contradictory trajectory bounds, overlapping raw intervals (including a shared
+boundary frame), aliased paths, unknown provenance or unverified normalizer scope
+block this diagnostic before model construction. Original splits and examples
+are not rewritten, dropped or repaired. This checks recorded provenance, not
+adversarial metadata authenticity, content deduplication or semantic independence.
+
+Default probe rows spread over distinct source groups and take a central eligible
+window, without consulting labels, contact, model outputs or success. Explicit
+train/val dataset indices may be supplied and are recorded; collated CPU audit
+identities must agree with the chosen split rows. The legacy single-batch
+operation retains its old selection. Actual action-label, endpoint-label and
+physical-feedback supports are reported, not used as success scores or gates.
+
+Only the fixed training batch receives optimizer updates. Training and validation
+batches each have fixed-seed before/after measurements at their actual completed
+update clocks; evaluation preserves the training RNG streams and module modes.
+No test batch is selected for model evaluation, no early stopping or checkpoint
+selection is performed, and no decrease is required for numeric completion.
+The inherited data loader may still inspect/materialize the complete source
+inventory. A pair of synthetic batches explicitly carries NO real-separation
+claim. One validation batch is not a population estimate or physical-skill test.
+
+Configured warmup/minimum ratio, objective budgets, neural parameters and physical
+history semantics remain unchanged. Missing real paths stay blocked. The bounded
+probe does not install dependencies, upgrade XVLA, run formal training or emit
+weights; full production CUDA/BF16, recorded-data learning and closed-loop results
+remain separate requirements. Source preservation and exact test results are
+recorded in the delivered report rather than inferred from the operation name.
+
 ## M8l — bounded fixed-batch learning measurement (2026-09-24 UTC)
 
 The runtime qualifier has an explicit `fit-batch` operation requiring both a

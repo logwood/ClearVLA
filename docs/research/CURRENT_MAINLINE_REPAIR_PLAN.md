@@ -1,3 +1,17 @@
+## M8m/M8n continuation: qualify learning without split leakage
+
+The existing qualifier now offers explicit `fit-heldout` train/val measurement.
+Its real CALVIN path verifies all recorded source trajectories and train-only
+normalizer scope before selecting a bounded batch from each split. Neither
+annotation filenames nor two random tensors alone certify held-out robot data.
+No new neural module, loss budget, configuration mode or workflow is needed.
+
+Next measured prerequisite remains the user server: actual runtime inspection,
+real-path/batch/source support admission, production-size one-update numerical
+execution, then a bounded train/val experiment and trained-policy closed-loop
+comparisons. Current-container synthetic measurements do not satisfy these.
+Do not keep adding task heads to work around missing real learning evidence.
+
 ## M8k/M8l continuation (2026-09-24 UTC)
 
 Continue from remotely saved M8j `4ba0fbbd731d82a80fd129362c27390b29029d14`,

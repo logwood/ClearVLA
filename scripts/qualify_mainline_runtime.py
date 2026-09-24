@@ -37,13 +37,15 @@ def arguments() -> argparse.Namespace:
     )
     p.add_argument("--output", type=Path, required=True)
     p.add_argument(
-        "--operation", choices=("inspect", "data", "inference", "train-step", "fit-batch"), default="inspect"
+        "--operation", choices=("inspect", "data", "inference", "train-step", "fit-batch", "fit-heldout"), default="inspect"
     )
     p.add_argument("--source", choices=("synthetic", "real"))
     p.add_argument(
         "--updates", type=int,
-        help="Explicit finite update budget for fit-batch only; repeats one admitted batch",
+        help="Explicit finite update budget for fit-batch/fit-heldout; repeats one training batch",
     )
+    p.add_argument("--train-indices", type=int, nargs="+", help="Explicit train dataset indices for real fit-heldout only")
+    p.add_argument("--val-indices", type=int, nargs="+", help="Explicit val dataset indices for real fit-heldout only")
     p.add_argument("--device", default="cpu")
     p.add_argument("--dtype", choices=("fp32", "bf16"))
     p.add_argument("--batch-size", type=int, default=1)
@@ -61,14 +63,21 @@ def arguments() -> argparse.Namespace:
     p.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     a = p.parse_args()
     if a.source is None:
-        if a.operation == "fit-batch":
-            p.error("fit-batch requires explicit --source real or synthetic")
+        if a.operation in {"fit-batch", "fit-heldout"}:
+            p.error("fit-batch/fit-heldout requires explicit --source real or synthetic")
         a.source = "synthetic"
-    if a.operation == "fit-batch":
+    if a.operation in {"fit-batch", "fit-heldout"}:
         if a.updates is None or a.updates < 1:
-            p.error("fit-batch requires a positive explicit --updates budget")
+            p.error("fit-batch/fit-heldout requires a positive explicit --updates budget")
     elif a.updates is not None:
-        p.error("updates is valid only for fit-batch")
+        p.error("updates is valid only for fit-batch/fit-heldout")
+    for name in ("train_indices", "val_indices"):
+        indices = getattr(a, name)
+        if indices is not None:
+            if a.operation != "fit-heldout" or a.source != "real":
+                p.error("explicit indices require real fit-heldout")
+            if len(indices) != a.batch_size or len(set(indices)) != len(indices) or min(indices) < 0:
+                p.error("indices must be unique, nonnegative and match batch-size")
     if a.batch_size < 1 or not math.isfinite(a.timeout) or a.timeout <= 0:
         p.error("batch-size and finite timeout must be positive")
     if a.inference_step < 0 or (a.inference_step and a.operation != "inference"):
@@ -198,6 +207,7 @@ def child(a: argparse.Namespace) -> int:
             mark("complete")
             return 0
         bundle = None
+        validation_batch = None
         if a.source == "real":
             missing = [k for k, v in report["data_paths"].items() if not v["exists"]]
             if missing:
@@ -213,21 +223,60 @@ def child(a: argparse.Namespace) -> int:
             bundle = measured(
                 "load-data", lambda: load_mainline_data(config, allow_null_goal=False)
             )
-            data = bundle.datasets["train"]
-            if len(data) < a.batch_size:
-                raise ValueError("real training inventory is smaller than requested batch")
-            # Deterministic, non-repeating samples spanning the available inventory.
-            indices = [i * (len(data) - 1) // max(a.batch_size - 1, 1) for i in range(a.batch_size)]
-            report["real_sample_indices"] = indices
-            batch = measured(
-                "read-batch",
-                lambda: to_training_batch(
-                    default_collate([data[i] for i in indices]),
-                    goal=bundle.goal,
-                    config=config,
-                    device=device,
-                ),
-            )
+            if a.operation == "fit-heldout":
+                from clearvla.mainline.runtime.probe_selection import (
+                    audit_calvin_holdout,
+                    select_probe_indices,
+                )
+
+                admission = audit_calvin_holdout(bundle.episodes, bundle.splits, bundle.normalizer_metadata)
+                report["heldout_admission"] = admission
+                if admission["status"] != "passed":
+                    report.update(status="blocked", reason="recorded-source holdout admission failed")
+                    mark("heldout-admission")
+                    return 2
+                report["probe_selection"] = {}
+                selected = {}
+                for split, explicit in (("train", a.train_indices), ("val", a.val_indices)):
+                    data = bundle.datasets[split]
+                    indices, rows = select_probe_indices(
+                        bundle.episodes, data.base.refs, count=a.batch_size, explicit=explicit
+                    )
+                    if any(row["episode_index"] not in bundle.splits[split] for row in rows):
+                        raise ValueError("selected dataset row is outside its declared split")
+                    report["probe_selection"][split] = {
+                        "rule": "explicit-indices" if explicit is not None else "source-group-spread-central-eligible-window",
+                        "rows": rows,
+                    }
+                    selected[split] = measured(
+                        "read-" + split + "-batch",
+                        lambda data=data, indices=indices: to_training_batch(
+                            default_collate([data[i] for i in indices]),
+                            goal=bundle.goal, config=config, device=device,
+                        ),
+                    )
+                    admitted = selected[split]
+                    if (
+                        admitted.audit.sample_index is None or admitted.audit.episode_index is None
+                        or admitted.audit.sample_index.tolist() != indices
+                        or admitted.audit.episode_index.tolist() != [row["episode_index"] for row in rows]
+                    ):
+                        raise ValueError("loaded batch provenance differs from selected split rows")
+                batch, validation_batch = selected["train"], selected["val"]
+            else:
+                data = bundle.datasets["train"]
+                if len(data) < a.batch_size:
+                    raise ValueError("real training inventory is smaller than requested batch")
+                # Preserve the original single-batch inspection behavior.
+                indices = [i * (len(data) - 1) // max(a.batch_size - 1, 1) for i in range(a.batch_size)]
+                report["real_sample_indices"] = indices
+                batch = measured(
+                    "read-batch",
+                    lambda: to_training_batch(
+                        default_collate([data[i] for i in indices]),
+                        goal=bundle.goal, config=config, device=device,
+                    ),
+                )
             normalizer = bundle.action_normalizer
         else:
             batch, normalizer = measured(
@@ -236,6 +285,21 @@ def child(a: argparse.Namespace) -> int:
                     config, count=a.batch_size, raw_side=a.raw_side, device=device
                 ),
             )
+        if a.operation == "fit-heldout" and a.source == "synthetic":
+            validation_batch, _ = measured(
+                "synthetic-validation-batch",
+                lambda: synthetic_batch(config, count=a.batch_size, raw_side=a.raw_side, device=device, seed=8401),
+            )
+            report["heldout_admission"] = {
+                "status": "not-applicable", "scope": "independently generated synthetic fixtures; no real-data separation claim",
+                "train_seed": 8301, "val_seed": 8401,
+            }
+        if validation_batch is not None:
+            from clearvla.mainline.runtime.probe_selection import batch_support_report
+
+            validation_batch.validate(config)
+            validate_finite_training_batch(validation_batch)
+            report["batch_support"] = {"train": batch_support_report(batch), "val": batch_support_report(validation_batch)}
         batch.validate(config)
         validate_finite_training_batch(batch)
         report["actual_shapes"] = {
@@ -265,7 +329,7 @@ def child(a: argparse.Namespace) -> int:
             p.numel() for p in model.parameters() if p.requires_grad
         )
         dtype = resolve_compute_dtype(config)
-        if a.operation in {"train-step", "fit-batch"}:
+        if a.operation in {"train-step", "fit-batch", "fit-heldout"}:
             optimizer, _ = measured("build-optimizer", lambda: build_optimizer(model, config))
             engine = MainlineTrainingEngine(
                 model=model,
@@ -273,16 +337,19 @@ def child(a: argparse.Namespace) -> int:
                 optimizer=optimizer,
                 schedule=WarmupCosineSchedule(
                     optimizer,
-                    warmup_steps=config.optimizer.warmup_steps if a.operation == "fit-batch" else 1,
-                    total_steps=a.updates if a.operation == "fit-batch" else 2,
-                    minimum_ratio=config.optimizer.min_lr_ratio if a.operation == "fit-batch" else 0.1,
+                    warmup_steps=config.optimizer.warmup_steps if a.operation in {"fit-batch", "fit-heldout"} else 1,
+                    total_steps=a.updates if a.operation in {"fit-batch", "fit-heldout"} else 2,
+                    minimum_ratio=config.optimizer.min_lr_ratio if a.operation in {"fit-batch", "fit-heldout"} else 0.1,
                 ),
                 device=device,
                 dtype=dtype,
             )
             report["model_forward_attempted"] = True
-            if a.operation == "fit-batch":
-                from clearvla.mainline.runtime.learning_probe import probe_fixed_batch_learning
+            if a.operation in {"fit-batch", "fit-heldout"}:
+                from clearvla.mainline.runtime.learning_probe import (
+                    probe_fixed_batch_learning,
+                    probe_heldout_learning,
+                )
 
                 report["probe_schedule"] = {
                     "state": engine.schedule.state_dict(),
@@ -290,17 +357,28 @@ def child(a: argparse.Namespace) -> int:
                     "warmup_exceeds_budget": config.optimizer.warmup_steps > a.updates,
                 }
 
+                learning_key = "heldout_learning" if a.operation == "fit-heldout" else "fixed_batch_learning"
+
                 def learning_progress(trace: dict[str, Any]) -> None:
-                    report["fixed_batch_learning"] = trace
+                    report[learning_key] = trace
                     report["completed_optimizer_updates"] = engine.global_step
                     mark("fixed-batch-" + trace["stage"])
 
-                report["fixed_batch_learning"] = measured(
-                    "fixed-batch-learning",
-                    lambda: probe_fixed_batch_learning(
-                        engine, batch, updates=a.updates, on_progress=learning_progress
-                    ),
-                )
+                if a.operation == "fit-heldout":
+                    assert validation_batch is not None
+                    report[learning_key] = measured(
+                        "heldout-learning",
+                        lambda: probe_heldout_learning(
+                            engine, batch, validation_batch, updates=a.updates, on_progress=learning_progress
+                        ),
+                    )
+                else:
+                    report[learning_key] = measured(
+                        "fixed-batch-learning",
+                        lambda: probe_fixed_batch_learning(
+                            engine, batch, updates=a.updates, on_progress=learning_progress
+                        ),
+                    )
                 report["weights_after"] = "same fresh initialization after bounded updates; no checkpoint emitted"
             else:
                 result = measured(
@@ -412,6 +490,9 @@ def main() -> int:
     ]
     if a.updates is not None:
         command += ["--updates", str(a.updates)]
+    for option, indices in (("--train-indices", a.train_indices), ("--val-indices", a.val_indices)):
+        if indices is not None:
+            command += [option, *(str(index) for index in indices)]
     if a.dtype is not None:
         command += ["--dtype", a.dtype]
     if a.allow_runtime_mismatch:

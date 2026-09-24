@@ -125,3 +125,86 @@ def probe_fixed_batch_learning(
         publish("failed")
         raise
     return trace
+
+
+def probe_heldout_learning(
+    engine: MainlineTrainingEngine,
+    train_batch: TrainingBatch,
+    validation_batch: TrainingBatch,
+    *,
+    updates: int,
+    evaluation_seed: int = 8302,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Train on ONE fixed batch, measure another batch without updating on it.
+
+    Source separation belongs to admission (the CLI checks the complete raw
+    train/val trajectory inventory and train-only normalizer ownership). This
+    helper does not turn synthetic samples or arbitrary callers into verified
+    independent data. No test split, early stopping, model selection, data
+    filtering, checkpoint output or loss-decrease acceptance is performed.
+    """
+    if type(updates) is not int or updates < 1:
+        raise ValueError("updates must be a positive integer")
+    if type(evaluation_seed) is not int or not 0 <= evaluation_seed < 2**64:
+        raise ValueError("evaluation seed must be a nonnegative 64-bit integer")
+    if train_batch is validation_batch or train_batch.online is validation_batch.online:
+        raise ValueError("validation must not reuse the training batch or online input")
+    start = engine.global_step
+    trace: dict[str, Any] = {
+        "status": "running",
+        "scope": "one fixed training batch and one validation batch; not population generalization or physics acceptance",
+        "updates_requested": updates,
+        "initial_completed_updates": start,
+        "completed_updates": 0,
+        "evaluation_seed": evaluation_seed,
+        "evaluation_clock": "actual engine completed updates; both splits evaluated at each clock",
+        "validation_optimizer_updates": 0,
+        "test_split_used": False,
+        "steps": [],
+    }
+
+    def publish(stage: str) -> None:
+        trace["stage"] = stage
+        trace["completed_updates"] = engine.global_step - start
+        if on_progress is not None:
+            on_progress(copy.deepcopy(trace))
+
+    def evaluate_pair(key: str) -> None:
+        # Publish each completed evaluation separately; never erase a completed
+        # update/evaluation if the next validation forward is killed.
+        trace[key] = {}
+        for name, batch in (("train", train_batch), ("val", validation_batch)):
+            publish(key + "-" + name)
+            trace[key][name] = evaluate_fixed_batch(engine, batch, seed=evaluation_seed)
+            publish(key + "-" + name + "-complete")
+
+    try:
+        evaluate_pair("before")
+        for index in range(updates):
+            publish(f"update-{index + 1}")
+            result = engine.train_step(train_batch, collect_diagnostics=False)
+            if engine.global_step != start + index + 1:
+                raise RuntimeError("engine did not report one completed update")
+            norm = float(result.gradient_norm.detach())
+            if not math.isfinite(norm):
+                raise FloatingPointError("non-finite heldout-probe gradient norm")
+            trace["steps"].append({
+                **_metrics(result),
+                "completed_optimizer_updates": engine.global_step,
+                "learning_rate_used": result.learning_rate,
+                "gradient_norm": norm,
+            })
+            publish(f"update-{index + 1}-complete")
+        evaluate_pair("after")
+        trace["loss_change"] = {
+            name: trace["after"][name]["loss"] - trace["before"][name]["loss"]
+            for name in ("train", "val")
+        }
+        trace["status"] = "completed"
+        publish("complete")
+    except BaseException as error:
+        trace.update(status="failed", error=type(error).__name__, message=str(error))
+        publish("failed")
+        raise
+    return trace
