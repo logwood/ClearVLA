@@ -10,6 +10,7 @@ from torch import Tensor, nn
 
 from ..config import ExperimentConfig
 from ..interfaces import FutureSupervision, ObservableHistory, OnlinePolicyInput
+from ..spatial_geometry import build_dino_charts, rgb_chart
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from .action_contract import BottomOutput
 from .component_contracts import ComponentSelection, modular_to_legacy_name
@@ -201,6 +202,26 @@ class ClearVLAMainlinePolicy(nn.Module):
         # policy; their already-initialized children are moved exactly once to
         # the final registered component hierarchy below.
         raw_observation = RestoredV120ObservationCompiler(config)
+        coordinate_contract = str(
+            raw_observation.v120_config.flow_jepa_coordinate_contract
+        )
+        future_chart = None
+        outer_chart = None
+        if coordinate_contract == "canonical_rgb_lattice_v1":
+            outer_chart = rgb_chart(
+                (int(config.data.cache_side), int(config.data.cache_side))
+            )
+            future_side = int(raw_observation.v120_config.future_grid_size)
+            future_chart = build_dino_charts(
+                outer_chart.shape_hw,
+                resized_hw=raw_observation.v120_config.flow_jepa_coordinate_processor_resize_hw,
+                crop_hw=raw_observation.v120_config.flow_jepa_coordinate_processor_crop_hw,
+                crop_offset_yx=raw_observation.v120_config.flow_jepa_coordinate_processor_crop_offset_yx,
+                patch_hw=raw_observation.v120_config.flow_jepa_coordinate_processor_patch_hw,
+                pooled_hw=(future_side, future_side),
+            )["dino_pooled"]
+            if tuple(future_chart.shape_hw) != (future_side, future_side):
+                raise RuntimeError("canonical future chart shape does not match V120 grid")
         raw_codec = PhysicalActionFieldCodec(
             action_dim=dims.action_dim,
             horizon=dims.action_horizon,
@@ -230,6 +251,9 @@ class ClearVLAMainlinePolicy(nn.Module):
             world_action_condition_mode=top.world_action_condition_mode,
             p2_spatial_intent_mode=top.p2_spatial_intent_mode,
             core_config=raw_observation.v120_config,
+            coordinate_contract=coordinate_contract,
+            future_chart=future_chart,
+            outer_chart=outer_chart,
         )
         raw_history_proposal = HistoryActionProposal(
             action_dim=dims.action_dim,
@@ -248,6 +272,7 @@ class ClearVLAMainlinePolicy(nn.Module):
                 top.p2_spatial_intent_mode
                 == "target_action_bottleneck_v1"
             ),
+            coordinate_contract=coordinate_contract,
         )
         raw_transition = ControlledTransitionDynamics(
             hidden=dims.hidden_size,

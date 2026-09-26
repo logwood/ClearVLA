@@ -36,6 +36,18 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
+from ..spatial_geometry import (
+    ChartSpec,
+    area_pool_chart,
+    build_dino_charts,
+    build_raw_charts,
+    convert_points,
+    convert_vectors,
+    convolution_chart,
+    resample_field,
+    resample_flow,
+    rgb_chart,
+)
 from .differential_intent_effect import (
     DifferentialWindowEffectBank,
     DifferentialWindowRouteCompiler,
@@ -102,6 +114,9 @@ class RawGroundingContext:
     # replaced by a future teacher or an action-conditioned crop.
     # Shape: [B,2,camera,3,R,R].
     raw_rgb_pair: Tensor | None = None
+    # Outer RGB side used to derive the runtime ChartSpec in the canonical
+    # path. This is metadata only and never enters a checkpoint state dict.
+    raw_outer_side: int | None = None
 
 
 @dataclass
@@ -144,6 +159,13 @@ class SoftAddressLatticeBank:
     # normalized image coordinates, so this chart can be sampled without a
     # fixed 8x8 -> patch ownership assumption.
     dense_current_rgb: Tensor | None = None
+    # Runtime-only geometry ownership for the opt-in canonical path. Chart
+    # objects carry no tensors and are intentionally absent from checkpoints.
+    coordinate_contract: str = "legacy_normalized_chart"
+    outer_chart: ChartSpec | None = None
+    raw_chart: ChartSpec | None = None
+    dino_chart: ChartSpec | None = None
+    dino_pooled_chart: ChartSpec | None = None
     # Frozen target-space projection of the current DINO chart.  This is
     # observation-only and sampled once by G3 at its continuous object-slot
     # coordinates.  It prevents W from learning a free current-reference head.
@@ -170,6 +192,9 @@ class ProgressiveFineCandidates:
     geometry_keys: Tensor | None = None
     literal_rgb: Tensor | None = None
     source_coordinates: Tensor | None = None
+    # Support belongs to each factual producer, independently of the shared
+    # proposal prior. A missing DINO sample cannot delete valid raw/RGB detail.
+    source_support: dict[str, Tensor] | None = None
 
 
 @dataclass(frozen=True)
@@ -425,6 +450,7 @@ class ProgressiveGroundingAddressState:
     dynamic_fine_valid: Tensor | None = None
     dynamic_fine_coordinates: Tensor | None = None
     dynamic_source_coordinates: Tensor | None = None
+    dynamic_source_support: dict[str, Tensor] | None = None
     dynamic_semantic_keys: Tensor | None = None
     dynamic_appearance_keys: Tensor | None = None
     dynamic_geometry_keys: Tensor | None = None
@@ -1356,11 +1382,23 @@ class _EarlyMaskedRawContextEncoder(nn.Module):
         grid: int,
         *,
         activation_checkpoint: bool,
+        coordinate_canonical: bool = False,
+        processor_resize_hw: tuple[int, int] = (256, 256),
+        processor_crop_hw: tuple[int, int] = (224, 224),
+        processor_crop_offset_yx: tuple[int, int] = (16, 16),
+        processor_patch_hw: tuple[int, int] = (14, 14),
     ) -> None:
         super().__init__()
         feature_dim = int(feature_dim)
         self.grid = int(grid)
         self.activation_checkpoint = bool(activation_checkpoint)
+        self.coordinate_canonical = bool(coordinate_canonical)
+        self.processor_resize_hw = tuple(int(value) for value in processor_resize_hw)
+        self.processor_crop_hw = tuple(int(value) for value in processor_crop_hw)
+        self.processor_crop_offset_yx = tuple(
+            int(value) for value in processor_crop_offset_yx
+        )
+        self.processor_patch_hw = tuple(int(value) for value in processor_patch_hw)
         self.mask_rgb = nn.Parameter(torch.zeros(1, 3, 1, 1))
         self.local = nn.Sequential(
             nn.Conv2d(4, feature_dim, 3, padding=1, bias=False),
@@ -1426,6 +1464,45 @@ class _EarlyMaskedRawContextEncoder(nn.Module):
         encoded = encoded.permute(0, 2, 3, 1).reshape(
             batch, history, cameras, self.grid, self.grid, int(encoded.shape[1])
         )
+        if self.coordinate_canonical:
+            # The adaptive RGB pool and the learned stride-2 block have their
+            # own producer lattice.  Its 8x8 centers are not the DINO pooled
+            # centers, even though both tensors have the same shape.  Align
+            # the early RGB carrier in the outer RGB frame before it is mixed
+            # with the DINO/history query.
+            rgb_hw = (int(side), int(side))
+            early_input_chart = area_pool_chart(
+                rgb_chart(rgb_hw),
+                (2 * self.grid, 2 * self.grid),
+                "early_rgb_pool",
+            )
+            early_chart = convolution_chart(
+                early_input_chart,
+                name="early_rgb_output",
+                kernel_hw=(3, 3),
+                stride_hw=(2, 2),
+                padding_hw=(1, 1),
+            )
+            dino_chart = build_dino_charts(
+                rgb_hw,
+                resized_hw=self.processor_resize_hw,
+                crop_hw=self.processor_crop_hw,
+                crop_offset_yx=self.processor_crop_offset_yx,
+                patch_hw=self.processor_patch_hw,
+                pooled_hw=(self.grid, self.grid),
+            )["dino_pooled"]
+            encoded_nchw = encoded.permute(0, 1, 2, 5, 3, 4).reshape(
+                batch * history * cameras,
+                int(encoded.shape[-1]),
+                self.grid,
+                self.grid,
+            )
+            encoded_nchw = resample_field(
+                encoded_nchw.float(), early_chart, dino_chart
+            ).values.to(dtype=encoded.dtype)
+            encoded = encoded_nchw.reshape(
+                batch, history, cameras, int(encoded.shape[-1]), self.grid, self.grid
+            ).permute(0, 1, 2, 4, 5, 3)
         return self.output_norm(encoded)
 
 
@@ -1509,6 +1586,12 @@ class _DenseRawFlowRefiner(nn.Module):
         preserve_uncertain_seed: bool = False,
         bounded_coordinates: bool = False,
         normalization_floor: float | None = None,
+        coordinate_canonical: bool = False,
+        chart_level: str = "high",
+        processor_resize_hw: tuple[int, int] = (256, 256),
+        processor_crop_hw: tuple[int, int] = (224, 224),
+        processor_crop_offset_yx: tuple[int, int] = (16, 16),
+        processor_patch_hw: tuple[int, int] = (14, 14),
     ) -> None:
         super().__init__()
         self.radius = int(radius)
@@ -1519,6 +1602,17 @@ class _DenseRawFlowRefiner(nn.Module):
         self.normalization_floor = (
             None if normalization_floor is None else float(normalization_floor)
         )
+        self.coordinate_canonical = bool(coordinate_canonical)
+        if chart_level not in {"mid", "high"}:
+            raise ValueError("raw flow chart_level must be mid or high")
+        self.chart_level = chart_level
+        self.processor_resize_hw = tuple(int(value) for value in processor_resize_hw)
+        self.processor_crop_hw = tuple(int(value) for value in processor_crop_hw)
+        self.processor_crop_offset_yx = tuple(
+            int(value) for value in processor_crop_offset_yx
+        )
+        self.processor_patch_hw = tuple(int(value) for value in processor_patch_hw)
+        self.outer_side: int | None = None
         self.feature = nn.Sequential(
             nn.Conv2d(input_dim, hidden, 1, bias=False),
             nn.GroupNorm(_group_count(hidden), hidden),
@@ -1578,13 +1672,48 @@ class _DenseRawFlowRefiner(nn.Module):
         previous_side = int(coarse_flow.shape[-1])
         if int(coarse_flow.shape[-2]) != previous_side or int(coarse_flow.shape[0]) != batch:
             raise ValueError("raw coarse flow must be square and batch aligned")
-        scale = float(max(side - 1, 1)) / float(max(previous_side - 1, 1))
-        up_flow = F.interpolate(
-            coarse_flow.float(), size=(side, side), mode="bilinear", align_corners=True
-        ) * scale
-        reliability = F.interpolate(
-            coarse_reliability.float(), size=(side, side), mode="bilinear", align_corners=True
-        ).clamp(0.0, 1.0)
+        if self.coordinate_canonical:
+            if self.outer_side is None:
+                raise RuntimeError("canonical raw refiner has no outer RGB chart size")
+            charts = build_raw_charts((self.outer_side, self.outer_side))
+            target_chart = charts[f"raw_{self.chart_level}"]
+            if tuple(target_chart.shape_hw) != (side, side):
+                raise ValueError(
+                    "canonical raw refiner target chart does not match features: "
+                    f"{target_chart.shape_hw} != {(side, side)}"
+                )
+            if self.chart_level == "mid":
+                dino_charts = build_dino_charts(
+                    (self.outer_side, self.outer_side),
+                    resized_hw=self.processor_resize_hw,
+                    crop_hw=self.processor_crop_hw,
+                    crop_offset_yx=self.processor_crop_offset_yx,
+                    patch_hw=self.processor_patch_hw,
+                    pooled_hw=(previous_side, previous_side),
+                )
+                coarse_chart = dino_charts["dino_pooled"]
+            else:
+                coarse_chart = charts["raw_mid"]
+            up_flow = resample_flow(
+                coarse_flow.float(),
+                coarse_chart,
+                target_chart,
+                source_units="index",
+                target_units="index",
+            ).values
+            reliability = resample_field(
+                coarse_reliability.float(),
+                coarse_chart,
+                target_chart,
+            ).values.clamp(0.0, 1.0)
+        else:
+            scale = float(max(side - 1, 1)) / float(max(previous_side - 1, 1))
+            up_flow = F.interpolate(
+                coarse_flow.float(), size=(side, side), mode="bilinear", align_corners=True
+            ) * scale
+            reliability = F.interpolate(
+                coarse_reliability.float(), size=(side, side), mode="bilinear", align_corners=True
+            ).clamp(0.0, 1.0)
         if not self.preserve_uncertain_seed:
             up_flow = up_flow * reliability
         first_feature = self.feature(first)
@@ -1791,6 +1920,10 @@ class _RawPyramidFlow(nn.Module):
         self.bounded_coordinates = bool(
             int(getattr(config, "flow_jepa_bounded_flow_coordinates", 0))
         )
+        self.coordinate_canonical = (
+            str(getattr(config, "flow_jepa_coordinate_contract", "legacy_normalized_chart"))
+            == "canonical_rgb_lattice_v1"
+        )
         self.complete_numerical_contract = bool(
             int(getattr(config, "flow_jepa_complete_numerical_contract", 0))
         )
@@ -1804,6 +1937,38 @@ class _RawPyramidFlow(nn.Module):
         )
         activation_checkpoint = bool(
             int(getattr(config, "flow_jepa_raw_activation_checkpoint", 1))
+        )
+        processor_resize_hw = tuple(
+            int(value)
+            for value in getattr(
+                config,
+                "flow_jepa_coordinate_processor_resize_hw",
+                (256, 256),
+            )
+        )
+        processor_crop_hw = tuple(
+            int(value)
+            for value in getattr(
+                config,
+                "flow_jepa_coordinate_processor_crop_hw",
+                (224, 224),
+            )
+        )
+        processor_crop_offset_yx = tuple(
+            int(value)
+            for value in getattr(
+                config,
+                "flow_jepa_coordinate_processor_crop_offset_yx",
+                (16, 16),
+            )
+        )
+        processor_patch_hw = tuple(
+            int(value)
+            for value in getattr(
+                config,
+                "flow_jepa_coordinate_processor_patch_hw",
+                (14, 14),
+            )
         )
         self.pyramid = _RawImagePyramid(
             int(config.flow_jepa_raw_base_channels),
@@ -1819,6 +1984,12 @@ class _RawPyramidFlow(nn.Module):
             preserve_uncertain_seed=self.zero_flow_guard,
             bounded_coordinates=self.bounded_coordinates,
             normalization_floor=correlation_rms_floor,
+            coordinate_canonical=self.coordinate_canonical,
+            chart_level="mid",
+            processor_resize_hw=processor_resize_hw,
+            processor_crop_hw=processor_crop_hw,
+            processor_crop_offset_yx=processor_crop_offset_yx,
+            processor_patch_hw=processor_patch_hw,
         )
         self.high = _DenseRawFlowRefiner(
             self.pyramid.high_channels,
@@ -1829,17 +2000,51 @@ class _RawPyramidFlow(nn.Module):
             preserve_uncertain_seed=self.zero_flow_guard,
             bounded_coordinates=self.bounded_coordinates,
             normalization_floor=correlation_rms_floor,
+            coordinate_canonical=self.coordinate_canonical,
+            chart_level="high",
+            processor_resize_hw=processor_resize_hw,
+            processor_crop_hw=processor_crop_hw,
+            processor_crop_offset_yx=processor_crop_offset_yx,
+            processor_patch_hw=processor_patch_hw,
         )
 
     @staticmethod
-    def _smoothness(flow: Tensor, feature: Tensor) -> Tensor:
+    def _smoothness(
+        flow: Tensor, feature: Tensor, support: Tensor | None = None
+    ) -> Tensor:
         dx = flow[..., :, 1:] - flow[..., :, :-1]
         dy = flow[..., 1:, :] - flow[..., :-1, :]
         fx = feature[..., :, 1:] - feature[..., :, :-1]
         fy = feature[..., 1:, :] - feature[..., :-1, :]
         wx = torch.exp(-fx.float().abs().mean(dim=1, keepdim=True))
         wy = torch.exp(-fy.float().abs().mean(dim=1, keepdim=True))
+        if support is not None:
+            valid_x = (support[..., :, 1:] & support[..., :, :-1]).float()
+            valid_y = (support[..., 1:, :] & support[..., :-1, :]).float()
+            return (
+                (dx.float().abs() * wx * valid_x).sum()
+                / (valid_x.sum() * int(flow.shape[1])).clamp_min(1.0)
+                + (dy.float().abs() * wy * valid_y).sum()
+                / (valid_y.sum() * int(flow.shape[1])).clamp_min(1.0)
+            )
         return (dx.float().abs() * wx).mean() + (dy.float().abs() * wy).mean()
+
+    @staticmethod
+    def _align_fixed_descriptor(
+        descriptor: Tensor, source_chart: ChartSpec, target_chart: ChartSpec
+    ) -> tuple[Tensor, Tensor]:
+        """Move area descriptors onto the learned raw-flow producer lattice."""
+        sampled = resample_field(descriptor.detach().float(), source_chart, target_chart)
+        support = sampled.support.complete[:, None]
+        return sampled.values * support.float(), support
+
+    @staticmethod
+    def _supported_descriptor_warp(
+        descriptor: Tensor, flow: Tensor, support: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        warped, valid = warp_patch_grid(descriptor, flow)
+        warped_support, _ = warp_patch_grid(support.float(), flow)
+        return warped, valid & support & (warped_support >= 1.0 - 1e-6)
 
     @staticmethod
     def _paired_mean(
@@ -1873,13 +2078,35 @@ class _RawPyramidFlow(nn.Module):
 
     @staticmethod
     def _motion_emphasis(
-        coarse_flow: Tensor, coarse_reliability: Tensor, side: int
+        coarse_flow: Tensor,
+        coarse_reliability: Tensor,
+        side: int,
+        *,
+        source_chart: ChartSpec | None = None,
+        target_chart: ChartSpec | None = None,
     ) -> Tensor:
         motion = _stable_vector_norm(coarse_flow, dim=1, keepdim=True)
         motion = motion * coarse_reliability.float().clamp(0.0, 1.0)
-        motion = F.interpolate(
-            motion, size=(side, side), mode="bilinear", align_corners=True
-        )
+        if source_chart is not None and target_chart is not None:
+            # The scalar magnitude still carries the source chart's index
+            # units. Convert the vector before taking its norm; resampling the
+            # magnitude alone would preserve DINO-cell units on a raw chart.
+            coarse_flow = resample_flow(
+                coarse_flow.float(),
+                source_chart,
+                target_chart,
+                source_units="index",
+                target_units="index",
+            ).values
+            coarse_reliability = resample_field(
+                coarse_reliability.float(), source_chart, target_chart
+            ).values
+            motion = _stable_vector_norm(coarse_flow, dim=1, keepdim=True)
+            motion = motion * coarse_reliability.clamp(0.0, 1.0)
+        else:
+            motion = F.interpolate(
+                motion, size=(side, side), mode="bilinear", align_corners=True
+            )
         mean = motion.flatten(2).mean(dim=-1, keepdim=True)[..., None]
         # Every location remains supervised.  Motion only raises the relative
         # weight continuously from 1x towards 2x; it never selects or drops a
@@ -1905,6 +2132,9 @@ class _RawPyramidFlow(nn.Module):
         batch, history, cameras, channels, side, side_b = raw_visual.shape
         if history < 2 or side != side_b:
             raise ValueError("raw flow requires at least two square RGB history frames")
+        if self.coordinate_canonical:
+            self.mid.outer_side = int(side)
+            self.high.outer_side = int(side)
         flat = raw_visual.reshape(batch * history * cameras, channels, side, side)
         high, mid = self.pyramid(flat)
 
@@ -1912,17 +2142,45 @@ class _RawPyramidFlow(nn.Module):
             return value.reshape(batch, history, cameras, *value.shape[1:])
 
         high_u, mid_u = restore(high), restore(mid)
+        fixed_high_support_u: Tensor | None = None
+        fixed_mid_support_u: Tensor | None = None
         if self.zero_flow_guard:
             fixed_high = _fixed_raw_motion_descriptor(flat, int(high.shape[-1]))
-            fixed_mid = F.normalize(
-                F.interpolate(
+            if self.coordinate_canonical:
+                fixed_mid = F.normalize(
+                    _fixed_raw_motion_descriptor(flat, int(mid.shape[-1])),
+                    dim=1,
+                    eps=1e-6,
+                ).detach()
+                rgb_chart = build_raw_charts((side, side))["rgb"]
+                high_source_chart = area_pool_chart(
+                    rgb_chart, (int(high.shape[-1]), int(high.shape[-1])), "fixed_high"
+                )
+                mid_source_chart = area_pool_chart(
+                    rgb_chart, (int(mid.shape[-1]), int(mid.shape[-1])), "fixed_mid"
+                )
+                fixed_high, fixed_high_support = self._align_fixed_descriptor(
                     fixed_high,
-                    size=(int(mid.shape[-1]), int(mid.shape[-1])),
-                    mode="area",
-                ),
-                dim=1,
-                eps=1e-6,
-            ).detach()
+                    high_source_chart,
+                    build_raw_charts((side, side))["raw_high"],
+                )
+                fixed_mid, fixed_mid_support = self._align_fixed_descriptor(
+                    fixed_mid,
+                    mid_source_chart,
+                    build_raw_charts((side, side))["raw_mid"],
+                )
+                fixed_high_support_u = restore(fixed_high_support)
+                fixed_mid_support_u = restore(fixed_mid_support)
+            else:
+                fixed_mid = F.normalize(
+                    F.interpolate(
+                        fixed_high,
+                        size=(int(mid.shape[-1]), int(mid.shape[-1])),
+                        mode="area",
+                    ),
+                    dim=1,
+                    eps=1e-6,
+                ).detach()
             fixed_high_u = restore(fixed_high)
             fixed_mid_u = restore(fixed_mid)
         else:
@@ -1956,9 +2214,15 @@ class _RawPyramidFlow(nn.Module):
         if fixed_high_u is not None and fixed_mid_u is not None:
             first_fixed_h, second_fixed_h = pair(fixed_high_u)
             first_fixed_m, second_fixed_m = pair(fixed_mid_u)
+            if fixed_high_support_u is not None and fixed_mid_support_u is not None:
+                first_fixed_h_support, second_fixed_h_support = pair(fixed_high_support_u)
+                first_fixed_m_support, second_fixed_m_support = pair(fixed_mid_support_u)
+            else:
+                first_fixed_h_support = second_fixed_h_support = None
         else:
             first_fixed_h = second_fixed_h = None
             first_fixed_m = second_fixed_m = None
+            first_fixed_h_support = second_fixed_h_support = None
         joined_coarse_flow = torch.cat((coarse_forward, coarse_backward), dim=0)
         joined_coarse_reliability = torch.cat(
             (coarse_reliability_forward, coarse_reliability_backward), dim=0
@@ -1988,11 +2252,31 @@ class _RawPyramidFlow(nn.Module):
         backward_cycle = backward + warped_forward
         forward_cycle_error = _stable_vector_norm(forward_cycle, dim=1, keepdim=True)
         backward_cycle_error = _stable_vector_norm(backward_cycle, dim=1, keepdim=True)
-        unit_scale = float(max(coarse_shape[-1] - 1, 1)) / float(
-            max(int(forward.shape[-1]) - 1, 1)
-        )
+        if self.coordinate_canonical:
+            charts = build_raw_charts((side, side))
+            dino_coarse = build_dino_charts(
+                (side, side),
+                resized_hw=self.mid.processor_resize_hw,
+                crop_hw=self.mid.processor_crop_hw,
+                crop_offset_yx=self.mid.processor_crop_offset_yx,
+                patch_hw=self.mid.processor_patch_hw,
+                pooled_hw=(coarse_shape[-2], coarse_shape[-1]),
+            )["dino_pooled"]
+            unit_scale = float(
+                charts["raw_high"].pitch_xy[0] / dino_coarse.pitch_xy[0]
+            )
+            motion_source_chart: ChartSpec | None = dino_coarse
+            motion_target_chart: ChartSpec | None = charts["raw_high"]
+        else:
+            unit_scale = float(max(coarse_shape[-1] - 1, 1)) / float(
+                max(int(forward.shape[-1]) - 1, 1)
+            )
+            motion_source_chart = None
+            motion_target_chart = None
         if first_fixed_h is not None and second_fixed_h is not None:
             warp_source, warp_target = first_fixed_h, second_fixed_h
+            warp_source_support = first_fixed_h_support
+            warp_target_support = second_fixed_h_support
             forward_identity_error, observable_motion = _fixed_observable_motion(
                 warp_source, warp_target
             )
@@ -2006,8 +2290,16 @@ class _RawPyramidFlow(nn.Module):
             ).detach()
             backward_identity_error = forward_identity_error
             observable_motion = None
+            warp_source_support = warp_target_support = None
         warped_second, forward_warp_valid = warp_patch_grid(warp_target, forward)
         warped_first, backward_warp_valid = warp_patch_grid(warp_source, backward)
+        if warp_source_support is not None and warp_target_support is not None:
+            warped_second, forward_warp_valid = self._supported_descriptor_warp(
+                warp_target, forward, warp_target_support
+            )
+            warped_first, backward_warp_valid = self._supported_descriptor_warp(
+                warp_source, backward, warp_source_support
+            )
         forward_warp_error = (
             warp_source.float() - warped_second.float()
         ).square().mean(dim=1, keepdim=True)
@@ -2059,10 +2351,18 @@ class _RawPyramidFlow(nn.Module):
             backward_motion_emphasis = forward_motion_emphasis
         else:
             forward_motion_emphasis = self._motion_emphasis(
-                coarse_forward, coarse_reliability_forward, int(forward.shape[-1])
+                coarse_forward,
+                coarse_reliability_forward,
+                int(forward.shape[-1]),
+                source_chart=motion_source_chart,
+                target_chart=motion_target_chart,
             )
             backward_motion_emphasis = self._motion_emphasis(
-                coarse_backward, coarse_reliability_backward, int(backward.shape[-1])
+                coarse_backward,
+                coarse_reliability_backward,
+                int(backward.shape[-1]),
+                source_chart=motion_source_chart,
+                target_chart=motion_target_chart,
             )
             observable_motion = (forward_motion_emphasis - 1.0).detach().clamp(0.0, 1.0)
         forward_warp_residual = _stable_sqrt(forward_warp_error, epsilon=1e-8)
@@ -2127,8 +2427,8 @@ class _RawPyramidFlow(nn.Module):
         smooth_source = first_fixed_h if first_fixed_h is not None else first_h
         smooth_target = second_fixed_h if second_fixed_h is not None else second_h
         smoothness = 0.5 * unit_scale * (
-            self._smoothness(forward, smooth_source)
-            + self._smoothness(backward, smooth_target)
+            self._smoothness(forward, smooth_source, warp_source_support)
+            + self._smoothness(backward, smooth_target, warp_target_support)
         )
         uncertainty_nll = self._paired_mean(
             forward_warp_error.detach().sqrt() / uncertainty_f.clamp_min(1e-4)
@@ -2216,6 +2516,7 @@ class _RawPyramidFlow(nn.Module):
             cycle_error=unflatten(forward_cycle_error),
             warp_error=unflatten(_stable_sqrt(forward_warp_error)),
             observable_motion=unflatten(observable_motion),
+            raw_outer_side=int(side),
         )
         losses = {
             "flow_jepa_warp_loss": warp_loss,
@@ -2311,6 +2612,9 @@ class _RawPyramidFlow(nn.Module):
                 float(self.bounded_coordinates), dtype=torch.float32
             ),
             "flow_jepa_raw_image_enabled": forward.new_ones((), dtype=torch.float32),
+            "flow_jepa_coordinate_contract_canonical": forward.new_tensor(
+                float(self.coordinate_canonical), dtype=torch.float32
+            ),
         }
         return context, losses, metrics
 
@@ -3079,6 +3383,7 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
 
     def __init__(self, config: Any, *, raw_dim: int) -> None:
         super().__init__()
+        self.config = config
         self.grid = int(config.flow_jepa_grid_size)
         self.cameras = int(config.num_cameras)
         self.slots = int(config.flow_jepa_address_slots)
@@ -3090,6 +3395,20 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             / float(4 * max(self.radius, 1))
         )
         self.raw_dim = int(raw_dim)
+        self.coordinate_contract = str(
+            getattr(config, "flow_jepa_coordinate_contract", "legacy_normalized_chart")
+        )
+        if self.coordinate_contract not in {
+            "legacy_normalized_chart",
+            "canonical_rgb_lattice_v1",
+        }:
+            raise ValueError(
+                "unsupported soft-address coordinate contract: "
+                f"{self.coordinate_contract!r}"
+            )
+        self.coordinate_canonical = (
+            self.coordinate_contract == "canonical_rgb_lattice_v1"
+        )
         self.flow_prior_floor = float(
             getattr(config, "flow_jepa_address_flow_prior_floor", 0.0)
         )
@@ -3331,25 +3650,66 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             source_centers[..., None, :]
             + support[..., None, None] * normalized_offsets
         )
-        target_valid = (
-            (target_coordinates[..., 0] >= -1.0)
-            & (target_coordinates[..., 0] <= 1.0)
-            & (target_coordinates[..., 1] >= -1.0)
-            & (target_coordinates[..., 1] <= 1.0)
-        )
-        source_valid = (
-            (source_coordinates[..., 0] >= -1.0)
-            & (source_coordinates[..., 0] <= 1.0)
-            & (source_coordinates[..., 1] >= -1.0)
-            & (source_coordinates[..., 1] <= 1.0)
-        )
-        valid = target_valid & source_valid
+        if bank.coordinate_contract == "canonical_rgb_lattice_v1":
+            if (
+                bank.outer_chart is None
+                or bank.raw_chart is None
+                or bank.dino_chart is None
+            ):
+                raise RuntimeError("canonical address bank lost chart ownership")
+            target_canonical = bank.outer_chart.normalized_to_canonical(
+                target_coordinates
+            )
+            source_canonical = bank.outer_chart.normalized_to_canonical(
+                source_coordinates
+            )
+            target_raw_coordinates = bank.raw_chart.canonical_to_normalized(
+                target_canonical
+            )
+            source_raw_coordinates = bank.raw_chart.canonical_to_normalized(
+                source_canonical
+            )
+            target_dino_coordinates = bank.dino_chart.canonical_to_normalized(
+                target_canonical
+            )
+            target_valid = bank.raw_chart.center_support(target_canonical)
+            source_valid = bank.raw_chart.center_support(source_canonical)
+            dino_valid = bank.dino_chart.center_support(target_canonical)
+            rgb_valid = bank.outer_chart.center_support(target_canonical)
+            source_support = {
+                "raw": target_valid,
+                "source_raw": source_valid,
+                "raw_pair": target_valid & source_valid,
+                "dino": dino_valid,
+                "rgb": rgb_valid,
+            }
+        else:
+            target_raw_coordinates = target_coordinates
+            source_raw_coordinates = source_coordinates
+            target_dino_coordinates = target_coordinates
+            target_valid = (
+                (target_coordinates[..., 0] >= -1.0)
+                & (target_coordinates[..., 0] <= 1.0)
+                & (target_coordinates[..., 1] >= -1.0)
+                & (target_coordinates[..., 1] <= 1.0)
+            )
+            source_valid = (
+                (source_coordinates[..., 0] >= -1.0)
+                & (source_coordinates[..., 0] <= 1.0)
+                & (source_coordinates[..., 1] >= -1.0)
+                & (source_coordinates[..., 1] <= 1.0)
+            )
+        canonical = bank.coordinate_contract == "canonical_rgb_lattice_v1"
+        valid = (target_valid & rgb_valid) if canonical else target_valid & source_valid
         target_raw_key = self._sample_normalized_chart(
-            bank.dense_target_raw_keys, target_coordinates
+            bank.dense_target_raw_keys, target_raw_coordinates
         )
         source_raw_key = self._sample_normalized_chart(
-            bank.dense_source_raw_keys, source_coordinates
+            bank.dense_source_raw_keys, source_raw_coordinates
         )
+        if canonical:
+            target_raw_key = torch.where(target_valid[..., None], target_raw_key, 0.0)
+            source_raw_key = torch.where(source_valid[..., None], source_raw_key, 0.0)
         raw_pair_key = self.raw_pair_key(
             torch.cat(
                 (
@@ -3362,8 +3722,13 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             )
         )
         dino_key = self._sample_normalized_chart(
-            bank.dense_target_dino_keys, target_coordinates
+            bank.dense_target_dino_keys, target_dino_coordinates
         )
+        if canonical:
+            dino_key = torch.where(dino_valid[..., None], dino_key, 0.0)
+            raw_pair_key = torch.where(
+                (target_valid & source_valid)[..., None], raw_pair_key, 0.0
+            )
         metadata = torch.cat(
             (
                 bank.dense_confidence,
@@ -3373,7 +3738,8 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             dim=2,
         )
         sampled_metadata = self._sample_normalized_chart(
-            metadata, target_coordinates
+            metadata,
+            target_raw_coordinates,
         ).float()
         raw_side = int(bank.dense_target_detail.shape[-1])
         normalized_std_base = _zero_preserving_variance_std(
@@ -3387,13 +3753,19 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             centers.float()
             - bank.coarse_flow_centers.float()[..., None, :]
         )[..., None, :].expand_as(normalized_std)
+        if canonical:
+            assert bank.raw_chart is not None and bank.outer_chart is not None
+            uncertainty_scale = (
+                2.0 * bank.raw_chart.pitch_xy[0] / (bank.outer_chart.shape_hw[1] - 1)
+            )
+        else:
+            uncertainty_scale = 1.0 / float(max(raw_side - 1, 1))
         geometry = torch.cat(
             (
                 target_coordinates.float(),
                 normalized_offsets.expand_as(target_coordinates).float(),
                 sampled_metadata[..., 0:1],
-                sampled_metadata[..., 1:2]
-                / float(max(raw_side - 1, 1)),
+                sampled_metadata[..., 1:2] * uncertainty_scale,
                 sampled_metadata[..., 2:3],
                 normalized_std,
                 normalized_flow_delta,
@@ -3411,12 +3783,15 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
         )
         fine_keys = semantic_keys + appearance_keys + geometry_keys
         fine_values = self._sample_normalized_chart(
-            bank.dense_target_detail, target_coordinates
+            bank.dense_target_detail, target_raw_coordinates
         )
         fine_values = fine_values * valid[..., None].to(dtype=fine_values.dtype)
         literal_rgb = (
             self._sample_normalized_chart(
-                bank.dense_current_rgb, target_coordinates
+                bank.dense_current_rgb,
+                bank.outer_chart.canonical_to_normalized(target_canonical)
+                if bank.coordinate_contract == "canonical_rgb_lattice_v1"
+                else target_coordinates,
             )
             if bank.dense_current_rgb is not None
             else None
@@ -3435,6 +3810,7 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             ),
             geometry_keys=geometry_keys if self.coordinate_typed_raw_detail else None,
             literal_rgb=literal_rgb if self.coordinate_typed_raw_detail else None,
+            source_support=source_support if canonical else None,
             metrics={
                 "flow_jepa_progressive_g2_dynamic_candidate_valid": valid.detach()
                 .float()
@@ -3548,6 +3924,78 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
         else:
             literal_rgb_chart = None
 
+        # The canonical path derives every producer chart from the actual
+        # runtime tensors and the serialized processor geometry.  Legacy keeps
+        # the endpoint-normalized index path byte-for-byte compatible.
+        outer_chart: ChartSpec | None = None
+        raw_chart: ChartSpec | None = None
+        dino_chart: ChartSpec | None = None
+        dino_pooled_chart: ChartSpec | None = None
+        coarse_chart: ChartSpec | None = None
+        if self.coordinate_canonical:
+            if current_rgb is None:
+                raise RuntimeError(
+                    "canonical address coordinates require the literal RGB chart"
+                )
+            rgb_hw = (int(current_rgb.shape[-2]), int(current_rgb.shape[-1]))
+            outer_chart = rgb_chart(rgb_hw)
+            raw_charts = build_raw_charts(rgb_hw)
+            raw_chart = raw_charts["raw_high"]
+            expected_raw = (raw_side, raw_side)
+            if tuple(raw_chart.shape_hw) != expected_raw:
+                raise ValueError(
+                    "canonical raw chart does not match the learned high pyramid: "
+                    f"{raw_chart.shape_hw} != {expected_raw}"
+                )
+            dino_charts = build_dino_charts(
+                rgb_hw,
+                resized_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_resize_hw
+                ),
+                crop_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_crop_hw
+                ),
+                crop_offset_yx=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_crop_offset_yx
+                ),
+                patch_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_patch_hw
+                ),
+                pooled_hw=(dino_side, dino_side),
+            )
+            dino_chart = dino_charts["dino_patch"]
+            if tuple(dino_chart.shape_hw) != (dino_side, dino_side):
+                raise ValueError(
+                    "canonical DINO chart does not match the cached token chart: "
+                    f"{dino_chart.shape_hw} != {(dino_side, dino_side)}"
+                )
+            dino_coarse = build_dino_charts(
+                rgb_hw,
+                resized_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_resize_hw
+                ),
+                crop_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_crop_hw
+                ),
+                crop_offset_yx=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_crop_offset_yx
+                ),
+                patch_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_patch_hw
+                ),
+                pooled_hw=(self.grid, self.grid),
+            )
+            coarse_chart = dino_coarse["dino_pooled"]
+            dino_pooled_chart = coarse_chart
+
         source_nchw = source_dino.permute(0, 1, 4, 2, 3).reshape(
             batch * cameras, int(source_dino.shape[-1]), dino_side, dino_side
         )
@@ -3584,35 +4032,76 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
                 * float(self.route_dim) ** -0.5
             )
 
-            flow_grid = F.interpolate(
-                flow.reshape(batch * cameras, 2, raw_side, raw_side).float(),
-                size=(self.grid, self.grid),
-                mode="bilinear",
-                align_corners=True,
-            ).reshape(batch, cameras, 2, self.grid, self.grid).permute(0, 1, 3, 4, 2)
-            source_high = self._grid_axis(
-                raw_side,
-                self.grid,
-                device=source_dino.device,
-                dtype=torch.float32,
-            )[None, None]
-            flow_center_high = source_high + flow_grid
-            flow_center_dino = (
-                flow_center_high
-                * float(max(dino_side - 1, 1))
-                / float(max(raw_side - 1, 1))
-            )
-            target_axis = self._grid_axis(
-                dino_side,
-                dino_side,
-                device=source_dino.device,
-                dtype=torch.float32,
+            if self.coordinate_canonical:
+                assert raw_chart is not None and dino_chart is not None
+                assert coarse_chart is not None
+                sampled_flow = resample_flow(
+                    flow.reshape(batch * cameras, 2, raw_side, raw_side).float(),
+                    raw_chart,
+                    coarse_chart,
+                    source_units="index",
+                    target_units="index",
+                )
+                flow_grid = sampled_flow.values.reshape(
+                    batch, cameras, 2, self.grid, self.grid
+                ).permute(0, 1, 3, 4, 2)
+                source_canonical = coarse_chart.lattice(device=source_dino.device)[None, None]
+                source_high = raw_chart.canonical_to_index(source_canonical)
+                flow_canonical = convert_vectors(
+                    flow_grid,
+                    coarse_chart,
+                    outer_chart,
+                    source_units="index",
+                    target_units="canonical",
+                )
+                flow_center_dino = dino_chart.canonical_to_index(
+                    source_canonical + flow_canonical
+                )
+            else:
+                flow_grid = F.interpolate(
+                    flow.reshape(batch * cameras, 2, raw_side, raw_side).float(),
+                    size=(self.grid, self.grid),
+                    mode="bilinear",
+                    align_corners=True,
+                ).reshape(batch, cameras, 2, self.grid, self.grid).permute(
+                    0, 1, 3, 4, 2
+                )
+                source_high = self._grid_axis(
+                    raw_side,
+                    self.grid,
+                    device=source_dino.device,
+                    dtype=torch.float32,
+                )[None, None]
+                flow_center_high = source_high + flow_grid
+                flow_center_dino = (
+                    flow_center_high
+                    * float(max(dino_side - 1, 1))
+                    / float(max(raw_side - 1, 1))
+                )
+            target_axis = (
+                dino_chart.canonical_to_index(
+                    dino_chart.lattice(device=source_dino.device)
+                )
+                if self.coordinate_canonical
+                else self._grid_axis(
+                    dino_side,
+                    dino_side,
+                    device=source_dino.device,
+                    dtype=torch.float32,
+                )
             ).reshape(1, 1, 1, 1, 1, dino_side * dino_side, 2)
             distance_square = (
                 target_axis - flow_center_dino[:, :, :, :, None, None]
             ).square().sum(dim=-1)
 
             def pooled_scalar(value: Tensor) -> Tensor:
+                if self.coordinate_canonical:
+                    assert raw_chart is not None and coarse_chart is not None
+                    return resample_field(
+                        value.reshape(batch * cameras, 1, raw_side, raw_side).float(),
+                        raw_chart,
+                        coarse_chart,
+                    ).values.reshape(batch, cameras, self.grid, self.grid)
                 return F.interpolate(
                     value.reshape(batch * cameras, 1, raw_side, raw_side).float(),
                     size=(self.grid, self.grid),
@@ -3628,11 +4117,17 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
                 if cycle_error is not None
                 else torch.zeros_like(occlusion_grid)
             )
-            uncertainty_dino = (
-                uncertainty_grid
-                * float(max(dino_side - 1, 1))
-                / float(max(raw_side - 1, 1))
-            )
+            if self.coordinate_canonical:
+                assert raw_chart is not None and dino_chart is not None
+                uncertainty_dino = uncertainty_grid * float(
+                    raw_chart.pitch_xy[0] / dino_chart.pitch_xy[0]
+                )
+            else:
+                uncertainty_dino = (
+                    uncertainty_grid
+                    * float(max(dino_side - 1, 1))
+                    / float(max(raw_side - 1, 1))
+                )
             sigma = (
                 0.75
                 + 2.0 * (1.0 - confidence_grid)
@@ -3694,37 +4189,90 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
                 target_value.float(),
             )
 
-        source_coordinates_dino = self._grid_axis(
-            dino_side,
-            self.grid,
-            device=source_dino.device,
-            dtype=torch.float32,
-        )[None, None, :, :, None].expand(
-            batch, cameras, -1, -1, self.slots, -1
-        )
+        if self.coordinate_canonical:
+            assert raw_chart is not None and dino_chart is not None
+            assert coarse_chart is not None
+            source_coordinates_dino = dino_chart.canonical_to_index(
+                coarse_chart.lattice(device=source_dino.device)
+            )[None, None, :, :, None].expand(
+                batch, cameras, -1, -1, self.slots, -1
+            )
+        else:
+            source_coordinates_dino = self._grid_axis(
+                dino_side,
+                self.grid,
+                device=source_dino.device,
+                dtype=torch.float32,
+            )[None, None, :, :, None].expand(
+                batch, cameras, -1, -1, self.slots, -1
+            )
         flow_delta = coarse_centers - flow_center_dino[:, :, :, :, None]
         coarse_epsilon_dino = (
             self.address_variance_epsilon_norm
             * float(max(dino_side - 1, 1))
             / 2.0
         )
+        if self.coordinate_canonical:
+            assert raw_chart is not None and dino_chart is not None
+            assert coarse_chart is not None
+            coarse_epsilon_dino = float(
+                coarse_chart.pitch_xy[0]
+                / dino_chart.pitch_xy[0]
+                / (4.0 * max(self.radius, 1))
+            )
         coarse_std_dino = _zero_preserving_variance_std(
             coarse_variance,
             epsilon=coarse_epsilon_dino,
         )
+        if self.coordinate_canonical:
+            assert outer_chart is not None and dino_chart is not None
+            source_geometry = outer_chart.canonical_to_normalized(
+                dino_chart.index_to_canonical(source_coordinates_dino)
+            )
+            center_geometry = outer_chart.canonical_to_normalized(
+                dino_chart.index_to_canonical(coarse_centers)
+            )
+            std_geometry = convert_vectors(
+                coarse_std_dino,
+                dino_chart,
+                outer_chart,
+                source_units="index",
+                target_units="normalized",
+            )
+            flow_delta_geometry = convert_vectors(
+                flow_delta,
+                dino_chart,
+                outer_chart,
+                source_units="index",
+                target_units="normalized",
+            )
+            uncertainty_geometry = uncertainty_dino * float(
+                dino_chart.pitch_xy[0]
+                * 2.0
+                / max(outer_chart.shape_hw[1] - 1, 1)
+            )
+        else:
+            source_geometry = self._normalize_xy(source_coordinates_dino, dino_side)
+            center_geometry = self._normalize_xy(coarse_centers, dino_side)
+            std_geometry = coarse_std_dino / float(max(dino_side - 1, 1))
+            flow_delta_geometry = flow_delta / float(max(dino_side - 1, 1))
+            uncertainty_geometry = uncertainty_dino / float(max(dino_side - 1, 1))
         coarse_geometry = torch.cat(
             (
-                self._normalize_xy(source_coordinates_dino, dino_side),
-                self._normalize_xy(coarse_centers, dino_side),
-                coarse_std_dino / float(max(dino_side - 1, 1)),
-                flow_delta / float(max(dino_side - 1, 1)),
+                source_geometry,
+                center_geometry,
+                std_geometry,
+                flow_delta_geometry,
                 confidence_grid[:, :, :, :, None, None].expand(
                     -1, -1, -1, -1, self.slots, -1
                 ),
                 uncertainty_dino[:, :, :, :, None, None].expand(
                     -1, -1, -1, -1, self.slots, -1
                 )
-                / float(max(dino_side - 1, 1)),
+                if not self.coordinate_canonical
+                else uncertainty_geometry[:, :, :, :, None, None].expand(
+                    -1, -1, -1, -1, self.slots, -1
+                ),
                 occlusion_grid[:, :, :, :, None, None].expand(
                     -1, -1, -1, -1, self.slots, -1
                 ),
@@ -3749,17 +4297,37 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             + coarse_geometry_key
         )
 
-        center_high = (
-            coarse_centers
-            * float(max(raw_side - 1, 1))
-            / float(max(dino_side - 1, 1))
-        )
-        coarse_std_high = (
-            coarse_std_dino
-            * float(max(raw_side - 1, 1))
-            / float(max(dino_side - 1, 1))
-        )
-        cell_stride = float(max(raw_side - 1, 1)) / float(max(self.grid - 1, 1))
+        if self.coordinate_canonical:
+            assert raw_chart is not None and dino_chart is not None
+            center_high = convert_points(
+                coarse_centers,
+                dino_chart,
+                raw_chart,
+                source_units="index",
+                target_units="index",
+            )
+            coarse_std_high = convert_vectors(
+                coarse_std_dino,
+                dino_chart,
+                raw_chart,
+                source_units="index",
+                target_units="index",
+            )
+            cell_stride = float(
+                coarse_chart.pitch_xy[0] / raw_chart.pitch_xy[0]
+            )
+        else:
+            center_high = (
+                coarse_centers
+                * float(max(raw_side - 1, 1))
+                / float(max(dino_side - 1, 1))
+            )
+            coarse_std_high = (
+                coarse_std_dino
+                * float(max(raw_side - 1, 1))
+                / float(max(dino_side - 1, 1))
+            )
+            cell_stride = float(max(raw_side - 1, 1)) / float(max(self.grid - 1, 1))
         fine_radius = (
             0.50 * cell_stride
             + coarse_std_high.mean(dim=-1)
@@ -3772,12 +4340,18 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             center_high[:, :, :, :, :, None]
             + fine_radius[:, :, :, :, :, None, None] * offsets
         )
-        fine_valid = (
-            (fine_coordinates[..., 0] >= 0.0)
-            & (fine_coordinates[..., 0] <= float(raw_side - 1))
-            & (fine_coordinates[..., 1] >= 0.0)
-            & (fine_coordinates[..., 1] <= float(raw_side - 1))
-        )
+        if self.coordinate_canonical:
+            assert raw_chart is not None
+            fine_valid = raw_chart.center_support(
+                raw_chart.index_to_canonical(fine_coordinates)
+            )
+        else:
+            fine_valid = (
+                (fine_coordinates[..., 0] >= 0.0)
+                & (fine_coordinates[..., 0] <= float(raw_side - 1))
+                & (fine_coordinates[..., 1] >= 0.0)
+                & (fine_coordinates[..., 1] <= float(raw_side - 1))
+            )
 
         target_raw_flat = target_raw.reshape(
             batch * cameras, self.raw_dim, raw_side, raw_side
@@ -3803,12 +4377,18 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             * cell_stride
             * offsets.reshape(1, 1, 1, 1, 1, -1, 2)
         ).expand(batch, cameras, -1, -1, self.slots, -1, -1)
-        source_fine_valid = (
-            (source_fine_coordinates[..., 0] >= 0.0)
-            & (source_fine_coordinates[..., 0] <= float(raw_side - 1))
-            & (source_fine_coordinates[..., 1] >= 0.0)
-            & (source_fine_coordinates[..., 1] <= float(raw_side - 1))
-        )
+        if self.coordinate_canonical:
+            assert raw_chart is not None
+            source_fine_valid = raw_chart.center_support(
+                raw_chart.index_to_canonical(source_fine_coordinates)
+            )
+        else:
+            source_fine_valid = (
+                (source_fine_coordinates[..., 0] >= 0.0)
+                & (source_fine_coordinates[..., 0] <= float(raw_side - 1))
+                & (source_fine_coordinates[..., 1] >= 0.0)
+                & (source_fine_coordinates[..., 1] <= float(raw_side - 1))
+            )
         sampled_source_raw_key = self._sample_chart(
             source_raw_key_map,
             source_fine_coordinates,
@@ -3824,35 +4404,76 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
                 dim=-1,
             )
         )
-        dino_coordinates = (
-            fine_coordinates
-            * float(max(dino_side - 1, 1))
-            / float(max(raw_side - 1, 1))
-        )
+        if self.coordinate_canonical:
+            assert raw_chart is not None and dino_chart is not None
+            dino_coordinates = convert_points(
+                fine_coordinates,
+                raw_chart,
+                dino_chart,
+                source_units="index",
+                target_units="index",
+            )
+        else:
+            dino_coordinates = (
+                fine_coordinates
+                * float(max(dino_side - 1, 1))
+                / float(max(raw_side - 1, 1))
+            )
         sampled_dino_key = self._sample_chart(dino_key_map, dino_coordinates)
         metadata_map = torch.cat((confidence, uncertainty, occlusion), dim=2)
         sampled_metadata = self._sample_chart(metadata_map, fine_coordinates).float()
-        normalized_coordinate = self._normalize_xy(fine_coordinates, raw_side)
+        if self.coordinate_canonical:
+            assert outer_chart is not None and raw_chart is not None and dino_chart is not None
+            normalized_coordinate = outer_chart.canonical_to_normalized(
+                raw_chart.index_to_canonical(fine_coordinates)
+            )
+            normalized_std = convert_vectors(
+                coarse_std_high[:, :, :, :, :, None].expand(
+                    -1, -1, -1, -1, -1, int(offsets.shape[0]), -1
+                ),
+                raw_chart,
+                outer_chart,
+                source_units="index",
+                target_units="normalized",
+            )
+            normalized_flow_delta = convert_vectors(
+                flow_delta[:, :, :, :, :, None].expand(
+                    -1, -1, -1, -1, -1, int(offsets.shape[0]), -1
+                ),
+                dino_chart,
+                outer_chart,
+                source_units="index",
+                target_units="normalized",
+            )
+            uncertainty_normalized = sampled_metadata[..., 1:2] * float(
+                raw_chart.pitch_xy[0]
+                * 2.0
+                / max(outer_chart.shape_hw[1] - 1, 1)
+            )
+        else:
+            normalized_coordinate = self._normalize_xy(fine_coordinates, raw_side)
+            normalized_std = (
+                coarse_std_high[:, :, :, :, :, None]
+                / float(max(raw_side - 1, 1))
+            ).expand(-1, -1, -1, -1, -1, int(offsets.shape[0]), -1)
+            normalized_flow_delta = (
+                flow_delta
+                * float(max(raw_side - 1, 1))
+                / float(max(dino_side - 1, 1))
+                / float(max(raw_side - 1, 1))
+            )[:, :, :, :, :, None].expand_as(normalized_std)
+            uncertainty_normalized = sampled_metadata[..., 1:2] / float(
+                max(raw_side - 1, 1)
+            )
         normalized_offset = offsets.reshape(
             1, 1, 1, 1, 1, -1, 2
         ).expand(batch, cameras, self.grid, self.grid, self.slots, -1, -1)
-        normalized_std = (
-            coarse_std_high[:, :, :, :, :, None]
-            / float(max(raw_side - 1, 1))
-        ).expand(-1, -1, -1, -1, -1, int(offsets.shape[0]), -1)
-        normalized_flow_delta = (
-            flow_delta
-            * float(max(raw_side - 1, 1))
-            / float(max(dino_side - 1, 1))
-            / float(max(raw_side - 1, 1))
-        )[:, :, :, :, :, None].expand_as(normalized_std)
         fine_geometry = torch.cat(
             (
                 normalized_coordinate,
                 normalized_offset,
                 sampled_metadata[..., 0:1],
-                sampled_metadata[..., 1:2]
-                / float(max(raw_side - 1, 1)),
+                uncertainty_normalized,
                 sampled_metadata[..., 2:3],
                 normalized_std,
                 normalized_flow_delta,
@@ -3955,17 +4576,28 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
                 target_key if self.progressive_grounding_address else None
             ),
             coarse_candidate_coordinates=(
-                self._normalize_xy(
-                    target_coordinates.expand(batch, cameras, -1, -1),
-                    dino_side,
+                (
+                    outer_chart.canonical_to_normalized(
+                        dino_chart.index_to_canonical(
+                            target_coordinates.expand(batch, cameras, -1, -1)
+                        )
+                    )
+                    if self.coordinate_canonical
+                    else self._normalize_xy(
+                        target_coordinates.expand(batch, cameras, -1, -1),
+                        dino_side,
+                    )
                 ).to(dtype=source_dino.dtype)
                 if self.progressive_grounding_address
                 else None
             ),
             coarse_flow_centers=(
-                self._normalize_xy(
-                    flow_center_dino,
-                    dino_side,
+                (
+                    outer_chart.canonical_to_normalized(
+                        dino_chart.index_to_canonical(flow_center_dino)
+                    )
+                    if self.coordinate_canonical
+                    else self._normalize_xy(flow_center_dino, dino_side)
                 ).to(dtype=source_dino.dtype)
                 if self.progressive_grounding_address
                 else None
@@ -3977,7 +4609,14 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             ),
             coarse_uncertainty=(
                 (
-                    uncertainty_dino / float(max(dino_side - 1, 1))
+                    uncertainty_dino
+                    * (
+                        float(dino_chart.pitch_xy[0])
+                        * 2.0
+                        / max(outer_chart.shape_hw[1] - 1, 1)
+                    )
+                    if self.coordinate_canonical
+                    else uncertainty_dino / float(max(dino_side - 1, 1))
                 ).to(dtype=source_dino.dtype)
                 if self.progressive_grounding_address
                 else None
@@ -3989,23 +4628,41 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             ),
             coarse_cycle_error=(
                 (
-                    cycle_grid / float(max(raw_side - 1, 1))
+                    cycle_grid
+                    * (
+                        float(raw_chart.pitch_xy[0])
+                        * 2.0
+                        / max(outer_chart.shape_hw[1] - 1, 1)
+                    )
+                    if self.coordinate_canonical
+                    else cycle_grid / float(max(raw_side - 1, 1))
                 ).to(dtype=source_dino.dtype)
                 if self.progressive_grounding_address
                 else None
             ),
             fine_coordinates=(
-                self._normalize_xy(
-                    fine_coordinates,
-                    raw_side,
+                (
+                    outer_chart.canonical_to_normalized(
+                        raw_chart.index_to_canonical(fine_coordinates)
+                    )
+                    if self.coordinate_canonical
+                    else self._normalize_xy(fine_coordinates, raw_side)
                 ).to(dtype=source_dino.dtype)
                 if self.progressive_grounding_address
                 else None
             ),
             coarse_source_centers=(
-                self._normalize_xy(
-                    source_high.expand(batch, cameras, -1, -1, -1),
-                    raw_side,
+                (
+                    outer_chart.canonical_to_normalized(
+                        raw_chart.index_to_canonical(
+                            source_high.expand(batch, cameras, -1, -1, -1)
+                        )
+                    )
+                    if self.coordinate_canonical
+                    else self._normalize_xy(
+                        source_high.expand(batch, cameras, -1, -1, -1),
+                        raw_side,
+                    )
                 ).to(dtype=source_dino.dtype)
                 if self.progressive_grounding_address
                 else None
@@ -4034,9 +4691,17 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
             dense_current_rgb=(
                 literal_rgb_chart if self.coordinate_typed_raw_detail else None
             ),
+            coordinate_contract=self.coordinate_contract,
+            outer_chart=outer_chart,
+            raw_chart=raw_chart,
+            dino_chart=dino_chart,
+            dino_pooled_chart=dino_pooled_chart,
         )
         metrics = {
             "flow_jepa_address_lattice_enabled": coarse_centers.new_ones(()),
+            "flow_jepa_coordinate_contract_canonical": coarse_centers.new_tensor(
+                float(self.coordinate_canonical), dtype=torch.float32
+            ),
             "flow_jepa_address_slot_count": coarse_centers.new_tensor(
                 float(self.slots)
             ),
@@ -5411,6 +6076,7 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
             state.dynamic_fine_valid = dynamic_fine_valid
             state.dynamic_fine_coordinates = fine_coordinates
             state.dynamic_source_coordinates = candidates.source_coordinates
+            state.dynamic_source_support = candidates.source_support
             state.dynamic_semantic_keys = candidates.semantic_keys
             state.dynamic_appearance_keys = candidates.appearance_keys
             state.dynamic_geometry_keys = candidates.geometry_keys
@@ -5932,10 +6598,33 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
                 raise RuntimeError(
                     "grounded G3 cannot form a complete object fact set"
                 )
+            content_coordinates = state.rectified_centers
+            content_support = None
+            if state.bank.coordinate_contract == "canonical_rgb_lattice_v1":
+                if (
+                    state.bank.outer_chart is None
+                    or state.bank.dino_pooled_chart is None
+                ):
+                    raise RuntimeError(
+                        "canonical grounded G3 lost outer or pooled-DINO chart"
+                    )
+                rectified_canonical = state.bank.outer_chart.normalized_to_canonical(
+                    state.rectified_centers
+                )
+                content_coordinates = state.bank.dino_pooled_chart.canonical_to_normalized(
+                    rectified_canonical
+                )
+                content_support = state.bank.dino_pooled_chart.center_support(
+                    rectified_canonical
+                )
             content_slots = sample_spatial_slots(
                 state.bank.dense_current_dino_content,
-                state.rectified_centers,
+                content_coordinates,
             )
+            if content_support is not None:
+                content_slots = content_slots * content_support[..., None].to(
+                    dtype=content_slots.dtype
+                )
             slot_validity = state.dynamic_fine_valid.any(
                 dim=-1,
                 keepdim=True,
@@ -7040,7 +7729,18 @@ class _ProgressiveGroundingAddressOrganizer(nn.Module):
         target_y, target_x = torch.meshgrid(axis, axis, indexing="ij")
         target_coordinates = torch.stack(
             (target_x.reshape(-1), target_y.reshape(-1)), dim=-1
-        ).reshape(1, 1, 1, self.grid * self.grid, 1, 1, 2)
+        )
+        if state.bank.coordinate_contract == "canonical_rgb_lattice_v1":
+            if state.bank.outer_chart is None or state.bank.dino_pooled_chart is None:
+                raise RuntimeError(
+                    "canonical future transport lost outer or pooled-DINO chart"
+                )
+            target_coordinates = state.bank.outer_chart.canonical_to_normalized(
+                state.bank.dino_pooled_chart.lattice(device=query.device)
+            ).reshape(-1, 2)
+        target_coordinates = target_coordinates.reshape(
+            1, 1, 1, self.grid * self.grid, 1, 1, 2
+        )
         source_centers = future_centers.reshape(
             batch,
             self.anchors,
@@ -8551,6 +9251,10 @@ class FlowDINOEvidenceEncoder(nn.Module):
             getattr(config, "flow_jepa_visibility_transition_fraction", 0.10)
         )
         self.grid_size = int(config.flow_jepa_grid_size)
+        self.coordinate_canonical = (
+            str(getattr(config, "flow_jepa_coordinate_contract", "legacy_normalized_chart"))
+            == "canonical_rgb_lattice_v1"
+        )
         self.history = int(config.visual_history_length)
         self.cameras = int(config.num_cameras)
         self.hidden = int(config.hidden_size)
@@ -8637,6 +9341,19 @@ class FlowDINOEvidenceEncoder(nn.Module):
                         self.grid_size,
                         activation_checkpoint=bool(
                             int(config.flow_jepa_raw_activation_checkpoint)
+                        ),
+                        coordinate_canonical=self.coordinate_canonical,
+                        processor_resize_hw=tuple(
+                            getattr(config, "flow_jepa_coordinate_processor_resize_hw", (256, 256))
+                        ),
+                        processor_crop_hw=tuple(
+                            getattr(config, "flow_jepa_coordinate_processor_crop_hw", (224, 224))
+                        ),
+                        processor_crop_offset_yx=tuple(
+                            getattr(config, "flow_jepa_coordinate_processor_crop_offset_yx", (16, 16))
+                        ),
+                        processor_patch_hw=tuple(
+                            getattr(config, "flow_jepa_coordinate_processor_patch_hw", (14, 14))
                         ),
                     )
                     if self.predictive_change_contract
@@ -9130,6 +9847,13 @@ class FlowDINOEvidenceEncoder(nn.Module):
         mask.scatter_(-1, selected, True)
         return mask.reshape(batch, rows, height, width)
 
+    def _online_context_mask_enabled(self, override: bool | None) -> bool:
+        """Resolve current-context masking without touching future targets."""
+
+        if override is None:
+            return bool(getattr(self.config, "flow_jepa_online_context_mask", 1))
+        return bool(override)
+
     def _compose_future_queries(
         self,
         identity_queries: Tensor,
@@ -9542,8 +10266,13 @@ class FlowDINOEvidenceEncoder(nn.Module):
         return _stable_sqrt(correlation_certainty, epsilon=1e-4) * scale_certainty
 
     def _forward_raw_grounding(
-        self, visual: Tensor, raw_visual: Tensor
+        self,
+        visual: Tensor,
+        raw_visual: Tensor,
+        *,
+        online_context_mask: bool | None = None,
     ) -> FlowDINOEvidencePack:
+        online_mask_enabled = self._online_context_mask_enabled(online_context_mask)
         if any(
             module is None
             for module in (
@@ -9626,25 +10355,76 @@ class FlowDINOEvidenceEncoder(nn.Module):
         )
         pair_count = history - 1
         high_side = int(raw_context.flow_forward.shape[-1])
+        raw_grid_chart: ChartSpec | None = None
+        dino_coarse_chart: ChartSpec | None = None
+        if self.coordinate_canonical:
+            rgb_hw = (int(raw_visual.shape[-2]), int(raw_visual.shape[-1]))
+            raw_grid_chart = build_raw_charts(rgb_hw)["raw_high"]
+            dino_coarse_chart = build_dino_charts(
+                rgb_hw,
+                resized_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_resize_hw
+                ),
+                crop_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_crop_hw
+                ),
+                crop_offset_yx=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_crop_offset_yx
+                ),
+                patch_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_patch_hw
+                ),
+                pooled_hw=(grid, grid),
+            )["dino_pooled"]
+            if tuple(raw_grid_chart.shape_hw) != (high_side, high_side):
+                raise ValueError("canonical raw flow chart does not match high features")
 
-        def to_grid(value: Tensor) -> Tensor:
+        def to_grid(value: Tensor, *, vector: bool = False) -> Tensor:
             channels = int(value.shape[3])
             flat = value.reshape(batch * pair_count * cameras, channels, high_side, high_side)
-            flat = F.interpolate(
-                flat.float(), size=(grid, grid), mode="bilinear", align_corners=True
-            )
+            if self.coordinate_canonical:
+                assert raw_grid_chart is not None and dino_coarse_chart is not None
+                if vector:
+                    flat = resample_flow(
+                        flat.float(),
+                        raw_grid_chart,
+                        dino_coarse_chart,
+                        source_units="index",
+                        target_units="index",
+                    ).values
+                else:
+                    flat = resample_field(
+                        flat.float(), raw_grid_chart, dino_coarse_chart
+                    ).values
+            else:
+                flat = F.interpolate(
+                    flat.float(), size=(grid, grid), mode="bilinear", align_corners=True
+                )
+                if vector:
+                    flat = flat * (
+                        float(max(grid - 1, 1)) / float(max(high_side - 1, 1))
+                    )
             return flat.reshape(batch, pair_count, cameras, channels, grid, grid)
 
-        raw_flow_grid = to_grid(raw_context.flow_forward) * (
-            float(max(grid - 1, 1)) / float(max(high_side - 1, 1))
-        )
+        raw_flow_grid = to_grid(raw_context.flow_forward, vector=True)
         confidence_grid = to_grid(raw_context.confidence)
         occlusion_grid = to_grid(raw_context.occlusion)
         entropy_grid = to_grid(raw_context.correlation_entropy)
         margin_grid = to_grid(raw_context.correlation_margin)
-        cycle_grid = to_grid(raw_context.cycle_error) * (
-            float(max(grid - 1, 1)) / float(max(high_side - 1, 1))
-        )
+        cycle_grid = to_grid(raw_context.cycle_error)
+        if self.coordinate_canonical:
+            assert raw_grid_chart is not None and dino_coarse_chart is not None
+            cycle_grid = cycle_grid * float(
+                raw_grid_chart.pitch_xy[0] / dino_coarse_chart.pitch_xy[0]
+            )
+        else:
+            cycle_grid = cycle_grid * (
+                float(max(grid - 1, 1)) / float(max(high_side - 1, 1))
+            )
         warp_error_grid = to_grid(raw_context.warp_error)
         observable_motion_grid = to_grid(raw_context.observable_motion).clamp(0.0, 1.0)
         magnitude = _stable_vector_norm(raw_flow_grid, dim=3)
@@ -9671,9 +10451,18 @@ class FlowDINOEvidenceEncoder(nn.Module):
             else magnitude[:, -1]
         )
         if self.training:
-            context_dropout = self._structured_mask(
+            # Draw the legacy current mask even for the disabled A/B arm so
+            # the subsequent future-target draw keeps the historical RNG
+            # position.  The disabled arm discards this mask before any
+            # online RGB/DINO mixing.
+            sampled_context_dropout = self._structured_mask(
                 motion_score.reshape(batch, history * cameras, grid, grid), stochastic=True
             ).reshape(batch, history, cameras, grid, grid)
+            context_dropout = (
+                sampled_context_dropout
+                if online_mask_enabled
+                else torch.zeros_like(motion_score, dtype=torch.bool)
+            )
         else:
             context_dropout = torch.zeros_like(motion_score, dtype=torch.bool)
         if self.predictive_change_contract:
@@ -9688,7 +10477,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 future_motion_score,
                 stochastic=self.training,
             )
-            if self.training:
+            if self.training and online_mask_enabled:
                 context_dropout = context_dropout.clone()
                 context_dropout[:, -1] = future_spatial_mask
             future_mask = future_spatial_mask[:, None].expand(
@@ -9846,6 +10635,10 @@ class FlowDINOEvidenceEncoder(nn.Module):
             "flow_jepa_current_context_mask_fraction": (
                 context_dropout[:, -1].float().mean().detach()
             ),
+            "flow_jepa_online_context_mask_enabled": selector.new_tensor(
+                float(online_mask_enabled),
+                dtype=torch.float32,
+            ),
             "flow_jepa_future_target_fraction": future_mask.float().mean().detach(),
             "flow_jepa_predictive_change_contract": selector.new_tensor(
                 float(self.predictive_change_contract), dtype=torch.float32
@@ -9940,6 +10733,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 )
                 else None
             ),
+            raw_outer_side=raw_context.raw_outer_side,
         )
         return FlowDINOEvidencePack(
             selector_tokens=selector,
@@ -9950,8 +10744,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
             context_dropout_mask=context_dropout,
             future_target_mask=future_mask.flatten(1, 4),
             patch_flow_forward=raw_flow_grid,
-            patch_flow_backward=to_grid(raw_context.flow_backward)
-            * (float(max(grid - 1, 1)) / float(max(high_side - 1, 1))),
+            patch_flow_backward=to_grid(raw_context.flow_backward, vector=True),
             flow_confidence=confidence_grid,
             flow_occlusion=occlusion_grid,
             losses=losses,
@@ -10053,11 +10846,43 @@ class FlowDINOEvidenceEncoder(nn.Module):
         flow = context.flow_forward[:, -1].reshape(
             batch * self.cameras, 2, high_side, high_side
         )
+        canonical_raw_chart: ChartSpec | None = None
+        canonical_dino_chart: ChartSpec | None = None
+        if self.coordinate_canonical:
+            outer_side = context.raw_outer_side
+            if outer_side is None:
+                raise RuntimeError("canonical raw context lost the outer RGB side")
+            canonical_raw_chart = build_raw_charts((outer_side, outer_side))["raw_high"]
+            canonical_dino_chart = build_dino_charts(
+                (outer_side, outer_side),
+                resized_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_resize_hw
+                ),
+                crop_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_crop_hw
+                ),
+                crop_offset_yx=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_crop_offset_yx
+                ),
+                patch_hw=tuple(
+                    int(value)
+                    for value in self.config.flow_jepa_coordinate_processor_patch_hw
+                ),
+                pooled_hw=(grid, grid),
+            )["dino_pooled"]
 
         def latest_grid(value: Tensor) -> Tensor:
             flat = value[:, -1].reshape(
                 batch * self.cameras, int(value.shape[3]), high_side, high_side
             )
+            if self.coordinate_canonical:
+                assert canonical_raw_chart is not None and canonical_dino_chart is not None
+                return resample_field(
+                    flat.float(), canonical_raw_chart, canonical_dino_chart
+                ).values
             return F.interpolate(
                 flat.float(), size=(grid, grid), mode="bilinear", align_corners=True
             )
@@ -10397,9 +11222,20 @@ class FlowDINOEvidenceEncoder(nn.Module):
                 )
             return pack.selector_tokens, pack.value_tokens, metrics
         magnitude = _stable_vector_norm(flow, dim=1, keepdim=True)
-        magnitude_grid = F.interpolate(
-            magnitude, size=(grid, grid), mode="bilinear", align_corners=True
-        )
+        if self.coordinate_canonical:
+            assert canonical_raw_chart is not None and canonical_dino_chart is not None
+            flow_grid = resample_flow(
+                flow.float(),
+                canonical_raw_chart,
+                canonical_dino_chart,
+                source_units="index",
+                target_units="index",
+            ).values
+            magnitude_grid = _stable_vector_norm(flow_grid, dim=1, keepdim=True)
+        else:
+            magnitude_grid = F.interpolate(
+                magnitude, size=(grid, grid), mode="bilinear", align_corners=True
+            )
         if bool(int(getattr(self.config, "flow_jepa_zero_flow_guard", 0))):
             spatial_motion = latest_grid(context.observable_motion).clamp(0.0, 1.0)
         else:
@@ -10732,7 +11568,13 @@ class FlowDINOEvidenceEncoder(nn.Module):
             return selector, values, metrics, late_detail
         return selector, values, metrics
 
-    def _forward_late_bottleneck(self, visual: Tensor) -> FlowDINOEvidencePack:
+    def _forward_late_bottleneck(
+        self,
+        visual: Tensor,
+        *,
+        online_context_mask: bool | None = None,
+    ) -> FlowDINOEvidencePack:
+        online_mask_enabled = self._online_context_mask_enabled(online_context_mask)
         if any(
             module is None
             for module in (
@@ -10763,10 +11605,15 @@ class FlowDINOEvidenceEncoder(nn.Module):
         motion_score[:, 0] = coarse_magnitude[:, 0]
         motion_score[:, 1:] = coarse_magnitude
         if self.training:
-            context_dropout = self._structured_mask(
+            sampled_context_dropout = self._structured_mask(
                 motion_score.reshape(batch, history * cameras, grid, grid),
                 stochastic=True,
             ).reshape(batch, history, cameras, grid, grid)
+            context_dropout = (
+                sampled_context_dropout
+                if online_mask_enabled
+                else torch.zeros_like(motion_score, dtype=torch.bool)
+            )
         else:
             context_dropout = torch.zeros_like(motion_score, dtype=torch.bool)
 
@@ -11079,6 +11926,10 @@ class FlowDINOEvidenceEncoder(nn.Module):
             "flow_jepa_correlation_entropy": fine_entropy_u.float().mean().detach(),
             "flow_jepa_correlation_margin": fine_margin_u.float().mean().detach(),
             "flow_jepa_context_dropout_fraction": context_dropout.float().mean().detach(),
+            "flow_jepa_online_context_mask_enabled": selector.new_tensor(
+                float(online_mask_enabled),
+                dtype=torch.float32,
+            ),
             "flow_jepa_future_target_fraction": future_mask.float().mean().detach(),
             "flow_jepa_evidence_token_count": selector.new_tensor(float(selector.shape[1])).float(),
             "flow_jepa_horizon_min": selector.new_tensor(float(self.window_offsets[0])).float(),
@@ -11119,16 +11970,28 @@ class FlowDINOEvidenceEncoder(nn.Module):
         )
 
     def forward(
-        self, visual: Tensor, *, raw_visual: Tensor | None = None
+        self,
+        visual: Tensor,
+        *,
+        raw_visual: Tensor | None = None,
+        online_context_mask: bool | None = None,
     ) -> FlowDINOEvidencePack:
+        online_mask_enabled = self._online_context_mask_enabled(online_context_mask)
         if self.raw_enabled:
             if raw_visual is None:
                 raise ValueError("raw-image Flow-JEPA requires raw_visual")
-            return self._forward_raw_grounding(visual, raw_visual)
+            return self._forward_raw_grounding(
+                visual,
+                raw_visual,
+                online_context_mask=online_context_mask,
+            )
         if raw_visual is not None:
             raise ValueError("raw_visual was supplied while raw-image Flow-JEPA is disabled")
         if self.late_bottleneck:
-            return self._forward_late_bottleneck(visual)
+            return self._forward_late_bottleneck(
+                visual,
+                online_context_mask=online_context_mask,
+            )
         pooled = self._pool(visual)
         batch, history, cameras, grid, _, _ = pooled.shape
         forward, backward, confidence, occlusion, warp_error, losses = self._estimate_pairs(pooled)
@@ -11151,10 +12014,15 @@ class FlowDINOEvidenceEncoder(nn.Module):
         motion_score[:, 0] = flow_magnitude[:, 0]
         motion_score[:, 1:] = flow_magnitude
         if self.training:
-            context_dropout = self._structured_mask(
+            sampled_context_dropout = self._structured_mask(
                 motion_score.reshape(batch, history * cameras, grid, grid),
                 stochastic=True,
             ).reshape(batch, history, cameras, grid, grid)
+            context_dropout = (
+                sampled_context_dropout
+                if online_mask_enabled
+                else torch.zeros_like(motion_score, dtype=torch.bool)
+            )
         else:
             context_dropout = torch.zeros_like(motion_score, dtype=torch.bool)
 
@@ -11306,6 +12174,10 @@ class FlowDINOEvidenceEncoder(nn.Module):
             "flow_jepa_correlation_entropy": entropy.float().mean().detach(),
             "flow_jepa_correlation_margin": margin.float().mean().detach(),
             "flow_jepa_context_dropout_fraction": context_dropout.float().mean().detach(),
+            "flow_jepa_online_context_mask_enabled": selector.new_tensor(
+                float(online_mask_enabled),
+                dtype=torch.float32,
+            ),
             "flow_jepa_future_target_fraction": future_mask.float().mean().detach(),
             "flow_jepa_evidence_token_count": torch.as_tensor(
                 selector.shape[1], device=selector.device, dtype=torch.float32
@@ -11873,12 +12745,43 @@ class FlowDINOEvidenceEncoder(nn.Module):
         )
         coordinate_y, coordinate_x = torch.meshgrid(axis, axis, indexing="ij")
         grid_coordinates = torch.stack((coordinate_x, coordinate_y), dim=-1)
+        if (
+            current_state is not None
+            and current_state.bank.coordinate_contract == "canonical_rgb_lattice_v1"
+        ):
+            if (
+                current_state.bank.outer_chart is None
+                or current_state.bank.dino_pooled_chart is None
+            ):
+                raise RuntimeError(
+                    "canonical Teacher-G track lost outer or pooled-DINO chart"
+                )
+            grid_coordinates = current_state.bank.outer_chart.canonical_to_normalized(
+                current_state.bank.dino_pooled_chart.lattice(
+                    device=current_visual.device
+                )
+            )
         fallback_centers = grid_coordinates.reshape(
             1, 1, grid, grid, 1, 2
         ).expand(batch, cameras, -1, -1, slots, -1)
+        if (
+            current_state is not None
+            and current_state.bank.coordinate_contract == "canonical_rgb_lattice_v1"
+        ):
+            assert (
+                current_state.bank.outer_chart is not None
+                and current_state.bank.dino_pooled_chart is not None
+            )
+            fallback_support_value = float(
+                current_state.bank.dino_pooled_chart.pitch_xy[0]
+                * 2.0
+                / max(current_state.bank.outer_chart.shape_hw[1] - 1, 1)
+            )
+        else:
+            fallback_support_value = 2.0 / float(max(grid - 1, 1))
         fallback_support = current_content_grid.new_full(
             (batch, cameras, grid, grid, slots),
-            2.0 / float(max(grid - 1, 1)),
+            fallback_support_value,
         )
         fallback_slot_weights = current_content_grid.new_full(
             (batch, cameras, grid, grid, slots),
@@ -12316,12 +13219,43 @@ class FlowDINOEvidenceEncoder(nn.Module):
         grid_coordinates = torch.stack(
             (coordinate_x, coordinate_y), dim=-1
         )
+        if (
+            current_state is not None
+            and current_state.bank.coordinate_contract == "canonical_rgb_lattice_v1"
+        ):
+            if (
+                current_state.bank.outer_chart is None
+                or current_state.bank.dino_pooled_chart is None
+            ):
+                raise RuntimeError(
+                    "canonical Teacher-G effect lost outer or pooled-DINO chart"
+                )
+            grid_coordinates = current_state.bank.outer_chart.canonical_to_normalized(
+                current_state.bank.dino_pooled_chart.lattice(
+                    device=current_visual.device
+                )
+            )
         fallback_centers = grid_coordinates.reshape(
             1, 1, grid, grid, 1, 2
         ).expand(batch, cameras, -1, -1, slots, -1)
+        if (
+            current_state is not None
+            and current_state.bank.coordinate_contract == "canonical_rgb_lattice_v1"
+        ):
+            assert (
+                current_state.bank.outer_chart is not None
+                and current_state.bank.dino_pooled_chart is not None
+            )
+            fallback_support_value = float(
+                current_state.bank.dino_pooled_chart.pitch_xy[0]
+                * 2.0
+                / max(current_state.bank.outer_chart.shape_hw[1] - 1, 1)
+            )
+        else:
+            fallback_support_value = 2.0 / float(max(grid - 1, 1))
         fallback_support = current_content_grid.new_full(
             (batch, cameras, grid, grid, slots),
-            2.0 / float(max(grid - 1, 1)),
+            fallback_support_value,
         )
         fallback_slot_weights = current_content_grid.new_full(
             (batch, cameras, grid, grid, slots),

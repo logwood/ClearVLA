@@ -218,6 +218,9 @@ class ObjectIntentDynamicsTop(nn.Module):
         world_action_condition_mode: str = "interval_mean_v1",
         p2_spatial_intent_mode: str = "post_pool_only",
         core_config=None,
+        coordinate_contract: str | None = None,
+        future_chart=None,
+        outer_chart=None,
     ) -> None:
         super().__init__()
         self.hidden = int(hidden)
@@ -227,6 +230,11 @@ class ObjectIntentDynamicsTop(nn.Module):
         self.horizon = int(horizon)
         self.basis = int(basis)
         self.world_action_condition_mode = str(world_action_condition_mode)
+        self.coordinate_contract = str(
+            coordinate_contract
+            if coordinate_contract is not None
+            else getattr(core_config, "flow_jepa_coordinate_contract", "legacy_normalized_chart")
+        )
         if int(objects) != 4:
             raise ValueError("the active object top requires K=4")
         del role_host_expansion, role_host_dropout
@@ -305,6 +313,9 @@ class ObjectIntentDynamicsTop(nn.Module):
             content_dim=content_dim,
             key_dim=teacher_key_dim,
             flow_reference_frames=flow_reference_frames,
+            coordinate_contract=self.coordinate_contract,
+            future_chart=future_chart,
+            outer_chart=outer_chart,
         )
         self.recognizer = FuturePlanRecognizer(
             hidden=hidden,

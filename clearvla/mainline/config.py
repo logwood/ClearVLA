@@ -404,6 +404,20 @@ class ObservationConfig:
     mask_ratio: float = 0.375
     mask_block_size: int = 2
     motion_mask_fraction: float = 0.60
+    # The online current-observation context mask is an explicit experiment
+    # control.  The default preserves the historical training objective.  It
+    # is deliberately separate from the future/Teacher JEPA mask: changing
+    # this field must not alter future target sampling or route teacher tensors
+    # through the online RGB/DINO path.
+    online_context_mask_mode: str = "legacy"
+    # Spatial chart selector. ``legacy`` preserves endpoint-normalized
+    # coordinates; ``canonical_v1`` enables the explicit outer-RGB lattice
+    # contract for point/vector/support conversion.
+    coordinate_contract_mode: str = "legacy"
+    coordinate_processor_resize_hw: tuple[int, int] = (256, 256)
+    coordinate_processor_crop_hw: tuple[int, int] = (224, 224)
+    coordinate_processor_crop_offset_yx: tuple[int, int] = (16, 16)
+    coordinate_processor_patch_hw: tuple[int, int] = (14, 14)
     uncertainty_floor: float = 0.03
     microgrid_side: int = 3
 
@@ -432,6 +446,59 @@ class ObservationConfig:
             raise ValueError("mask_ratio must be in (0,1)")
         if not 0.0 <= self.motion_mask_fraction <= 1.0:
             raise ValueError("motion_mask_fraction must be in [0,1]")
+        if not isinstance(self.online_context_mask_mode, str) or (
+            self.online_context_mask_mode not in {"legacy", "disabled"}
+        ):
+            raise ValueError(
+                "observation.online_context_mask_mode must be legacy or disabled"
+            )
+        if not isinstance(self.coordinate_contract_mode, str) or (
+            self.coordinate_contract_mode not in {"legacy", "canonical_v1"}
+        ):
+            raise ValueError(
+                "observation.coordinate_contract_mode must be legacy or canonical_v1"
+            )
+        for name, value in (
+            ("coordinate_processor_resize_hw", self.coordinate_processor_resize_hw),
+            ("coordinate_processor_crop_hw", self.coordinate_processor_crop_hw),
+            ("coordinate_processor_patch_hw", self.coordinate_processor_patch_hw),
+        ):
+            if len(value) != 2 or any(int(v) != v or int(v) <= 0 for v in value):
+                raise ValueError(f"observation.{name} must contain two positive integers")
+        value = self.coordinate_processor_crop_offset_yx
+        if len(value) != 2 or any(int(v) != v or int(v) < 0 for v in value):
+            raise ValueError(
+                "observation.coordinate_processor_crop_offset_yx must contain two nonnegative integers"
+            )
+        if self.coordinate_contract_mode == "canonical_v1":
+            resize_hw = tuple(int(v) for v in self.coordinate_processor_resize_hw)
+            crop_hw = tuple(int(v) for v in self.coordinate_processor_crop_hw)
+            patch_hw = tuple(int(v) for v in self.coordinate_processor_patch_hw)
+            if len({resize_hw[0], resize_hw[1]}) != 1:
+                raise ValueError(
+                    "canonical processor geometry is invalid: resize must be square"
+                )
+            if len({crop_hw[0], crop_hw[1]}) != 1:
+                raise ValueError(
+                    "canonical processor geometry is invalid: crop must be square"
+                )
+            if len({patch_hw[0], patch_hw[1]}) != 1:
+                raise ValueError(
+                    "canonical processor geometry is invalid: patch must be square"
+                )
+            if crop_hw[0] > resize_hw[0]:
+                raise ValueError(
+                    "canonical processor geometry is invalid: crop exceeds resize"
+                )
+            expected_offset = (
+                (resize_hw[0] - crop_hw[0]) // 2,
+                (resize_hw[1] - crop_hw[1]) // 2,
+            )
+            if tuple(int(v) for v in value) != expected_offset:
+                raise ValueError(
+                    "canonical processor geometry is invalid: crop offset must be the "
+                    "center-crop offset used by BitImageProcessor"
+                )
         if self.uncertainty_floor <= 0.0:
             raise ValueError("uncertainty_floor must be positive")
         if self.microgrid_side != 3:
@@ -942,6 +1009,34 @@ class ExperimentConfig:
             raise ValueError("patches_per_camera must form one square native chart")
         if self.observation.grid_size > native_side:
             raise ValueError("the coarse evidence grid cannot exceed the native chart")
+        if self.observation.coordinate_contract_mode == "canonical_v1":
+            # Validate the processor geometry against the model's native DINO
+            # chart before constructing the policy.  Without this check a
+            # seemingly valid config can produce (for example) a 15x15 token
+            # chart while the graph still claims 16x16=256 tokens; the error
+            # would otherwise surface only after data/cache admission.
+            from .spatial_geometry import build_dino_charts
+
+            try:
+                dino_chart = build_dino_charts(
+                    (int(self.data.cache_side), int(self.data.cache_side)),
+                    resized_hw=self.observation.coordinate_processor_resize_hw,
+                    crop_hw=self.observation.coordinate_processor_crop_hw,
+                    crop_offset_yx=self.observation.coordinate_processor_crop_offset_yx,
+                    patch_hw=self.observation.coordinate_processor_patch_hw,
+                    pooled_hw=(self.observation.grid_size, self.observation.grid_size),
+                )["dino_patch"]
+            except ValueError as error:
+                raise ValueError(
+                    "canonical coordinate processor geometry is invalid"
+                ) from error
+            if int(dino_chart.shape_hw[0] * dino_chart.shape_hw[1]) != int(
+                self.dimensions.patches_per_camera
+            ):
+                raise ValueError(
+                    "canonical coordinate processor patch chart must match "
+                    "dimensions.patches_per_camera"
+                )
         if self.bottom.controller_heads != self.dimensions.num_heads:
             raise ValueError("top and execution controller head counts must align")
         if len(self.data.camera_names) != self.dimensions.num_cameras:
@@ -1153,6 +1248,24 @@ class ExperimentConfig:
             # model-contract initialization, never an implicit exact resume.
             cast(dict[str, object], payload["top"]).pop("p2_spatial_intent_mode")
         data = cast(dict[str, object], payload["data"])
+        observation = cast(dict[str, object], payload["observation"])
+        if self.observation.online_context_mask_mode == "legacy":
+            # The legacy encoder masks the online current context during the
+            # training path.  Omit the accepted default so old config payloads
+            # and checkpoint identities remain byte-compatible; an A/B run
+            # that disables it carries an explicit semantic selector.
+            observation.pop("online_context_mask_mode", None)
+        if self.observation.coordinate_contract_mode == "legacy":
+            # Preserve historical checkpoint/config identities; B artifacts
+            # carry an explicit semantic selector.
+            observation.pop("coordinate_contract_mode", None)
+            for key in (
+                "coordinate_processor_resize_hw",
+                "coordinate_processor_crop_hw",
+                "coordinate_processor_crop_offset_yx",
+                "coordinate_processor_patch_hw",
+            ):
+                observation.pop(key, None)
         if self.data.visual_cache_read_backend == "mmap":
             data.pop("visual_cache_read_backend")
             data.pop("visual_pread_max_open_files")

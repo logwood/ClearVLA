@@ -1089,6 +1089,7 @@ class LateRawDetailPolicyReader(nn.Module):
         config: V39PolicyConfig,
         *,
         target_fact_routing: bool = False,
+        coordinate_contract: str | None = None,
     ) -> None:
         super().__init__()
         hidden = int(config.hidden_size)
@@ -1097,6 +1098,19 @@ class LateRawDetailPolicyReader(nn.Module):
             raise ValueError("late raw-detail hidden size must be divisible by heads")
         self.config = config
         self.target_fact_routing = bool(target_fact_routing)
+        self.coordinate_contract = str(
+            coordinate_contract
+            if coordinate_contract is not None
+            else getattr(config, "flow_jepa_coordinate_contract", "legacy_normalized_chart")
+        )
+        if self.coordinate_contract not in {
+            "legacy_normalized_chart",
+            "canonical_rgb_lattice_v1",
+        }:
+            raise ValueError(
+                "unsupported P1 coordinate contract: "
+                f"{self.coordinate_contract!r}"
+            )
         self.hidden = hidden
         self.heads = heads
         self.head_dim = hidden // heads
@@ -3015,6 +3029,24 @@ class LateRawDetailPolicyReader(nn.Module):
             typed_coordinates = progressive.dynamic_fine_coordinates
             if typed_literal_rgb is None or typed_coordinates is None:
                 raise RuntimeError("typed P1 has no literal RGB/current coordinates")
+            if self.coordinate_contract == "canonical_rgb_lattice_v1":
+                # The producer owns chart conversion and support.  P1 must
+                # consume the already typed bank without a second spatial
+                # read; this guard only verifies the public normalized frame.
+                typed_support = fine_valid > 0.0
+                supported_coordinates = typed_coordinates[typed_support]
+                if supported_coordinates.numel() and not bool(
+                    torch.isfinite(supported_coordinates).all().item()
+                ):
+                    raise ValueError(
+                        "canonical P1 coordinates are non-finite on support"
+                    )
+                if supported_coordinates.numel() and bool(
+                    (supported_coordinates.abs() > 1.00001).any().item()
+                ):
+                    raise ValueError(
+                        "canonical P1 coordinates must use outer-RGB normalized units"
+                    )
             if self.target_fact_routing:
                 fine_support = fine_valid[..., None]
                 for value, name in (
@@ -4943,6 +4975,10 @@ class LateRawDetailPolicyReader(nn.Module):
                 {
                     "flow_jepa_coordinate_typed_raw_detail": trajectory.new_ones(
                         (), dtype=torch.float32
+                    ),
+                    "flow_jepa_coordinate_contract_canonical": trajectory.new_tensor(
+                        float(self.coordinate_contract == "canonical_rgb_lattice_v1"),
+                        dtype=torch.float32,
                     ),
                     "flow_jepa_structured_ownership_bottleneck": (
                         trajectory.new_tensor(

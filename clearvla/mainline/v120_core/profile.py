@@ -169,6 +169,26 @@ def build_v120_visual_config(mainline_config: Any) -> V39PolicyConfig:
         flow_jepa_mask_ratio=float(observation.mask_ratio),
         flow_jepa_mask_block_size=int(observation.mask_block_size),
         flow_jepa_motion_mask_fraction=float(observation.motion_mask_fraction),
+        flow_jepa_online_context_mask=int(
+            getattr(observation, "online_context_mask_mode", "legacy") == "legacy"
+        ),
+        flow_jepa_coordinate_contract=(
+            "canonical_rgb_lattice_v1"
+            if observation.coordinate_contract_mode == "canonical_v1"
+            else "legacy_normalized_chart"
+        ),
+        flow_jepa_coordinate_processor_resize_hw=tuple(
+            int(value) for value in observation.coordinate_processor_resize_hw
+        ),
+        flow_jepa_coordinate_processor_crop_hw=tuple(
+            int(value) for value in observation.coordinate_processor_crop_hw
+        ),
+        flow_jepa_coordinate_processor_crop_offset_yx=tuple(
+            int(value) for value in observation.coordinate_processor_crop_offset_yx
+        ),
+        flow_jepa_coordinate_processor_patch_hw=tuple(
+            int(value) for value in observation.coordinate_processor_patch_hw
+        ),
         flow_jepa_uncertainty_floor=float(observation.uncertainty_floor),
         flow_jepa_raw_base_channels=int(observation.raw_base_channels),
         flow_jepa_address_slots=int(observation.local_hypotheses),

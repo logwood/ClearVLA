@@ -21,6 +21,13 @@ from torch import Tensor, nn
 
 from ..config import ExperimentConfig
 from ..interfaces import CurrentObservation
+from ..spatial_geometry import (
+    ChartSpec,
+    build_dino_charts,
+    build_raw_charts,
+    resample_field,
+    resample_flow,
+)
 from ..v120_core.flow_dino_evidence import (
     FlowDINOEvidenceEncoder,
     FlowDINOEvidencePack,
@@ -61,7 +68,14 @@ def _high_frequency(value: Tensor, grid: int) -> Tensor:
     return (flat - low).reshape_as(value).to(dtype=value.dtype)
 
 
-def _v120_flow_field(pack: FlowDINOEvidencePack, index: int) -> PatchFlowField:
+def _v120_flow_field(
+    pack: FlowDINOEvidencePack,
+    index: int,
+    *,
+    target_shape: tuple[int, int] | None = None,
+    canonical_raw_chart: ChartSpec | None = None,
+    canonical_dino_chart: ChartSpec | None = None,
+) -> PatchFlowField:
     """Adapt V120's source-indexed 8x8-chart flow to the mainline contract.
 
     V120 stores ``patch_flow_forward`` as previous-to-current displacement on
@@ -70,11 +84,10 @@ def _v120_flow_field(pack: FlowDINOEvidencePack, index: int) -> PatchFlowField:
     uses destination indexing instead: its online ``forward`` is
     previous-to-current on current cells.  Swapping the two directed solves
     and negating them is therefore required; merely relabelling the tensors
-    silently attaches motion to the wrong frame. Before the pack is returned,
-    V120 explicitly rescales raw-flow pixels by
-    ``(chart_side - 1) / (high_side - 1)``. The exported displacement is
-    therefore already measured in 8x8 chart cells and converts to
-    ``grid_sample`` coordinates with ``2 / (chart_side - 1)``.
+    silently attaches motion to the wrong frame.  Legacy vectors are first
+    converted from the V120 endpoint-index chart to normalized coordinates;
+    canonical vectors are converted by their explicit pooled-DINO/raw chart
+    contract before the same normalized export.
     """
 
     forward_source = pack.patch_flow_forward[:, index]
@@ -88,11 +101,82 @@ def _v120_flow_field(pack: FlowDINOEvidencePack, index: int) -> PatchFlowField:
     ):
         raise ValueError("V120 exported patch flow must be a square [B,C,2,Y,X] chart")
     chart_side = int(forward_source.shape[-1])
-    scale = 2.0 / float(chart_side - 1)
-    forward = -backward_source * scale
-    backward = -forward_source * scale
-    confidence = pack.flow_confidence[:, index]
-    occlusion = pack.flow_occlusion[:, index]
+    if target_shape is None:
+        target_shape = (chart_side, chart_side)
+    if len(target_shape) != 2 or target_shape[0] != target_shape[1] or any(
+        int(value) < 2 for value in target_shape
+    ):
+        raise ValueError("V120 flow target chart must be a square side >= 2")
+    if canonical_raw_chart is not None or canonical_dino_chart is not None:
+        if canonical_raw_chart is None or canonical_dino_chart is None:
+            raise ValueError("canonical V120 flow conversion requires both charts")
+        if tuple(canonical_raw_chart.shape_hw) != tuple(target_shape):
+            raise ValueError(
+                "canonical V120 flow target chart does not match detail features: "
+                f"{canonical_raw_chart.shape_hw} != {target_shape}"
+            )
+        # The pack's raw-flow vectors are expressed in the pooled-DINO cell
+        # index chart. Convert both directed solves to the detail producer
+        # chart before switching to the normalized displacement contract.
+        forward_index = resample_flow(
+            -backward_source.float(),
+            canonical_dino_chart,
+            canonical_raw_chart,
+            source_units="index",
+            target_units="index",
+        ).values
+        backward_index = resample_flow(
+            -forward_source.float(),
+            canonical_dino_chart,
+            canonical_raw_chart,
+            source_units="index",
+            target_units="index",
+        ).values
+        scale = 2.0 / float(max(int(target_shape[1]) - 1, 1))
+        forward = forward_index * scale
+        backward = backward_index * scale
+        confidence = resample_field(
+            pack.flow_confidence[:, index].float(),
+            canonical_dino_chart,
+            canonical_raw_chart,
+        ).values
+        occlusion = resample_field(
+            pack.flow_occlusion[:, index].float(),
+            canonical_dino_chart,
+            canonical_raw_chart,
+        ).values
+    else:
+        # Legacy packs are endpoint-index vectors on the native V120 8x8
+        # chart. Convert to normalized units first, then interpolate the
+        # normalized field onto the retained high-resolution detail chart.
+        scale = 2.0 / float(max(chart_side - 1, 1))
+        forward = -backward_source * scale
+        backward = -forward_source * scale
+        if tuple(forward.shape[-2:]) != tuple(target_shape):
+            forward = F.interpolate(
+                forward.reshape(-1, 2, chart_side, chart_side).float(),
+                size=target_shape,
+                mode="bilinear",
+                align_corners=True,
+            ).reshape(*forward.shape[:-2], *target_shape).to(dtype=forward.dtype)
+            backward = F.interpolate(
+                backward.reshape(-1, 2, chart_side, chart_side).float(),
+                size=target_shape,
+                mode="bilinear",
+                align_corners=True,
+            ).reshape(*backward.shape[:-2], *target_shape).to(dtype=backward.dtype)
+        confidence = F.interpolate(
+            pack.flow_confidence[:, index].reshape(-1, 1, chart_side, chart_side).float(),
+            size=target_shape,
+            mode="bilinear",
+            align_corners=True,
+        ).reshape(*pack.flow_confidence[:, index].shape[:-2], *target_shape)
+        occlusion = F.interpolate(
+            pack.flow_occlusion[:, index].reshape(-1, 1, chart_side, chart_side).float(),
+            size=target_shape,
+            mode="bilinear",
+            align_corners=True,
+        ).reshape(*pack.flow_occlusion[:, index].shape[:-2], *target_shape)
     uncertainty = torch.zeros_like(confidence)
     field = PatchFlowField(
         forward=forward,
@@ -159,6 +243,9 @@ class RestoredV120ObservationCompiler(nn.Module):
             pack = self.encoder(
                 observation.dino_history,
                 raw_visual=observation.raw_rgb,
+                online_context_mask=(
+                    self.config.observation.online_context_mask_mode == "legacy"
+                ),
             )
         finally:
             self.encoder.training = previous_training
@@ -224,6 +311,19 @@ class RestoredV120ObservationCompiler(nn.Module):
         literal = bank.dense_current_rgb
         previous_literal = 2.0 * observation.raw_rgb[:, -2].float() - 1.0
         earlier_literal = 2.0 * observation.raw_rgb[:, -3].float() - 1.0
+        canonical_raw_chart: ChartSpec | None = None
+        canonical_dino_chart: ChartSpec | None = None
+        if self.v120_config.flow_jepa_coordinate_contract == "canonical_rgb_lattice_v1":
+            rgb_hw = tuple(int(value) for value in observation.raw_rgb.shape[-2:])
+            canonical_raw_chart = build_raw_charts(rgb_hw)["raw_high"]
+            canonical_dino_chart = build_dino_charts(
+                rgb_hw,
+                resized_hw=self.v120_config.flow_jepa_coordinate_processor_resize_hw,
+                crop_hw=self.v120_config.flow_jepa_coordinate_processor_crop_hw,
+                crop_offset_yx=self.v120_config.flow_jepa_coordinate_processor_crop_offset_yx,
+                patch_hw=self.v120_config.flow_jepa_coordinate_processor_patch_hw,
+                pooled_hw=(self.grid, self.grid),
+            )["dino_pooled"]
         grounding = GroundingObservationBank(
             address_bank=bank,
             late_detail=detail,
@@ -239,8 +339,20 @@ class RestoredV120ObservationCompiler(nn.Module):
             literal_rgb=literal,
             previous_literal_rgb=previous_literal.to(dtype=literal.dtype),
             earlier_literal_rgb=earlier_literal.to(dtype=literal.dtype),
-            flow=_v120_flow_field(pack, -1),
-            earlier_flow=_v120_flow_field(pack, 0),
+            flow=_v120_flow_field(
+                pack,
+                -1,
+                target_shape=tuple(current_detail.shape[-2:]),
+                canonical_raw_chart=canonical_raw_chart,
+                canonical_dino_chart=canonical_dino_chart,
+            ),
+            earlier_flow=_v120_flow_field(
+                pack,
+                0,
+                target_shape=tuple(current_detail.shape[-2:]),
+                canonical_raw_chart=canonical_raw_chart,
+                canonical_dino_chart=canonical_dino_chart,
+            ),
             context_mask=pack.context_dropout_mask[:, -1],
             native_flow_losses=pack.losses,
         )

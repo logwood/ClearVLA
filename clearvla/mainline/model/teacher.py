@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..spatial_geometry import ChartSpec
 from .types import (
     INTERVAL_BOUNDS,
     FutureObjectDynamics,
@@ -31,11 +32,32 @@ class ObjectFutureTeacher(nn.Module):
         content_dim: int,
         key_dim: int = 64,
         flow_reference_frames: int = 4,
+        coordinate_contract: str = "legacy_normalized_chart",
+        future_chart: ChartSpec | None = None,
+        outer_chart: ChartSpec | None = None,
     ) -> None:
         super().__init__()
         self.content_dim = int(content_dim)
         self.key_dim = int(key_dim)
         self.flow_reference_frames = int(flow_reference_frames)
+        self.coordinate_contract = str(coordinate_contract)
+        self.future_chart = future_chart
+        self.outer_chart = outer_chart
+        if self.coordinate_contract not in {
+            "legacy_normalized_chart",
+            "canonical_rgb_lattice_v1",
+        }:
+            raise ValueError(
+                "unsupported Teacher coordinate contract: "
+                f"{self.coordinate_contract!r}"
+            )
+        if self.coordinate_contract == "canonical_rgb_lattice_v1":
+            if self.future_chart is None or self.outer_chart is None:
+                raise ValueError(
+                    "canonical Teacher coordinates require future_chart and outer_chart"
+                )
+            if self.future_chart.canonical_frame != self.outer_chart.canonical_frame:
+                raise ValueError("Teacher charts must share the canonical frame")
         if self.flow_reference_frames <= 0:
             raise ValueError("teacher flow reference frames must be positive")
         self.semantic_content_key = nn.Linear(content_dim, key_dim, bias=False)
@@ -70,6 +92,36 @@ class ObjectFutureTeacher(nn.Module):
         """Convert a raw-pair displacement into each future support horizon."""
 
         return offsets.float() / float(self.flow_reference_frames)
+
+    def _future_coordinate_grid(
+        self,
+        *,
+        rows: int,
+        columns: int,
+        device: torch.device,
+    ) -> Tensor:
+        """Return future support centers in the declared Teacher frame.
+
+        The legacy path intentionally retains its endpoint-normalized chart.
+        The canonical path derives pooled-DINO centers from its producer
+        ChartSpec and expresses them in the outer-RGB normalized frame used by
+        current facts, W, and P2. Point conversion has no flow or covariance
+        term; those remain producer-owned physical quantities.
+        """
+
+        if self.coordinate_contract == "legacy_normalized_chart":
+            axis_y = torch.linspace(-1.0, 1.0, rows, device=device)
+            axis_x = torch.linspace(-1.0, 1.0, columns, device=device)
+            yy, xx = torch.meshgrid(axis_y, axis_x, indexing="ij")
+            return torch.stack((xx, yy), dim=-1)
+        assert self.future_chart is not None and self.outer_chart is not None
+        if tuple(self.future_chart.shape_hw) != (rows, columns):
+            raise ValueError(
+                "Teacher future ChartSpec shape does not match future supports: "
+                f"{self.future_chart.shape_hw} vs {(rows, columns)}"
+            )
+        canonical = self.future_chart.lattice(device=device)
+        return self.outer_chart.canonical_to_normalized(canonical)
 
     @staticmethod
     def _supported_finite(
@@ -233,10 +285,11 @@ class ObjectFutureTeacher(nn.Module):
             current_appearance_key,
             support_appearance_key,
         )
-        axis_y = torch.linspace(-1.0, 1.0, rows, device=future_supports.device)
-        axis_x = torch.linspace(-1.0, 1.0, columns, device=future_supports.device)
-        coordinate_y, coordinate_x = torch.meshgrid(axis_y, axis_x, indexing="ij")
-        coordinate = torch.stack((coordinate_x, coordinate_y), dim=-1)
+        coordinate = self._future_coordinate_grid(
+            rows=rows,
+            columns=columns,
+            device=future_supports.device,
+        )
         coordinate = coordinate.reshape(1, 1, 1, 1, rows, columns, 2)
         # Learned flow spans ``flow_reference_frames`` in the observable raw
         # pair.  Future supports are absolute frame offsets from the current

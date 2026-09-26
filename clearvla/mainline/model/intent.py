@@ -905,14 +905,16 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 camera_validity=facts.camera_validity,
                 existence=facts.existence,
             )
+            # Observe the view consumed by public S, independently of the
+            # separate coarse-action read of target_summary.
+            object_innovation = target_summary[:, None, :]
             public_seed = (
                 interval_base
                 + goal_innovation
                 + history_innovation
-                + target_summary[:, None, :]
+                + object_innovation
             )
             language_object_query = public_seed
-            object_innovation = target_summary[:, None, :]
             public_intervals = self.interval_self(public_seed)
             # P2 retains the full K/type carrier, but language no longer owns a
             # second per-type K gate.  These are producer-valid factual values;

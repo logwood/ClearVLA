@@ -125,6 +125,18 @@ real K objects. Reconstruction uses detached current DINO on observed cells
 and exports one K-specific content value shared by reconstruction, S, W and
 the detached Teacher.
 
+The paired A/B observation controls are opt-in and keep the default graph
+unchanged. A disables only the online current-context mask while preserving
+the encoder's random-draw position; B additionally selects
+`canonical_rgb_lattice_v1`. In that contract, outer RGB pixel centers are the
+canonical frame and every raw, descriptor, DINO patch/pooled, flow, support,
+transport, Teacher-G and P1 coordinate crosses a named `ChartSpec` before it
+is consumed. The executable DINO processor is center-crop geometry, and its
+resize/crop/patch shape, backend and chart digest are admitted through the
+deployment ABI. Per-source visibility/interpolation support remains separate;
+it cannot be replaced by a shared DINO validity mask. The legacy normalized
+chart remains the default and is bitwise-preserved for old checkpoints.
+
 K is an equivariant representation axis, not a fixed color or instance ID.
 The reversible chart correspondence is a typed interface; an entity-to-K
 mapping in a particular observation must be verified before using it as an

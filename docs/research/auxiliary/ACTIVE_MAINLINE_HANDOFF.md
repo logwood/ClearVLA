@@ -1,9 +1,84 @@
 # ClearVLA active operational handoff
 
-Updated: 2026-09-19 UTC. **Dated observations, not a live process inventory.**
-This edit consolidates retained local evidence; it did not poll the server.
+Latest addendum: 2026-09-23 UTC; older sections retain their 2026-09-19 dates.
+**Dated observations, not a live process inventory.**
 Each row below states when it was last checked. A documentation update does
 not refresh a PID, checkpoint or training result.
+
+## 2026-09-23 user-requested pause after diagnostic closeout; resumed for pre-implementation tests
+
+The user first asked to finish the bounded work and save progress, then resumed
+work with an explicit requirement to finish the anomaly analysis and all tests
+before implementation. Existing remote jobs were left running, not stopped.
+No architectural geometry change has been promoted. Current source HEAD is
+`100aaf30f9872f0bff72f0f9869b3f918fef08b6`.
+
+Primary continuation artifact (ignored local artifacts may not exist in a new clone):
+`artifacts/grounding_gradient_followup_20260923/本轮追查结论与修复边界.md`.
+Its sibling `续接说明.md` records paths, outstanding work and provenance.
+Previous causal stage: `artifacts/conditioning_path_trace_20260923/本轮结论与下一阶段.md`.
+
+- Eight fresh/old frozen-state top forwards: all A0 bit-exact. Full49 fine
+  support and binder seed+3 updates localized fresh K0 real-mass concentration
+  to recurrent updates; final share99.88–99.95%. This is not object identity.
+- Twelve real train/val samples × five loss VJPs completed, no optimizer or
+  parameter changes. Best fresh checkpoint E1/11012 has nonzero selector/binder
+  gradients on these samples; earlier E1 late-log saturation remains a bounded
+  observation, not proof that every state is permanently saturated.
+- Actual-processor CPU coordinate reference passed. Explicit geometry maps,
+  typed supports and deployment ABI binding remain proposed source work.
+- Uncommitted source fix: `clearvla/mainline/model/intent.py` observes the actual
+  public-S object-innovation view. Regression script:
+  `scripts/probe_target_fact_gradient_observation.py`. Forward and parameter
+  gradients are bit-exact; real edge metric is repaired; legacy/no_grad pass.
+  Evidence: artifact `diagnostic_hook_fix/diagnostic_fix_report.md`.
+- Preserve pre-existing untracked benchmark files:
+  `clearvla/mainline/data/benchmark_hdf5.py`,
+  `scripts/benchmark_mainline_hdf5_training.py`, `tests/test_benchmark_hdf5.py`.
+
+### Resumed pre-implementation test results (2026-09-23 UTC)
+
+- A four-condition forward factorial on the same 12 real windows crossed
+  `dropout train/eval × visual context mask keep/mask`. No-mask p-max median was
+  0.7029/0.6993; mask-on was 1.0000 in both modes. Actual encoder mask fraction
+  was 0.375. This isolates the active hard-posterior trigger to the visual mask
+  path, with dropout having negligible effect in this matrix.
+- A second 12-sample × 5-loss VJP used `model.train(True)` and the actual
+  `training_mask=True` path. Query/score selector gradient medians fell to
+  3.67e-13/8.45e-11 (train) and 3.62e-16/1.07e-13 (val rows run in train mode),
+  while G3 GRU remained 1.01e-5/5.45e-6. This is the missing active-path
+  evidence; it does not authorize a production change yet.
+- The original 18-case replan1 panel is now complete: 18/18, success 1/18;
+  case005 `push_pink_block_right` is the only success (256 steps). Final local
+  copy: `artifacts/closed_loop_videos_20260923/replan1_completed_final.json`.
+- The eager1000 retry is complete/exit0: wrapper 2544.640s vs lazy2591.127s;
+  load549.594s vs390.570s. Preserve the caveat that wall-clock is only1.80%
+  faster in this run while loading is40.72% slower; this is not a default-reader
+  promotion. Final local timing: `artifacts/mainline_hdf5_1000_rerun_v2_status/`.
+
+Detailed new test report:
+`artifacts/grounding_gradient_followup_20260923/gradient/condition_factor_report.md`.
+
+The resumed pre-implementation probes are now complete: candidate support
+overlay, local DINO chart coordinate overlay, binder 0/1/2/3 iteration
+ablation, and a parameter-restored virtual direction step. They remain
+diagnostic artifacts only; no production geometry, selector, binder or loss
+change has been promoted. The full panel comparison is
+`artifacts/closed_loop_videos_20260923/完整18任务对照.md` and the verified video
+index now has 90/90 playable H.264 copies.
+
+| Last checked UTC | Existing job | Dated state | Owner / path |
+|---|---|---|---|
+| 2026-09-23 17:45:53 | eager1000 retry | 1000/1000 + 2 validation, exit0; wrapper2544.640s, load549.594s | completed artifact; `/data/senwang/clearvla/experiments/calvin/20260923-mainline-hdf5-1000-rerun-v2/eager_retry_gpu4` |
+| 2026-09-23 final artifact refresh | fresh replan1 18-case panel | 18/18 complete, 1 success; final case-level artifact downloaded | completed artifact; `/data/senwang/clearvla/experiments/calvin/20260923-fresh-b4-cadence18-isolated-v3/replan1` |
+
+On explicit continuation, first collect these existing jobs' final artifacts
+without restarting or declaring a final rate from partial output. User video
+evidence is the reference; no additional video viewing is needed. Preserve the
+correction: object at camera-right, actions tend camera-left; do not equate
+image-left with negative world-x. W interval-mean vs sequence is a confounder,
+not the sole explanation. Remote operations still follow the senwang-server
+skill and `/home/sen.wang/mysh/AGENTS.md`.
 
 ## Scope and authority
 
@@ -261,6 +336,91 @@ snapshot. No run, checkpoint, environment or cache was moved or deleted by this
 documentation cleanup; their current disk state was not checked.
 
 ## Transition and cleanup boundary
+
+### Current A/B contract (2026-09-23)
+
+- The paired A/B training comparison keeps `top.world_action_condition_mode`
+  at the current `interval_mean_v1` default. This holds W conditioning fixed
+  while A disables only the online current-context mask and B additionally
+  enables `observation.coordinate_contract_mode=canonical_v1`.
+- The historical `sequence_prefix_v1` / full action-prefix W path remains a
+  separate orthogonal control. It must not be mixed into the A/B runs or used
+  to explain a coordinate-contract result; run it only as a later control if
+  the paired result remains ambiguous.
+- Binder is unchanged. A/B admission uses the same initialization, seed,
+  data order, optimizer and 1000-step pilot envelope before any physical
+  18-task closed-loop panel.
+
+### Full dataflow audit before the next real run (2026-09-24 UTC)
+
+The A/B source path has now been audited from decoded RGB/DINO inputs through
+the Flow-DINO chart owners, G1/G2/G3 support and coordinates, W transport,
+Teacher-G future support, P1 typed reads, and deployment ABI. The audit found
+and closed two canonical-unit leaks: raw motion emphasis now converts DINO
+index vectors into the raw chart before weighting, and future transport plus
+both Teacher-G fallbacks use pooled-DINO centers mapped into the outer-RGB
+normalized frame instead of endpoint `linspace` centers. Canonical early RGB,
+raw flow refinement, fixed descriptors, per-source support, and legacy branch
+parity are covered by the source tests and tiny staged smoke.
+
+The ABI/config boundary now rejects a canonical processor geometry that cannot
+be produced by the executable BitImageProcessor: resize/crop/patch are square,
+crop is inside resize, and the offset is the center-crop offset. Canonical ABI
+validation also binds RGB resize backend, processor charts, DINO patch count and
+token width to the graph; legacy ABI payloads remain byte-compatible and reject
+hidden canonical fields. The full workspace suite passes `78 passed`, targeted
+Ruff and `py_compile` checks pass, and legacy encoder/address/deployment
+comparisons against HEAD are bitwise identical apart from new diagnostics.
+
+The existing Pen DINO cache remains schema-v1 and therefore does not record HF
+processor revision/config provenance. Before this audit was closed, a read-only
+server preflight re-encoded frames 0, 137 and 311 from the original HDF5 using
+the actual `/home/sen.wang/workspace/robotics/clear/hub` processor/model and
+compared both cameras against `dinov2_cache_336`: six `[256,768]` arrays had
+maximum absolute error `1.49e-8`, mean error `2.87e-14`, and minimum cosine
+similarity `0.99999988`. This closes the current cache identity for the planned
+Pen run; any different cache/model must repeat that read-only preflight. Only
+after this audit and the read-only preflight closed were the corrected A/B
+1000-step pilots started from the audited source snapshot (`a9fc26f`). Both
+completed epoch 1 at step 1000 with validation, zero traceback/fatal-error
+records, and checkpoints under
+`/data/senwang/clearvla/experiments/ab-coordinate-20260924-{A,B}-pilot`.
+The paired result is recorded in
+`artifacts/ab_coordinate_20260924/ab_pilot_analysis.md`: A is lower on full
+validation RMSE, while B has no pilot-level numerical win and costs more
+runtime/memory; both retain the shared gripper-event mismatch and long-horizon
+tail gap. Keep both checkpoints for the 18-task closed-loop comparison.
+
+### Full A/B formal training launched (2026-09-25 UTC)
+
+After the completed 1000-step pilot audit, the normal full runs were launched from
+source snapshot `a9fc26f` with `--epochs 8`, `--max-train-batches 0`, and
+`--max-val-batches 0`: A on GPU 4 and B on GPU 6. Both passed the mainline
+preflight and memory gate; the detached processes are running under
+`/data/senwang/clearvla/experiments/ab-coordinate-20260924-{A,B}-formal`
+with console logs beside those directories.
+
+### Completed A/B formal and B8 closure (2026-09-27 UTC)
+
+The two formal Pen runs are complete at step 22,768 from the same source
+snapshot (`a9fc26f`), seed, data identity and batch size 8. A keeps the
+legacy coordinate chart with the online mask disabled; B adds
+`canonical_v1`. Final validation action RMSE is `0.08372` for A and `0.08028`
+for B, tail/first RMSE ratio is `8.926` and `8.355`, and decoded gripper-event
+F1 is `0.327` and `0.353`. B costs about 2.7% more seconds per batch
+(`2.188` versus `2.131` in the final epoch) and has no non-finite final
+metrics. Both runs record the same five early finite gradient spikes above the
+5.0 audit threshold; they were clipped and did not abort training.
+
+The B8 vmass CALVIN closed-loop pair is complete for the fixed 18-task panel:
+replan1 succeeds `1/18`, replan8 `8/18`. Its read-only physical replay
+telemetry is complete for all 18 one-step cases. The median maximum TCP
+tracking error is `38.68 mm`; nine cases cross a sustained 30 mm error, target
+contact depth has median `0.178 mm` and maximum `9.822 mm`, and the maximum
+target-contact force is `1232 N`. These values support a shared control/IK
+amplification and contact-quality failure mode; the telemetry does not by
+itself prove every video penetration is collision geometry. Numeric audit:
+`artifacts/behavior_causal_probes_20260923/physical_numeric_audit_b8r1_20260927.json`.
 
 - Use Desktop Commander/SSH and the `senwang-server` skill for remote work.
   New small standalone `.sh` helpers belong in `/home/sen.wang/mysh`; read its

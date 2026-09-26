@@ -263,6 +263,10 @@ class V39PolicyConfig(V38PolicyConfig):
     flow_jepa_mask_ratio: float = 0.375
     flow_jepa_mask_block_size: int = 2
     flow_jepa_motion_mask_fraction: float = 0.60
+    # Explicitly controls masking of the online current-observation context.
+    # Future/Teacher target masks remain governed by training mode and their
+    # own selectors. ``1`` is the historical behavior.
+    flow_jepa_online_context_mask: int = 1
     # Optional teacher-side target allocation for the historical absolute
     # prediction path.  This changes only which predicted future patches
     # receive JEPA loss: future teacher features never enter forward
@@ -378,6 +382,13 @@ class V39PolicyConfig(V38PolicyConfig):
     # local micro-grid and P2 performs the first typed local fusion.  Zero
     # restores the V109 progressive graph exactly.
     flow_jepa_coordinate_typed_raw_detail: int = 0
+    # Explicit producer/consumer spatial chart. Legacy keeps endpoint
+    # normalized indices; canonical_rgb_lattice_v1 uses outer RGB centers.
+    flow_jepa_coordinate_contract: str = "legacy_normalized_chart"
+    flow_jepa_coordinate_processor_resize_hw: tuple[int, int] = (256, 256)
+    flow_jepa_coordinate_processor_crop_hw: tuple[int, int] = (224, 224)
+    flow_jepa_coordinate_processor_crop_offset_yx: tuple[int, int] = (16, 16)
+    flow_jepa_coordinate_processor_patch_hw: tuple[int, int] = (14, 14)
     flow_jepa_raw_micro_grid: int = 3
     # V111 turns the V110 typed evidence labels into functional ownership.
     # G keeps public scene state separate from semantic/appearance/geometry
@@ -1235,6 +1246,64 @@ class V39PolicyConfig(V38PolicyConfig):
             raise ValueError("flow_jepa_mask_ratio must be in [0,1)")
         if not 0.0 <= float(self.flow_jepa_motion_mask_fraction) <= 1.0:
             raise ValueError("flow_jepa_motion_mask_fraction must be in [0,1]")
+        if int(self.flow_jepa_online_context_mask) not in (0, 1):
+            raise ValueError("flow_jepa_online_context_mask must be 0 or 1")
+        if self.flow_jepa_coordinate_contract not in {
+            "legacy_normalized_chart",
+            "canonical_rgb_lattice_v1",
+        }:
+            raise ValueError(
+                "flow_jepa_coordinate_contract must be legacy_normalized_chart "
+                "or canonical_rgb_lattice_v1"
+            )
+        for name in (
+            "flow_jepa_coordinate_processor_resize_hw",
+            "flow_jepa_coordinate_processor_crop_hw",
+            "flow_jepa_coordinate_processor_patch_hw",
+        ):
+            value = getattr(self, name)
+            if len(value) != 2 or any(int(v) != v or int(v) <= 0 for v in value):
+                raise ValueError(f"{name} must contain two positive integers")
+        value = self.flow_jepa_coordinate_processor_crop_offset_yx
+        if len(value) != 2 or any(int(v) != v or int(v) < 0 for v in value):
+            raise ValueError(
+                "flow_jepa_coordinate_processor_crop_offset_yx must contain two nonnegative integers"
+            )
+        if self.flow_jepa_coordinate_contract == "canonical_rgb_lattice_v1":
+            resize_hw = tuple(
+                int(v) for v in self.flow_jepa_coordinate_processor_resize_hw
+            )
+            crop_hw = tuple(
+                int(v) for v in self.flow_jepa_coordinate_processor_crop_hw
+            )
+            patch_hw = tuple(
+                int(v) for v in self.flow_jepa_coordinate_processor_patch_hw
+            )
+            if len({resize_hw[0], resize_hw[1]}) != 1:
+                raise ValueError(
+                    "canonical processor geometry is invalid: resize must be square"
+                )
+            if len({crop_hw[0], crop_hw[1]}) != 1:
+                raise ValueError(
+                    "canonical processor geometry is invalid: crop must be square"
+                )
+            if len({patch_hw[0], patch_hw[1]}) != 1:
+                raise ValueError(
+                    "canonical processor geometry is invalid: patch must be square"
+                )
+            if crop_hw[0] > resize_hw[0]:
+                raise ValueError(
+                    "canonical processor geometry is invalid: crop exceeds resize"
+                )
+            expected_offset = (
+                (resize_hw[0] - crop_hw[0]) // 2,
+                (resize_hw[1] - crop_hw[1]) // 2,
+            )
+            if tuple(int(v) for v in value) != expected_offset:
+                raise ValueError(
+                    "canonical processor geometry is invalid: crop offset must be the "
+                    "center-crop offset used by BitImageProcessor"
+                )
         if int(self.flow_jepa_teacher_balanced_target_mask) not in (0, 1):
             raise ValueError("flow_jepa_teacher_balanced_target_mask must be 0 or 1")
         if int(self.flow_jepa_predictive_change_contract) not in (0, 1):

@@ -17,6 +17,7 @@ import numpy as np
 
 from clearvla.data.action_chart import resolve_action_state_profile
 from clearvla.vision.preprocessing import (
+    RGB_PREPROCESS_SCHEMA,
     PreprocessConfig,
     preprocessing_identity,
 )
@@ -30,6 +31,7 @@ from ..gripper_contract import (
     MANISKILL_BINARY_GRIPPER_OUTPUT_MODE,
     VALID_GRIPPER_OUTPUT_MODES,
 )
+from ..spatial_geometry import build_dino_charts, build_raw_charts, rgb_chart
 from .flow_schedule import DeploymentFlowSchedule
 
 DEPLOYMENT_ABI_SCHEMA = "clearvla-mainline-deployment-abi-v1"
@@ -84,6 +86,44 @@ def deployment_flow_schedule(config: ExperimentConfig) -> DeploymentFlowSchedule
         if raw is None
         else DeploymentFlowSchedule.from_dict(raw)
     )
+
+
+def _coordinate_geometry_abi(config: ExperimentConfig) -> dict[str, object]:
+    """Export the B chart identity without changing legacy ABI payloads."""
+
+    if config.observation.coordinate_contract_mode == "legacy":
+        return {}
+    outer = rgb_chart((int(config.data.cache_side), int(config.data.cache_side)))
+    charts = build_raw_charts(outer.shape_hw)
+    dino = build_dino_charts(
+        outer.shape_hw,
+        resized_hw=config.observation.coordinate_processor_resize_hw,
+        crop_hw=config.observation.coordinate_processor_crop_hw,
+        crop_offset_yx=config.observation.coordinate_processor_crop_offset_yx,
+        patch_hw=config.observation.coordinate_processor_patch_hw,
+        pooled_hw=(8, 8),
+    )
+    geometry: dict[str, object] = {
+        "mode": "canonical_rgb_lattice_v1",
+        "processor": {
+            "resize_hw": list(config.observation.coordinate_processor_resize_hw),
+            "crop_hw": list(config.observation.coordinate_processor_crop_hw),
+            "crop_offset_yx": list(config.observation.coordinate_processor_crop_offset_yx),
+            "patch_hw": list(config.observation.coordinate_processor_patch_hw),
+        },
+        "charts": {
+            name: chart.to_dict()
+            for name, chart in {
+                "outer_rgb": outer,
+                "raw_high": charts["raw_high"],
+                "raw_mid": charts["raw_mid"],
+                "dino_patch": dino["dino_patch"],
+                "dino_pooled": dino["dino_pooled"],
+            }.items()
+        },
+    }
+    geometry["sha256"] = canonical_sha256(geometry)
+    return geometry
 
 
 def _strict_abi_int(value: object, *, name: str) -> int:
@@ -327,6 +367,25 @@ def build_deployment_abi(
                 "normalized_high": [1.0] * _LIBERO_ACTION_DIM,
             }
         )
+    observation_abi: dict[str, object] = {
+        "camera_names": list(config.data.camera_names),
+        "visual_offsets": [-8, -4, 0],
+        "state_offsets": [-8, -4, 0],
+        "executed_action_offsets": [-24, -16, -12, -8, -6, -4, -2, -1],
+        "rgb_preprocessing": preprocessing_identity(image_preprocess),
+        "dinov2": {
+            "model": config.data.dinov2_model,
+            "patches_per_camera": int(config.dimensions.patches_per_camera),
+            "token_width": int(config.dimensions.visual_token_dim),
+            "compute_dtype": str(config.runtime.compute_dtype),
+            "reference_batch_size": int(config.data.dinov2_reference_batch_size),
+        },
+        "state_dim": int(config.dimensions.state_dim),
+        "action_dim": int(config.dimensions.action_dim),
+    }
+    coordinate_geometry = _coordinate_geometry_abi(config)
+    if coordinate_geometry:
+        observation_abi["coordinate_geometry"] = coordinate_geometry
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
         "source_config_digest": identity.config_digest,
@@ -335,22 +394,7 @@ def build_deployment_abi(
         "graph_config_sha256": canonical_sha256(graph),
         "flow_schedule": flow_schedule,
         "flow_schedule_sha256": canonical_sha256(flow_schedule),
-        "observation": {
-            "camera_names": list(config.data.camera_names),
-            "visual_offsets": [-8, -4, 0],
-            "state_offsets": [-8, -4, 0],
-            "executed_action_offsets": [-24, -16, -12, -8, -6, -4, -2, -1],
-            "rgb_preprocessing": preprocessing_identity(image_preprocess),
-            "dinov2": {
-                "model": config.data.dinov2_model,
-                "patches_per_camera": int(config.dimensions.patches_per_camera),
-                "token_width": int(config.dimensions.visual_token_dim),
-                "compute_dtype": str(config.runtime.compute_dtype),
-                "reference_batch_size": int(config.data.dinov2_reference_batch_size),
-            },
-            "state_dim": int(config.dimensions.state_dim),
-            "action_dim": int(config.dimensions.action_dim),
-        },
+        "observation": observation_abi,
         "action": action_contract,
         "normalizers": {
             "action_sha256": canonical_sha256(action_normalizer.to_dict()),
@@ -404,12 +448,138 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         if abi.get("flow_schedule_sha256") != canonical_sha256(stored_schedule):
             raise ValueError("deployment flow schedule digest is inconsistent")
     observation = _mapping(abi.get("observation"), name="observation")
+    graph_observation = _mapping(graph.get("observation"), name="graph_config.observation")
     action = _mapping(abi.get("action"), name="action")
     normalizers = _mapping(abi.get("normalizers"), name="normalizers")
     language = _mapping(abi.get("language"), name="language")
     profile = _mapping(action.get("data_profile"), name="action.data_profile")
     profile_name = profile.get("name")
     dino = _mapping(observation.get("dinov2"), name="observation.dinov2")
+    coordinate_mode = graph_observation.get("coordinate_contract_mode", "legacy")
+    if coordinate_mode not in {"legacy", "canonical_v1"}:
+        raise ValueError("deployment graph coordinate contract mode is unsupported")
+    if coordinate_mode == "legacy" and any(
+        field in graph_observation
+        for field in (
+            "coordinate_processor_resize_hw",
+            "coordinate_processor_crop_hw",
+            "coordinate_processor_crop_offset_yx",
+            "coordinate_processor_patch_hw",
+        )
+    ):
+        raise ValueError(
+            "legacy coordinate contract cannot carry processor geometry fields"
+        )
+    coordinate_geometry = observation.get("coordinate_geometry")
+    if coordinate_mode == "legacy" and "coordinate_geometry" in observation:
+        raise ValueError("legacy coordinate contract cannot carry deployment geometry ABI")
+    if coordinate_mode == "canonical_v1" and coordinate_geometry is None:
+        raise ValueError("canonical coordinate contract requires deployment geometry ABI")
+    if coordinate_geometry is not None:
+        geometry = _mapping(coordinate_geometry, name="observation.coordinate_geometry")
+        if set(geometry) != {"mode", "processor", "charts", "sha256"}:
+            raise ValueError("deployment coordinate geometry fields are inconsistent")
+        if geometry.get("mode") != "canonical_rgb_lattice_v1":
+            raise ValueError("deployment coordinate geometry mode is unsupported")
+        stored_hash = geometry.get("sha256")
+        unsigned_geometry = dict(geometry)
+        unsigned_geometry.pop("sha256", None)
+        if stored_hash != canonical_sha256(unsigned_geometry):
+            raise ValueError("deployment coordinate geometry digest is inconsistent")
+        charts = _mapping(geometry.get("charts"), name="observation.coordinate_geometry.charts")
+        processor = _mapping(
+            geometry.get("processor"),
+            name="observation.coordinate_geometry.processor",
+        )
+        expected_processor: dict[str, list[int]] = {}
+        for field in ("resize_hw", "crop_hw", "crop_offset_yx", "patch_hw"):
+            for owner, raw in (
+                ("processor", processor.get(field)),
+                ("graph", graph_observation.get(f"coordinate_processor_{field}")),
+            ):
+                values = _strict_index_sequence(
+                    raw, name=f"coordinate {owner}.{field}"
+                )
+                minimum = 0 if field == "crop_offset_yx" else 1
+                if len(values) != 2 or any(item < minimum for item in values):
+                    raise ValueError("deployment coordinate processor geometry is malformed")
+                if owner == "graph":
+                    expected_processor[field] = list(values)
+        if canonical_sha256(processor) != canonical_sha256(expected_processor):
+            raise ValueError(
+                "deployment coordinate processor geometry differs from graph config"
+            )
+        # The outer RGB lattice is owned by executable RGB preprocessing,
+        # not by a self-consistent geometry hash. This formal graph supports
+        # the same uncropped 336px input as DataConfig.validate().
+        rgb = _mapping(observation.get("rgb_preprocessing"), name="rgb_preprocessing")
+        rgb_config = _mapping(rgb.get("config"), name="rgb_preprocessing.config")
+        outer_hw = _strict_index_sequence(
+            rgb_config.get("resize_hw"), name="rgb_preprocessing.config.resize_hw"
+        )
+        # The decoded-image chart is also a pixel-value contract.  OpenCV
+        # INTER_AREA and Pillow bilinear are different transforms even when
+        # they produce the same output shape.  Do not admit a checkpoint on a
+        # host whose executable backend differs from the backend used when
+        # the ABI was built; otherwise raw-flow/literal-RGB evidence silently
+        # sees different pixels while all geometry hashes still match.
+        expected_rgb_preprocessing = preprocessing_identity(
+            PreprocessConfig(resize_hw=(336, 336), crop_hw=None)
+        )
+        if (
+            rgb.get("schema") != RGB_PREPROCESS_SCHEMA
+            or rgb.get("input") != "uint8-hwc-rgb"
+            or rgb.get("output") != "uint8-hwc-rgb"
+            or rgb.get("resize_backend")
+            != expected_rgb_preprocessing["resize_backend"]
+            or set(rgb_config) != {"resize_hw", "crop_hw"}
+            or outer_hw != (336, 336)
+            or rgb_config.get("crop_hw") is not None
+        ):
+            raise ValueError("canonical coordinate contract requires uncropped 336px RGB preprocessing")
+        expected_outer = rgb_chart(outer_hw).to_dict()
+        expected_raw = build_raw_charts(outer_hw)
+        expected_dino = build_dino_charts(
+            outer_hw,
+            resized_hw=tuple(expected_processor["resize_hw"]),
+            crop_hw=tuple(expected_processor["crop_hw"]),
+            crop_offset_yx=tuple(expected_processor["crop_offset_yx"]),
+            patch_hw=tuple(expected_processor["patch_hw"]),
+            pooled_hw=(8, 8),
+        )
+        expected_charts = {
+            "outer_rgb": expected_outer,
+            "raw_high": expected_raw["raw_high"].to_dict(),
+            "raw_mid": expected_raw["raw_mid"].to_dict(),
+            "dino_patch": expected_dino["dino_patch"].to_dict(),
+            "dino_pooled": expected_dino["dino_pooled"].to_dict(),
+        }
+        if canonical_sha256(charts) != canonical_sha256(expected_charts):
+            raise ValueError(
+                "deployment coordinate charts differ from RGB preprocessing and graph processor"
+            )
+        resize_hw = tuple(expected_processor["resize_hw"])
+        crop_hw = tuple(expected_processor["crop_hw"])
+        patch_hw = tuple(expected_processor["patch_hw"])
+        if (
+            resize_hw[0] != resize_hw[1]
+            or crop_hw[0] != crop_hw[1]
+            or patch_hw[0] != patch_hw[1]
+            or crop_hw[0] > resize_hw[0]
+            or tuple(expected_processor["crop_offset_yx"])
+            != ((resize_hw[0] - crop_hw[0]) // 2, (resize_hw[1] - crop_hw[1]) // 2)
+        ):
+            raise ValueError(
+                "deployment canonical processor geometry must match BitImageProcessor center crop"
+            )
+        patch_h, patch_w = expected_dino["dino_patch"].shape_hw
+        dimensions = _mapping(graph.get("dimensions"), name="graph_config.dimensions")
+        for owner, raw_count in (
+            ("DINO", dino.get("patches_per_camera")),
+            ("graph", dimensions.get("patches_per_camera")),
+        ):
+            if _strict_abi_int(raw_count, name=f"{owner}.patches_per_camera") != patch_h * patch_w:
+                raise ValueError(f"deployment {owner} patch count differs from coordinate geometry")
     if not str(dino.get("model", "")).strip():
         raise ValueError("deployment DINO model identity is empty")
     if str(dino.get("compute_dtype", "")) not in {"bf16", "fp32"}:
@@ -423,6 +593,23 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         raise ValueError("deployment DINO reference_batch_size must be an integer") from error
     if reference_batch_size <= 0:
         raise ValueError("deployment DINO reference_batch_size must be positive")
+    # Keep the DINO token ABI tied to the executable graph for both legacy and
+    # canonical contracts.  Previously this equality was checked only while
+    # validating canonical chart metadata, allowing a malformed legacy ABI to
+    # advertise a different patch count and reach cache admission.
+    dimensions = _mapping(graph.get("dimensions"), name="graph_config.dimensions")
+    for field in ("patches_per_camera", "visual_token_dim"):
+        graph_value = _strict_abi_int(
+            dimensions.get(field), name=f"graph_config.dimensions.{field}"
+        )
+        dino_field = "patches_per_camera" if field == "patches_per_camera" else "token_width"
+        dino_value = _strict_abi_int(
+            dino.get(dino_field), name=f"observation.dinov2.{dino_field}"
+        )
+        if dino_value != graph_value:
+            raise ValueError(
+                f"deployment DINO {dino_field} differs from graph dimensions"
+            )
     cameras = tuple(str(name) for name in observation.get("camera_names", ()))
     if cameras != ("top", "wrist"):
         raise ValueError("deployment ABI camera order must be top,wrist")

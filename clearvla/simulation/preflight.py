@@ -17,6 +17,7 @@ from clearvla.experiments.classic_policy_lab.rdt2_dinov2_cache import (
 )
 from clearvla.mainline.config import load_config
 from clearvla.vision.decoded_image_store import DecodedImageStore
+from clearvla.vision.image_io import decode_image_value
 from clearvla.vision.preprocessing import PreprocessConfig, preprocessing_identity
 
 from .vision import DinoV2OnlineEncoder, preprocess_rgb_history
@@ -42,7 +43,14 @@ def _raw_history(
     with h5py.File(episode.path, "r") as stream:
         for camera in camera_names:
             unique, inverse = np.unique(frame_indices, return_inverse=True)
-            value = np.asarray(stream[episode.camera_keys[camera]][unique])[inverse]
+            encoded_or_raw = np.asarray(stream[episode.camera_keys[camera]][unique])
+            decoded = [decode_image_value(value) for value in encoded_or_raw]
+            shapes = {tuple(value.shape) for value in decoded}
+            if len(shapes) != 1:
+                raise ValueError(
+                    f"native {camera} frames have inconsistent decoded shapes: {sorted(shapes)}"
+                )
+            value = np.stack(decoded, axis=0)[inverse]
             if value.dtype != np.uint8 or value.ndim != 4 or value.shape[-1] != 3:
                 raise ValueError(
                     f"native {camera} frames must be uint8 [3,H,W,3], got "
