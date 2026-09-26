@@ -1,0 +1,101 @@
+name: Publish verified M9 source
+on:
+  push:
+    branches: [codex/m9-execution-continuation-20260926]
+    paths: [.github/m9-source/manifest.json]
+permissions:
+  contents: write
+concurrency:
+  group: m9-reviewed-source-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'logwood/ClearVLA' && github.ref == 'refs/heads/codex/m9-execution-continuation-20260926'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify exact reviewed tree and preserve source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m9-source-report"
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, re, shutil, subprocess
+          def git(*args, **kwargs):
+              return subprocess.check_output(['git', *args], **kwargs)
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'm9-source-report'
+          transport = os.environ['GITHUB_SHA']
+          workflow = '.github/workflows/m9-source-publish.yml'
+          path = pathlib.Path('.github/m9-source/manifest.json')
+          m = json.loads(path.read_text())
+          assert m['schema'] == 'clearvla-m9-reviewed-source-v1'
+          assert m['base'] == '27de7ce376455e1b20d8a8237308094fc403856a'
+          for key in ('base', 'base_tree', 'source_result_tree', 'local_commit'):
+              assert re.fullmatch(r'[0-9a-f]{40}', m[key])
+          assert git('rev-parse', 'HEAD', text=True).strip() == transport
+          assert git('rev-parse', 'HEAD^', text=True).strip() == m['base']
+          assert git('rev-parse', m['base']+'^{tree}', text=True).strip() == m['base_tree']
+          assert not git('status', '--porcelain', text=True).strip()
+          paths, encoded = [str(path)], []
+          assert 1 <= len(m['parts']) <= 16
+          for i, part in enumerate(m['parts']):
+              name = f'.github/m9-source/part-{i:02d}.txt'
+              assert part['path'] == name
+              b = pathlib.Path(name).read_bytes()
+              assert 0 < len(b) == part['length'] <= 4000
+              assert hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest() == part['blob_sha']
+              paths.append(name)
+              encoded.append(b)
+          assert set(git('diff', '--name-only', m['base'], 'HEAD', text=True).splitlines()) == set(paths+[workflow])
+          decoder = lzma.LZMADecompressor(memlimit=256*1024*1024)
+          patch = decoder.decompress(base64.b64decode(b''.join(encoded), validate=True), max_length=2000000)
+          assert decoder.eof and not decoder.unused_data
+          assert 0 < len(patch) == m['patch_bytes'] < 2000000
+          assert hashlib.sha256(patch).hexdigest() == m['patch_sha256']
+          declared = set(m['changed_paths'])
+          for name in declared:
+              p = pathlib.PurePosixPath(name)
+              assert not p.is_absolute() and '..' not in p.parts
+              assert p.parts[0] in {'clearvla', 'tests', 'scripts', 'docs'}
+          actual = set()
+          for line in patch.decode('utf-8').splitlines():
+              if line.startswith('diff --git '):
+                  _, _, left, right = line.split()
+                  assert left.startswith('a/') and right == 'b/'+left[2:]
+                  actual.add(left[2:])
+          assert actual == declared
+          git('apply', '--check', '--index', '-', input=patch)
+          git('apply', '--index', '-', input=patch)
+          git('rm', '--', *paths)
+          # The temporary transport workflow is removed through the connector
+          # after this job; the bot never edits workflow files or another ref.
+          index = pathlib.Path(git('rev-parse', '--git-path', 'index', text=True).strip()).resolve()
+          clean_index = out / 'clean.index'
+          shutil.copyfile(index, clean_index)
+          env = dict(os.environ, GIT_INDEX_FILE=str(clean_index))
+          git('rm', '--cached', '--', workflow, env=env)
+          clean_tree = git('write-tree', env=env, text=True).strip()
+          assert clean_tree == m['source_result_tree']
+          out.joinpath('manifest.json').write_text(json.dumps(m, indent=2)+'\n')
+          out.joinpath('changes.patch').write_bytes(patch)
+          git('archive', '--format=tar.gz', '--output='+str(out/'reviewed-source.tar.gz'), clean_tree)
+          git('config', 'user.name', 'github-actions[bot]')
+          git('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
+          git('commit', '-m', 'feat(M9): preserve reviewed execution-value repair and CT chain audit\n\nSource tree verified against '+clean_tree+'. Local M9a/M9b commits are retained in the delivery archive. This source save is not full CI, GPU or physical-task acceptance. Temporary publication workflow remains only until connector cleanup.')
+          branch = 'codex/m9-execution-continuation-20260926'
+          remote = git('ls-remote', '--heads', 'origin', 'refs/heads/'+branch, text=True).split()[0]
+          assert remote == transport, 'branch moved; do not overwrite concurrent work'
+          git('push', 'origin', 'HEAD:refs/heads/'+branch)
+          out.joinpath('published.json').write_text(json.dumps({'source_commit':git('rev-parse','HEAD',text=True).strip(),'reviewed_tree':clean_tree,'temporary_workflow':workflow},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: reviewed-m9-source-${{ github.sha }}
+          path: ${{ runner.temp }}/m9-source-report
+          retention-days: 14
