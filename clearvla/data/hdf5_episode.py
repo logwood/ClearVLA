@@ -14,8 +14,7 @@ from .schema import (
     ACTION_STATE_ALIASES,
     CAMERA_ALIASES,
     STATE_ALIASES,
-    list_hdf5_datasets_from_handle,
-    resolve_key,
+    resolve_handle_key,
 )
 
 RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING = "relative-action-absorbing-v1"
@@ -226,17 +225,16 @@ def load_episode(
 ) -> LoadedEpisode:
     overrides = camera_key_overrides or {}
     with h5py.File(path, "r") as f:
-        datasets = list_hdf5_datasets_from_handle(f)
-        resolved_action = resolve_key(datasets, action_key, ACTION_ALIASES, required=True)
+        resolved_action = resolve_handle_key(f, action_key, ACTION_ALIASES, required=True)
         assert resolved_action is not None
         resolved_state = (
-            resolve_key(datasets, state_key, STATE_ALIASES, required=True)
+            resolve_handle_key(f, state_key, STATE_ALIASES, required=True)
             if state_key
             else None
         )
         resolved_action_state = (
-            resolve_key(
-                datasets,
+            resolve_handle_key(
+                f,
                 action_state_key,
                 ACTION_STATE_ALIASES,
                 required=True,
@@ -254,8 +252,8 @@ def load_episode(
                     f"Unknown camera name={camera!r}; provide an explicit camera key. "
                     f"Known aliases={sorted(CAMERA_ALIASES)}"
                 )
-            key = resolve_key(
-                datasets,
+            key = resolve_handle_key(
+                f,
                 requested,
                 aliases,
                 required=True,

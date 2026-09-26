@@ -104,13 +104,7 @@ def list_hdf5_datasets(path: str) -> dict[str, dict[str, Any]]:
         return list_hdf5_datasets_from_handle(handle)
 
 
-def resolve_key(
-    datasets: dict[str, dict[str, Any]],
-    requested: str | None,
-    aliases: tuple[str, ...],
-    *,
-    required: bool = True,
-) -> str | None:
+def _key_candidates(requested: str | None, aliases: tuple[str, ...]) -> tuple[str, ...]:
     candidates: list[str] = []
     if requested:
         candidates.extend(
@@ -119,16 +113,54 @@ def resolve_key(
     candidates.extend(x.lstrip("/") for x in aliases)
     candidates.extend(x.replace(".", "/").lstrip("/") for x in aliases)
 
+    result: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
         if candidate and candidate not in seen:
             seen.add(candidate)
-            if candidate in datasets:
-                return candidate
+            result.append(candidate)
+    return tuple(result)
+
+
+def resolve_key(
+    datasets: dict[str, dict[str, Any]],
+    requested: str | None,
+    aliases: tuple[str, ...],
+    *,
+    required: bool = True,
+) -> str | None:
+    candidates = _key_candidates(requested, aliases)
+    for candidate in candidates:
+        if candidate in datasets:
+            return candidate
 
     if required:
         available = "\n".join(sorted(datasets.keys())[:160])
         raise KeyError(
             f"Could not resolve requested dataset {requested!r}. Available datasets:\n{available}"
         )
+    return None
+
+
+def resolve_handle_key(
+    handle: h5py.Group,
+    requested: str | None,
+    aliases: tuple[str, ...],
+    *,
+    required: bool = True,
+) -> str | None:
+    """Resolve a known dataset key without traversing unrelated HDF5 objects.
+
+    The normal episode schema has a small, fixed set of candidate paths.  Probe
+    those paths directly on the already-open handle; only malformed files that
+    miss a required key fall back to a full inventory for diagnostics.
+    """
+
+    for candidate in _key_candidates(requested, aliases):
+        canonical = candidate.lstrip("/")
+        if isinstance(handle.get(canonical), h5py.Dataset):
+            return canonical
+    if required:
+        datasets = list_hdf5_datasets_from_handle(handle)
+        return resolve_key(datasets, requested, aliases, required=True)
     return None
