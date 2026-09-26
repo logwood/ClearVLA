@@ -1,3 +1,30 @@
+## M9 execution continuation (2026-09-26 UTC)
+
+Authorized continuation branch: `codex/m9-execution-continuation-20260926`.
+Frozen starting source: `27de7ce376455e1b20d8a8237308094fc403856a`.
+Follow the original M9 -> M10 -> M11 responsibilities; do not relabel the
+small P2 cleanup or the S common/residual gradient explanation as a new core.
+
+M9a implements the binary computation-value ownership correction: selection
+uses the same arm-only physical-error metric as existing binary supervision;
+continuous scoring, native command classification and all loss budgets remain
+unchanged. Keep the baseline failure and current tests separate. Source saving
+is not milestone acceptance and does not authorize robot/server training.
+
+M9b implements an explicit CT-only execution-boundary probe and regression
+matrix: eight source owners, direct-P3 invariance, first/last native-arm VJPs,
+continuous gripper versus binary logits, matched forward contexts, and the
+binary zero-initialization / real-one-update distinction. It retains the
+existing CT and bottom neural formulas. Compact CPU tests are not production
+GPU or trained-policy acceptance; the diagnostic clean-field read is one
+velocity node, not a robot rollout.
+
+Next M9 scope: use verified trained weights and actual causal input to measure
+this execution chain, audit long-horizon value/difference decoding and actual
+outlet acknowledgments without hard-coded hold/release policies. A connected or tiny path alone does not justify adding
+a module, amplitude multiplier or loss. Production GPU, learned checkpoints,
+external command receipts and aggregate M9 acceptance remain outstanding.
+
 ## M8m/M8n continuation: qualify learning without split leakage
 
 The existing qualifier now offers explicit `fit-heldout` train/val measurement.

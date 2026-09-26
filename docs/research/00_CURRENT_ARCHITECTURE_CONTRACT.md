@@ -1,3 +1,63 @@
+## M9b — CT-only terminal/codec responsibility (2026-09-26 UTC)
+
+`scripts/probe_m9_execution_chain.py` is an explicit synthetic source audit,
+not a second inference path. It holds the real direct P3 plan and noisy field
+fixed, changes exactly one of the eight declared CT dynamic inputs, and follows
+that input through the existing CT, Evidence-MMDiT, terminal and outlet codec.
+First/last-row native-arm covectors reach both the source and its actual CT
+projection owner. Pen uses the continuous native gripper readout; binary
+outlets use a command-logit margin because native argmax is not differentiable.
+
+The inherited binary command output is exactly zero-initialized. At that point
+its input VJP is zero while its parameter VJP is live. The explicit one-update
+control uses the real engine and unshortened configured warmup, then repeats the
+same path audit at the real completed-update clock. It does not overwrite head
+weights to manufacture a nonzero gradient. Zero CT dynamic features still give
+zero CT values, not a robot stop command or zero native action.
+
+Forward comparisons use matching autograd/autocast contexts and repeat an exact
+baseline before source changes. A no-grad/grad kernel difference is not counted
+as causal source influence. Ordinary autograd is retained on the tested path;
+the read-only online cache only isolates fixed upstream observation/P3 values.
+The probe neither adds loss terms nor changes source gain, token counts, blend,
+selector probabilities or neural parameters. Compact mode is explicitly H32 /
+64 cached patches with synthetic RGB/DINO/state/labels, not production H512 or
+real encoder evidence. The single-node clean-field estimate is not a complete
+ODE sample or physical rollout. Connectivity is not useful learned control;
+no minimum behavior gain is required or claimed. Existing trained checkpoints,
+CUDA resources, long-horizon continuous decode quality and acknowledged native
+execution remain M9/M10 obligations.
+
+## M9a — outlet-owned computation-candidate value metric (2026-09-26 UTC)
+
+Continuation source is isolated on `codex/m9-execution-continuation-20260926`,
+branched from `27de7ce376455e1b20d8a8237308094fc403856a`. The original rebuild
+branch, user jobs and existing workflows are not changed by this source unit.
+M9/M10/M11 remain open; this is not a new architecture family or release.
+
+`execution_values.py` defines the arm/gripper metric shared by the existing
+execution-value loss and the bottom's soft, mean-field and compatibility-hard
+computation-candidate choices. Continuous outlets retain the historical
+`[arm_dim,1]/(arm_dim+1)` arithmetic. CALVIN/ManiSkill binary outlets already
+supervise only the arm candidate-error column; selection now also reads only
+that column. The compatibility gripper-error column cannot steer internal
+block/dwell/termination choices. This is not an environment stop rule, nor a
+claim that binary command quality is optimized by this arm-error metric.
+The private command classifier and its existing CE objective are unchanged.
+
+The two-output value-reader parameter layout, all objective budgets, codec,
+0.25 decode blend and solver schedule are retained. No detach, forced nonzero
+source, object rule or extra predictor is added. Old-source checkpoints are
+not admitted as exact resumes merely because tensor shapes still match; the
+existing source identity must match. Binary learned choices may change and
+require fresh behavioral comparison. Pen/RDT continuous scoring is unchanged.
+
+Local CPU FP32/BF16 value-chart tests include forward invariance, actual
+value-head owner VJP and the existing supervised component weights. One actual
+small-model update followed by matched two-pass sampling also verifies binary
+nuisance-column isolation. These are numerical/source contracts, not CUDA,
+production-size, real-data or physical-task acceptance.
+
 ## M8m/M8n — bounded train/validation measurement (2026-09-24 UTC)
 
 `fit-heldout` is an explicit qualifier operation, NOT a new neural mode. Its

@@ -22,6 +22,7 @@ from ..bottom_evidence import (
     NORMALIZED_EVIDENCE,
     validate_evidence_value_mode,
 )
+from ..execution_values import execution_value_score
 from ..gripper_contract import VALID_GRIPPER_OUTPUT_MODES, is_binary_gripper_mode
 from ..model.component_contracts import TerminalHeadOutput
 from ..model.routing import register_gradient_rms_metric
@@ -1364,15 +1365,16 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         )
 
     @staticmethod
-    def _execution_value_score(value_field: Tensor, *, arm_dim: int = 1) -> Tensor:
-        """Collapse the typed arm/gripper value field to candidate scores."""
-        if value_field.ndim != 4 or int(value_field.shape[-1]) != 2:
-            raise ValueError(
-                "execution value field must be [B,candidate,horizon,2]"
-            )
-        arm_dim = max(int(arm_dim), 1)
-        component_weight = value_field.new_tensor([float(arm_dim), 1.0]) / float(arm_dim + 1)
-        return (value_field * component_weight).sum(dim=-1).mean(dim=-1)
+    def _execution_value_score(
+        value_field: Tensor,
+        *,
+        arm_dim: int = 1,
+        gripper_output_mode: str = "continuous",
+    ) -> Tensor:
+        """Use the same outlet-owned components as execution-value supervision."""
+        return execution_value_score(
+            value_field, arm_dim=arm_dim, gripper_output_mode=gripper_output_mode
+        )
 
     @staticmethod
     def _select_execution_candidate(
@@ -1381,6 +1383,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         *,
         tie_tolerance: float = 1e-5,
         arm_dim: int = 1,
+        gripper_output_mode: str = "continuous",
     ) -> Tensor:
         """Select a hard real-operation candidate with candidate-0 tie break.
 
@@ -1389,7 +1392,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         removes the unidentifiable common-mode component before selection.
         """
         scores = EvidenceLatentMMDiTActionDecoder._execution_value_score(
-            value_field, arm_dim=arm_dim
+            value_field, arm_dim=arm_dim, gripper_output_mode=gripper_output_mode
         )
         if scores.ndim != 2 or valid.shape != scores.shape:
             raise ValueError("execution value scores and mask are misaligned")
@@ -2279,7 +2282,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         (usually BF16).
         """
         scores = self._execution_value_score(
-            value_field.float(), arm_dim=self.arm_dim
+            value_field.float(), arm_dim=self.arm_dim,
+            gripper_output_mode=self.gripper_output_mode,
         )
         temperature = max(
             float(
@@ -2457,7 +2461,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         # strict indexed accumulations such as ``index_add``.
         policy_pointer_mass = pointer_mass.float()
         scores = self._execution_value_score(
-            value_field.float(), arm_dim=self.arm_dim
+            value_field.float(), arm_dim=self.arm_dim,
+            gripper_output_mode=self.gripper_output_mode,
         )
         temperature = max(
             float(
@@ -3812,7 +3817,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 )
                 selected_index = (
                     self._select_execution_candidate(
-                        value_field, candidate_mask, arm_dim=self.arm_dim
+                        value_field, candidate_mask, arm_dim=self.arm_dim,
+                        gripper_output_mode=self.gripper_output_mode,
                     )
                     if learned_execution
                     else torch.zeros(

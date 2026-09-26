@@ -15,6 +15,7 @@ from clearvla.data.action_chart import resolve_action_state_profile
 
 from ..config import ExperimentConfig
 from ..endpoint_supervision import CLEAN_ENDPOINT_SUPERVISION, EndpointHeadSupervision
+from ..execution_values import execution_value_component_weights
 from ..gripper_contract import is_binary_gripper_mode
 from ..interfaces import ActionSupervision, ObservableHistory
 from ..model.action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
@@ -1225,11 +1226,10 @@ def execution_value_terms(
         candidate_dim=2,
     )
     valid_field = valid[..., None, None].expand_as(predicted) & label_field
-    component_weight = (
-        predicted.new_tensor([1.0, 0.0])
-        if binary_command
-        else predicted.new_tensor([float(codec.arm_dim), 1.0])
-        / float(codec.arm_dim + 1)
+    component_weight = execution_value_component_weights(
+        predicted,
+        arm_dim=codec.arm_dim,
+        gripper_output_mode=config.bottom.gripper_output_mode,
     )
     physical_weight = valid_field.float() * component_weight[None, None, None, None]
     active = (valid.float().sum(dim=2) > 1.0) & source_rows.any(dim=-1)[:, None]
