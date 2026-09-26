@@ -33,10 +33,11 @@ from .types import DenseFactChart, LocalFactSet, ObjectFactSet, normalized_entro
 def _finite_log_measure(measure: Tensor) -> Tensor:
     """Return finite FP32 logs; zero support is represented by finite zero."""
 
-    measure_f = measure.float().clamp_min(0.0)
-    support = measure_f > 0.0
-    safe = torch.where(support, measure_f, torch.ones_like(measure_f))
-    return torch.where(support, safe.log(), torch.zeros_like(measure_f))
+    with torch.autocast(device_type=measure.device.type, enabled=False):
+        measure_f = measure.float().clamp_min(0.0)
+        support = measure_f > 0.0
+        safe = torch.where(support, measure_f, torch.ones_like(measure_f))
+        return torch.where(support, safe.log(), torch.zeros_like(measure_f))
 
 
 def _supported_values(value: Tensor, support: Tensor) -> Tensor:
@@ -65,25 +66,29 @@ def _masked_log_softmax(
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Normalize finite log measures with exact-zero all-invalid rows."""
 
-    log_measure_f = log_measure.float()
-    if tuple(log_measure_f.shape) != tuple(support.shape):
-        raise ValueError("log measure and support must align")
-    support_b = support.bool()
-    has_support = support_b.any(dim=dim, keepdim=True)
-    masked = log_measure_f.masked_fill(~support_b, -torch.inf)
-    safe_masked = torch.where(has_support, masked, torch.zeros_like(masked))
-    log_probability = torch.log_softmax(safe_masked, dim=dim)
-    log_probability = torch.where(
-        support_b & has_support,
-        log_probability,
-        torch.zeros_like(log_probability),
-    )
-    probability = torch.where(
-        support_b & has_support,
-        log_probability.exp(),
-        torch.zeros_like(log_probability),
-    )
-    return probability, log_probability, has_support
+    # ``.float()`` does not opt an eligible operation out of an enclosing
+    # autocast region.  Keep both the normalized log law and its probability
+    # view in FP32, including the all-invalid-row handling around softmax.
+    with torch.autocast(device_type=log_measure.device.type, enabled=False):
+        log_measure_f = log_measure.float()
+        if tuple(log_measure_f.shape) != tuple(support.shape):
+            raise ValueError("log measure and support must align")
+        support_b = support.bool()
+        has_support = support_b.any(dim=dim, keepdim=True)
+        masked = log_measure_f.masked_fill(~support_b, -torch.inf)
+        safe_masked = torch.where(has_support, masked, torch.zeros_like(masked))
+        log_probability = torch.log_softmax(safe_masked, dim=dim)
+        log_probability = torch.where(
+            support_b & has_support,
+            log_probability,
+            torch.zeros_like(log_probability),
+        )
+        probability = torch.where(
+            support_b & has_support,
+            log_probability.exp(),
+            torch.zeros_like(log_probability),
+        )
+        return probability, log_probability, has_support
 
 
 def _coordinate_basis(coordinates: Tensor, width: int) -> Tensor:
@@ -378,76 +383,81 @@ class DenseObjectGrounder(nn.Module):
         candidate_prior_support: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         batch, count, _ = candidates.shape
-        valid = torch.nan_to_num(
-            validity.float(), nan=0.0, posinf=0.0, neginf=0.0
-        ).reshape(batch, count, 1).clamp(0.0, 1.0)
-        # Close the private competition boundary as well as the public
-        # candidate-token boundary.  A direct caller (or a malformed cached
-        # chart) may still hand us NaNs in an unsupported candidate.  Remove
-        # those values before either the real-owner or null projection; a
-        # later ``masked_fill`` would be too late for the null path and could
-        # leave NaNs in its backward graph.
-        safe_candidates = _supported_values(candidates, valid)
-        slot_key = self.slot_norm(slots)
-        logits = torch.einsum("bkh,bnh->bnk", slot_key.float(), safe_candidates.float())
-        logits = logits / math.sqrt(float(self.hidden))
-        null = torch.einsum(
-            "bnh,bqh->bnq",
-            safe_candidates.float(),
-            self.null_key.to(device=safe_candidates.device, dtype=safe_candidates.dtype)
-            .expand(batch, -1, -1)
-            .float(),
-        )
-        prior = torch.nan_to_num(
-            candidate_prior.float(), nan=0.0, posinf=0.0, neginf=0.0
-        ).reshape(batch, count, 1).clamp_min(0.0)
-        log_prior = torch.nan_to_num(
-            candidate_log_prior.float(), nan=0.0, posinf=0.0, neginf=0.0
-        ).reshape(batch, count, 1)
-        # ``owner`` is conditional on one local candidate.  The local prior
-        # is applied afterwards as joint mixture mass.  Only true invalidity
-        # may move probability to null; ``1 - candidate_prior`` denotes other
-        # hypotheses at the same cell, not absence.  Invalid candidates must
-        # nevertheless be removed from the real-object softmax support before
-        # normalization; letting them compete and multiplying their mass by
-        # zero later steals owner probability from valid candidates.
-        owner_logits = torch.cat((logits, null), dim=-1)
-        owner_logits = owner_logits.clone()
-        owner_logits[..., : self.objects] = owner_logits[..., : self.objects].masked_fill(
-            valid <= 0.0,
-            -torch.inf,
-        )
-        owner_log_probability = torch.log_softmax(owner_logits, dim=-1)
-        owner = owner_log_probability.exp()
-        object_mass = owner[..., : self.objects] * valid * prior
-        null_mass = (owner[..., self.objects] * valid[..., 0] + (1.0 - valid[..., 0])) * prior[
-            ..., 0
-        ]
-        prior_support = candidate_prior_support.reshape(batch, count).bool()
-        read_support = (
-            (valid[..., 0] > 0.0) & prior_support
-        )[:, None].expand(
-            -1, self.objects, -1
-        )
-        log_validity = _finite_log_measure(valid[..., 0])
-        read_log_measure = (
-            owner_log_probability[..., : self.objects].transpose(1, 2)
-            + log_prior[..., 0][:, None]
-            + log_validity[:, None]
-        )
-        read, read_log_probability, _ = _masked_log_softmax(
-            read_log_measure,
-            read_support,
-            dim=-1,
-        )
-        return (
-            owner,
-            object_mass,
-            null_mass,
-            read,
-            owner_log_probability,
-            read_log_probability,
-        )
+        # ``.float()`` alone does not override an enclosing BF16 autocast
+        # policy for einsum, log_softmax or exp.  The owner/null event is the
+        # actual object-assignment law, so keep the entire probability path in
+        # an explicit FP32 island.  The formula and support semantics are
+        # unchanged.
+        with torch.autocast(device_type=candidates.device.type, enabled=False):
+            valid = torch.nan_to_num(
+                validity.float(), nan=0.0, posinf=0.0, neginf=0.0
+            ).reshape(batch, count, 1).clamp(0.0, 1.0)
+            # Close the private competition boundary as well as the public
+            # candidate-token boundary.  A direct caller (or a malformed
+            # cached chart) may still hand us NaNs in an unsupported candidate.
+            # Remove those values before either the real-owner or null
+            # projection; a later ``masked_fill`` would be too late for the
+            # null path and could leave NaNs in its backward graph.
+            safe_candidates = _supported_values(candidates, valid).float()
+            slot_key = self.slot_norm(slots.float())
+            logits = torch.einsum("bkh,bnh->bnk", slot_key, safe_candidates)
+            logits = logits / math.sqrt(float(self.hidden))
+            null = torch.einsum(
+                "bnh,bqh->bnq",
+                safe_candidates,
+                self.null_key.to(device=safe_candidates.device, dtype=torch.float32)
+                .expand(batch, -1, -1),
+            )
+            prior = torch.nan_to_num(
+                candidate_prior.float(), nan=0.0, posinf=0.0, neginf=0.0
+            ).reshape(batch, count, 1).clamp_min(0.0)
+            log_prior = torch.nan_to_num(
+                candidate_log_prior.float(), nan=0.0, posinf=0.0, neginf=0.0
+            ).reshape(batch, count, 1)
+            # ``owner`` is conditional on one local candidate.  The local prior
+            # is applied afterwards as joint mixture mass.  Only true invalidity
+            # may move probability to null; ``1 - candidate_prior`` denotes other
+            # hypotheses at the same cell, not absence.  Invalid candidates must
+            # nevertheless be removed from the real-object softmax support before
+            # normalization; letting them compete and multiplying their mass by
+            # zero later steals owner probability from valid candidates.
+            owner_logits = torch.cat((logits, null), dim=-1)
+            owner_logits = owner_logits.clone()
+            owner_logits[..., : self.objects] = owner_logits[..., : self.objects].masked_fill(
+                valid <= 0.0,
+                -torch.inf,
+            )
+            owner_log_probability = torch.log_softmax(owner_logits, dim=-1)
+            owner = owner_log_probability.exp()
+            object_mass = owner[..., : self.objects] * valid * prior
+            null_mass = (owner[..., self.objects] * valid[..., 0] + (1.0 - valid[..., 0])) * prior[
+                ..., 0
+            ]
+            prior_support = candidate_prior_support.reshape(batch, count).bool()
+            read_support = (
+                (valid[..., 0] > 0.0) & prior_support
+            )[:, None].expand(
+                -1, self.objects, -1
+            )
+            log_validity = _finite_log_measure(valid[..., 0])
+            read_log_measure = (
+                owner_log_probability[..., : self.objects].transpose(1, 2)
+                + log_prior[..., 0][:, None]
+                + log_validity[:, None]
+            )
+            read, read_log_probability, _ = _masked_log_softmax(
+                read_log_measure,
+                read_support,
+                dim=-1,
+            )
+            return (
+                owner,
+                object_mass,
+                null_mass,
+                read,
+                owner_log_probability,
+                read_log_probability,
+            )
 
     def forward(
         self,
@@ -546,45 +556,53 @@ class DenseObjectGrounder(nn.Module):
             ),
             dim=-1,
         )
-        residual = 0.50 * torch.tanh(self.g3_residual(pair).squeeze(-1).float())
+        # The learned residual is a BF16-produced logit under training
+        # autocast, but its bounded correction is consumed by the FP32
+        # posterior below.  Cast before the nonlinearity and keep that
+        # probability-facing operation outside autocast.
+        residual_logits = self.g3_residual(pair).squeeze(-1).float()
+        with torch.autocast(device_type=residual_logits.device.type, enabled=False):
+            residual = 0.50 * torch.tanh(residual_logits)
         # G3 refines only identity inside the parent's real-object event.  The
         # physical binder remains the sole owner of real-versus-null mass.
         # Local-hypothesis prior and observable validity remain outside both
         # softmaxes and therefore retain their existing units.
-        parent_k_log_mass = torch.logsumexp(
-            parent_owner_log[..., : self.objects],
-            dim=-1,
-            keepdim=True,
-        )
-        has_real_owner = torch.isfinite(parent_k_log_mass)
-        safe_parent_k_log_mass = torch.where(
-            has_real_owner,
-            parent_k_log_mass,
-            torch.zeros_like(parent_k_log_mass),
-        )
-        parent_k_log_conditional = torch.where(
-            has_real_owner,
-            parent_owner_log[..., : self.objects] - safe_parent_k_log_mass,
-            torch.zeros_like(parent_owner_log[..., : self.objects]),
-        )
-        corrected_k_log_conditional = torch.log_softmax(
-            parent_k_log_conditional + residual,
-            dim=-1,
-        )
-        corrected_k_log_conditional = torch.where(
-            has_real_owner,
-            corrected_k_log_conditional,
-            torch.full_like(corrected_k_log_conditional, -torch.inf),
-        )
-        corrected_k_conditional = corrected_k_log_conditional.exp()
-        corrected_log_owner = torch.cat(
-            (
-                safe_parent_k_log_mass + corrected_k_log_conditional,
-                parent_owner_log[..., self.objects :],
-            ),
-            dim=-1,
-        )
-        corrected = corrected_log_owner.exp()
+        with torch.autocast(device_type=parent_owner_log.device.type, enabled=False):
+            parent_owner_log_f = parent_owner_log.float()
+            parent_k_log_mass = torch.logsumexp(
+                parent_owner_log_f[..., : self.objects],
+                dim=-1,
+                keepdim=True,
+            )
+            has_real_owner = torch.isfinite(parent_k_log_mass)
+            safe_parent_k_log_mass = torch.where(
+                has_real_owner,
+                parent_k_log_mass,
+                torch.zeros_like(parent_k_log_mass),
+            )
+            parent_k_log_conditional = torch.where(
+                has_real_owner,
+                parent_owner_log_f[..., : self.objects] - safe_parent_k_log_mass,
+                torch.zeros_like(parent_owner_log_f[..., : self.objects]),
+            )
+            corrected_k_log_conditional = torch.log_softmax(
+                parent_k_log_conditional + residual.float(),
+                dim=-1,
+            )
+            corrected_k_log_conditional = torch.where(
+                has_real_owner,
+                corrected_k_log_conditional,
+                torch.full_like(corrected_k_log_conditional, -torch.inf),
+            )
+            corrected_k_conditional = corrected_k_log_conditional.exp()
+            corrected_log_owner = torch.cat(
+                (
+                    safe_parent_k_log_mass + corrected_k_log_conditional,
+                    parent_owner_log_f[..., self.objects :],
+                ),
+                dim=-1,
+            )
+            corrected = corrected_log_owner.exp()
         valid = torch.nan_to_num(
             validity.float(), nan=0.0, posinf=0.0, neginf=0.0
         ).clamp(0.0, 1.0)
@@ -713,16 +731,19 @@ class DenseObjectGrounder(nn.Module):
         # Instead measure object-vs-null confidence only where that object's
         # own read posterior places mass.  This remains soft and naturally
         # becomes zero when an object receives no valid candidate support.
-        object_vs_null = (
-            corrected_log_owner[..., : self.objects]
-            - torch.logaddexp(
-                corrected_log_owner[..., : self.objects],
-                corrected_log_owner[..., self.objects, None],
+        with torch.autocast(device_type=corrected_log_owner.device.type, enabled=False):
+            object_vs_null = (
+                corrected_log_owner[..., : self.objects].float()
+                - torch.logaddexp(
+                    corrected_log_owner[..., : self.objects].float(),
+                    corrected_log_owner[..., self.objects, None].float(),
+                )
+            ).exp()
+            existence = (
+                (read.float() * object_vs_null.transpose(1, 2))
+                .sum(dim=-1, keepdim=True)
+                .clamp(0.0, 1.0)
             )
-        ).exp()
-        existence = (
-            (read * object_vs_null.transpose(1, 2)).sum(dim=-1, keepdim=True).clamp(0.0, 1.0)
-        )
         object_validity = (
             read * valid[..., 0][:, None]
         ).sum(dim=-1, keepdim=True).clamp(0.0, 1.0).float()
@@ -1041,20 +1062,25 @@ class DenseObjectGrounder(nn.Module):
 
     @staticmethod
     def _pair_cosine(value: Tensor) -> Tensor:
-        normalized = F.normalize(value.detach().float(), dim=-1, eps=1e-4)
-        similarity = torch.einsum("bkd,bjd->bkj", normalized, normalized)
-        objects = int(value.shape[1])
-        mask = ~torch.eye(objects, device=value.device, dtype=torch.bool)
-        return similarity[:, mask].mean() if objects > 1 else similarity.new_zeros(())
+        # This is detached telemetry, but it still needs a stable precision
+        # boundary: ``.float()`` alone can be downcast by an outer autocast
+        # region in normalize/einsum.
+        with torch.autocast(device_type=value.device.type, enabled=False):
+            normalized = F.normalize(value.detach().float(), dim=-1, eps=1e-4)
+            similarity = torch.einsum("bkd,bjd->bkj", normalized, normalized)
+            objects = int(value.shape[1])
+            mask = ~torch.eye(objects, device=value.device, dtype=torch.bool)
+            return similarity[:, mask].mean() if objects > 1 else similarity.new_zeros(())
 
     @staticmethod
     def _pair_overlap(probability: Tensor) -> Tensor:
-        probability = probability.detach().float()
-        overlap = torch.einsum(
-            "bkn,bjn->bkj",
-            probability.clamp_min(0.0).sqrt(),
-            probability.clamp_min(0.0).sqrt(),
-        )
-        objects = int(probability.shape[1])
-        mask = ~torch.eye(objects, device=probability.device, dtype=torch.bool)
-        return overlap[:, mask].mean() if objects > 1 else overlap.new_zeros(())
+        with torch.autocast(device_type=probability.device.type, enabled=False):
+            probability = probability.detach().float()
+            overlap = torch.einsum(
+                "bkn,bjn->bkj",
+                probability.clamp_min(0.0).sqrt(),
+                probability.clamp_min(0.0).sqrt(),
+            )
+            objects = int(probability.shape[1])
+            mask = ~torch.eye(objects, device=probability.device, dtype=torch.bool)
+            return overlap[:, mask].mean() if objects > 1 else overlap.new_zeros(())

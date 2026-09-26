@@ -181,6 +181,56 @@ def test_invalid_payload_is_quarantined_before_indices_products_and_gradients():
     assert torch.count_nonzero(current_image_centers(out)) == 0
 
 
+def test_g3_competition_probability_law_is_fp32_under_bf16_autocast():
+    torch.manual_seed(67)
+    grounder = DenseObjectGrounder(hidden=16, content_dim=8, route_dim=8, objects=3)
+    slots = torch.randn(2, 3, 16)
+    candidates = torch.randn(2, 5, 16)
+    validity = torch.tensor(
+        [[1.0, 1.0, 0.0, 1.0, 1.0], [1.0, 0.0, 1.0, 1.0, 1.0]]
+    )
+    prior = torch.full((2, 5, 1), 0.2)
+    log_prior = prior.log()
+    prior_support = torch.ones(2, 5, dtype=torch.bool)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        actual = grounder._competition(
+            slots,
+            candidates,
+            validity,
+            prior,
+            log_prior,
+            prior_support,
+        )
+    with torch.autocast("cpu", enabled=False):
+        expected = grounder._competition(
+            slots,
+            candidates,
+            validity,
+            prior,
+            log_prior,
+            prior_support,
+        )
+    for actual_value, expected_value in zip(actual, expected, strict=True):
+        assert actual_value.dtype == torch.float32
+        torch.testing.assert_close(actual_value, expected_value, rtol=0.0, atol=0.0)
+
+
+def test_g3_pair_diagnostics_are_fp32_under_bf16_autocast():
+    torch.manual_seed(68)
+    content = torch.randn(2, 4, 16).to(torch.bfloat16)
+    probability = torch.randn(2, 4, 9).softmax(dim=-1).to(torch.bfloat16)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        cosine = DenseObjectGrounder._pair_cosine(content)
+        overlap = DenseObjectGrounder._pair_overlap(probability)
+    with torch.autocast("cpu", enabled=False):
+        expected_cosine = DenseObjectGrounder._pair_cosine(content)
+        expected_overlap = DenseObjectGrounder._pair_overlap(probability)
+    assert cosine.dtype == torch.float32
+    assert overlap.dtype == torch.float32
+    torch.testing.assert_close(cosine, expected_cosine, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(overlap, expected_overlap, rtol=0.0, atol=0.0)
+
+
 def test_malformed_support_is_rejected_not_silently_renormalized():
     xy = torch.zeros(1, 1, 1, 1, 1, 2, 2)
     support = _support(xy)
