@@ -23,7 +23,7 @@ from .checkpoint import (
     checkpoint_identity_from_mapping,
     compare_checkpoint_identity,
 )
-from .config import ExperimentConfig, load_config
+from .config import CACHE_IDENTITY_MODES, ExperimentConfig, load_config
 from .data.loading import MainlineDataBundle, load_mainline_data, to_training_batch
 from .interfaces import TrainingBatch
 from .model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
@@ -102,6 +102,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--decoded-cache", type=Path)
     parser.add_argument("--dino-cache", type=Path)
+    parser.add_argument(
+        "--cache-identity-mode",
+        choices=CACHE_IDENTITY_MODES,
+        help=(
+            "Use fast scope identity by default; choose sha256 to read and hash "
+            "every materialized cache meta.json."
+        ),
+    )
     parser.add_argument("--t5-condition", type=Path)
     parser.add_argument("--resume", type=Path)
     parser.add_argument(
@@ -253,6 +261,8 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         data = replace(data, decoded_cache=str(args.decoded_cache))
     if args.dino_cache is not None:
         data = replace(data, dino_cache=str(args.dino_cache))
+    if getattr(args, "cache_identity_mode", None) is not None:
+        data = replace(data, cache_identity_mode=str(args.cache_identity_mode))
     if args.t5_condition is not None:
         data = replace(data, t5_condition=str(args.t5_condition))
     if args.gripper_event_threshold is not None:

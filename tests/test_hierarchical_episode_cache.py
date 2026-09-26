@@ -87,6 +87,7 @@ def _write_token_caches(
 
 def test_hierarchical_identity_closes_decoded_dino_and_run_identity(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "rdt-ft-data"
     _write_episode(
@@ -173,7 +174,7 @@ def test_hierarchical_identity_closes_decoded_dino_and_run_identity(
         split_metadata={"schema": "test"},
     )
     base = ExperimentConfig()
-    config = replace(
+    strict_config = replace(
         base,
         data=replace(
             base.data,
@@ -181,12 +182,27 @@ def test_hierarchical_identity_closes_decoded_dino_and_run_identity(
             hdf5_glob="**/*.hdf5",
             decoded_cache=str(decoded_cache),
             dino_cache=str(dino_cache),
+            cache_identity_mode="sha256",
         ),
     )
-    identity = dataset_identity(bundle, config)  # type: ignore[arg-type]
-    assert len(identity.inventory_sha256) == 64
-    assert len(identity.decoded_cache_identity) == 64
-    assert len(identity.dino_cache_identity) == 64
+    strict_identity = dataset_identity(bundle, strict_config)  # type: ignore[arg-type]
+    assert len(strict_identity.inventory_sha256) == 64
+    assert len(strict_identity.decoded_cache_identity) == 64
+    assert len(strict_identity.dino_cache_identity) == 64
+
+    fast_config = replace(
+        strict_config,
+        data=replace(strict_config.data, cache_identity_mode="fast"),
+    )
+
+    def fail_cache_read(_path: Path) -> bytes:
+        raise AssertionError("fast cache identity must not read metadata contents")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_cache_read)
+    fast_identity = dataset_identity(bundle, fast_config)  # type: ignore[arg-type]
+    assert len(fast_identity.decoded_cache_identity) == 64
+    assert len(fast_identity.dino_cache_identity) == 64
+    assert fast_identity != strict_identity
 
 
 def test_flat_episode_keeps_v1_cache_layout_and_metadata(tmp_path: Path) -> None:

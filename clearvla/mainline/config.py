@@ -79,12 +79,20 @@ from .v120_core.bspine import (
 )
 
 
+CACHE_IDENTITY_FAST = "fast"
+CACHE_IDENTITY_SHA256 = "sha256"
+CACHE_IDENTITY_MODES = (CACHE_IDENTITY_FAST, CACHE_IDENTITY_SHA256)
+
+
 @dataclass(frozen=True)
 class DataConfig:
     raw_hdf5_root: str = "/data/liang.zhang/dataset/grab_pen_single/grab_pen_single"
     hdf5_glob: str = "*.hdf5"
     decoded_cache: str = "/data/senwang/data/cache_336"
     dino_cache: str = "/data/senwang/data/dinov2_cache_336"
+    # Cache identity is a fast, scope-based descriptor by default.  The
+    # sha256 mode is an explicit slow audit that reads every cache meta.json.
+    cache_identity_mode: str = CACHE_IDENTITY_FAST
     t5_condition: str = "/data/senwang/checkpoint/grasp_pen_embed.pt"
     output_dir: str = "runs/clearvla_mainline"
     camera_names: tuple[str, ...] = ("top", "wrist")
@@ -217,6 +225,10 @@ class DataConfig:
             raise ValueError("data.dinov2_reference_batch_size must be positive")
         if self.image_store_mode not in {"decoded-cache", "hdf5-direct"}:
             raise ValueError("data.image_store_mode must be decoded-cache or hdf5-direct")
+        if self.cache_identity_mode not in CACHE_IDENTITY_MODES:
+            raise ValueError(
+                "data.cache_identity_mode must be fast or sha256"
+            )
         if self.visual_cache_read_backend not in {"mmap", "pread"}:
             raise ValueError("data.visual_cache_read_backend must be mmap or pread")
         if type(self.visual_pread_max_open_files) is not int or self.visual_pread_max_open_files <= 0:

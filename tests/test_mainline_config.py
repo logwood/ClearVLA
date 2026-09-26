@@ -249,6 +249,30 @@ def test_pread_cache_backend_is_opt_in_and_serialized_explicitly() -> None:
         ).validate()
 
 
+def test_cache_identity_defaults_fast_and_strict_mode_is_explicit() -> None:
+    baseline = ExperimentConfig()
+    assert baseline.data.cache_identity_mode == "fast"
+    assert baseline.as_dict()["data"]["cache_identity_mode"] == "fast"
+
+    strict = replace(
+        baseline,
+        data=replace(baseline.data, cache_identity_mode="sha256"),
+    )
+    strict.validate()
+    payload = strict.as_dict()
+    assert payload["data"]["cache_identity_mode"] == "sha256"
+    restored = config_from_mapping(json.loads(json.dumps(payload)))
+    assert restored.data.cache_identity_mode == "sha256"
+    assert restored.digest() == strict.digest()
+    assert restored.digest() != baseline.digest()
+
+    with pytest.raises(ValueError, match="cache_identity_mode"):
+        replace(
+            baseline,
+            data=replace(baseline.data, cache_identity_mode="metadata"),
+        ).validate()
+
+
 def test_p2_spatial_intent_mode_is_explicit_and_round_trips() -> None:
     baseline = ExperimentConfig()
     assert baseline.top.p2_spatial_intent_mode == "post_pool_only"

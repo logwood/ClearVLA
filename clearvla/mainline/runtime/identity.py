@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from ..checkpoint import ArtifactIdentity, DatasetIdentity
-from ..config import ExperimentConfig
+from ..config import CACHE_IDENTITY_SHA256, ExperimentConfig
 from ..data.loading import MainlineDataBundle
 from ..data.normalizer import ArrayNormalizer
 
@@ -99,37 +99,74 @@ def dataset_identity(
             "unique and inside the verified source inventory"
         )
     materialized_episodes = [bundle.episodes[index] for index in materialized_indices]
-    dino_rows = []
     dino_cache_root = Path(config.data.dino_cache)
     decoded_cache_root = Path(config.data.decoded_cache)
-    decoded_rows = []
-    for episode in materialized_episodes:
-        dino_metadata = dino_cache_root / episode.cache_key / "meta.json"
-        if not dino_metadata.is_file():
-            raise FileNotFoundError(f"DINO cache metadata disappeared: {dino_metadata}")
-        dino_rows.append(
-            (episode.episode_id, hashlib.sha256(dino_metadata.read_bytes()).hexdigest())
-        )
-        if config.data.image_store_mode == "decoded-cache":
-            decoded_metadata = decoded_cache_root / episode.cache_key / "meta.json"
-            if not decoded_metadata.is_file():
-                raise FileNotFoundError(
-                    f"decoded-image cache metadata disappeared: {decoded_metadata}"
-                )
-            decoded_rows.append(
-                (episode.episode_id, hashlib.sha256(decoded_metadata.read_bytes()).hexdigest())
+    cache_scope = tuple(
+        (episode.episode_id, episode.cache_key)
+        for episode in materialized_episodes
+    )
+    if config.data.cache_identity_mode == CACHE_IDENTITY_SHA256:
+        dino_rows = []
+        decoded_rows = []
+        for episode in materialized_episodes:
+            dino_metadata = dino_cache_root / episode.cache_key / "meta.json"
+            if not dino_metadata.is_file():
+                raise FileNotFoundError(f"DINO cache metadata disappeared: {dino_metadata}")
+            dino_rows.append(
+                (episode.episode_id, hashlib.sha256(dino_metadata.read_bytes()).hexdigest())
             )
-    decoded_identity = (
-        _digest(decoded_rows)
-        if config.data.image_store_mode == "decoded-cache"
-        else _digest(
+            if config.data.image_store_mode == "decoded-cache":
+                decoded_metadata = decoded_cache_root / episode.cache_key / "meta.json"
+                if not decoded_metadata.is_file():
+                    raise FileNotFoundError(
+                        f"decoded-image cache metadata disappeared: {decoded_metadata}"
+                    )
+                decoded_rows.append(
+                    (episode.episode_id, hashlib.sha256(decoded_metadata.read_bytes()).hexdigest())
+                )
+        dino_identity = _digest(dino_rows)
+        decoded_identity = (
+            _digest(decoded_rows)
+            if config.data.image_store_mode == "decoded-cache"
+            else _digest(
+                {
+                    "mode": "hdf5-direct",
+                    "cache_side": config.data.cache_side,
+                    "camera_keys": config.data.camera_key_map(),
+                }
+            )
+        )
+    else:
+        # The fast descriptor deliberately does not touch cache files.  The
+        # loader still validates and opens the files it needs; this identity
+        # only records that cache-content hashing was not part of the run
+        # contract, so strict and fast checkpoints cannot be confused.
+        dino_identity = _digest(
             {
-                "mode": "hdf5-direct",
+                "mode": "dino-cache-fast-v1",
+                "scope": cache_scope,
                 "cache_side": config.data.cache_side,
-                "camera_keys": config.data.camera_key_map(),
+                "dinov2_model": config.data.dinov2_model,
             }
         )
-    )
+        decoded_identity = (
+            _digest(
+                {
+                    "mode": "decoded-cache-fast-v1",
+                    "scope": cache_scope,
+                    "cache_side": config.data.cache_side,
+                    "camera_keys": config.data.camera_key_map(),
+                }
+            )
+            if config.data.image_store_mode == "decoded-cache"
+            else _digest(
+                {
+                    "mode": "hdf5-direct",
+                    "cache_side": config.data.cache_side,
+                    "camera_keys": config.data.camera_key_map(),
+                }
+            )
+        )
     return DatasetIdentity(
         raw_root=str(Path(config.data.raw_hdf5_root)),
         hdf5_glob=config.data.hdf5_glob,
@@ -153,7 +190,7 @@ def dataset_identity(
         state_normalizer_sha256=_digest(bundle.state_normalizer.to_dict()),
         action_normalizer_sha256=_digest(bundle.action_normalizer.to_dict()),
         decoded_cache_identity=decoded_identity,
-        dino_cache_identity=_digest(dino_rows),
+        dino_cache_identity=dino_identity,
     )
 
 
