@@ -14,7 +14,7 @@ from .schema import (
     ACTION_STATE_ALIASES,
     CAMERA_ALIASES,
     STATE_ALIASES,
-    list_hdf5_datasets,
+    list_hdf5_datasets_from_handle,
     resolve_key,
 )
 
@@ -225,42 +225,44 @@ def load_episode(
     camera_key_overrides: dict[str, str] | None = None,
 ) -> LoadedEpisode:
     overrides = camera_key_overrides or {}
-    datasets = list_hdf5_datasets(str(path))
-    resolved_action = resolve_key(datasets, action_key, ACTION_ALIASES, required=True)
-    assert resolved_action is not None
-    resolved_state = (
-        resolve_key(datasets, state_key, STATE_ALIASES, required=True) if state_key else None
-    )
-    resolved_action_state = (
-        resolve_key(
-            datasets,
-            action_state_key,
-            ACTION_STATE_ALIASES,
-            required=True,
-        )
-        if action_state_key
-        else None
-    )
-
-    camera_keys: dict[str, str] = {}
-    for camera in cameras:
-        requested = overrides.get(camera)
-        aliases = CAMERA_ALIASES.get(camera, ())
-        if not aliases and requested is None:
-            raise KeyError(
-                f"Unknown camera name={camera!r}; provide an explicit camera key. "
-                f"Known aliases={sorted(CAMERA_ALIASES)}"
-            )
-        key = resolve_key(
-            datasets,
-            requested,
-            aliases,
-            required=True,
-        )
-        assert key is not None
-        camera_keys[camera] = key
-
     with h5py.File(path, "r") as f:
+        datasets = list_hdf5_datasets_from_handle(f)
+        resolved_action = resolve_key(datasets, action_key, ACTION_ALIASES, required=True)
+        assert resolved_action is not None
+        resolved_state = (
+            resolve_key(datasets, state_key, STATE_ALIASES, required=True)
+            if state_key
+            else None
+        )
+        resolved_action_state = (
+            resolve_key(
+                datasets,
+                action_state_key,
+                ACTION_STATE_ALIASES,
+                required=True,
+            )
+            if action_state_key
+            else None
+        )
+
+        camera_keys: dict[str, str] = {}
+        for camera in cameras:
+            requested = overrides.get(camera)
+            aliases = CAMERA_ALIASES.get(camera, ())
+            if not aliases and requested is None:
+                raise KeyError(
+                    f"Unknown camera name={camera!r}; provide an explicit camera key. "
+                    f"Known aliases={sorted(CAMERA_ALIASES)}"
+                )
+            key = resolve_key(
+                datasets,
+                requested,
+                aliases,
+                required=True,
+            )
+            assert key is not None
+            camera_keys[camera] = key
+
         actions = np.asarray(f[resolved_action], dtype=np.float32)
         states = (
             np.asarray(f[resolved_state], dtype=np.float32)

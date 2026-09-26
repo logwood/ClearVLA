@@ -83,21 +83,25 @@ def parse_camera_key_overrides(values: Sequence[str] | None) -> dict[str, str]:
     return result
 
 
-def list_hdf5_datasets(path: str) -> dict[str, dict[str, Any]]:
+def list_hdf5_datasets_from_handle(handle: h5py.File) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
-    with h5py.File(path, "r") as f:
 
-        def visit(name: str, obj: Any) -> None:
-            if isinstance(obj, h5py.Dataset):
-                out[name] = {
-                    "shape": list(obj.shape),
-                    "dtype": str(obj.dtype),
-                    "chunks": list(obj.chunks) if obj.chunks is not None else None,
-                    "compression": obj.compression,
-                }
+    def visit(name: str, obj: Any) -> None:
+        if isinstance(obj, h5py.Dataset):
+            out[name] = {
+                "shape": list(obj.shape),
+                "dtype": str(obj.dtype),
+                "chunks": list(obj.chunks) if obj.chunks is not None else None,
+                "compression": obj.compression,
+            }
 
-        f.visititems(visit)
+    handle.visititems(visit)
     return out
+
+
+def list_hdf5_datasets(path: str) -> dict[str, dict[str, Any]]:
+    with h5py.File(path, "r") as handle:
+        return list_hdf5_datasets_from_handle(handle)
 
 
 def resolve_key(
