@@ -23,7 +23,6 @@
     "policy_semantic_map"
   ],
   "typeCheckingMode": "basic",
-  "pythonPlatform": "Linux",
   "pythonVersion": "3.12",
   "reportMissingImports": "warning",
   "reportMissingTypeStubs": "none",
