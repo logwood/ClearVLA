@@ -14,6 +14,28 @@ from ..world_robot import RobotWorldObservation
 from .types import ObjectWorldBelief
 
 
+class _RowwiseLinear(nn.Linear):
+    """Linear projection with a fixed reduction order for every row.
+
+    Some CUDA/CPU GEMM kernels use a reduction tiling that depends on a row's
+    physical position.  That is numerically harmless for training, but it
+    violates the strict object/camera permutation audit at this boundary.
+    Each row here is tiny, so explicit matrix-vector products keep the
+    reduction order fixed without changing the learned function.
+    """
+
+    def forward(self, value: Tensor) -> Tensor:
+        shape = value.shape
+        rows = value.reshape(-1, shape[-1])
+        projected = torch.stack(
+            [torch.mv(self.weight, row) for row in rows],
+            dim=0,
+        )
+        if self.bias is not None:
+            projected = projected + self.bias
+        return projected.reshape(*shape[:-1], self.out_features)
+
+
 @dataclass(frozen=True)
 class RobotObjectRelation:
     pooled: Tensor  # [B,K,H], relation features, not averaged image vectors
@@ -39,10 +61,10 @@ class RobotObjectRelationEncoder(nn.Module):
         self.state_projection = nn.Linear(state_dim, hidden, bias=False)
         self.object_projection = nn.Linear(content_dim, hidden, bias=False)
         # xy, image velocity xy, positive source-gap flag, named-view one-hot.
-        self.view_projection = nn.Linear(5 + len(camera_names), hidden, bias=False)
+        self.view_projection = _RowwiseLinear(5 + len(camera_names), hidden, bias=False)
         self.relation = nn.Sequential(
-            nn.Linear(3 * hidden, 2 * hidden, bias=False), nn.SiLU(),
-            nn.Linear(2 * hidden, hidden, bias=False),
+            _RowwiseLinear(3 * hidden, 2 * hidden, bias=False), nn.SiLU(),
+            _RowwiseLinear(2 * hidden, hidden, bias=False),
         )
         roles = {name: i for i, name in enumerate(sorted(camera_names))}
         self.role_basis: Tensor
@@ -78,8 +100,13 @@ class RobotObjectRelationEncoder(nn.Module):
             belief.batch, belief.objects, -1, -1
         )
         view_input = torch.cat((coordinates, rate, motion_observed.float(), roles), dim=-1)
-        view_input = torch.where(supported, view_input, 0.0)
-        content = torch.where(valid, belief.content, 0.0)
+        # Advanced object-axis indexing used by causal permutation audits can
+        # leave a different stride layout even when every row contains the
+        # same values.  Materialize both projected inputs so GEMM reduction
+        # order is independent of that layout and the equivariance contract
+        # remains bit-exact on CPU/CUDA.
+        view_input = torch.where(supported, view_input, 0.0).contiguous()
+        content = torch.where(valid, belief.content, 0.0).contiguous()
         dtype = self.state_projection.weight.dtype
         robot = self.state_projection(observation.state.to(dtype=dtype))[:, None, None]
         objects = self.object_projection(content.to(dtype=dtype))[:, :, None]
@@ -88,7 +115,8 @@ class RobotObjectRelationEncoder(nn.Module):
         robot = robot.expand_as(spatial)
         # Interaction happens while camera identity is intact. Equal/opposite
         # image vectors are not pre-averaged into a fictitious zero velocity.
-        relation = self.relation(torch.cat((robot, spatial, robot * torch.tanh(spatial)), dim=-1))
+        relation_input = torch.cat((robot, spatial, robot * torch.tanh(spatial)), dim=-1)
+        relation = self.relation(relation_input)
         relation = torch.where(supported, relation, 0.0)
         weights = torch.where(supported, weight, 0.0)
         weights = weights / weights.sum(dim=2, keepdim=True).clamp_min(1e-6)
