@@ -422,6 +422,21 @@ amplification and contact-quality failure mode; the telemetry does not by
 itself prove every video penetration is collision geometry. Numeric audit:
 `artifacts/behavior_causal_probes_20260923/physical_numeric_audit_b8r1_20260927.json`.
 
+### Fixed structural-refactor experiment names (2026-09-27 UTC)
+
+Use these identifiers in every status message, remote helper, output directory
+annotation, and behavior report. Do not refer to either run only as
+“structural refactor”.
+
+| Fixed identifier | Exact experiment/source identity | State and scope |
+|---|---|---|
+| `SREF-LEGACY-AB25` | `/data/senwang/clearvla/experiments/calvin/20260925-abstructural-calvin`; structural candidate source `93234c7e60272ff876ef5c6347f2b27341d7ac4b` | Older A/B/structural bundle. Training finished on 2026-09-26 and its structural candidate already has the prior closed-loop result. Reference evidence only. |
+| `SREF-M6N-REBUILD` | `/data/senwang/clearvla/experiments/calvin/20260926-structural-rebuild-m6n-calvin-formal-b4-e2-gpu3`; source `df9ea95a907e9301bd16642c171a54bebf46ef99` | New comprehensive `structural-rebuild` candidate. Started at 2026-09-26 22:33:18 server time and is the active run under this handoff. Its current checkpoint requires a fresh 18-task CALVIN closed-loop panel after training. |
+
+These runs have different source snapshots, configuration paths,
+checkpoints, and evaluation obligations. Results from `SREF-LEGACY-AB25`
+must not be substituted for pending validation of `SREF-M6N-REBUILD`.
+
 - Use Desktop Commander/SSH and the `senwang-server` skill for remote work.
   New small standalone `.sh` helpers belong in `/home/sen.wang/mysh`; read its
   `AGENTS.md` and existing scripts first. Repository-managed scripts stay in
