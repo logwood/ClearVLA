@@ -134,8 +134,12 @@ def _diagnostic_attention_weights(
 
 
 class _CrossRead(nn.Module):
-    def __init__(self, hidden: int, heads: int, maximum_rms: float = 0.35) -> None:
+    def __init__(
+        self, hidden: int, heads: int, maximum_rms: float = 0.35,
+        *, source_values_only: bool = False,
+    ) -> None:
         super().__init__()
+        self.source_values_only = bool(source_values_only)
         self.query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.memory_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.attention = nn.MultiheadAttention(
@@ -203,7 +207,10 @@ class _CrossRead(nn.Module):
             ) if diagnostics else None
         )
         update, _ = smooth_rms_contract(update, self.maximum_rms)
-        value = query + update
+        # In the joint task path a learned query is an address, not task
+        # evidence. Both the residual and FFN must obey that ownership; merely
+        # returning "innovation" still leaves FFN(query + update) as a bypass.
+        value = update if self.source_values_only else query + update
         ffn, _ = smooth_rms_contract(self.ffn(value), self.maximum_rms)
         innovation = update + ffn
         value = value + ffn
@@ -212,7 +219,8 @@ class _CrossRead(nn.Module):
             # No valid object/evidence is an exact no-op, including its FFN
             # residual.  This is intentionally a value-level mask rather than
             # a detached loss-side convention.
-            value = torch.where(invalid, query, value)
+            fallback = torch.zeros_like(value) if self.source_values_only else query
+            value = torch.where(invalid, fallback, value)
             innovation = torch.where(invalid, torch.zeros_like(innovation), innovation)
             if weights is not None:
                 weights = torch.where(
@@ -345,7 +353,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.horizon = int(horizon)
         self.goal_input = nn.Linear(goal_dim, hidden, bias=False)
         self.goal_queries = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
-        self.goal_read = _CrossRead(hidden, heads)
+        self.goal_read = _CrossRead(
+            hidden, heads, source_values_only=task_execution_mode == JOINT_TASK_EXECUTION
+        )
         self.goal_self = _SelfBlock(hidden, heads)
         self.history_encoding_mode = history_encoding_mode
         self.timed_history: TimedHistoryEncoder | None = None
@@ -372,7 +382,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.interval_clock_code: Tensor | None
         self.register_buffer("interval_clock_code", self.time_grid.interval_encoding(hidden)[None] if self.time_grid.aligned else None)
-        self.interval_goal = _CrossRead(hidden, heads)
+        self.interval_goal = _CrossRead(
+            hidden, heads, source_values_only=task_execution_mode == JOINT_TASK_EXECUTION
+        )
         self.interval_history = _CrossRead(hidden, heads)
         self.task_relation_encoder = (
             JointTaskRelationEncoder(hidden=hidden, state_dim=state_dim, camera_names=camera_names)

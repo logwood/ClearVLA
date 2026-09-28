@@ -1,3 +1,14 @@
+## M9d continuation: source-owned task reads (2026-09-28)
+
+The recovered joint path still inherited query residuals and FFN(query) from
+its upstream language and interval readers. The selected candidate now takes
+values only from the actual language memory; query scaffolds remain addresses.
+Zero task-relation output under neutral language is a representation contract,
+not a hard native-action stop. Missing comparison support is masked before
+projections/products, and S outcome inputs reject a relation from another
+observation. Keep cumulative endpoint/world-feedback composition and disabled-
+mode parity in verification; these source checks do not certify learned behavior.
+
 ## M9c task-grounded execution continuation (2026-09-28 evidence batch)
 
 Source branch: `codex/task-grounded-execution-20260928`, exact M9 parent

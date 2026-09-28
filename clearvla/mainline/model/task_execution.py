@@ -321,15 +321,19 @@ class TaskOutcomePlanRead(nn.Module):
         sem = sem[:, :, :, None].expand(-1, -1, -1, len(self.camera_names), -1)
         image = self.image((expected_img.float() - predicted_img.float()).to(dtype))
         # Keep content and image errors distinct until a nonlinear joint read.
+        # Quarantine the common support BEFORE any trainable projection or
+        # product. Masking only the final value can still yield NaN * 0 in
+        # Linear weight gradients from an unavailable relation/view.
+        relation_values = torch.where(support[..., None], relation.values, 0.0)
         gap = self.gap_model(torch.cat((sem, image), -1))
-        gap = gap * (1.0 + torch.tanh(self.task_modulation(relation.values.to(dtype))))
+        gap = gap * (1.0 + torch.tanh(self.task_modulation(relation_values.to(dtype))))
         gap = torch.where(support[..., None], gap, 0.0)
-        key = self.relation_key(relation.values.to(dtype)) + self.effect_key(
+        key = self.relation_key(relation_values.to(dtype)) + self.effect_key(
             torch.cat((sem, image), -1)
         )
         key = key + self.time_code.to(key)[None, :, None, None]
         mass = relation.binding.mass
-        target = self.target_relation(query, key, relation.values, support, mass)
+        target = self.target_relation(query, key, relation_values, support, mass)
         target = target + self.target_gap(query, key, gap, support, mass)
         scene_mass = (relation.binding.supported.float() - mass) / mass.shape[-1]
         scene = self.scene_gap(query, key, gap, support, scene_mass)

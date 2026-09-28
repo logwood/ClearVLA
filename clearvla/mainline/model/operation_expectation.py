@@ -75,6 +75,8 @@ class ObjectOperationPredictor(nn.Module):
             task_relation.validate(hidden=self.task.out_features)
             if task_relation.binding is not binding or task_relation.camera_names != self.camera_names:
                 raise ValueError("operation relation lost target or camera provenance")
+            if task_relation.current_content is not facts.content or task_relation.current_state is not state:
+                raise ValueError("operation relation belongs to another current observation")
             mask = task_relation.view_observed[:, None, :, :, None]
             relation_values = torch.where(mask, task_relation.values, 0.0)
             relation_mean = relation_values.sum(3) / mask.sum(3).clamp_min(1)

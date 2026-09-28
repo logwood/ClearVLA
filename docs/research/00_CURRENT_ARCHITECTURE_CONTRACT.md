@@ -8,6 +8,11 @@ outweighing task identity/location/direction, not a button-task-count claim.
 Evidence motivates a coordinated candidate, not a proven neural root cause.
 
 `top.task_execution_mode=joint_object_scene_v1` selects these replacements:
+- Language and interval-task reads are source-value-only in this candidate.
+  Learned queries address the language memory but neither query residuals nor
+  FFN(query) can manufacture task content. At zero encoded language, protected
+  task content and the joint relation are exactly zero; the whole policy is
+  not forced to stop. Historical modes retain the original arithmetic.
 - One shared task-conditioned binder: task/object interaction scores, with
   history in task-read queries only; no additive history target-value path.
   It preserves one K-plus-null law, not a second object selector.

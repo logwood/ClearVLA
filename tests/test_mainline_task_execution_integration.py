@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 import torch
 from test_mainline_endpoint_supervision import _config as endpoint_config
-from test_mainline_operation_expectation import _batch
+from test_mainline_operation_expectation import _batch as _transport_batch
 from test_mainline_state_features import _model_engine
 
 from clearvla.mainline.runtime.deployment import build_deployment_abi, validate_deployment_abi
@@ -23,6 +23,21 @@ def release_completed_graphs():
     gc.collect()
     yield
     gc.collect()
+
+
+def _batch():
+    """Real engine fixture with explicit nonzero synthetic task values.
+
+    The inherited transport fixture uses zero T5 placeholders. Those are kept
+    in their original tests; task-dependent positive controls must not obtain
+    artificial task content from learned read queries instead.
+    """
+    batch = _transport_batch()
+    goal = batch.online.goal
+    tokens = torch.randn(goal.tokens.shape, generator=torch.Generator().manual_seed(43971),
+                         dtype=goal.tokens.dtype, device=goal.tokens.device)
+    tokens = torch.where(goal.mask[..., None], tokens, 0.0)
+    return replace(batch, online=replace(batch.online, goal=replace(goal, tokens=tokens)))
 
 
 def config(amp=False):
