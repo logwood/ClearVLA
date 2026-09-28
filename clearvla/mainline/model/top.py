@@ -30,6 +30,7 @@ from ..future_time import LEGACY_FUTURE_TIME
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE
 from ..instruction_reference import InstructionReference
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
+from ..task_execution import JOINT_TASK_EXECUTION, NO_TASK_EXECUTION
 from ..temporal import HistoryTiming
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
 from ..v120_core.role_delta_attnres import AffineVarianceFlooredCenteredNorm
@@ -229,6 +230,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         instruction_change_mode: str = "mixed_reference_v1",
         operation_intent_mode: str = POSTERIOR_INTENT,
         annotation_goal_mode: str = "none",
+        task_execution_mode: str = NO_TASK_EXECUTION,
         history_encoding_mode: str = "paired_rows_v1",
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = "query_lattice_v1",
@@ -280,7 +282,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             entity_chart_mode=entity_chart_mode,
             entity_history_mode=entity_history_mode,
             entity_motion_mode=entity_motion_mode,
-            retain_image_source=instruction_change_mode == POSTERIOR_REFERENCE_CHANGE,
+            retain_image_source=(instruction_change_mode == POSTERIOR_REFERENCE_CHANGE or task_execution_mode == JOINT_TASK_EXECUTION),
         )
         self.intent = StatelessObjectIntentOrganizer(
             future_time_grid_mode=future_time_grid_mode,
@@ -297,6 +299,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             instruction_reference_mode=instruction_reference_mode,
             operation_intent_mode=operation_intent_mode,
             annotation_goal_mode=annotation_goal_mode,
+            task_execution_mode=task_execution_mode,
             instruction_change_mode=instruction_change_mode,
             camera_names=camera_names,
             history_encoding_mode=history_encoding_mode,
@@ -309,6 +312,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             horizon=horizon,
             action_condition_mode=self.world_action_condition_mode,
             target_binding_mode=target_binding_mode,
+            task_execution_mode=task_execution_mode,
         )
         self.dynamics = ObjectFutureDynamicsCompiler(
             future_time_grid_mode=future_time_grid_mode,
@@ -353,6 +357,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             camera_names=tuple(camera_names or ()),
             world_control_mode=world_control_mode,
             target_binding_mode=target_binding_mode,
+            task_execution_mode=task_execution_mode, heads=heads,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)
         self.plan_compiler = ObjectPolicyPlanCompiler(
@@ -361,6 +366,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             robot_feedback_mode=robot_feedback_mode, world_feedback_mode=world_feedback_mode, state_dim=state_dim, action_dim=action_dim,
             operation_intent_mode=operation_intent_mode,
             annotation_goal_mode=annotation_goal_mode,
+            task_execution_mode=task_execution_mode,
             instruction_change_mode=instruction_change_mode, content_dim=content_dim,
             camera_names=camera_names,
             hidden=hidden,
@@ -853,6 +859,10 @@ class ObjectIntentDynamicsTop(nn.Module):
             p1_policy_residual=p1_state.policy_query_residual,
             consequence=consequence,
             intent=context.intent.policy_dock(),
+            task_execution=self.effect_reader.compile_task_execution(
+                p1_action_query + context.intent.temporal_queries[:, :, None],
+                candidate_world, context.intent.policy_dock(),
+            ),
             action_query=p3_action_query,
             collect_diagnostics=collect_diagnostics,
         )

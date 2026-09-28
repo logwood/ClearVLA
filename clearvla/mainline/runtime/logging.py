@@ -719,6 +719,7 @@ class JsonlRunLogger:
                         "validation_core_attribution_coverage",
                         "validation_core_attribution_primary_vs_explicit_none_normalized_action_max_abs",
                         "validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact",
+                        "validation_core_attribution_world_consequence_identity_expected",
                         "validation_core_attribution_world_vs_consequence_neutral_normalized_action_max_abs",
                         "validation_core_attribution_world_vs_consequence_neutral_normalized_bit_exact",
                         "validation_core_attribution_wrong_action_world_donor_valid_fraction",

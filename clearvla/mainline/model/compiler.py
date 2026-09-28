@@ -21,6 +21,7 @@ from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from ..robot_execution import RobotResponseFeedback
+from ..task_execution import JOINT_TASK_EXECUTION, NO_TASK_EXECUTION, TaskExecutionPlan
 from .action_codec import ACTION_BAND_ENDS
 from .annotation_goal import AnnotatedGoalPlanRead
 from .executed_world import ExecutedWorldPlanRead
@@ -36,6 +37,7 @@ from .routing import (
     smooth_rms_contract,
 )
 from .target_binding import LOCAL_TARGET_READERS, SHARED_TARGET_BINDING, masked_probability
+from .task_execution import TaskOutcomePlanRead
 from .types import (
     CandidateWorld,
     FutureObjectDynamics,
@@ -273,8 +275,15 @@ class ObjectFutureEffectReader(nn.Module):
         future_time_grid_mode: str = LEGACY_FUTURE_TIME,
         geometry_mode: str = POOLED_TRANSPORT,
         camera_names: tuple[str, ...] = (),
+        task_execution_mode: str = NO_TASK_EXECUTION,
+        heads: int = 1,
     ) -> None:
         super().__init__()
+        self.task_execution = (
+            TaskOutcomePlanRead(hidden=hidden, content_dim=content_dim, heads=heads, camera_names=camera_names)
+            if task_execution_mode == JOINT_TASK_EXECUTION else None
+        )
+
         if spatial_intent_mode not in {
             "post_pool_only",
             "shared_target_prior_v1",
@@ -330,6 +339,23 @@ class ObjectFutureEffectReader(nn.Module):
             raise ValueError("view-conditioned P2 needs shared target and aligned known controls")
         self.view_geometry = (ViewConditionedTransport(hidden=hidden, camera_names=camera_names)
                               if geometry_mode == VIEW_CONDITIONED_TRANSPORT else None)
+
+    def compile_task_execution(
+        self, query: Tensor, candidate: CandidateWorld, intent: PolicyIntentDock,
+    ) -> TaskExecutionPlan | None:
+        if self.task_execution is None:
+            if intent.task_relation is not None:
+                raise ValueError("legacy P2 cannot ignore task relations")
+            return None
+        if intent.task_relation is None or intent.operation_expectation is None:
+            raise ValueError("joint P2 requires S relation and expected outcomes")
+        # S temporal context selects evidence; it is not an independent value
+        # that can bypass relation/outcome content at the execution boundary.
+        task_query = query + intent.temporal_control[:, :, None]
+        target, scene = self.task_execution(
+            task_query, intent.task_relation, intent.operation_expectation, candidate.dynamics,
+        )
+        return TaskExecutionPlan(target, scene, intent.task_relation, candidate)
 
     def set_eval_intervention(self, mode: str) -> None:
         """Select one matched P2 value/address counterfactual for evaluation."""
@@ -1472,6 +1498,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
                  instruction_change_mode: str = MIXED_REFERENCE_CHANGE, content_dim: int = 768,
                  operation_intent_mode: str = POSTERIOR_INTENT,
                  annotation_goal_mode: str = "none",
+                 task_execution_mode: str = NO_TASK_EXECUTION,
                  camera_names: tuple[str, ...] = ("top", "wrist")) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
@@ -1485,13 +1512,14 @@ class ObjectPolicyPlanCompiler(nn.Module):
             raise ValueError("unknown instruction change P3 consumer")
         if instruction_change_mode in TYPED_CHANGE_MODES and coordination_mode != TYPED_HORIZON_PLAN:
             raise ValueError("typed instruction change requires typed P3")
+        self.task_execution_mode = task_execution_mode
         self.operation_read = None
-        if operation_intent_mode == OBJECT_OUTCOME_INTENT:
+        if operation_intent_mode == OBJECT_OUTCOME_INTENT and self.task_execution_mode == NO_TASK_EXECUTION:
             if coordination_mode != TYPED_HORIZON_PLAN:
                 raise ValueError("operation expectation requires typed plan consumer")
             self.operation_read = OperationExpectationPlanRead(
                 hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
-        elif operation_intent_mode != POSTERIOR_INTENT:
+        elif operation_intent_mode not in {POSTERIOR_INTENT, OBJECT_OUTCOME_INTENT}:
             raise ValueError("unknown operation expectation consumer")
         change_reader_type = (PosteriorInstructionChangePlanRead if instruction_change_mode == POSTERIOR_REFERENCE_CHANGE
                               else InstructionChangePlanRead)
@@ -1561,6 +1589,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
         consequence: ObjectConsequenceState,
         intent: PolicyIntentDock,
         action_query: Tensor,
+        task_execution: TaskExecutionPlan | None = None,
         robot_feedback: RobotResponseFeedback | None = None,
         world_feedback: ExecutedWorldPlanValues | None = None,
         collect_diagnostics: bool = True,
@@ -1581,6 +1610,15 @@ class ObjectPolicyPlanCompiler(nn.Module):
             -1, -1, self.basis, -1
         )
         consequence_innovation = consequence.innovation()
+        if self.task_execution_mode == JOINT_TASK_EXECUTION:
+            if task_execution is None or task_execution.relation is not intent.task_relation:
+                raise ValueError("joint P3 lost the exact P2-compiled task relation")
+            task_execution.validate(hidden=self.hidden, horizon=self.horizon, basis=self.basis)
+            # Replace the pooled temporal-value shortcut with P2-compiled
+            # task/relation/outcome values. P3 cannot reopen W or raw language.
+            temporal_context = task_execution.target + task_execution.scene
+        elif task_execution is not None or intent.task_relation is not None:
+            raise ValueError("legacy P3 cannot silently ignore joint execution")
         if self.coordinator is not None:
             # Callers supply the original noisy-action query, not a sum with
             # protected consequence. All other owners enter explicitly here.
@@ -1617,7 +1655,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
             if intent.operation_expectation is None:
                 raise ValueError("P3 operation expectation is required")
             temporal_raw = temporal_raw + self.operation_read(intent.operation_expectation, temporal_private)
-        elif intent.operation_expectation is not None:
+        elif intent.operation_expectation is not None and self.task_execution_mode == NO_TASK_EXECUTION:
             raise ValueError("unexpected operation expectation in legacy P3")
         if self.annotated_goal_read is not None:
             if intent.annotated_goal is None:

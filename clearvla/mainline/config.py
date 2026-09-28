@@ -58,6 +58,7 @@ from .manifest import ARCHITECTURE_MANIFEST
 from .operation_expectation import OBJECT_OUTCOME_INTENT, OPERATION_INTENT_MODES, POSTERIOR_INTENT
 from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from .p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
+from .task_execution import JOINT_TASK_EXECUTION, NO_TASK_EXECUTION
 from .temporal import TIMED_HISTORY_ENCODING
 from .transition_condition import (
     SUMMED_TRANSITION,
@@ -77,7 +78,6 @@ from .v120_core.bspine import (
     BSPINE_ARM_PRIVATE_READER_IMPLEMENTATION,
     BSPINE_DISABLED_IMPLEMENTATION,
 )
-
 
 CACHE_IDENTITY_FAST = "fast"
 CACHE_IDENTITY_SHA256 = "sha256"
@@ -513,6 +513,7 @@ class TopConfig:
     instruction_reference_mode: str = "none"
     instruction_change_mode: str = MIXED_REFERENCE_CHANGE
     operation_intent_mode: str = POSTERIOR_INTENT
+    task_execution_mode: str = NO_TASK_EXECUTION
     annotation_goal_mode: str = "none"
 
     def validate(self) -> None:
@@ -536,6 +537,19 @@ class TopConfig:
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
             or self.history_encoding_mode != TIMED_HISTORY_ENCODING):
             raise ValueError("executed world feedback requires aligned sequence W, current-image G3, shared target and typed P3")
+        if self.task_execution_mode not in {NO_TASK_EXECUTION, JOINT_TASK_EXECUTION}:
+            raise ValueError("unknown task_execution_mode")
+        if self.task_execution_mode == JOINT_TASK_EXECUTION and (
+            self.operation_intent_mode != OBJECT_OUTCOME_INTENT
+            or self.target_binding_mode != "shared_operation_v1"
+            or self.future_time_grid_mode != "control_aligned_24_v1"
+            or self.world_action_condition_mode != "sequence_prefix_v1"
+            or self.world_control_mode != "known_prefix_v1"
+            or self.world_supervision_mode != "matched_observed_sequence_v1"
+            or self.p3_coordination_mode != TYPED_HORIZON_PLAN
+            or self.entity_chart_mode != "current_image_support_v1"
+        ):
+            raise ValueError("joint task execution requires shared target, current-image G3, matched known sequence W and typed P3")
         if self.operation_intent_mode not in OPERATION_INTENT_MODES:
             raise ValueError("unknown operation_intent_mode")
         if self.operation_intent_mode == OBJECT_OUTCOME_INTENT and (
@@ -1349,6 +1363,8 @@ class ExperimentConfig:
             cast(dict[str, object], payload["top"]).pop("annotation_goal_mode")
         if self.objectives.annotated_goal == 0:
             cast(dict[str, object], payload["objectives"]).pop("annotated_goal")
+        if self.top.task_execution_mode == NO_TASK_EXECUTION:
+            cast(dict[str, object], payload["top"]).pop("task_execution_mode")
         if self.top.operation_intent_mode == POSTERIOR_INTENT:
             cast(dict[str, object], payload["top"]).pop("operation_intent_mode")
         if self.top.instruction_change_mode == MIXED_REFERENCE_CHANGE:

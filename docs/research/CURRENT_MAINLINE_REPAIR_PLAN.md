@@ -1,3 +1,26 @@
+## M9c task-grounded execution continuation (2026-09-28 evidence batch)
+
+Source branch: `codex/task-grounded-execution-20260928`, exact M9 parent
+`4a7faafbbed42d512a8c015f6251e41e662d1287`. This is a coordinated S/coarse/P1/P2/P3
+candidate for the observed common task/contact mismatch, not a gripper/button
+rule collection or claim that the old binder has been proven correct.
+
+Implemented: single task-interaction shared binder; native-support nonlinear
+joint task/spatial/robot relation; query-only factual integration; relation-
+conditioned supervised outcomes; P2 per-object/view expectation/candidate
+comparison; independent target/scene read; actual P3/CT/bottom integration;
+cache/component/deployment identity; explicit M6n/cumulative configurations.
+Current compact module and engine checks are per-source evidence only. They
+retain zero-initialization behavior and use a real update for indirect W VJPs.
+
+Next acceptance: preserve full source, run the existing responsibility suite
+and exact resume/deployment checks, then train under declared matched real-data
+budgets. Physical acceptance must cover designated-target versus nearer
+interference, both operation directions, true progress reversal, gripper/contact
+quality and scene side effects, plus a separate held-out scene panel. Do not use
+18 evaluation trajectories as demonstration targets. No robot/server training
+is implicitly authorized by source preservation; M9/M10/M11 remain open.
+
 ## M9 execution continuation (2026-09-26 UTC)
 
 Authorized continuation branch: `codex/m9-execution-continuation-20260926`.

@@ -1202,6 +1202,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             camera_names=self.camera_names,
             time_grid_mode=self.time_grid.mode,
             current_reference=current_reference,
+            source_content=facts.content,
             successor_content=current_reference[:, None] + semantic_delta,
             semantic_delta=semantic_delta,
             transport_mean=transport,

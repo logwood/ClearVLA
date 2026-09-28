@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+
+from clearvla.vision.entity_chart import ImageLogMeasure, current_image_grid
 
 from ..annotation_goal import ANNOTATED_ENDPOINT_GOAL
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
@@ -17,6 +21,7 @@ from ..instruction_change import (
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
+from ..task_execution import JOINT_TASK_EXECUTION, NO_TASK_EXECUTION
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
 from .annotation_goal import AnnotatedGoalValueRead, EndpointGoalPredictor, compare_goal_to_current
 from .instruction_change import TypedInstructionReferenceRead
@@ -33,6 +38,7 @@ from .target_binding import (
     TargetEvidence,
     masked_probability,
 )
+from .task_execution import JointTaskRelationEncoder, TaskConditionedTargetBinder, TaskRelationRead
 from .timed_history import TimedHistoryEncoder
 from .types import (
     INTERVAL_BOUNDS,
@@ -309,6 +315,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         instruction_change_mode: str = MIXED_REFERENCE_CHANGE,
         operation_intent_mode: str = POSTERIOR_INTENT,
         annotation_goal_mode: str = "none",
+        task_execution_mode: str = NO_TASK_EXECUTION,
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
         super().__init__()
@@ -367,7 +374,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.register_buffer("interval_clock_code", self.time_grid.interval_encoding(hidden)[None] if self.time_grid.aligned else None)
         self.interval_goal = _CrossRead(hidden, heads)
         self.interval_history = _CrossRead(hidden, heads)
+        self.task_relation_encoder = (
+            JointTaskRelationEncoder(hidden=hidden, state_dim=state_dim, camera_names=camera_names)
+            if task_execution_mode == JOINT_TASK_EXECUTION else None
+        )
         self.interval_object = (
+            TaskRelationRead(hidden, heads) if self.task_relation_encoder is not None else
             BoundTargetRead(hidden, heads) if target_binding_mode == SHARED_TARGET_BINDING
             else _CrossRead(hidden, heads)
         )
@@ -409,14 +421,15 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.state_change_input = nn.Linear(state_dim, hidden, bias=False)
         self.state_change_transport = nn.Linear(2, hidden, bias=False)
         self.state_change_fuse = nn.Linear(2 * hidden, hidden, bias=False)
-        self.shared_binder: SharedTargetBinder | None = None
+        self.shared_binder: SharedTargetBinder | TaskConditionedTargetBinder | None = None
         self.target_coordinate: nn.Linear | None = None
         self.target_state: nn.Linear | None = None
         self.target_view: nn.Embedding | None = None
         if target_binding_mode == SHARED_TARGET_BINDING:
             if not camera_names or len(set(camera_names)) != len(camera_names):
                 raise ValueError("target evidence requires unique declared cameras")
-            self.shared_binder = SharedTargetBinder(hidden)
+            self.shared_binder = (TaskConditionedTargetBinder(hidden, heads)
+                                  if task_execution_mode == JOINT_TASK_EXECUTION else SharedTargetBinder(hidden))
             self.target_coordinate = nn.Linear(2, hidden, bias=False)
             self.target_state = nn.Linear(state_dim, hidden, bias=False)
             self.target_view = nn.Embedding(len(camera_names), hidden)
@@ -757,7 +770,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
             history_support = torch.ones(history.shape[:2], dtype=torch.bool, device=history.device) if history_validity is None else history_validity
             safe_history = torch.where(history_support[..., None], history, torch.zeros_like(history))
             history_context = safe_history.sum(1) / history_support.sum(1, keepdim=True).clamp_min(1)
-            target_binding = self.shared_binder(protected_goal.mean(1) + history_context, objects, object_validity)
+            if isinstance(self.shared_binder, TaskConditionedTargetBinder):
+                target_binding = self.shared_binder(protected_goal, objects, object_validity, history=history_context)
+            else:
+                target_binding = self.shared_binder(protected_goal.mean(1) + history_context, objects, object_validity)
             camera_valid = (facts.camera_validity[..., 0] > 0) & object_validity[..., None]
             camera_positions = torch.where(camera_valid[..., None], facts.camera_coordinates, torch.zeros_like(facts.camera_coordinates))
             view_ids = torch.arange(len(self.camera_names), device=objects.device)
@@ -816,7 +832,33 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # query preserves the K axis while making object identity conditional
         # on the instruction and the current causal context.
         language_object_query = interval_base + goal_innovation + history_innovation
-        if isinstance(self.interval_object, BoundTargetRead):
+        task_relation = None
+        if isinstance(self.interval_object, TaskRelationRead):
+            if self.task_relation_encoder is None or target_binding is None or target_evidence is None:
+                raise RuntimeError("joint task relation source is incomplete")
+            source = facts.current_image_source
+            if source is None or current_dino is None:
+                raise ValueError("joint task relations require original G3 and native current chart")
+            if source.spatial is not facts.dense_chart.current_image_support:
+                raise ValueError("joint task relation spatial source is not current G3")
+            side = math.isqrt(current_dino.shape[-2])
+            if side * side != current_dino.shape[-2]:
+                raise ValueError("joint task relation native patch chart must be square")
+            image = source.on_image(rows=side, columns=side)
+            spatial_support = image.supported & camera_valid[..., None, None]
+            position_probability, _ = ImageLogMeasure(image.log_mass, spatial_support).normalized((-2, -1))
+            relation_views = spatial_support.flatten(-2).any(-1) & camera_valid
+            task_relation = self.task_relation_encoder(
+                task_intervals=goal_innovation, attributes=attribute_tokens,
+                position_probability=position_probability.flatten(-2),
+                position_grid=current_image_grid(side, side, device=state.device).reshape(-1, 2),
+                state=state,
+                history_context=history_context, view_observed=relation_views,
+                binding=target_binding, current_content=facts.content,
+            )
+            object_innovation = self.interval_object(language_object_query, task_relation)
+            interval_object_attention = target_binding.mass[:, None].expand(-1, 4, -1)
+        elif isinstance(self.interval_object, BoundTargetRead):
             if target_binding is None or target_evidence is None:
                 raise RuntimeError("shared S read has no operated-object binding")
             object_innovation = self.interval_object(language_object_query, target_evidence, target_binding)
@@ -826,7 +868,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 language_object_query, interval_objects, padding_mask=~object_validity,
                 diagnostics=collect_diagnostics,
             )
-        interval_source = interval_base + goal_innovation + history_innovation + object_innovation
+        if self.task_relation_encoder is not None:
+            # Query identity/history locate evidence; they no longer provide a
+            # standalone task value that can bypass the joint relation read.
+            interval_source = object_innovation
+        else:
+            interval_source = interval_base + goal_innovation + history_innovation + object_innovation
         if progress is not None:
             interval_source = interval_source + progress[:, None]
         public_intervals = self.interval_self(interval_source)
@@ -843,7 +890,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
             if target_binding is None or self.operation_read is None:
                 raise ValueError("operation expectation lost binding or consumer")
             operation_expectation = self.operation_predictor(
-                task_intervals=public_intervals, facts=facts, state=state, binding=target_binding)
+                task_intervals=public_intervals, facts=facts, state=state,
+                binding=target_binding, task_relation=task_relation)
             # Prediction and task remain distinguishable; the expected values
             # serve actual coarse/P1/P2/time consumers instead of a logging head.
             public_intervals = public_intervals + self.operation_read(operation_expectation)
@@ -957,6 +1005,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             object_tokens=objects,
             target_binding=target_binding,
             target_evidence=target_evidence,
+            task_relation=task_relation,
             public_interval_carrier=public_intervals,
             policy_interval_context=policy_intervals,
             temporal_queries=temporal,
@@ -1279,6 +1328,7 @@ class CoarseActionIntent(nn.Module):
         horizon: int = 24,
         action_condition_mode: str = "interval_mean_v1",
         target_binding_mode: str = LOCAL_TARGET_READERS,
+        task_execution_mode: str = NO_TASK_EXECUTION,
     ) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
@@ -1304,6 +1354,7 @@ class CoarseActionIntent(nn.Module):
             )
         self.intent_read = _CrossRead(hidden, heads)
         self.object_read = (
+            TaskRelationRead(hidden, heads) if task_execution_mode == JOINT_TASK_EXECUTION else
             BoundTargetRead(hidden, heads) if target_binding_mode == SHARED_TARGET_BINDING
             else _CrossRead(hidden, heads)
         )
@@ -1355,7 +1406,17 @@ class CoarseActionIntent(nn.Module):
                 dtype=torch.float32,
             ).squeeze(-1).clamp(0.0, 1.0)
             object_padding_mask = ~(validity > 0.0)
-        if isinstance(self.object_read, BoundTargetRead):
+        if isinstance(self.object_read, TaskRelationRead):
+            _, history_delta, _ = self.history_read(
+                conditioned_query,
+                intent.history_memory,
+                padding_mask=None if intent.history_validity is None else ~intent.history_validity,
+                diagnostics=collect_diagnostics,
+            )
+            if intent.task_relation is None:
+                raise ValueError("joint coarse read requires the current task relation")
+            object_delta = self.object_read(conditioned_query + history_delta, intent.task_relation)
+        elif isinstance(self.object_read, BoundTargetRead):
             if intent.target_binding is None or intent.target_evidence is None:
                 raise ValueError("shared coarse read requires target binding and current facts")
             object_delta = self.object_read(conditioned_query, intent.target_evidence, intent.target_binding)
@@ -1366,16 +1427,19 @@ class CoarseActionIntent(nn.Module):
                 conditioned_query, intent.public_object_memory,
                 padding_mask=object_padding_mask, diagnostics=collect_diagnostics,
             )
-        _, history_delta, _ = self.history_read(
-            conditioned_query,
-            intent.history_memory,
-            padding_mask=None if intent.history_validity is None else ~intent.history_validity,
-            diagnostics=collect_diagnostics,
-        )
+        if not isinstance(self.object_read, TaskRelationRead):
+            # Preserve legacy execution and backward accumulation order.
+            _, history_delta, _ = self.history_read(
+                conditioned_query,
+                intent.history_memory,
+                padding_mask=None if intent.history_validity is None else ~intent.history_validity,
+                diagnostics=collect_diagnostics,
+            )
+        # In the selected candidate, the temporal scaffold and history are
+        # read queries, not an independent source of proposed task motion.
         token = self.block(
-            conditioned_query
-            + object_delta
-            + history_delta
+            object_delta if isinstance(self.object_read, TaskRelationRead)
+            else conditioned_query + object_delta + history_delta
         )
         action_prediction = self.action_head(token)
         if future_action is None:

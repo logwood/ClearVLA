@@ -17,6 +17,7 @@ from ..operation_expectation import OBJECT_OUTCOME_INTENT
 from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT
 from ..robot_execution import RobotResponseFeedback
 from ..supervision import quarantine, supported_mean
+from ..task_execution import JOINT_TASK_EXECUTION
 from ..world_robot import OBSERVED_ROBOT_VIEWS, RobotWorldObservation
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from .action_contract import BottomOutput
@@ -43,6 +44,7 @@ from .restored_bottom import RestoredV120EvidenceBottom
 from .restored_observation import RestoredV120ObservationCompiler
 from .routing import register_gradient_rms_metric
 from .target_binding import SHARED_TARGET_BINDING, BoundTargetRead
+from .task_execution import TaskAwareFactualRead
 from .teacher import ObjectFutureTeacher
 from .top import (
     CompiledPolicyState,
@@ -163,6 +165,15 @@ class OnlinePolicyCache:
                 raise ValueError("annotated goal belongs to another causal comparison")
             if endpoint_goal.prediction.reference is not self.instruction_reference:
                 raise ValueError("annotated goal belongs to another instruction start")
+        relation = self.top.intent.task_relation
+        if (relation is not None) != (config.top.task_execution_mode == JOINT_TASK_EXECUTION):
+            raise ValueError("task relation cache differs from configured graph")
+        if relation is not None:
+            relation.validate(hidden=config.dimensions.hidden_size)
+            if (relation.binding is not self.top.intent.target_binding
+                    or relation.current_content is not self.top.belief.content
+                    or relation.current_state is not self.history.state):
+                raise ValueError("task relation cache belongs to another target")
         op = self.top.intent.operation_expectation
         if (op is not None) != (config.top.operation_intent_mode == OBJECT_OUTCOME_INTENT):
             raise ValueError("operation expectation cache differs from configured mode")
@@ -349,6 +360,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             instruction_change_mode=top.instruction_change_mode,
             operation_intent_mode=top.operation_intent_mode,
             annotation_goal_mode=top.annotation_goal_mode,
+            task_execution_mode=top.task_execution_mode,
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,
@@ -388,8 +400,12 @@ class ClearVLAMainlinePolicy(nn.Module):
             physical_action_dim=raw_codec.physical_dim,
         )
 
-        raw_target_reader = (BoundTargetRead(dims.hidden_size, dims.num_heads)
-                             if top.target_binding_mode == SHARED_TARGET_BINDING else None)
+        raw_target_reader = (
+            TaskAwareFactualRead(dims.hidden_size, dims.num_heads)
+            if top.task_execution_mode == JOINT_TASK_EXECUTION else
+            BoundTargetRead(dims.hidden_size, dims.num_heads)
+            if top.target_binding_mode == SHARED_TARGET_BINDING else None
+        )
 
         # Capture the exact old traversal before changing registrations.  This
         # ledger is consumed by optimizer/clipping code and by checkpoint
@@ -857,6 +873,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             phase_context=factual_intent.phase_context,
             target_binding=factual_intent.target_binding,
             target_evidence=factual_intent.target_evidence,
+            task_relation=factual_intent.task_relation,
             condition_query_context=factual_intent.condition_query_context,
             history_query_context=factual_intent.history_query_context,
             clean_basis_tokens=clean_action_basis,

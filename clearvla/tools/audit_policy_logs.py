@@ -4182,17 +4182,17 @@ def _recovery_assessment(
             record(
                 "core_attribution/world_consequence_sole_consumer_identity",
                 (
-                    "incomplete"
-                    if not isinstance(sole_consumer_identity, (int, float))
+                    "not_applicable"
+                    if latest_val.get("validation_core_attribution_world_consequence_identity_expected", 1.0) == 0.0
                     else (
-                        "pass"
-                        if float(sole_consumer_identity) == 0.0
-                        else "fail"
+                        "incomplete"
+                        if not isinstance(sole_consumer_identity, (int, float))
+                        else ("pass" if float(sole_consumer_identity) == 0.0 else "fail")
                     )
                 ),
                 baseline_value=0.0,
                 candidate_value=sole_consumer_identity,
-                detail="a mismatch exposes an unmodelled CandidateWorld consumer or intervention leak",
+                detail="equality applies only without a declared task/outcome P2 comparison; otherwise both ablations remain distinct measured interventions",
             )
             donor_fraction = latest_val.get(
                 "validation_core_attribution_wrong_action_world_donor_valid_fraction"

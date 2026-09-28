@@ -1,3 +1,67 @@
+## M9c — joint task/scene execution candidate (2026-09-28 evidence batch)
+
+Branch: `codex/task-grounded-execution-20260928`, inherited from M9 source
+`4a7faafbbed42d512a8c015f6251e41e662d1287` (tree
+`70bb5fb6419e6503ea5ef876a9ad722011a14100`). Neither original branch is changed.
+The observed common failure is near-object contact and shared action phases
+outweighing task identity/location/direction, not a button-task-count claim.
+Evidence motivates a coordinated candidate, not a proven neural root cause.
+
+`top.task_execution_mode=joint_object_scene_v1` selects these replacements:
+- One shared task-conditioned binder: task/object interaction scores, with
+  history in task-read queries only; no additive history target-value path.
+  It preserves one K-plus-null law, not a second object selector.
+- S forms task-by-object-by-view-by-robot relations before any role pooling.
+  Nonlinear native-grid features are integrated over the full current G3
+  image law. A centroid alone is not the spatial input. These are learned
+  relations, not calibrated contact geometry or world/image subtraction.
+- Independent S/coarse consumers read those relations with separate target
+  and scene weights. Their task values no longer add standalone temporal-query
+  or history content: these enter queries/modulation, not a task-value bypass. P1 uses them only in its query; its factual values still
+  come exclusively from actual current evidence.
+- The existing all-object S outcome prediction is relation-conditioned under
+  its existing source-supported future losses. P2 compares this expectation
+  with the actual candidate W on the same I/K/C chart BEFORE pooling, retaining
+  target and scene values separately. Scene mass is (supported-target_mass)/K,
+  a subprobability expectation, not the old K-1 categorical complement.
+- S temporal context remains a P2 read query, not an independent task value.
+  P3 receives only P2-compiled values, through the existing typed coordinator;
+  it does not inspect raw W. W remains goal-free for fixed facts/action. CT and
+  bottom use compiled P3 only, not raw language, object IDs, or simulator truth.
+
+The source comparison carries exact current-G3 provenance; masks quarantine
+unknown intervals/objects/views before subtraction and projection. No module
+uses future labels online. Existing instruction reference, later endpoint
+prior and executed-world feedback remain separate and optional. Two explicit
+CALVIN presets retain either the M6n graph for a narrow graph comparison, or
+all selected later cumulative mechanisms. They require training a new graph;
+old checkpoint loading is NOT a silent warm start or exact resume.
+
+No task keyword, nearest-object rule, forced grip/hold/stop, movement amplitude,
+new loss budget, checkpoint score, optimizer rate, sampler, physical chart,
+solver, or robot adapter is changed. A zero task relation is NOT a robot stop.
+The scene path covers represented evidence only, not guaranteed button/distractor
+protection. S/W prediction errors are learned task features, not certified
+progress/costs. This architecture can still ignore task content after training;
+there is no claim of a mathematical behavior guarantee.
+
+The additional P2 comparison is a declared consumer of candidate W. Hence
+world-dynamic neutralization and the OLD consequence-only neutralization no
+longer have to yield equal actions. Their measured discrepancy is retained;
+`validation_core_attribution_world_consequence_identity_expected=0` marks the
+old equality check inapplicable. Primary-vs-explicit-none remains an exact
+identity requirement. Old configurations keep their original equality check.
+
+New parameters are registered under existing intent/coarse/P1/P2 owners. Graph
+configuration, component selections, deployment ABI, source fingerprints and
+cache admission include the new choice. Full M9/M10/M11 acceptance remains open.
+Initial compact tests use synthetic transport on CPU FP32/BF16 and test-only
+short schedules. They are not the missing CALVIN trained weights, CUDA tests,
+real-data convergence, or improved closed-loop performance. Preserve failures
+and exact test scope in delivery reports; do not turn a nonzero gradient into
+proof of useful control. Existing W heads are zero-initialized; indirect
+coarse-to-action gradients are tested after one real update, not by editing them.
+
 ## M9b — CT-only terminal/codec responsibility (2026-09-26 UTC)
 
 `scripts/probe_m9_execution_chain.py` is an explicit synthetic source audit,

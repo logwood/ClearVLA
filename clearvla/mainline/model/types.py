@@ -26,6 +26,7 @@ from ..instruction_change import InstructionChangeEvidence
 from ..instruction_posterior import InstructionChangeValues
 from ..manifest import INTERVALS
 from ..operation_expectation import OperationExpectation
+from ..task_execution import TaskRelationEvidence
 from ..transition_condition import SUMMED_TRANSITION, validate_transition_condition_mode
 from ..world_control import CandidateControlDomain
 from ..world_robot import RobotWorldObservation
@@ -954,12 +955,17 @@ class ActionIntentDock:
     public_object_validity: Tensor | None = None  # FP32 [B,K,1]
     history_validity: Tensor | None = None  # bool [B,L], source padding only
     target_binding: TargetBinding | None = None
+    task_relation: TaskRelationEvidence | None = None
     target_evidence: TargetEvidence | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
 
     def validate(self, *, hidden: int) -> None:
         resolve_future_time(self.time_grid_mode)
+        if self.task_relation is not None:
+            self.task_relation.validate(hidden=hidden)
+            if self.task_relation.binding is not self.target_binding:
+                raise ValueError("task relations cannot replace shared target identity")
         batch = int(self.public_interval_carrier.shape[0])
         _shape(
             self.public_interval_carrier,
@@ -1002,12 +1008,17 @@ class FactualIntentDock:
     condition_query_context: Tensor  # [B,I,H]
     history_query_context: Tensor  # [B,I,H]
     target_binding: TargetBinding | None = None
+    task_relation: TaskRelationEvidence | None = None
     target_evidence: TargetEvidence | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
 
     def validate(self, *, hidden: int) -> None:
         resolve_future_time(self.time_grid_mode)
+        if self.task_relation is not None:
+            self.task_relation.validate(hidden=hidden)
+            if self.task_relation.binding is not self.target_binding:
+                raise ValueError("task relations cannot replace shared target identity")
         batch = int(self.phase_context.shape[0])
         expected = (batch, 4, hidden)
         _shape(self.phase_context, expected, "factual-intent phase context")
@@ -1030,6 +1041,7 @@ class PolicyIntentDock:
     typed_common_value: Tensor  # [B,K,3,R]
     typed_interval_residual_value: Tensor  # [B,I,K,3,R]
     target_binding: TargetBinding | None = None
+    task_relation: TaskRelationEvidence | None = None
     instruction_change: InstructionChangeEvidence | None = None
     instruction_plan_values: InstructionChangeValues | None = None
     annotated_goal: AnnotatedGoalEvidence | None = None
@@ -1040,6 +1052,10 @@ class PolicyIntentDock:
 
     def validate(self, *, horizon: int, hidden: int) -> None:
         resolve_future_time(self.time_grid_mode)
+        if self.task_relation is not None:
+            self.task_relation.validate(hidden=hidden)
+            if self.task_relation.binding is not self.target_binding:
+                raise ValueError("task relations cannot replace shared target identity")
         batch = int(self.interval_key.shape[0])
         _shape(self.interval_key, (batch, 4, hidden), "policy-intent interval key")
         _shape(
@@ -1127,6 +1143,7 @@ class ObjectIntentState:
     object_validity: Tensor | None = None  # FP32 [B,K,1]
     history_validity: Tensor | None = None  # bool [B,L]
     target_binding: TargetBinding | None = None
+    task_relation: TaskRelationEvidence | None = None
     target_evidence: TargetEvidence | None = None
     instruction_change: InstructionChangeEvidence | None = None
     instruction_plan_values: InstructionChangeValues | None = None
@@ -1174,6 +1191,7 @@ class ObjectIntentState:
             public_object_memory=self.object_tokens,
             public_object_validity=self.object_validity,
             target_binding=self.target_binding,
+            task_relation=self.task_relation,
             target_evidence=self.target_evidence,
             history_validity=self.history_validity,
         )
@@ -1184,6 +1202,7 @@ class ObjectIntentState:
             time_grid_mode=self.time_grid_mode,
             phase_context=self.policy_interval_context,
             target_binding=self.target_binding,
+            task_relation=self.task_relation,
             target_evidence=self.target_evidence,
             condition_query_context=self.protected_goal_set.mean(dim=1)[:, None].expand(
                 -1, 4, -1
@@ -1207,11 +1226,16 @@ class ObjectIntentState:
             target_object_address_logit=self.target_object_address_logit,
             typed_common_value=self.typed_common_value,
             target_binding=self.target_binding,
+            task_relation=self.task_relation,
             typed_interval_residual_value=self.typed_interval_residual_value,
         )
 
     def validate(self, *, horizon: int, hidden: int) -> None:
         resolve_future_time(self.time_grid_mode)
+        if self.task_relation is not None:
+            self.task_relation.validate(hidden=hidden)
+            if self.task_relation.binding is not self.target_binding:
+                raise ValueError("task relations cannot replace shared target identity")
         batch = int(self.public_interval_carrier.shape[0])
         _shape(self.protected_goal_set, (batch, 4, hidden), "protected goal set")
         if self.annotated_goal is not None:
@@ -2202,6 +2226,7 @@ class FutureObjectDynamics:
     camera_names: tuple[str, ...] = ()  # W-owned chart order, not guessed from axis length
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
+    source_content: Tensor | None = None  # exact G chart owner before masked/detached reference
 
     @property
     def intervals(self) -> int:
@@ -2353,6 +2378,7 @@ class FutureObjectDynamics:
                 self.log_camera_chart_availability[:, index]
             ),
             control_domain=self.control_domain,
+            source_content=None if self.source_content is None else self.source_content[:, index],
         )
 
     @classmethod

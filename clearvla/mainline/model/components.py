@@ -21,6 +21,7 @@ from ..gripper_contract import is_binary_gripper_selection
 from ..interfaces import CurrentObservation, ObservableHistory, OnlinePolicyInput
 from ..robot_execution import RobotResponseFeedback
 from ..supervision import FutureLabelSupport, supported_mean
+from ..task_execution import TaskRelationEvidence
 from ..transition_condition import SUMMED_TRANSITION, validate_transition_condition_mode
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
 from ..v120_core.primitives import TimeEmbedding
@@ -50,6 +51,7 @@ from .restored_observation import (
 )
 from .routing import smooth_rms_contract
 from .target_binding import BoundTargetRead, TargetBinding, TargetEvidence
+from .task_execution import TaskAwareFactualRead
 from .teacher import ObjectFutureTeacher
 from .top import (
     CompiledPolicyState,
@@ -674,7 +676,7 @@ class P1Stage(nn.Module):
         horizon: int,
         basis: int,
         factual_reader: nn.Module,
-        target_reader: BoundTargetRead | None = None,
+        target_reader: BoundTargetRead | TaskAwareFactualRead | None = None,
         dynamic_time: TimeEmbedding,
         dynamic_content_mod: nn.Sequential,
         dynamic_content_mod_scale: nn.Parameter,
@@ -702,6 +704,7 @@ class P1Stage(nn.Module):
         history_query_context: Tensor,
         target_binding: TargetBinding | None = None,
         target_evidence: TargetEvidence | None = None,
+        task_relation: TaskRelationEvidence | None = None,
         clean_basis_tokens: Tensor,
         collect_diagnostics: bool = False,
     ) -> tuple[FactualPrecisionDock, dict[str, Tensor]]:
@@ -721,7 +724,14 @@ class P1Stage(nn.Module):
             # Add AFTER subtracting the clean basis: its S-owned common mass is
             # physical evidence, not a query offset that a residual can cancel.
             target_query = clean_basis_tokens + phase_context.mean(1)[:, None, None]
-            target_detail = self.target_read(target_query, target_evidence, target_binding)
+            if isinstance(self.target_read, TaskAwareFactualRead):
+                if task_relation is None:
+                    raise ValueError("joint P1 query requires task relations")
+                target_detail = self.target_read(target_query, target_evidence, target_binding, relation=task_relation)
+            else:
+                if task_relation is not None:
+                    raise ValueError("legacy P1 cannot silently ignore task relations")
+                target_detail = self.target_read(target_query, target_evidence, target_binding)
         else:
             if target_binding is not None or target_evidence is not None:
                 raise ValueError("legacy factual read cannot ignore target evidence")
@@ -931,6 +941,10 @@ class PolicyCompilerStage(nn.Module):
             p1_policy_residual=p1_state.policy_query_residual,
             consequence=consequence,
             intent=context.intent.policy_dock(),
+            task_execution=self.effect_reader.compile_task_execution(
+                p1_action_query + context.intent.temporal_queries[:, :, None],
+                candidate_world, context.intent.policy_dock(),
+            ),
             action_query=p3_action_query,
             collect_diagnostics=collect_diagnostics,
         )

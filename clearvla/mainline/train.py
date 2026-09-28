@@ -2002,6 +2002,11 @@ def _validate(
         result.update(p2_interventions.means())
     if core_attribution_batches:
         result.update(core_attribution.means())
+        # A declared P2 task/outcome comparison also consumes W. Clearing only
+        # the original consequence read is not the same intervention here.
+        result["validation_core_attribution_world_consequence_identity_expected"] = float(
+            config.top.task_execution_mode == "none"
+        )
     result["validation_sampling_diagnostic_batches"] = float(
         sampling_diagnostic_batches
     )

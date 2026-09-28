@@ -72,6 +72,8 @@ def _conditioning_selection(config: "ExperimentConfig") -> str:
 
 
 def _intent_selection(config: "ExperimentConfig") -> str:
+    if config.top.task_execution_mode == "joint_object_scene_v1":
+        return "joint_task_object_scene_intent_v1"
     if config.top.history_encoding_mode == "timestamped_streams_v1":
         return "timestamped_object_intent_v1"
     return "stateless_object_intent_v1"
@@ -148,6 +150,8 @@ class ComponentSelection:
             return cls(
                 conditioning=_conditioning_selection(config),
                 intent=_intent_selection(config),
+                p1=("task_query_current_factual_p1_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "v120_factual_dynamic_p1_v1"),
+                policy_compiler=("joint_task_outcome_p2_p3_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "object_p2_p3_v1"),
                 execution_bottom=_execution_bottom_selection(config),
                 terminal_controller="calvin_binary_command_v1",
                 outlet_adapter="calvin_7d_binary_v1",
@@ -156,6 +160,8 @@ class ComponentSelection:
             return cls(
                 conditioning=_conditioning_selection(config),
                 intent=_intent_selection(config),
+                p1=("task_query_current_factual_p1_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "v120_factual_dynamic_p1_v1"),
+                policy_compiler=("joint_task_outcome_p2_p3_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "object_p2_p3_v1"),
                 execution_bottom=_execution_bottom_selection(config),
                 outlet_adapter="libero_7d_continuous_v1",
             )
@@ -163,6 +169,8 @@ class ComponentSelection:
             return cls(
                 conditioning=_conditioning_selection(config),
                 intent=_intent_selection(config),
+                p1=("task_query_current_factual_p1_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "v120_factual_dynamic_p1_v1"),
+                policy_compiler=("joint_task_outcome_p2_p3_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "object_p2_p3_v1"),
                 execution_bottom=_execution_bottom_selection(config),
                 outlet_adapter="maniskill_7d_continuous_v1",
             )
@@ -171,6 +179,8 @@ class ComponentSelection:
                 return cls(
                     conditioning=_conditioning_selection(config),
                     intent=_intent_selection(config),
+                p1=("task_query_current_factual_p1_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "v120_factual_dynamic_p1_v1"),
+                policy_compiler=("joint_task_outcome_p2_p3_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "object_p2_p3_v1"),
                     execution_bottom=_execution_bottom_selection(config),
                     terminal_controller="maniskill_binary_command_v1",
                     outlet_adapter=MANISKILL_BINARY_GRIPPER_SELECTION,
@@ -178,6 +188,8 @@ class ComponentSelection:
             return cls(
                 conditioning=_conditioning_selection(config),
                 intent=_intent_selection(config),
+                p1=("task_query_current_factual_p1_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "v120_factual_dynamic_p1_v1"),
+                policy_compiler=("joint_task_outcome_p2_p3_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "object_p2_p3_v1"),
                 execution_bottom=_execution_bottom_selection(config),
                 outlet_adapter="maniskill_7d_continuous_v2",
             )
@@ -185,12 +197,16 @@ class ComponentSelection:
             return cls(
                 conditioning=_conditioning_selection(config),
                 intent=_intent_selection(config),
+                p1=("task_query_current_factual_p1_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "v120_factual_dynamic_p1_v1"),
+                policy_compiler=("joint_task_outcome_p2_p3_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "object_p2_p3_v1"),
                 execution_bottom=_execution_bottom_selection(config),
                 outlet_adapter="rdt_right_arm_7d_v1",
             )
         return cls(
             conditioning=_conditioning_selection(config),
             intent=_intent_selection(config),
+                p1=("task_query_current_factual_p1_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "v120_factual_dynamic_p1_v1"),
+                policy_compiler=("joint_task_outcome_p2_p3_v1" if config.top.task_execution_mode == "joint_object_scene_v1" else "object_p2_p3_v1"),
             execution_bottom=_execution_bottom_selection(config),
         )
 

@@ -168,6 +168,7 @@ def test_predictor_does_not_receive_future_labels_or_candidate_action() -> None:
         "facts",
         "state",
         "binding",
+        "task_relation",  # current S-owned evidence, never future labels/action
     }
     assert not list(OperationExpectationSupervisor().parameters())
 

@@ -82,6 +82,7 @@ from ..operation_expectation import (
 from ..p2_geometry import POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, p2_geometry_metadata
 from ..p3_coordination import POINTWISE_PLAN, TYPED_HORIZON_PLAN, p3_coordination_metadata
 from ..robot_execution import robot_execution_metadata
+from ..task_execution import JOINT_TASK_EXECUTION, NO_TASK_EXECUTION, task_execution_metadata
 from ..temporal import HISTORY_TIMING_CONTRACT, TIMED_HISTORY_ENCODING
 from ..transition_condition import (
     SUMMED_TRANSITION,
@@ -389,6 +390,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"task_execution": task_execution_metadata()}
+           if config.top.task_execution_mode == JOINT_TASK_EXECUTION else {}),
         **({"endpoint_supervision": endpoint_supervision_metadata()}
            if config.bottom.endpoint_supervision_mode == CLEAN_ENDPOINT_SUPERVISION else {}),
         **({"controller_values": controller_value_metadata()}
@@ -559,6 +562,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
             raise ValueError("annotated goal ABI semantics mismatch")
     elif annotation_mode != "none" or "annotation_goal" in abi:
         raise ValueError("unexpected annotated goal ABI")
+    task_execution_mode = graph_top.get("task_execution_mode", NO_TASK_EXECUTION)
+    if task_execution_mode == JOINT_TASK_EXECUTION:
+        if abi.get("task_execution") != task_execution_metadata():
+            raise ValueError("joint task execution ABI semantics mismatch")
+    elif task_execution_mode != NO_TASK_EXECUTION or "task_execution" in abi:
+        raise ValueError("unexpected joint task execution ABI")
     operation_mode = graph_top.get("operation_intent_mode", POSTERIOR_INTENT)
     if operation_mode == OBJECT_OUTCOME_INTENT:
         cameras = observation.get("camera_names")

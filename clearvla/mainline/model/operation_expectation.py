@@ -14,6 +14,7 @@ from torch import Tensor, nn
 from ..future_time import CONTROL_ALIGNED_FUTURE_TIME, resolve_future_time
 from ..operation_expectation import OperationExpectation, operation_expectation_metadata
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
+from ..task_execution import TaskRelationEvidence
 from .target_binding import TargetBinding
 from .types import FutureObjectDynamics, ObjectFactSet
 
@@ -54,7 +55,8 @@ class ObjectOperationPredictor(nn.Module):
         )
 
     def forward(
-        self, *, task_intervals: Tensor, facts: ObjectFactSet, state: Tensor, binding: TargetBinding
+        self, *, task_intervals: Tensor, facts: ObjectFactSet, state: Tensor, binding: TargetBinding,
+        task_relation: TaskRelationEvidence | None = None,
     ) -> OperationExpectation:
         b, k, _ = facts.content.shape
         if task_intervals.shape != (
@@ -68,13 +70,25 @@ class ObjectOperationPredictor(nn.Module):
         dtype = self.task.weight.dtype
         task = self.task(task_intervals.to(dtype)) + self.state(state.to(dtype))[:, None]
         content = self.content(torch.where(valid.any(-1)[..., None], facts.content, 0.0).to(dtype))
-        objects = self.object_model(task[:, :, None] + content[:, None])
+        object_input = task[:, :, None] + content[:, None]
+        if task_relation is not None:
+            task_relation.validate(hidden=self.task.out_features)
+            if task_relation.binding is not binding or task_relation.camera_names != self.camera_names:
+                raise ValueError("operation relation lost target or camera provenance")
+            mask = task_relation.view_observed[:, None, :, :, None]
+            relation_values = torch.where(mask, task_relation.values, 0.0)
+            relation_mean = relation_values.sum(3) / mask.sum(3).clamp_min(1)
+            object_input = object_input + relation_mean.to(object_input.dtype)
+        objects = self.object_model(object_input)
         semantic = torch.where(valid.any(-1)[:, None, :, None], self.semantic(objects).float(), 0.0)
         coordinates = self.coordinates(
             torch.where(valid[..., None], facts.camera_coordinates, 0.0).to(dtype)
         )
         role = self.view_role(self.role_basis.to(dtype))[None, None]
-        view = self.view_model(objects[:, :, :, None] + (coordinates + role)[:, None])
+        view_input = objects[:, :, :, None] + (coordinates + role)[:, None]
+        if task_relation is not None:
+            view_input = view_input + relation_values.to(view_input.dtype)
+        view = self.view_model(view_input)
         image = torch.where(valid[:, None, :, :, None], self.image(view).float(), 0.0)
         result = OperationExpectation(
             semantic,
