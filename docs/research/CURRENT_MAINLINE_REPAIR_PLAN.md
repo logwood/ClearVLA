@@ -1,3 +1,29 @@
+## M10a continuation: data-entry closure and reset-context qualification
+
+Closed in source: cumulative and annotated-goal presets previously attached
+endpoint mode to the temporary strict inventory config, failing before dataset
+loading. The goal mode is now restored on the selected dataset config before
+validation, without disabling it or accepting an invalid strict endpoint setup.
+Test the actual disk HDF5/NPY/T5/split path, not only isolated config objects.
+
+Established boundary: the raw annotation source keeps real preinstruction
+history; a fresh evaluation reset has no such past. Action-only dropout is not
+a full causal-history reset. Matched producer tests eliminate selected indexing,
+language-row and chart mismatches under identical source history; they do not
+eliminate content-level encoder errors or certify task conditioning in weights.
+Use `python -m scripts.audit_calvin_history_support --config <effective.json>
+--output <new-report.json>` for the actual selected dataset, or explicitly bound
+a smoke split. Never treat this synthetic file test as the user's census.
+
+Still open: distinguish data coverage of target-relative approach/recovery from
+learned task-consumption failures, including continuous wrong-direction replans
+after history has filled. A future reset-view training candidate must change all
+causal histories and feedback consistently, retain current observation and valid
+future labels, and preserve warm instruction starts; do not call control-only
+dropout that candidate or silently enable it in the existing comparison. No
+fixed y correction, forced grip timing, hard object/stop rule, new loss or server
+training is introduced by this source closure.
+
 ## M9d continuation: source-owned task reads (2026-09-28)
 
 The recovered joint path still inherited query residuals and FFN(query) from

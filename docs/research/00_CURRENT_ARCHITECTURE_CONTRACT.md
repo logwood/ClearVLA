@@ -1,3 +1,32 @@
+## M10a — production data entry and cold-reset context boundary (2026-09-28)
+
+The strict inventory-admission DatasetConfig is not the selected training
+supervision contract. It must not carry annotated endpoint supervision while
+it is validated as `strict_complete_v1`. Attach the requested goal mode to the
+selected dataset config BEFORE validating that config. Invalid strict+endpoint
+requests still fail; observed-tail train/val/test and loader-only smoke retain
+real endpoint labels. Missing/censored source provenance is not fabricated.
+This repairs an actual cumulative-preset startup failure in `b58a3a0f`, not the
+cause of the already-trained M6n behavior (its endpoint mode was disabled).
+
+Raw CALVIN annotation eligibility retains 24 real preceding context rows.
+Instruction starts are not environment resets: do not discard that history or
+invent an executed reset prefix. The online reset has one observed state and
+no executed history; a warm annotation start can have three observed states,
+eight sparse executed commands and available feedback. Existing action-history
+dropout removes controls/feedback, NOT preceding state/image evidence, so it
+does not establish equivalent cold-start training coverage.
+
+The production loader, batching, instruction lookup, 7D/10D adaptation and
+online producer have paired source-labelled file tests with identical current
+observations and histories at reset-relative ages 0/1/4/8/12/24. The separate
+cold/warm contrast is a context-support difference, not a proven unique neural
+cause. `scripts/audit_calvin_history_support.py` reads actual admitted centers
+and records selected modes separately from available source history. It does
+not change the dataset, sampler, labels, network, gains or robot commands.
+Bounded smoke census is not full inventory coverage. Physical target-relative
+geometry, trained conditional behavior and post-contact direction remain open.
+
 ## M9c — joint task/scene execution candidate (2026-09-28 evidence batch)
 
 Branch: `codex/task-grounded-execution-20260928`, inherited from M9 source

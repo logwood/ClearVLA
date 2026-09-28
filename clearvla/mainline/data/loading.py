@@ -525,7 +525,10 @@ def _load_mainline_data(
     strict_dataset_config = ObservedStateDatasetConfig(
         emit_history_timing=config.top.history_encoding_mode == TIMED_HISTORY_ENCODING,
         instruction_reference_mode=config.top.instruction_reference_mode,
-        annotation_goal_mode=config.top.annotation_goal_mode,
+        # This config describes strict source-inventory admission, not the
+        # selected training supervision. Endpoint labels require observed-tail
+        # provenance and belong only on the selected dataset config below.
+        annotation_goal_mode="none",
         robot_feedback_mode=config.top.robot_feedback_mode,
         world_feedback_mode=config.top.world_feedback_mode,
         state_feature_mode=config.top.state_feature_mode,
@@ -550,6 +553,10 @@ def _load_mainline_data(
             window_boundary_contract=data.window_boundary_contract,
         )
     )
+    if config.top.annotation_goal_mode != "none":
+        train_dataset_config = replace(
+            train_dataset_config, annotation_goal_mode=config.top.annotation_goal_mode
+        )
     train_dataset_config.validate()
     if data.split_mode in {"manifest", "episode-manifest"}:
         min_length = strict_dataset_config.minimum_episode_length
