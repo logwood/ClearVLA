@@ -5,9 +5,6 @@ on:
     paths: [.github/workflows/dinov3-parity-diagnosis.yml]
 permissions:
   contents: read
-concurrency:
-  group: dinov3-parity-diagnosis-${{ github.ref }}
-  cancel-in-progress: false
 jobs:
   diagnose:
     runs-on: ubuntu-latest
@@ -20,14 +17,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 2
           persist-credentials: false
-      - name: Preserve exact interrupted source
-        run: |
-          mkdir -p recovery-results
-          git rev-parse HEAD^ > recovery-results/source-commit.txt
-          git rev-parse HEAD^^{tree} > recovery-results/source-tree.txt
-          git archive --format=tar.gz HEAD^ > recovery-results/source.tar.gz
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
@@ -35,8 +25,10 @@ jobs:
         run: |
           python -m pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install 'pytest>=8,<10' 'numpy<3' 'pillow<13' 'h5py<4' transformers==4.57.6 safetensors
+          mkdir -p recovery-results
           python -m pip freeze > recovery-results/environment.txt
-      - name: Diagnose original unrelaxed assertion
+          git rev-parse HEAD > recovery-results/source-commit.txt
+      - name: Trace unchanged production comparison
         id: parity
         continue-on-error: true
         shell: bash
@@ -45,71 +37,71 @@ jobs:
           python - <<'PY' 2>&1 | tee recovery-results/diagnosis.log
           import dataclasses, hashlib, json, pathlib, sys, tempfile, traceback
           import torch, pytest
-          sys.path.insert(0, 'tests')
+          sys.path.insert(0,'tests')
           import test_dinov3_production_integration as test
           import clearvla.simulation.clearvla_policy as adapter
-          report={'scope':'synthetic-marker integration diagnostic, not pretrained/CUDA/robot acceptance','seed':44}
-          def differences(a,b,path='input'):
-              result=[]
+          report={'scope':'synthetic marker only, not pretrained/CUDA/robot','seed':44}
+          def diff(a,b,path='input'):
+              r=[]
               if isinstance(a,torch.Tensor) and isinstance(b,torch.Tensor):
-                  if a.shape!=b.shape or a.dtype!=b.dtype:
-                      return [{'field':path,'left_shape':list(a.shape),'right_shape':list(b.shape),'left_dtype':str(a.dtype),'right_dtype':str(b.dtype)}]
-                  delta=(a.detach().float().cpu()-b.detach().float().cpu()).abs()
+                  if a.shape!=b.shape or a.dtype!=b.dtype:return [{'field':path,'shape_or_dtype_mismatch':True}]
+                  d=(a.detach().float().cpu()-b.detach().float().cpu()).abs()
                   if not torch.equal(a,b) or a.stride()!=b.stride():
-                      result.append({'field':path,'exact':torch.equal(a,b),'max_abs':float(delta.max()) if delta.numel() else 0.,'changed':int((delta!=0).sum()),'left_stride':list(a.stride()),'right_stride':list(b.stride())})
+                      r.append({'field':path,'exact':torch.equal(a,b),'max_abs':float(d.max()) if d.numel() else 0.,'changed':int((d!=0).sum()),'left_stride':list(a.stride()),'right_stride':list(b.stride())})
               elif dataclasses.is_dataclass(a) and dataclasses.is_dataclass(b):
-                  for f in dataclasses.fields(a):result+=differences(getattr(a,f.name),getattr(b,f.name),path+'.'+f.name)
+                  for f in dataclasses.fields(a):r+=diff(getattr(a,f.name),getattr(b,f.name),path+'.'+f.name)
               elif isinstance(a,dict) and isinstance(b,dict):
-                  for k in sorted(set(a)|set(b)):
-                      result+=differences(a.get(k),b.get(k),path+'.'+str(k))
+                  for k in sorted(set(a)|set(b)):r+=diff(a.get(k),b.get(k),path+'.'+str(k))
               elif isinstance(a,(list,tuple)) and isinstance(b,(list,tuple)):
-                  for i,(x,y) in enumerate(zip(a,b)):result+=differences(x,y,path+f'[{i}]')
-                  if len(a)!=len(b):result.append({'field':path,'different_length':True})
-              elif a!=b:result.append({'field':path,'left':str(a),'right':str(b)})
-              return result
-          def weight_digest(model):
+                  for i,(x,y) in enumerate(zip(a,b)):r+=diff(x,y,path+f'[{i}]')
+                  if len(a)!=len(b):r.append({'field':path,'length_mismatch':True})
+              elif a!=b:r.append({'field':path,'left':str(a),'right':str(b)})
+              return r
+          def canonical(x):
+              if isinstance(x,torch.Tensor):return x.contiguous()
+              if dataclasses.is_dataclass(x):return dataclasses.replace(x,**{f.name:canonical(getattr(x,f.name)) for f in dataclasses.fields(x)})
+              return x
+          def digest(m):
               h=hashlib.sha256()
-              for k,v in sorted(model.state_dict().items()):
-                  t=v.detach().cpu().contiguous()
-                  h.update(k.encode());h.update(str((t.shape,t.dtype)).encode());h.update(t.reshape(-1).view(torch.uint8).numpy().tobytes())
+              for k,v in sorted(m.state_dict().items()):
+                  t=v.detach().cpu().contiguous();h.update(k.encode());h.update(str((t.shape,t.dtype)).encode());h.update(t.reshape(-1).view(torch.uint8).numpy().tobytes())
               return h.hexdigest()
-          real=test.sample_action
-          saved={}
-          def before(model,online,config,**kw):
-              saved.update(input=online,config=config.to_dict(),weights=weight_digest(model))
-              result=real(model,online,config,**kw)
-              saved['normalized']=result.action.detach().clone()
+          real=test.sample_action; saved={}
+          @torch.no_grad()
+          def before(m,online,cfg,**kw):
+              saved.update(input=online,config=cfg.as_dict(),weights=digest(m))
+              result=real(m,online,cfg,**kw);saved['normalized']=result.action.clone()
+              saved['canonical']=real(m,canonical(online),cfg,generator=torch.Generator().manual_seed(15)).action.clone()
               return result
-          def deployed(model,online,config,**kw):
-              report['input_differences']=differences(saved['input'],online)
-              report['config_differences']=differences(saved['config'],config.to_dict(),'config')
-              report['weights_equal']=saved['weights']==weight_digest(model)
-              result=real(model,online,config,**kw)
-              report['normalized_differences']=differences(saved['normalized'],result.action,'normalized_action')
+          @torch.no_grad()
+          def after(m,online,cfg,**kw):
+              report['input_differences']=diff(saved['input'],online)
+              report['config_differences']=diff(saved['config'],cfg.as_dict(),'config')
+              report['weights_equal']=saved['weights']==digest(m)
+              result=real(m,online,cfg,**kw)
+              report['normalized_differences']=diff(saved['normalized'],result.action,'normalized_action')
+              canon=real(m,canonical(online),cfg,generator=torch.Generator().manual_seed(15)).action
+              report['canonical_differences']=diff(saved['canonical'],canon,'canonical_action')
               print(json.dumps(report,indent=2),flush=True)
               return result
-          torch.manual_seed(44)
-          patch=pytest.MonkeyPatch()
-          patch.setattr(test,'sample_action',before)
-          patch.setattr(adapter,'sample_action',deployed)
+          torch.manual_seed(44);p=pytest.MonkeyPatch()
+          p.setattr(test,'sample_action',before);p.setattr(adapter,'sample_action',after)
           try:
-              with tempfile.TemporaryDirectory() as d:
-                  test.test_saved_online_identity_and_real_adapter_input(pathlib.Path(d),patch)
+              with tempfile.TemporaryDirectory() as d:test.test_saved_online_identity_and_real_adapter_input(pathlib.Path(d),p)
               report['original_assertion']='passed'
           except Exception as exc:
               report.update(original_assertion='failed',error=repr(exc),traceback=traceback.format_exc())
               raise
           finally:
-              patch.undo()
-              pathlib.Path('recovery-results/diagnosis.json').write_text(json.dumps(report,indent=2)+'\n')
+              p.undo();pathlib.Path('recovery-results/diagnosis.json').write_text(json.dumps(report,indent=2)+'\n')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: dinov3-exact-parity-recovery
+          name: dinov3-exact-parity-diagnosis
           path: recovery-results
           retention-days: 14
-      - name: Preserve failure status
+      - name: Preserve original assertion result
         if: always()
         env:
           OUTCOME: ${{ steps.parity.outcome }}
