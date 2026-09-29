@@ -549,6 +549,12 @@ class ObjectFactSet:
     object_chart_mode: str = QUERY_CHART
     current_image_measure: ImageLogMeasure | None = None
     current_image_source: ObjectImageReadSource | None = None
+    # Observed values reduced WITHIN each camera, never pooled values expanded
+    # over C. Optional only for unchanged historical graphs.
+    camera_content: Tensor | None = None
+    camera_semantic: Tensor | None = None
+    camera_appearance: Tensor | None = None
+    camera_geometry: Tensor | None = None
 
     @property
     def batch(self) -> int:
@@ -672,6 +678,12 @@ class ObjectFactSet:
                 name.replace("_", " "),
             )
         _shape(self.null_assignment, tuple(candidates.shape[:5]), "null assignment")
+        view_values = [self.camera_content, self.camera_semantic, self.camera_appearance, self.camera_geometry]
+        if any(v is not None for v in view_values):
+            if any(v is None for v in view_values):
+                raise ValueError("per-camera object values must be complete")
+            for value, global_value in zip(view_values, (self.content, self.semantic, self.appearance, self.geometry), strict=True):
+                _shape(value, (batch, objects, cameras, global_value.shape[-1]), "per-camera object value")
         _shape(self.reconstructed_dino, tuple(chart.shape), "reconstructed DINO")
         if self.reconstruction_error.ndim != 0:
             raise ValueError("object reconstruction error must be scalar")
@@ -685,6 +697,10 @@ class ObjectFactSet:
         return ObjectFactSet(
             dense_chart=self.dense_chart,
             current_image_source=None if self.current_image_source is None else self.current_image_source.permute(index),
+            camera_content=None if self.camera_content is None else self.camera_content[:, index],
+            camera_semantic=None if self.camera_semantic is None else self.camera_semantic[:, index],
+            camera_appearance=None if self.camera_appearance is None else self.camera_appearance[:, index],
+            camera_geometry=None if self.camera_geometry is None else self.camera_geometry[:, index],
             object_chart_mode=self.object_chart_mode,
             current_image_measure=(
                 ImageLogMeasure(self.current_image_measure.log_mass[:, index], self.current_image_measure.supported[:, index])

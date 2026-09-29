@@ -26,6 +26,8 @@ positions for supervision.
 
 from __future__ import annotations
 
+from clearvla.vision.online_pipeline import resize_endpoint_chart, rasterize_strided_rgb
+
 import copy
 import math
 from dataclasses import dataclass, replace
@@ -1395,10 +1397,12 @@ class _EarlyMaskedRawContextEncoder(nn.Module):
         grid: int,
         *,
         activation_checkpoint: bool,
+        visual_chart_mode: str = "legacy_v1",
     ) -> None:
         super().__init__()
         feature_dim = int(feature_dim)
         self.grid = int(grid)
+        self.visual_chart_mode = visual_chart_mode
         self.activation_checkpoint = bool(activation_checkpoint)
         self.mask_rgb = nn.Parameter(torch.zeros(1, 3, 1, 1))
         self.local = nn.Sequential(
@@ -1454,12 +1458,14 @@ class _EarlyMaskedRawContextEncoder(nn.Module):
             )
             # 2G keeps within-cell structure before the learned stride-2
             # transition creates the chart consumed by future queries.
-            local_input = F.adaptive_avg_pool2d(masked, (2 * self.grid, 2 * self.grid))
+            local_input = resize_endpoint_chart(masked, (2 * self.grid, 2 * self.grid), self.visual_chart_mode)
             mask_channel = F.adaptive_max_pool2d(
                 pixel_mask, (2 * self.grid, 2 * self.grid)
             )
             local_input = torch.cat((local_input, mask_channel), dim=1)
         encoded = self._run(local_input.to(dtype=raw_visual.dtype))
+        if self.visual_chart_mode == "full_rgb_endpoint_v1":
+            encoded = rasterize_strided_rgb(encoded, image_hw=(2*self.grid,2*self.grid), stride=2)
         if tuple(encoded.shape[-2:]) != (self.grid, self.grid):
             raise RuntimeError("early masked raw encoder produced the wrong chart size")
         encoded = encoded.permute(0, 2, 3, 1).reshape(
@@ -1484,10 +1490,11 @@ class _RawImagePyramid(nn.Module):
     discard the 84x84 map here.
     """
 
-    def __init__(self, base: int, *, activation_checkpoint: bool) -> None:
+    def __init__(self, base: int, *, activation_checkpoint: bool, visual_chart_mode: str = "legacy_v1") -> None:
         super().__init__()
         base = int(base)
         self.activation_checkpoint = bool(activation_checkpoint)
+        self.visual_chart_mode = visual_chart_mode
         self.high_channels = base + base // 2
         self.mid_channels = 2 * base
 
@@ -1531,6 +1538,9 @@ class _RawImagePyramid(nn.Module):
         value = value.to(dtype=image.dtype)
         high = self._run(self.high, self._run(self.stem, value))
         mid = self._run(self.mid, high)
+        if self.visual_chart_mode == "full_rgb_endpoint_v1":
+            high = rasterize_strided_rgb(high, image_hw=tuple(image.shape[-2:]), stride=4)
+            mid = rasterize_strided_rgb(mid, image_hw=tuple(image.shape[-2:]), stride=8)
         return high, mid
 
 
@@ -1847,6 +1857,7 @@ class _RawPyramidFlow(nn.Module):
         self.pyramid = _RawImagePyramid(
             int(config.flow_jepa_raw_base_channels),
             activation_checkpoint=activation_checkpoint,
+            visual_chart_mode=getattr(config, "visual_chart_mode", "legacy_v1"),
         )
         dim = int(config.flow_jepa_feature_dim)
         self.mid = _DenseRawFlowRefiner(
@@ -3162,6 +3173,7 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
         normalization_floor = float(
             getattr(config, "flow_jepa_routing_norm_floor", 0.25)
         )
+        self.visual_chart_mode = getattr(config, "visual_chart_mode", "legacy_v1")
         dino_dim = int(config.visual_token_dim)
         route = self.route_dim
 
@@ -3632,8 +3644,8 @@ class _SoftMultiResolutionAddressCompiler(nn.Module):
         source_nchw = source_dino.permute(0, 1, 4, 2, 3).reshape(
             batch * cameras, int(source_dino.shape[-1]), dino_side, dino_side
         )
-        source_grid = F.adaptive_avg_pool2d(
-            source_nchw.float(), (self.grid, self.grid)
+        source_grid = resize_endpoint_chart(
+            source_nchw.float(), (self.grid, self.grid), self.visual_chart_mode
         ).reshape(
             batch, cameras, int(source_dino.shape[-1]), self.grid, self.grid
         ).permute(0, 1, 3, 4, 2).to(dtype=source_dino.dtype)
@@ -8727,6 +8739,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
             # alone interpreted a uniform match as motion to image centre.
             identity_centered_initialization=True,
         )
+        self.visual_chart_mode = getattr(config, "visual_chart_mode", "legacy_v1")
         dino_dim = int(config.visual_token_dim)
         h = self.hidden
 
@@ -8790,6 +8803,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
                         int(config.flow_jepa_feature_dim),
                         h,
                         self.grid_size,
+                        visual_chart_mode=getattr(config, "visual_chart_mode", "legacy_v1"),
                         activation_checkpoint=bool(
                             int(config.flow_jepa_raw_activation_checkpoint)
                         ),
@@ -9257,7 +9271,7 @@ class FlowDINOEvidenceEncoder(nn.Module):
             raise ValueError("Flow-DINO requires a square DINO patch grid")
         grid = self.grid_size
         value = visual.reshape(batch * history * cameras, side, side, dim)
-        value = F.adaptive_avg_pool2d(value.permute(0, 3, 1, 2).float(), (grid, grid))
+        value = resize_endpoint_chart(value.permute(0, 3, 1, 2).float(), (grid, grid), self.config.visual_chart_mode)
         return value.permute(0, 2, 3, 1).reshape(batch, history, cameras, grid, grid, dim)
 
     def _structured_mask(self, score: Tensor, *, stochastic: bool) -> Tensor:
@@ -11880,11 +11894,9 @@ class FlowDINOEvidenceEncoder(nn.Module):
             raise ValueError("future DINO target requires a square patch grid")
         grid = self.grid_size
         with torch.autocast(device_type=visual.device.type, enabled=False):
-            pooled = F.adaptive_avg_pool2d(
+            pooled = resize_endpoint_chart(
                 visual.reshape(batch * frames * cameras, side, side, dim)
-                .permute(0, 3, 1, 2)
-                .float(),
-                (grid, grid),
+                .permute(0, 3, 1, 2).float(), (grid, grid), self.config.visual_chart_mode,
             ).permute(0, 2, 3, 1)
         return pooled.reshape(
             batch, frames, cameras, grid, grid, dim

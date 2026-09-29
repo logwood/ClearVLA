@@ -154,6 +154,7 @@ def build_v120_visual_config(mainline_config: Any) -> V39PolicyConfig:
         executed_history_length=int(dims.executed_history_length),
         hidden_size=int(dims.hidden_size),
         num_heads=int(dims.num_heads),
+        visual_chart_mode=str(observation.visual_chart_mode),
         visual_token_dim=int(dims.visual_token_dim),
         visual_history_length=int(dims.visual_history_length),
         num_cameras=int(dims.num_cameras),

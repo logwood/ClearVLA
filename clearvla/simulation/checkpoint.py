@@ -159,6 +159,11 @@ def load_deployment_checkpoint(
     if dict(cast(Mapping[str, object], abi["architecture_manifest"])) != identity.manifest:
         raise ValueError("deployment ABI architecture manifest differs from checkpoint identity")
 
+    if config.data.visual_feature_mode == "dinov3_online_v1":
+        visual_abi = cast(Mapping[str, object], cast(Mapping[str, object], abi["observation"])["dinov3"])
+        if visual_abi["identity_sha256"] != identity.dataset.dino_cache_identity:
+            raise ValueError("online visual producer differs from checkpoint dataset identity")
+
     dims = config.dimensions
     action_normalizer = _normalizer(
         data_state.get("action_normalizer"),

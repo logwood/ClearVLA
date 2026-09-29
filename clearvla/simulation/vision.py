@@ -212,3 +212,22 @@ __all__ = [
     "DinoV2OnlineEncoder",
     "preprocess_rgb_history",
 ]
+
+
+class DinoV3OnlineEncoder(nn.Module):
+    """Same full-FOV producer as training; adapter only formats simulator RGB."""
+    def __init__(self, config, *, device: torch.device, expected_identity: dict[str, object]):
+        super().__init__()
+        from clearvla.vision.online_pipeline import OnlineVisionPipeline
+        self.pipeline = OnlineVisionPipeline.from_config(config, device)
+        if _digest(self.pipeline.identity()) != _digest(expected_identity):
+            raise ValueError("runtime DINOv3 weights/preprocessing/chart differ from checkpoint")
+
+    def identity(self) -> dict[str, object]:
+        return self.pipeline.identity()
+
+    @torch.no_grad()
+    def encode(self, rgb_history, preprocessing):
+        images = preprocess_rgb_history(rgb_history, preprocessing=preprocessing, camera_names=("top", "wrist"))
+        rgb = torch.from_numpy(images).permute(0,1,4,2,3).float().div(255)
+        return self.pipeline(rgb), images

@@ -16,6 +16,7 @@ from ..gripper_contract import VALID_GRIPPER_OUTPUT_MODES
 
 @dataclass(frozen=True)
 class V362PolicyConfig:
+    visual_chart_mode: str = "legacy_v1"
     action_dim: int = 7
     state_dim: int = 7
     state_feature_mode: str = "native_affine_v1"

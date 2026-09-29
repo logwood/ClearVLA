@@ -187,6 +187,8 @@ def _policy(
             t5_condition=args.t5_condition,
             dinov2_model=args.dinov2_model,
             dinov2_local_files_only=args.dinov2_local_files_only,
+            dinov3_model=args.dinov3_model,
+            dinov3_allow_download=args.dinov3_allow_download,
             seed=seed,
         )
         if environment.descriptor.benchmark == "ManiSkill3":
@@ -396,6 +398,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dinov2-model", type=Path, default=None)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dinov2-local-files-only", action="store_true")
+    parser.add_argument("--dinov3-model", type=Path, default=None)
+    parser.add_argument("--dinov3-allow-download", action="store_true")
     parser.add_argument(
         "--maniskill-sim-backend",
         default="physx_cpu",

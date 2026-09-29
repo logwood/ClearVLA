@@ -110,11 +110,10 @@ def dataset_identity(
         decoded_rows = []
         for episode in materialized_episodes:
             dino_metadata = dino_cache_root / episode.cache_key / "meta.json"
-            if not dino_metadata.is_file():
+            if config.data.visual_feature_mode != "dinov3_online_v1" and not dino_metadata.is_file():
                 raise FileNotFoundError(f"DINO cache metadata disappeared: {dino_metadata}")
-            dino_rows.append(
-                (episode.episode_id, hashlib.sha256(dino_metadata.read_bytes()).hexdigest())
-            )
+            if config.data.visual_feature_mode != "dinov3_online_v1":
+                dino_rows.append((episode.episode_id, hashlib.sha256(dino_metadata.read_bytes()).hexdigest()))
             if config.data.image_store_mode == "decoded-cache":
                 decoded_metadata = decoded_cache_root / episode.cache_key / "meta.json"
                 if not decoded_metadata.is_file():
@@ -167,6 +166,10 @@ def dataset_identity(
                 }
             )
         )
+    if config.data.visual_feature_mode == "dinov3_online_v1":
+        if bundle.visual_encoder is None:
+            raise ValueError("online dataset identity requires the actual loaded encoder")
+        dino_identity = _digest(bundle.visual_encoder.identity())
     return DatasetIdentity(
         raw_root=str(Path(config.data.raw_hdf5_root)),
         hdf5_glob=config.data.hdf5_glob,

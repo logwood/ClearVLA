@@ -111,6 +111,13 @@ class DataConfig:
     image_frame_lru_capacity: int = 512
     image_open_file_capacity: int = 8
     cache_side: int = 336
+    # Independent from the optional RGB decode store. Old experiments retain
+    # their exact cache contract; online mode never opens a token cache.
+    visual_feature_mode: str = "dinov2_cached_v1"
+    dinov3_model: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+    dinov3_revision: str = ""
+    dinov3_local_files_only: bool = True
+    dinov3_microbatch: int = 2
     dinov2_model: str = "facebook/dinov2-base"
     # CUDA attention kernels can choose a different numerical reduction path
     # for different batch shapes (especially in bf16).  The existing DINO
@@ -199,8 +206,23 @@ class DataConfig:
         )
         for name in string_fields:
             value = getattr(self, name)
+            if name == "dino_cache" and self.visual_feature_mode == "dinov3_online_v1":
+                if not isinstance(value, str):
+                    raise ValueError("data.dino_cache must be a string")
+                continue
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"data.{name} must be a non-empty string")
+        if self.visual_feature_mode not in {"dinov2_cached_v1", "dinov3_online_v1"}:
+            raise ValueError("unknown visual feature producer")
+        if self.visual_feature_mode == "dinov3_online_v1":
+            if not isinstance(self.dinov3_model, str) or not self.dinov3_model.strip():
+                raise ValueError("online DINOv3 requires a model source")
+            if type(self.dinov3_microbatch) is not int or self.dinov3_microbatch < 1:
+                raise ValueError("DINOv3 microbatch must be positive")
+            if type(self.dinov3_local_files_only) is not bool:
+                raise ValueError("DINOv3 local_files_only must be boolean")
+            if not isinstance(self.dinov3_revision, str):
+                raise ValueError("DINOv3 revision must be a string")
         if not isinstance(self.action_state_key, str):
             raise ValueError("data.action_state_key must be a string")
         if not self.camera_names or len(set(self.camera_names)) != len(self.camera_names):
@@ -413,6 +435,8 @@ class ModelDimensions:
 
 @dataclass(frozen=True)
 class ObservationConfig:
+    # Derived full-frame endpoint raster, NOT raw/native DINO patch tokens.
+    visual_chart_mode: str = "legacy_v1"
     source_time_mode: str = "fixed_history_steps_v1"
     candidate_support_mode: str = "moment_local_v1"
     local_ownership_mode: str = "independent_typed_v1"
@@ -513,6 +537,7 @@ class TopConfig:
     instruction_reference_mode: str = "none"
     instruction_change_mode: str = MIXED_REFERENCE_CHANGE
     operation_intent_mode: str = POSTERIOR_INTENT
+    object_view_mode: str = "pooled_v1"
     task_execution_mode: str = NO_TASK_EXECUTION
     annotation_goal_mode: str = "none"
 
@@ -1118,6 +1143,22 @@ class ExperimentConfig:
         grid = resolve_future_time(self.top.future_time_grid_mode)
         if self.dimensions.future_supports != len(grid.support_offsets):
             raise ValueError("future support count and time grid disagree")
+        if self.observation.visual_chart_mode not in {"legacy_v1", "full_rgb_endpoint_v1"}:
+            raise ValueError("unknown visual chart")
+        if self.top.object_view_mode not in {"pooled_v1", "per_camera_values_v1"}:
+            raise ValueError("unknown object view content mode")
+        online_visual = self.data.visual_feature_mode == "dinov3_online_v1"
+        if online_visual != (self.observation.visual_chart_mode == "full_rgb_endpoint_v1"):
+            raise ValueError("online DINOv3 and full-frame spatial chart must be selected together")
+        if online_visual and (self.data.cache_side != 336 or tuple(self.data.camera_names) != ("top", "wrist")):
+            raise ValueError("online visual chart requires 336px RGB and ordered top,wrist sources")
+        if online_visual and (self.dimensions.visual_token_dim != 768 or self.dimensions.patches_per_camera != 256):
+            raise ValueError("DINOv3 ViT-B/16 requires 256 spatial tokens of width 768")
+        if self.top.object_view_mode == "per_camera_values_v1" and (
+            self.top.task_execution_mode != JOINT_TASK_EXECUTION
+            or self.top.entity_context_mode != "completed_g3_v1"
+        ):
+            raise ValueError("per-camera values require the completed G3 and joint task consumer")
         native_side = round(self.dimensions.patches_per_camera**0.5)
         if native_side * native_side != self.dimensions.patches_per_camera:
             raise ValueError("patches_per_camera must form one square native chart")
@@ -1363,6 +1404,13 @@ class ExperimentConfig:
             cast(dict[str, object], payload["top"]).pop("annotation_goal_mode")
         if self.objectives.annotated_goal == 0:
             cast(dict[str, object], payload["objectives"]).pop("annotated_goal")
+        if self.data.visual_feature_mode == "dinov2_cached_v1":
+            for name in ("visual_feature_mode", "dinov3_model", "dinov3_revision", "dinov3_local_files_only", "dinov3_microbatch"):
+                cast(dict[str, object], payload["data"]).pop(name)
+        if self.observation.visual_chart_mode == "legacy_v1":
+            cast(dict[str, object], payload["observation"]).pop("visual_chart_mode")
+        if self.top.object_view_mode == "pooled_v1":
+            cast(dict[str, object], payload["top"]).pop("object_view_mode")
         if self.top.task_execution_mode == NO_TASK_EXECUTION:
             cast(dict[str, object], payload["top"]).pop("task_execution_mode")
         if self.top.operation_intent_mode == POSTERIOR_INTENT:

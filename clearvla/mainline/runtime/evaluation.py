@@ -1624,6 +1624,7 @@ def evaluate_loader(
     goal: GoalTemplate | None = None,
     action_normalizer: ArrayNormalizer | None = None,
     device: torch.device | None = None,
+    visual_encoder=None,
 ) -> dict[str, float]:
     model_device = next(model.parameters()).device if device is None else device
     if action_normalizer is not None:
@@ -1662,6 +1663,7 @@ def evaluate_loader(
                 goal=goal,
                 config=config,
                 device=model_device,
+                visual_encoder=visual_encoder,
             )
         else:
             raise TypeError("mainline validation loader yielded an unsupported batch type")

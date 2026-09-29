@@ -75,8 +75,14 @@ class JointTaskRelationEncoder(nn.Module):
         binding: TargetBinding,
         current_content: Tensor,
     ) -> TaskRelationEvidence:
-        b, k, sources, h = attributes.shape
+        per_view = attributes.ndim == 5
+        if attributes.ndim not in (4, 5):
+            raise ValueError("relation attributes require [B,K,4,H] or actual [B,K,C,4,H]")
+        b, k = attributes.shape[:2]
+        sources, h = attributes.shape[-2:]
         c = len(self.camera_names)
+        if per_view and attributes.shape[2] != c:
+            raise ValueError("relation camera content axis differs")
         if (
             sources != 4
             or h != self.hidden
@@ -96,8 +102,12 @@ class JointTaskRelationEncoder(nn.Module):
             raise ValueError("joint relation robot/history chart differs")
         valid = view_observed & binding.supported[..., None]
         dtype = self.task.weight.dtype
-        a = torch.where(valid.any(-1)[..., None, None], attributes, 0.0)
-        a = self.attributes(a.flatten(-2).to(dtype))[:, :, None].expand(-1, -1, c, -1)
+        if per_view:
+            a = torch.where(valid[...,None,None], attributes, 0.0)
+            a = self.attributes(a.flatten(-2).to(dtype))
+        else:
+            a = torch.where(valid.any(-1)[..., None, None], attributes, 0.0)
+            a = self.attributes(a.flatten(-2).to(dtype))[:, :, None].expand(-1, -1, c, -1)
         # Apply nonlinear position features BEFORE expectation. Equal
         # centroids no longer force equal spatial evidence. The learned finite
         # feature map is not an injective or calibrated geometry guarantee.
@@ -366,11 +376,12 @@ class TaskConditionedTargetBinder(nn.Module):
         self.null = nn.Linear(hidden, 1)
 
     def forward(
-        self, task: Tensor, objects: Tensor, supported: Tensor, *, history: Tensor
+        self, task: Tensor, objects: Tensor, supported: Tensor, *, history: Tensor,
+        view_support: Tensor | None = None,
     ) -> TargetBinding:
         if (
             task.ndim != 3
-            or objects.ndim != 3
+            or objects.ndim not in (3, 4)
             or task.shape[0] != objects.shape[0]
             or task.shape[-1] != objects.shape[-1]
         ):
@@ -381,10 +392,27 @@ class TaskConditionedTargetBinder(nn.Module):
             or history.shape != (task.shape[0], task.shape[-1])
         ):
             raise ValueError("task-conditioned binding lost source support/history")
-        safe = torch.where(supported[..., None], objects, 0.0)
+        per_view = objects.ndim == 4
+        object_count = objects.shape[1]
+        if per_view:
+            if view_support is None or view_support.shape != objects.shape[:3] or view_support.dtype != torch.bool:
+                raise ValueError("camera-conditioned binding requires producer view support")
+            legal = view_support & supported[...,None]
+            safe = torch.where(legal[...,None], objects, 0.0).flatten(1,2)
+        else:
+            if view_support is not None:
+                raise ValueError("pooled binder cannot acquire a fabricated camera axis")
+            safe = torch.where(supported[..., None], objects, 0.0)
         obj = self.objects(safe)
         query = self.query_norm(obj + self.history_query(history)[:, None])
         task_value = self.task_value(task)
         read, _ = self.task_read(query, self.task_norm(task_value), task_value, need_weights=False)
         score = self.score(read * torch.tanh(self.compatibility(obj)))[..., 0]
+        if per_view:
+            score = score.reshape(task.shape[0], object_count, -1).float()
+            # Log-mean-exp is permutation equivariant and does not reward an
+            # object solely for having more available cameras. No view quota.
+            score = torch.logsumexp(torch.where(legal, score, -1e9), -1) - legal.sum(-1).clamp_min(1).float().log()
+            supported = supported & legal.any(-1)
+            score = torch.where(supported, score, 0.0)
         return TargetBinding.from_logits(score, self.null(task_value.mean(1)), supported)

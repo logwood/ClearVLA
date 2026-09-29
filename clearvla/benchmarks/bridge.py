@@ -337,6 +337,8 @@ def main() -> None:
         help="Optional relocated local DINO snapshot; model identity is still audited",
     )
     parser.add_argument("--dinov2-local-files-only", action="store_true")
+    parser.add_argument("--dinov3-model", type=Path, default=None)
+    parser.add_argument("--dinov3-allow-download", action="store_true")
     args = parser.parse_args()
     if args.smoke_zero_policy:
         policy = SmokeZeroPolicy()
@@ -358,6 +360,8 @@ def main() -> None:
             t5_condition=args.t5_condition,
             dinov2_model=args.dinov2_model,
             dinov2_local_files_only=args.dinov2_local_files_only,
+            dinov3_model=args.dinov3_model,
+            dinov3_allow_download=args.dinov3_allow_download,
             seed=args.seed,
         )
         device_name = str(device)

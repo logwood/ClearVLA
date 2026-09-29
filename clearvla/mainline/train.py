@@ -102,6 +102,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--decoded-cache", type=Path)
     parser.add_argument("--dino-cache", type=Path)
+    parser.add_argument("--dinov3-model", type=str)
+    parser.add_argument("--dinov3-revision", type=str)
+    parser.add_argument("--dinov3-microbatch", type=int)
+    parser.add_argument("--dinov3-allow-download", action="store_true")
     parser.add_argument(
         "--cache-identity-mode",
         choices=CACHE_IDENTITY_MODES,
@@ -259,6 +263,14 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         data = replace(data, raw_hdf5_root=str(args.data_root))
     if args.decoded_cache is not None:
         data = replace(data, decoded_cache=str(args.decoded_cache))
+    if args.dinov3_model is not None:
+        data = replace(data, dinov3_model=args.dinov3_model)
+    if args.dinov3_revision is not None:
+        data = replace(data, dinov3_revision=args.dinov3_revision)
+    if args.dinov3_microbatch is not None:
+        data = replace(data, dinov3_microbatch=args.dinov3_microbatch)
+    if args.dinov3_allow_download:
+        data = replace(data, dinov3_local_files_only=False)
     if args.dino_cache is not None:
         data = replace(data, dino_cache=str(args.dino_cache))
     if getattr(args, "cache_identity_mode", None) is not None:
@@ -741,6 +753,7 @@ def _data_state(
         data_profile=bundle.data_profile_metadata,
         gripper_indices=tuple(int(value) for value in bundle.gripper_indices),
         goal_metadata=bundle.goal.metadata,
+        visual_encoder_identity=(None if bundle.visual_encoder is None else bundle.visual_encoder.identity()),
     )
     return state
 
@@ -868,6 +881,7 @@ def _preflight(
     batch = to_training_batch(
         raw_batch,
         goal=bundle.goal,
+        visual_encoder=bundle.visual_encoder,
         config=config,
         device=device,
     )
@@ -1503,6 +1517,7 @@ def _validate(
         batch = to_training_batch(
             raw_batch,
             goal=bundle.goal,
+            visual_encoder=bundle.visual_encoder,
             config=config,
             device=device,
         )
@@ -2200,6 +2215,7 @@ def _validate_boundary_panel(
         batch = to_training_batch(
             raw_batch,
             goal=bundle.goal,
+            visual_encoder=bundle.visual_encoder,
             config=config,
             device=device,
         )
@@ -2264,6 +2280,9 @@ def main() -> None:
     output_dir = Path(config.data.output_dir)
     _prepare_output_directory(output_dir, exact_resume=args.resume is not None)
     bundle = load_mainline_data(config, allow_null_goal=bool(args.allow_null_goal))
+    if config.data.visual_feature_mode == "dinov3_online_v1":
+        from clearvla.vision.online_pipeline import OnlineVisionPipeline
+        bundle = replace(bundle, visual_encoder=OnlineVisionPipeline.from_config(config, device))
     train_loader_generator = torch.Generator().manual_seed(config.data.seed + 101)
     train_flow_generator = _owned_generator(device, config.data.seed + 102)
     train_condition_generator = _owned_generator(device, config.data.seed + 103)
@@ -2656,6 +2675,7 @@ def main() -> None:
             batch = to_training_batch(
                 raw_batch,
                 goal=bundle.goal,
+                visual_encoder=bundle.visual_encoder,
                 config=config,
                 device=device,
             )

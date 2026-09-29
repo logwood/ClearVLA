@@ -93,6 +93,8 @@ from .language import (
 from .normalizer import ArrayNormalizer
 from .normalizer_artifact import load_shared_normalizers
 from .token_store import DinoV2TokenStore
+from .online_visual import OnlineRGBPolicyWindowDataset
+from clearvla.vision.online_pipeline import ONLINE_MODE, OnlineVisionPipeline
 
 
 def _configure_worker_tensor_sharing(workers: int) -> None:
@@ -150,6 +152,8 @@ class MainlineDataBundle:
     information_event_fraction: float
     information_motion_quantile: float
     gripper_event_threshold: float | None
+    # Runtime-owned, never copied into Dataset/DataLoader workers.
+    visual_encoder: OnlineVisionPipeline | None = None
     information_batches_per_epoch: int | None = None
     sampling_arm_motion: str = "adjacent_action_delta"
     sampling_gripper_event_scope: str = "window_any"
@@ -849,26 +853,28 @@ def _load_mainline_data(
             frame_lru_capacity=data.image_frame_lru_capacity,
             open_file_capacity=data.image_open_file_capacity,
         )
-    token_store = DinoV2TokenStore(
-        Path(data.dino_cache),
-        episodes=episodes,
-        camera_names=cameras,
-        preprocessing=preprocessing,
-        dinov2_model=data.dinov2_model,
-        required_episode_indices=required_token_episode_ids,
-        read_backend=data.visual_cache_read_backend,
-        max_open_arrays=data.visual_pread_max_open_files,
-    )
-    if token_store.token_dim != dims.visual_token_dim:
-        raise ValueError(
-            f"DINO cache width {token_store.token_dim} != model width {dims.visual_token_dim}"
+    token_store = None
+    if data.visual_feature_mode != ONLINE_MODE:
+        token_store = DinoV2TokenStore(
+            Path(data.dino_cache),
+            episodes=episodes,
+            camera_names=cameras,
+            preprocessing=preprocessing,
+            dinov2_model=data.dinov2_model,
+            required_episode_indices=required_token_episode_ids,
+            read_backend=data.visual_cache_read_backend,
+            max_open_arrays=data.visual_pread_max_open_files,
         )
-    if token_store.tokens_per_camera != dims.patches_per_camera:
-        raise ValueError(
-            "DINO cache has "
-            f"{token_store.tokens_per_camera} patches/camera, but the configured "
-            f"native chart expects {dims.patches_per_camera}"
-        )
+        if token_store.token_dim != dims.visual_token_dim:
+            raise ValueError(
+                f"DINO cache width {token_store.token_dim} != model width {dims.visual_token_dim}"
+            )
+        if token_store.tokens_per_camera != dims.patches_per_camera:
+            raise ValueError(
+                "DINO cache has "
+                f"{token_store.tokens_per_camera} patches/camera, but the configured "
+                f"native chart expects {dims.patches_per_camera}"
+            )
     datasets: dict[str, CachedTokenPolicyWindowDataset] = {}
 
     def materialize_dataset(
@@ -889,10 +895,11 @@ def _load_mainline_data(
             gripper_transition_boundary=profile.gripper_transition_boundary,
             allowed_boundary_regions=allowed_regions,
         )
-        datasets[name] = CachedTokenPolicyWindowDataset(
-            base,
-            token_store=token_store,
-        )
+        if data.visual_feature_mode == ONLINE_MODE:
+            datasets[name] = OnlineRGBPolicyWindowDataset(base)
+        else:
+            assert token_store is not None
+            datasets[name] = CachedTokenPolicyWindowDataset(base, token_store=token_store)
 
     for name, ids in dataset_episode_ids.items():
         materialize_dataset(
@@ -1086,9 +1093,16 @@ def to_training_batch(
     goal: GoalTemplate,
     config: ExperimentConfig,
     device: torch.device,
+    visual_encoder: OnlineVisionPipeline | None = None,
 ) -> TrainingBatch:
     """Convert a worker batch to the three disjoint model/training planes."""
 
+    if config.data.visual_feature_mode == ONLINE_MODE:
+        if visual_encoder is None:
+            raise ValueError("online DINOv3 batch requires the resident visual encoder")
+        batch = visual_encoder.prepare_batch(batch, config)
+    elif visual_encoder is not None or "visual_request_rgb" in batch:
+        raise ValueError("legacy cached producer cannot consume online visual requests")
     dino_history = _device_tensor(batch, "history_dinov2_tokens", device=device)
     batch_size = int(dino_history.shape[0])
     if goal.episode_condition_indices is None:

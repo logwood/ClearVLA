@@ -361,6 +361,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             operation_intent_mode=top.operation_intent_mode,
             annotation_goal_mode=top.annotation_goal_mode,
             task_execution_mode=top.task_execution_mode,
+            object_view_mode=top.object_view_mode,
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,

@@ -1,3 +1,32 @@
+## M10b — online DINOv3 and camera-owned visual values (2026-09-29 UTC)
+
+Branch `codex/dinov3-online-aligned-vision-20260928`, inherited M10a unchanged.
+Opt-in `data.visual_feature_mode=dinov3_online_v1` requires the full336 RGB
+source, frozen HF ViT-B/16 at256, 4 registers removed and width768/256 patches.
+`observation.visual_chart_mode=full_rgb_endpoint_v1` describes a DERIVED
+endpoint raster, not native patch centers. Native patches, padded raw-pyramid
+centers and early raw-context centers are explicitly resampled into that chart;
+outer extension repeats nearest feature, not observed new pixels. All Teacher,
+reference and policy consumers share it. Legacy mode keeps original pooling.
+
+CPU RGB source requests retain exact episode/frame/camera identities and
+support. A single resident encoder prepares train and validation batches;
+future/terminal supervision remains disjoint from causal inputs. Compatible
+batch duplicates are reused; no persistent DINO dataset cache is required.
+Deployment restores the same versioned weight/preprocessing/raster/dtype and
+microbatch definition. No old-checkpoint migration or source relabelling.
+
+`top.object_view_mode=per_camera_values_v1` retains actual G3 content,
+semantic, appearance and geometry values per camera. S binding and the joint
+relation consume these independently; no global attribute copied to fake C.
+K+null is still shared, W is still goal-free, and global summaries remain for
+compact physical consumers. No camera quota or behavior rule is introduced.
+
+Main config `dinov3_online_cumulative_calvin.json`; M6n and pooled-camera
+controls are separate. Read `DINOV3_INTEGRATION_STATUS.md` for commands,
+validation boundaries and the actual-pretrained deployment-admission probe.
+Source preservation is not CUDA or learned behavior acceptance.
+
 ## M10a — production data entry and cold-reset context boundary (2026-09-28)
 
 The strict inventory-admission DatasetConfig is not the selected training

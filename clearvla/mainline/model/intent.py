@@ -324,6 +324,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         operation_intent_mode: str = POSTERIOR_INTENT,
         annotation_goal_mode: str = "none",
         task_execution_mode: str = NO_TASK_EXECUTION,
+        object_view_mode: str = "pooled_v1",
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
         super().__init__()
@@ -347,6 +348,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if target_binding_mode == SHARED_TARGET_BINDING and target_object_address_mode != "post_pool_only":
             raise ValueError("shared binding cannot duplicate the additive target address")
         self.target_binding_mode = target_binding_mode
+        self.per_camera_values = object_view_mode == "per_camera_values_v1"
         self.camera_names = tuple(camera_names)
         self.target_object_address_mode = target_object_address_mode
         self.hidden = int(hidden)
@@ -774,6 +776,18 @@ class StatelessObjectIntentOrganizer(nn.Module):
         )
         target_binding = None
         target_evidence = None
+        view_attribute_tokens = None
+        if self.per_camera_values:
+            camera_valid = (facts.camera_validity[..., 0] > 0) & object_validity[..., None]
+            encoded_views = []
+            for name, projection in (("content", self.object_content), ("semantic", self.object_semantic),
+                                     ("appearance", self.object_appearance), ("geometry", self.object_geometry)):
+                source = getattr(facts, "camera_"+name)
+                if source is None:
+                    raise ValueError("selected per-camera graph has no actual camera content")
+                encoded_views.append(projection(torch.where(camera_valid[...,None], source, 0.0)))
+            view_attribute_tokens = torch.stack(encoded_views, dim=-2)
+            view_attribute_tokens = torch.where(camera_valid[...,None,None], view_attribute_tokens, 0.0)
         if self.shared_binder is not None:
             if self.target_coordinate is None or self.target_view is None or self.target_state is None:
                 raise RuntimeError("shared target evidence encoder is incomplete")
@@ -783,7 +797,14 @@ class StatelessObjectIntentOrganizer(nn.Module):
             safe_history = torch.where(history_support[..., None], history, torch.zeros_like(history))
             history_context = safe_history.sum(1) / history_support.sum(1, keepdim=True).clamp_min(1)
             if isinstance(self.shared_binder, TaskConditionedTargetBinder):
-                target_binding = self.shared_binder(protected_goal, objects, object_validity, history=history_context)
+                if view_attribute_tokens is None:
+                    target_binding = self.shared_binder(protected_goal, objects, object_validity, history=history_context)
+                else:
+                    # Shared K+null binding, evaluated on actual per-view values.
+                    target_binding = self.shared_binder(
+                        protected_goal, view_attribute_tokens.sum(-2) / 2.0, object_validity,
+                        history=history_context, view_support=camera_valid,
+                    )
             else:
                 target_binding = self.shared_binder(protected_goal.mean(1) + history_context, objects, object_validity)
             camera_valid = (facts.camera_validity[..., 0] > 0) & object_validity[..., None]
@@ -798,8 +819,12 @@ class StatelessObjectIntentOrganizer(nn.Module):
             )
             attribute_tokens = torch.stack((content_objects, self.object_semantic(semantic_input),
                 self.object_appearance(appearance_input), self.object_geometry(geometry_input)), dim=2)
-            target_valid = torch.cat((object_validity[..., None].expand(-1, -1, 4), camera_valid), dim=-1)
-            target_tokens = torch.cat((attribute_tokens, camera_tokens), dim=2)
+            if view_attribute_tokens is None:
+                target_valid = torch.cat((object_validity[..., None].expand(-1, -1, 4), camera_valid), dim=-1)
+                target_tokens = torch.cat((attribute_tokens, camera_tokens), dim=2)
+            else:
+                target_valid = torch.cat((camera_valid[...,None].expand(-1,-1,-1,4).flatten(-2), camera_valid), dim=-1)
+                target_tokens = torch.cat((view_attribute_tokens.flatten(2,3), camera_tokens), dim=2)
             target_evidence = TargetEvidence(
                 torch.where(target_valid[..., None], target_tokens, torch.zeros_like(target_tokens)), target_valid
             )
@@ -861,7 +886,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
             position_probability, _ = ImageLogMeasure(image.log_mass, spatial_support).normalized((-2, -1))
             relation_views = spatial_support.flatten(-2).any(-1) & camera_valid
             task_relation = self.task_relation_encoder(
-                task_intervals=goal_innovation, attributes=attribute_tokens,
+                task_intervals=goal_innovation,
+                attributes=attribute_tokens if view_attribute_tokens is None else view_attribute_tokens,
                 position_probability=position_probability.flatten(-2),
                 position_grid=current_image_grid(side, side, device=state.device).reshape(-1, 2),
                 state=state,

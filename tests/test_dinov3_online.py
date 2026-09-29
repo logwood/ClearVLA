@@ -13,7 +13,7 @@ class MarkerModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(()))
-        self.config = SimpleNamespace(model_type='dinov3_vit',patch_size=16,hidden_size=768,num_register_tokens=4)
+        self.config = SimpleNamespace(model_type='dinov3_vit',patch_size=16,hidden_size=768,num_register_tokens=4,num_hidden_layers=12,num_attention_heads=12,intermediate_size=3072)
         self.calls = []
     def forward(self, pixel_values):
         self.calls.append(tuple(pixel_values.shape))

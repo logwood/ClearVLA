@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 from typing import Mapping, cast
 
 import numpy as np
@@ -33,7 +34,7 @@ from clearvla.vision.preprocessing import PreprocessConfig, preprocessing_identi
 
 from .checkpoint import DeploymentBundle, load_deployment_checkpoint
 from .history import HistorySnapshot
-from .vision import DinoV2OnlineEncoder
+from .vision import DinoV2OnlineEncoder, DinoV3OnlineEncoder
 
 
 def _mapping(value: object, *, name: str) -> Mapping[str, object]:
@@ -53,6 +54,8 @@ class ClearVLACheckpointPolicy:
         t5_condition: str | Path | None = None,
         dinov2_model: str | Path | None = None,
         dinov2_local_files_only: bool = False,
+        dinov3_model: str | Path | None = None,
+        dinov3_allow_download: bool = False,
         seed: int = 0,
     ) -> None:
         self.bundle: DeploymentBundle = load_deployment_checkpoint(
@@ -81,29 +84,43 @@ class ClearVLACheckpointPolicy:
                 "runtime RGB preprocessing implementation differs from checkpoint ABI: "
                 f"saved={dict(preprocessing_abi)} current={actual_preprocessing}"
             )
-        dino_abi = _mapping(observation_abi["dinov2"], name="observation.dinov2")
-        encoder_source = (
-            str(dino_abi["model"]) if dinov2_model is None else str(dinov2_model)
-        )
-        self.encoder = DinoV2OnlineEncoder(
-            encoder_source,
-            device=device,
-            compute_dtype=dtype,
-            expected_patches=int(dino_abi["patches_per_camera"]),
-            expected_width=int(dino_abi["token_width"]),
-            reference_batch_size=int(dino_abi["reference_batch_size"]),
-            local_files_only=dinov2_local_files_only,
-        )
-        runtime_identity = self.encoder.identity()
-        if str(runtime_identity.get("compute_dtype")) != str(dino_abi["compute_dtype"]):
-            raise ValueError(
-                "runtime DINO compute dtype differs from checkpoint ABI: "
-                f"saved={dino_abi['compute_dtype']} current={runtime_identity.get('compute_dtype')}"
+        if config.data.visual_feature_mode == "dinov3_online_v1":
+            if dinov2_model is not None:
+                raise ValueError("DINOv2 override cannot be used for a DINOv3 checkpoint")
+            dino_abi = _mapping(observation_abi["dinov3"], name="observation.dinov3")
+            encoder_config = replace(config, data=replace(
+                config.data,
+                dinov3_model=config.data.dinov3_model if dinov3_model is None else str(dinov3_model),
+                dinov3_local_files_only=not dinov3_allow_download,
+            ))
+            self.encoder = DinoV3OnlineEncoder(encoder_config, device=device,
+                expected_identity=dict(_mapping(dino_abi["identity"], name="dinov3.identity")))
+        else:
+            if dinov3_model is not None:
+                raise ValueError("DINOv3 override cannot be used for a DINOv2 checkpoint")
+            dino_abi = _mapping(observation_abi["dinov2"], name="observation.dinov2")
+            encoder_source = (
+                str(dino_abi["model"]) if dinov2_model is None else str(dinov2_model)
             )
-        if int(runtime_identity.get("reference_batch_size", 0)) != int(
-            dino_abi["reference_batch_size"]
-        ):
-            raise ValueError("runtime DINO reference batch size differs from checkpoint ABI")
+            self.encoder = DinoV2OnlineEncoder(
+                encoder_source,
+                device=device,
+                compute_dtype=dtype,
+                expected_patches=int(dino_abi["patches_per_camera"]),
+                expected_width=int(dino_abi["token_width"]),
+                reference_batch_size=int(dino_abi["reference_batch_size"]),
+                local_files_only=dinov2_local_files_only,
+            )
+            runtime_identity = self.encoder.identity()
+            if str(runtime_identity.get("compute_dtype")) != str(dino_abi["compute_dtype"]):
+                raise ValueError(
+                    "runtime DINO compute dtype differs from checkpoint ABI: "
+                    f"saved={dino_abi['compute_dtype']} current={runtime_identity.get('compute_dtype')}"
+                )
+            if int(runtime_identity.get("reference_batch_size", 0)) != int(
+                dino_abi["reference_batch_size"]
+            ):
+                raise ValueError("runtime DINO reference batch size differs from checkpoint ABI")
         self.device = device
         self._seed = int(seed)
         self._generator = torch.Generator(device=device)
@@ -187,7 +204,7 @@ class ClearVLACheckpointPolicy:
             },
             "observation": {
                 **dict(observation_abi),
-                "dinov2_runtime": self.encoder.identity(),
+                ("dinov3_runtime" if self.bundle.config.data.visual_feature_mode == "dinov3_online_v1" else "dinov2_runtime"): self.encoder.identity(),
                 "last_input_shapes": self._last_input_shapes,
             },
             "action": {

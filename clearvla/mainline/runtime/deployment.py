@@ -299,11 +299,18 @@ def build_deployment_abi(
     data_profile: Mapping[str, object],
     gripper_indices: tuple[int, ...],
     goal_metadata: Mapping[str, object],
+    visual_encoder_identity: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the checkpoint-owned inference boundary without runtime caches."""
 
     config.validate()
     identity.validate()
+    online_visual = config.data.visual_feature_mode == "dinov3_online_v1"
+    if online_visual:
+        if visual_encoder_identity is None:
+            raise ValueError("DINOv3 deployment ABI requires the loaded encoder identity")
+        if canonical_sha256(visual_encoder_identity) != identity.dataset.dino_cache_identity:
+            raise ValueError("DINOv3 runtime identity differs from training dataset identity")
     if not isinstance(data_profile, Mapping):
         raise ValueError("deployment data profile must be a mapping")
     profile = {str(key): value for key, value in data_profile.items()}
@@ -453,13 +460,23 @@ def build_deployment_abi(
             "state_offsets": [-8, -4, 0],
             "executed_action_offsets": [-24, -16, -12, -8, -6, -4, -2, -1],
             "rgb_preprocessing": preprocessing_identity(image_preprocess),
-            "dinov2": {
+            **({"dinov3": {
+                "model": config.data.dinov3_model,
+                "revision": config.data.dinov3_revision,
+                "local_files_only": config.data.dinov3_local_files_only,
+                "patches_per_camera": int(config.dimensions.patches_per_camera),
+                "token_width": int(config.dimensions.visual_token_dim),
+                "compute_dtype": str(config.runtime.compute_dtype),
+                "reference_batch_size": int(config.data.dinov3_microbatch),
+                "identity": dict(visual_encoder_identity),
+                "identity_sha256": canonical_sha256(visual_encoder_identity),
+            }} if online_visual else {"dinov2": {
                 "model": config.data.dinov2_model,
                 "patches_per_camera": int(config.dimensions.patches_per_camera),
                 "token_width": int(config.dimensions.visual_token_dim),
                 "compute_dtype": str(config.runtime.compute_dtype),
                 "reference_batch_size": int(config.data.dinov2_reference_batch_size),
-            },
+            }}),
             **({"visual_source_time": visual_time_metadata(config.observation.source_time_mode)} if config.observation.source_time_mode != FIXED_VISUAL_TIME else {}),
             **({"candidate_support": candidate_support_metadata(config.observation.candidate_support_mode, source_candidate_count=config.dimensions.patches_per_camera)}
                if config.observation.candidate_support_mode != MOMENT_LOCAL_SUPPORT else {}),
@@ -748,7 +765,40 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
             raise ValueError("deployment state feature width differs from selected chart")
     elif "state_features" in observation:
         raise ValueError("legacy state graph cannot silently acquire a new feature chart")
-    dino = _mapping(observation.get("dinov2"), name="observation.dinov2")
+    online_visual = _mapping(graph["observation"], name="graph.observation").get("visual_chart_mode") == "full_rgb_endpoint_v1"
+    visual_key = "dinov3" if online_visual else "dinov2"
+    dino = _mapping(observation.get(visual_key), name="observation."+visual_key)
+    if online_visual:
+        if "dinov2" in observation:
+            raise ValueError("DINOv3 checkpoint cannot also declare legacy DINOv2")
+        visual_identity = _mapping(dino.get("identity"), name="dinov3.identity")
+        if canonical_sha256(visual_identity) != dino.get("identity_sha256"):
+            raise ValueError("DINOv3 identity digest mismatch")
+        if (visual_identity.get("schema") != "clearvla_online_vision_v1"
+                or visual_identity.get("chart") != "full_rgb_endpoint_v1"
+                or visual_identity.get("feature_mode") != "dinov3_online_v1"
+                or visual_identity.get("disk_feature_cache") is not False):
+            raise ValueError("DINOv3 producer/chart contract differs")
+        from clearvla.vision.dinov3_online import DinoV3SpatialSpec
+        from clearvla.vision.online_pipeline import raster_identity
+        if (canonical_sha256(visual_identity.get("raster")) != canonical_sha256(raster_identity())
+                or visual_identity.get("camera_names") != ["top", "wrist"]):
+            raise ValueError("DINOv3 derived-raster or camera identity differs")
+        encoder_identity = _mapping(visual_identity.get("encoder"), name="dinov3.encoder")
+        if canonical_sha256(encoder_identity.get("spatial")) != canonical_sha256(DinoV3SpatialSpec().identity()):
+            raise ValueError("DINOv3 preprocessing or patch center contract differs")
+        if (encoder_identity.get("schema") != "clearvla_online_dinov3_boundary_v1"
+                or encoder_identity.get("padding") != "repeat_last_image_to_fixed_microbatch"):
+            raise ValueError("DINOv3 encoder runtime contract differs")
+        if encoder_identity.get("frozen") is not True or encoder_identity.get("token_disk_cache") is not False:
+            raise ValueError("DINOv3 encoder must be frozen and online")
+        expected_dtype = {"fp32": "torch.float32", "bf16": "torch.bfloat16"}.get(dino.get("compute_dtype"))
+        if encoder_identity.get("compute_dtype") != expected_dtype or encoder_identity.get("microbatch") != dino.get("reference_batch_size"):
+            raise ValueError("DINOv3 numerical runtime differs")
+        if dino.get("patches_per_camera") != 256 or dino.get("token_width") != 768:
+            raise ValueError("DINOv3 patch output contract differs")
+    elif "dinov3" in observation:
+        raise ValueError("legacy checkpoint cannot acquire DINOv3")
     if not str(dino.get("model", "")).strip():
         raise ValueError("deployment DINO model identity is empty")
     if str(dino.get("compute_dtype", "")) not in {"bf16", "fp32"}:
@@ -975,7 +1025,9 @@ def deployment_config_from_checkpoint(
             raise ValueError(f"checkpoint {name} differs from its deployment ABI")
     observation = _mapping(abi["observation"], name="observation")
     action = _mapping(abi["action"], name="action")
-    dino = _mapping(observation.get("dinov2"), name="observation.dinov2")
+    online_visual = _mapping(graph["observation"], name="graph.observation").get("visual_chart_mode") == "full_rgb_endpoint_v1"
+    visual_key = "dinov3" if online_visual else "dinov2"
+    dino = _mapping(observation.get(visual_key), name="observation."+visual_key)
     profile = _mapping(action.get("data_profile"), name="action.data_profile")
     objective = _mapping(graph["objectives"], name="graph_config.objectives")
 
@@ -1010,6 +1062,11 @@ def deployment_config_from_checkpoint(
             ),
         }
     )
+    if online_visual:
+        data.update(visual_feature_mode="dinov3_online_v1", dino_cache="",
+                    dinov3_model=str(dino["model"]), dinov3_revision=str(dino.get("revision", "")),
+                    dinov3_microbatch=int(dino["reference_batch_size"]),
+                    dinov3_local_files_only=bool(dino.get("local_files_only", True)))
     payload = {
         "data": data,
         **graph,

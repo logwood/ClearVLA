@@ -239,9 +239,13 @@ class DenseObjectGrounder(nn.Module):
         entity_history_mode: str = NO_ENTITY_HISTORY,
         entity_motion_mode: str = QUERY_ANCHOR_MOTION,
         retain_image_source: bool = False,
+        object_view_mode: str = "pooled_v1",
     ) -> None:
         super().__init__()
         self.retain_image_source = retain_image_source
+        self.per_camera_values = object_view_mode == "per_camera_values_v1"
+        if self.per_camera_values and entity_chart_mode != CURRENT_IMAGE_CHART:
+            raise ValueError("per-camera values require the source-supported current-image law")
         if retain_image_source and entity_chart_mode != CURRENT_IMAGE_CHART:
             raise ValueError("posterior instruction reads require the actual current-image G3 chart")
         self.hidden = int(hidden)
@@ -934,7 +938,15 @@ class DenseObjectGrounder(nn.Module):
             torch.zeros_like(reconstruction_per_cell),
         )
         reconstruction_error = reconstruction_per_cell.sum() / observed.sum().clamp_min(1.0)
+        view_values = {}
+        if self.per_camera_values:
+            # camera_read is log-space normalized INSIDE each camera above.
+            # Retain observation values, without adding shared slot residuals.
+            for name in ("content", "semantic", "appearance", "geometry"):
+                value = camera_aggregate(getattr(chart, "candidate_"+name), camera_read)
+                view_values["camera_"+name] = torch.where(camera_validity > 0, value, 0.0)
         facts = ObjectFactSet(
+            **view_values,
             latest_flow_steps=local_facts.latest_flow_steps,
             dense_chart=chart,
             object_chart_mode=self.entity_chart_mode,

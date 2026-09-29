@@ -1,3 +1,11 @@
+## M10b online visual integration checkpoint
+
+DINOv3 online producer, common full-image derived raster, per-camera G3/S
+values and strict deployment identities are implemented on the isolated
+DINOv3 branch. See `DINOV3_INTEGRATION_STATUS.md`. Complete full-width engine
+and restore tests on a >4GiB runner before marking software admission ready;
+actual pretrained/GPU and closed-loop task acceptance remain distinct.
+
 ## M10a continuation: data-entry closure and reset-context qualification
 
 Closed in source: cumulative and annotated-goal presets previously attached

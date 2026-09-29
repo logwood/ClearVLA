@@ -231,6 +231,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         operation_intent_mode: str = POSTERIOR_INTENT,
         annotation_goal_mode: str = "none",
         task_execution_mode: str = NO_TASK_EXECUTION,
+        object_view_mode: str = "pooled_v1",
         history_encoding_mode: str = "paired_rows_v1",
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = "query_lattice_v1",
@@ -283,6 +284,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             entity_history_mode=entity_history_mode,
             entity_motion_mode=entity_motion_mode,
             retain_image_source=(instruction_change_mode == POSTERIOR_REFERENCE_CHANGE or task_execution_mode == JOINT_TASK_EXECUTION),
+            object_view_mode=object_view_mode,
         )
         self.intent = StatelessObjectIntentOrganizer(
             future_time_grid_mode=future_time_grid_mode,
@@ -301,6 +303,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             annotation_goal_mode=annotation_goal_mode,
             task_execution_mode=task_execution_mode,
             instruction_change_mode=instruction_change_mode,
+            object_view_mode=object_view_mode,
             camera_names=camera_names,
             history_encoding_mode=history_encoding_mode,
         )

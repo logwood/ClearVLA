@@ -179,7 +179,8 @@ class FrozenDinoV3Encoder(nn.Module):
         config = getattr(model, "config", None)
         if config is None or getattr(config, "model_type", None) != "dinov3_vit":
             raise ValueError("expected a DINOv3 ViT model, not a DINOv2 or ConvNeXt fallback")
-        for name, expected in (("patch_size", spec.patch_size), ("hidden_size", spec.width), ("num_register_tokens", spec.register_tokens)):
+        for name, expected in (("patch_size", spec.patch_size), ("hidden_size", spec.width), ("num_register_tokens", spec.register_tokens), ("num_hidden_layers", 12),
+                               ("num_attention_heads", 12), ("intermediate_size", 3072)):
             if getattr(config, name, None) != expected:
                 raise ValueError(f"DINOv3 config {name} must be {expected}")
         self.encoder = model.requires_grad_(False).eval()
