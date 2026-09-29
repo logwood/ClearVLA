@@ -168,7 +168,10 @@ def posterior_microgrid_expectation(
     into a whole-camera thumbnail. Keep the same local radius and ordered
     micro cells, while retaining every candidate in their expectation.
     Values outside the observed image are not manufactured by border padding.
-    The center cell reuses the exact already sampled RGB/detail values.
+
+    The weighted contraction is tiled over candidate support points. This
+    preserves the complete posterior expectation while avoiding a transient
+    [B,C,I,J,M,K,D] sampled-value volume during the second chart read.
     """
     if fine_logits.ndim != 8 or tuple(route_weights.shape) != tuple(fine_logits.shape[:-1]):
         raise ValueError("posterior microgrid route and candidate measures do not align")
@@ -197,14 +200,53 @@ def posterior_microgrid_expectation(
         if chart.ndim != 5 or tuple(chart.shape[:2]) != (b, c):
             raise ValueError("posterior microgrid dense values lost camera identity")
         d, sy, sx = chart.shape[2:]
+        n_local = int(points.shape[-2])
         value = F.grid_sample(
             chart.float().reshape(b * c, d, sy, sx),
-            points.reshape(b * c, -1, n, 2),
+            points.reshape(b * c, -1, n_local, 2),
             mode="bilinear",
             padding_mode="zeros",
             align_corners=True,
         )
-        return value.permute(0, 2, 3, 1).reshape(b, c, *prefix, n, d)
+        return value.permute(0, 2, 3, 1).reshape(b, c, *prefix, n_local, d)
+
+    def weighted_dense(chart: Tensor, points: Tensor, weights: Tensor) -> Tensor:
+        partials: list[Tensor] = []
+        tile = 8
+        for start in range(0, n, tile):
+            stop = min(start + tile, n)
+            sampled = sample(chart, points[..., start:stop, :]).masked_fill(
+                ~candidate_valid[..., start:stop, None], 0.0
+            )
+            partials.append(
+                torch.einsum(
+                    "bqgcijmk,bcijmkv->bqgv",
+                    weights[..., start:stop],
+                    sampled,
+                )
+            )
+        return torch.stack(partials, dim=0).sum(dim=0)
+
+    def weighted_center(
+        values: Tensor,
+        weights: Tensor,
+        validity: Tensor,
+    ) -> Tensor:
+        partials: list[Tensor] = []
+        tile = 8
+        for start in range(0, n, tile):
+            stop = min(start + tile, n)
+            safe_values = values[..., start:stop, :].float().masked_fill(
+                ~validity[..., start:stop, None], 0.0
+            )
+            partials.append(
+                torch.einsum(
+                    "bqgcijmk,bcijmkv->bqgv",
+                    weights[..., start:stop],
+                    safe_values,
+                )
+            )
+        return torch.stack(partials, dim=0).sum(dim=0)
 
     rgb_rows: list[Tensor] = []
     detail_rows: list[Tensor] = []
@@ -218,35 +260,30 @@ def posterior_microgrid_expectation(
         for y in axis.unbind():
             for x in axis.unbind():
                 offset = torch.stack((x, y))
-                safe_coordinates = torch.where(
-                    candidate_valid[..., None],
-                    coordinates.float(),
-                    torch.zeros_like(coordinates, dtype=torch.float32),
+                safe_coordinates = coordinates.float().masked_fill(
+                    ~candidate_valid[..., None], 0.0
                 )
-                safe_radius = torch.where(
-                    candidate_valid.any(dim=-1),
-                    radius.float(),
-                    torch.zeros_like(radius, dtype=torch.float32),
+                safe_radius = radius.float().masked_fill(
+                    ~candidate_valid.any(dim=-1), 0.0
                 )
                 points = safe_coordinates + safe_radius[..., None, None] * offset
                 valid = (points.abs() <= 1.0).all(dim=-1) & candidate_valid
                 observed = valid[:, None, None]
                 logits = fine_logits.float().masked_fill(~observed, torch.finfo(torch.float32).min)
                 supported = observed.any(dim=-1, keepdim=True)
-                safe_logits = torch.where(supported, logits, torch.zeros_like(logits))
-                # Normalize in logit space; conditioning a tiny probability
-                # sum by division can overflow its reverse derivative.
+                safe_logits = logits.masked_fill(~supported, 0.0)
                 weights = torch.softmax(safe_logits, dim=-1) * observed.float()
                 joint = route_weights.float()[..., None] * weights
-                # Use integer loop positions below to avoid a device sync.
                 cell_index = len(rgb_rows)
                 if microgrid_side % 2 and cell_index == microgrid_side**2 // 2:
-                    rgb, detail = center_rgb.float(), center_detail.float()
+                    rgb_rows.append(
+                        weighted_center(center_rgb, joint, candidate_valid)
+                    )
+                    detail_rows.append(
+                        weighted_center(center_detail, joint, candidate_valid)
+                    )
                 else:
-                    rgb, detail = sample(rgb_chart, points), sample(detail_chart, points)
-                rgb = torch.where(valid[..., None], rgb, torch.zeros_like(rgb))
-                detail = torch.where(valid[..., None], detail, torch.zeros_like(detail))
-                rgb_rows.append(torch.einsum("bqgcijmk,bcijmkv->bqgv", joint, rgb))
-                detail_rows.append(torch.einsum("bqgcijmk,bcijmkv->bqgv", joint, detail))
+                    rgb_rows.append(weighted_dense(rgb_chart, points, joint))
+                    detail_rows.append(weighted_dense(detail_chart, points, joint))
                 coord_rows.append(torch.einsum("bqgcijmk,bcijmkd->bqgd", joint, points))
     return torch.stack(rgb_rows, -2), torch.stack(detail_rows, -2), torch.stack(coord_rows, -2)

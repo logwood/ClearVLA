@@ -49,6 +49,7 @@ class CurrentImageSupport:
     valid: Tensor
     log_probability: Tensor
 
+    @torch.no_grad()
     def validate(self, local_validity: Tensor | None = None) -> None:
         if self.coordinates.ndim != 7 or self.coordinates.shape[-1] != 2:
             raise ValueError("current image coordinates must be [B,C,Yq,Xq,M,N,2]")
@@ -69,9 +70,19 @@ class CurrentImageSupport:
             raise ValueError("current image probabilities must be finite and nonnegative")
         if bool((p.masked_select(~active) != 0).any()):
             raise ValueError("unsupported current image candidates must have zero probability")
-        coords = self.coordinates.masked_select(active[..., None])
-        if not bool(torch.isfinite(coords).all()) or bool((coords.abs() > 1.0 + 1e-6).any()):
-            raise ValueError("supported current image coordinates must lie in [-1,1]")
+        # Validate supported coordinates one batch row at a time. The
+        # flattened masked_select can transiently copy the entire active
+        # chart (112 MiB at batch 8), even though validation needs no graph.
+        for batch_index in range(int(self.coordinates.shape[0])):
+            row_coords = self.coordinates[batch_index].masked_select(
+                active[batch_index, ..., None]
+            )
+            if not bool(torch.isfinite(row_coords).all()) or bool(
+                (row_coords.abs() > 1.0 + 1e-6).any()
+            ):
+                raise ValueError(
+                    "supported current image coordinates must lie in [-1,1]"
+                )
         has_support = active.any(-1)
         mass = p.sum(-1)
         if not torch.allclose(mass, has_support.float(), rtol=2e-5, atol=2e-6):

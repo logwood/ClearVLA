@@ -2854,9 +2854,62 @@ class LateRawDetailPolicyReader(nn.Module):
                             )
                         )
                     )
+            def _tiled_typed_fine_projection(
+                projection_query: Tensor,
+                projection_key: Tensor,
+                equation: str,
+            ) -> Tensor:
+                """Exact FP32 candidate projection without a full key cast.
+
+                The native key bank is BF16/FP16 and has a 256-candidate
+                axis. Casting the whole bank to FP32 creates a 128 MiB
+                transient at batch 8. Cast and contract candidate tiles
+                instead; training tiles are checkpointed so autograd retains
+                the native key view and recomputes the FP32 cast in backward.
+                """
+                candidate_count = int(projection_key.shape[-2])
+                candidate_tile = 64
+                parts: list[Tensor] = []
+                for candidate_start in range(0, candidate_count, candidate_tile):
+                    candidate_stop = min(
+                        candidate_start + candidate_tile, candidate_count
+                    )
+                    key_tile = projection_key[
+                        ..., candidate_start:candidate_stop, :
+                    ]
+
+                    def _project(
+                        query_value: Tensor,
+                        key_value: Tensor,
+                    ) -> Tensor:
+                        return torch.einsum(
+                            equation,
+                            query_value.float(),
+                            key_value.float(),
+                        ) * (float(self.lattice_route_dim) ** -0.5)
+
+                    if torch.is_grad_enabled() and (
+                        projection_query.requires_grad or key_tile.requires_grad
+                    ):
+                        parts.append(
+                            checkpoint(
+                                _project,
+                                projection_query,
+                                key_tile,
+                                use_reentrant=False,
+                            )
+                        )
+                    else:
+                        parts.append(_project(projection_query, key_tile))
+                return torch.cat(parts, dim=-1)
+
             with torch.autocast(device_type=query.device.type, enabled=False):
                 query_f = query_row.float()
                 if typed_fine_keys:
+                    if query.device.type == 'cuda':
+                        # Drop allocator-only blocks before the first full
+                        # precision candidate-key projection.
+                        torch.cuda.empty_cache()
                     typed_fine_logit_rms: dict[str, Tensor] = {}
                     typed_fine_logits: dict[str, Tensor] = {}
                     for name, typed_key in typed_fine_keys.items():
@@ -2878,11 +2931,11 @@ class LateRawDetailPolicyReader(nn.Module):
                             and name == "appearance"
                         ):
                             continue
-                        typed_logit = torch.einsum(
+                        typed_logit = _tiled_typed_fine_projection(
+                            typed_fine_query_rows[name],
+                            typed_key,
                             "bqgcr,bcijmkr->bqgcijmk",
-                            typed_fine_query_rows[name].float(),
-                            typed_key.float(),
-                        ) * (float(self.lattice_route_dim) ** -0.5)
+                        )
                         if collect_diagnostics:
                             typed_fine_logit_rms[name] = (
                                 typed_logit.detach().square().mean().sqrt()
@@ -2968,15 +3021,16 @@ class LateRawDetailPolicyReader(nn.Module):
                                     .norm(dim=-1)
                                     .mean()
                                 )
-                            appearance_candidate_logit = torch.einsum(
-                                "bqgcijmr,bcijmkr->bqgcijmk",
-                                composed_appearance,
-                                typed_fine_keys["appearance"].float(),
-                            ) * (float(self.lattice_route_dim) ** -0.5)
-                            typed_fine_logits[
-
-                                "appearance"
-                            ] = appearance_candidate_logit
+                            appearance_candidate_logit = (
+                                _tiled_typed_fine_projection(
+                                    composed_appearance,
+                                    typed_fine_keys["appearance"],
+                                    "bqgcijmr,bcijmkr->bqgcijmk",
+                                )
+                            )
+                            typed_fine_logits["appearance"] = (
+                                appearance_candidate_logit
+                            )
                             if collect_diagnostics:
                                 typed_fine_logit_rms[
                                     "appearance"
@@ -2996,13 +3050,15 @@ class LateRawDetailPolicyReader(nn.Module):
                                     .sqrt()
                                 )
                         else:
-                            appearance_candidate_logit = torch.einsum(
-                                "bqgcijmr,bcijmkr->bqgcijmk",
-                                appearance_fine_query_rows[
-                                    :, start:stop
-                                ].float(),
-                                typed_fine_keys["appearance"].float(),
-                            ) * (float(self.lattice_route_dim) ** -0.5)
+                            appearance_candidate_logit = (
+                                _tiled_typed_fine_projection(
+                                    appearance_fine_query_rows[
+                                        :, start:stop
+                                    ],
+                                    typed_fine_keys["appearance"],
+                                    "bqgcijmr,bcijmkr->bqgcijmk",
+                                )
+                            )
                     if self.structured_ownership:
                         # P1 factorizes coarse source ownership from precise
                         # offset verification.  Appearance and geometry own
@@ -3518,9 +3574,70 @@ class LateRawDetailPolicyReader(nn.Module):
                             typed_detail_micro,
                             typed_coordinate_micro,
                         ) = micro_reader(*micro_inputs)
+                    if route_weights.is_cuda:
+                        # The candidate-tiled path keeps the live graph intact;
+                        # release only allocator blocks left unused between the
+                        # microgrid checkpoint and the next contraction.
+                        torch.cuda.empty_cache()
+
+                    def _typed_context_from_candidates(
+                        route: Tensor,
+                        fine: Tensor,
+                        key: Tensor,
+                    ) -> Tensor:
+                        # The full candidate contraction is exact but its
+                        # einsum planner can materialize a transient
+                        # [B,Q,G,C,I,J,M,K,R] workspace. Accumulate over K
+                        # tiles so batch-8 online DINO keeps the same
+                        # posterior support and gradients within 24 GB.
+                        candidate_count = int(fine.shape[-1])
+                        partials: list[Tensor] = []
+                        tile = 16
+
+                        def _context_piece(
+                            route_value: Tensor,
+                            fine_value: Tensor,
+                            key_value: Tensor,
+                        ) -> Tensor:
+                            return torch.einsum(
+                                "bqgcijm,bqgcijmk,bcijmkr->bqgr",
+                                route_value,
+                                fine_value,
+                                key_value.float(),
+                            )
+
+                        for candidate_start in range(0, candidate_count, tile):
+                            candidate_stop = min(
+                                candidate_start + tile, candidate_count
+                            )
+                            fine_tile = fine[
+                                ..., candidate_start:candidate_stop
+                            ]
+                            key_tile = key[
+                                ..., candidate_start:candidate_stop, :
+                            ]
+                            if torch.is_grad_enabled() and (
+                                route.requires_grad
+                                or fine_tile.requires_grad
+                                or key_tile.requires_grad
+                            ):
+                                partials.append(
+                                    checkpoint(
+                                        _context_piece,
+                                        route,
+                                        fine_tile,
+                                        key_tile,
+                                        use_reentrant=False,
+                                    )
+                                )
+                            else:
+                                partials.append(
+                                    _context_piece(route, fine_tile, key_tile)
+                                )
+                        return torch.stack(partials, dim=0).sum(dim=0)
+
                     typed_contexts = {
-                        name: torch.einsum(
-                            "bqgcijm,bqgcijmk,bcijmkr->bqgr",
+                        name: _typed_context_from_candidates(
                             (
                                 route_weights
                                 if self.utility_precision_mainline
@@ -3531,7 +3648,7 @@ class LateRawDetailPolicyReader(nn.Module):
                                 if self.utility_precision_mainline
                                 else owner_fine_weights.get(name, fine_weights)
                             ),
-                            typed_key.float(),
+                            typed_key,
                         )
                         for name, typed_key in typed_fine_keys.items()
                     }
