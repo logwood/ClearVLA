@@ -12,6 +12,8 @@ MODEL="${DINOV3_MODEL:-/data/senwang/clearvla/third_party/dinov3/hf-vitb16-lvd16
 GPU="${CUDA_VISIBLE_DEVICES:-0}"
 DTYPE="${CLEARVLA_DTYPE:-bf16}"
 MICROBATCH="${CLEARVLA_DINOV3_MICROBATCH:-2}"
+BATCH_SIZE="${CLEARVLA_BATCH_SIZE:-}"
+EPOCHS="${CLEARVLA_EPOCHS:-}"
 MODE="${1:-preflight}"
 RUN_ROOT="/data/senwang/clearvla/experiments/dinov3-online-aligned-vision-20260928"
 
@@ -59,6 +61,12 @@ case "${MODE}" in
       --output-dir "${OUTPUT}"
       --dinov3-model "${MODEL}"
       --dinov3-microbatch "${MICROBATCH}")
+    if [[ -n "${EPOCHS}" ]]; then
+      cmd+=(--epochs "${EPOCHS}")
+    fi
+    if [[ -n "${BATCH_SIZE}" ]]; then
+      cmd+=(--batch-size "${BATCH_SIZE}")
+    fi
     exec "${cmd[@]}"
     ;;
   *)
