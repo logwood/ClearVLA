@@ -1,5 +1,30 @@
 # DINOv3 online / aligned multiview integration
 
+## Causal task-global candidate on latest source (2026-09-29)
+
+This isolated local revision starts from remote `4e4f2e26901cd18ffd94c8f271b34424c34b24cd`
+(tree `e404080adb6dbb30851a1e63659e304a6e768fc4`), including the subsequent
+batch-eight reader optimization, local RoPE binding and launcher batch override.
+It does not revert to b58, the local-trial branch, or de706.
+
+New selection: `configs/mainline/dinov3_online_task_global_calvin.json`.
+It differs from the current cumulative config only in output directory and
+`bottom.global_condition_mode`. The active cumulative config and launcher defaults
+are intentionally unchanged. The P3 static compiler and task memory's actual
+trainable consumer now reach the existing global latent. Graph/ABI and producer
+ownership checks prohibit treating old graph checkpoints as exact resumes.
+
+Local evidence includes actual compact-policy updates, ordinary source/parameter
+gradients, one compilation per complete two-pass sample, real checkpoint restore,
+and source-fixed old-mode FP32/BF16 parity. Native 336px/256x768 online-marker
+forward and a fresh-weight real adapter comparison are distinct from training.
+The native-chart update tests are resource-blocked under this 4-GiB CPU container,
+including the original unmodified FP32 update test. They are not skipped passes.
+No pretrained-encoder/CUDA/new-policy task success is claimed for this candidate.
+The source archive owns the exact per-test results and remaining acceptance scope.
+No server job, dataset, existing checkpoint, physical rule or workflow is changed.
+
+
 ## Deployment preparation refresh (2026-09-29 UTC)
 
 The managed deployment branch is

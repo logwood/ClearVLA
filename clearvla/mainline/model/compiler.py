@@ -10,6 +10,7 @@ from torch import Tensor, nn
 
 from ..annotation_goal import ANNOTATED_ENDPOINT_GOAL
 from ..executed_world import EXECUTED_WORLD_FEEDBACK, ExecutedWorldPlanValues
+from ..global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import (
     INSTRUCTION_CHANGE_MODES,
@@ -25,6 +26,7 @@ from ..task_execution import JOINT_TASK_EXECUTION, NO_TASK_EXECUTION, TaskExecut
 from .action_codec import ACTION_BAND_ENDS
 from .annotation_goal import AnnotatedGoalPlanRead
 from .executed_world import ExecutedWorldPlanRead
+from .global_task import GlobalTaskCompiler
 from .horizon_coordination import P3HorizonContext, TypedHorizonCoordinator
 from .instruction_change import InstructionChangePlanRead
 from .instruction_posterior import PosteriorInstructionChangePlanRead
@@ -1499,6 +1501,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
                  operation_intent_mode: str = POSTERIOR_INTENT,
                  annotation_goal_mode: str = "none",
                  task_execution_mode: str = NO_TASK_EXECUTION,
+                 global_condition_mode: str = PROPRIOCEPTIVE_GLOBAL,
                  camera_names: tuple[str, ...] = ("top", "wrist")) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
@@ -1513,6 +1516,16 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if instruction_change_mode in TYPED_CHANGE_MODES and coordination_mode != TYPED_HORIZON_PLAN:
             raise ValueError("typed instruction change requires typed P3")
         self.task_execution_mode = task_execution_mode
+        validate_global_condition_mode(global_condition_mode)
+        self.global_condition_mode = global_condition_mode
+        if global_condition_mode == COMPILED_TASK_GLOBAL and (
+            task_execution_mode != JOINT_TASK_EXECUTION
+            or coordination_mode != TYPED_HORIZON_PLAN or not self.time_grid.aligned
+        ):
+            raise ValueError("P3 global task compilation requires aligned joint task coordination")
+        self.global_task_compiler = (
+            GlobalTaskCompiler(hidden) if global_condition_mode == COMPILED_TASK_GLOBAL else None
+        )
         self.operation_read = None
         if operation_intent_mode == OBJECT_OUTCOME_INTENT and self.task_execution_mode == NO_TASK_EXECUTION:
             if coordination_mode != TYPED_HORIZON_PLAN:
@@ -1580,6 +1593,11 @@ class ObjectPolicyPlanCompiler(nn.Module):
             intent = replace(intent, annotated_goal_values=self.annotated_goal_read.prepare(intent.annotated_goal))
         elif intent.annotated_goal is not None:
             raise ValueError("annotated goal supplied to an unselected reader")
+        if self.global_task_compiler is not None:
+            intent = replace(intent, compiled_global_task=self.global_task_compiler(
+                intent.public_interval_carrier))
+        elif intent.compiled_global_task is not None:
+            raise ValueError("compiled global task supplied to unselected P3")
         return intent
 
     def forward(

@@ -22,6 +22,7 @@ from ..bottom_evidence import (
     NORMALIZED_EVIDENCE,
     validate_evidence_value_mode,
 )
+from ..global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
 from ..execution_values import execution_value_score
 from ..gripper_contract import VALID_GRIPPER_OUTPUT_MODES, is_binary_gripper_mode
 from ..model.component_contracts import TerminalHeadOutput
@@ -113,6 +114,10 @@ class EvidenceViewAdapter(nn.Module):
         self.allow_terminal_layer_subset = bool(
             int(getattr(config, "flow_jepa_strict_role_visual_path", 0))
         )
+        self.global_condition_mode = getattr(config, "global_condition_mode", PROPRIOCEPTIVE_GLOBAL)
+        validate_global_condition_mode(self.global_condition_mode)
+        if self.global_condition_mode == COMPILED_TASK_GLOBAL and not self.magnitude_values:
+            raise ValueError("compiled global task requires magnitude-preserving evidence")
         self.bank = OwnedEvidenceMemoryBank(config)
         self.layer_field_proj = nn.ModuleDict(
             {name: nn.Sequential(nn.LayerNorm(h), nn.Linear(h, h)) for name in self._LAYER_FIELDS}
@@ -151,6 +156,10 @@ class EvidenceViewAdapter(nn.Module):
                 for name in self.intent_source_names
             }
         )
+        if self.global_condition_mode == COMPILED_TASK_GLOBAL:
+            # Already compiled P3 values, not raw language. No affine or type
+            # value may replace an absent task signal at this ingress.
+            self.intent_proj["task"] = nn.Linear(h, h, bias=False)
         if self.allow_terminal_layer_subset:
             # Strict G->W->P ownership removes raw visual intent before this
             # adapter is called. Preserve the key for compatible state dicts,
@@ -281,6 +290,10 @@ class EvidenceViewAdapter(nn.Module):
         for name, value in source_tokens.items():
             if value.ndim != 3 or int(value.shape[1]) <= 0:
                 raise RuntimeError(f"evidence source {name!r} is empty")
+        if self.global_condition_mode == COMPILED_TASK_GLOBAL and (
+            intent_memory is None or "task" not in intent_memory
+        ):
+            raise ValueError("global task evidence requires compiled task memory")
         if intent_memory is None:
             intent_memory = {
                 "state": state,
@@ -298,12 +311,17 @@ class EvidenceViewAdapter(nn.Module):
             projected = self.intent_proj[name](
                 value.to(device=reference.device, dtype=reference.dtype)
             )
-            intent_parts.append(
-                projected
-                + self.intent_type_embed[:, index : index + 1].to(
-                    device=reference.device, dtype=reference.dtype
+            if name == "task" and self.global_condition_mode == COMPILED_TASK_GLOBAL:
+                if value.shape[1] != 4:
+                    raise ValueError("compiled global task lost four interval rows")
+                intent_parts.append(projected)
+            else:
+                intent_parts.append(
+                    projected
+                    + self.intent_type_embed[:, index : index + 1].to(
+                        device=reference.device, dtype=reference.dtype
+                    )
                 )
-            )
         if not intent_parts:
             raise RuntimeError("native evidence requires at least one clean intent source")
         intent_tokens = torch.cat(intent_parts, dim=1)

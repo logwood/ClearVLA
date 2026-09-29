@@ -1,3 +1,12 @@
+## DINOv3 continuation: compiled task-global candidate
+
+Continue from the online/aligned source including the batch-eight optimization,
+not the historical cached-DINO branches. The opt-in P3 task-global value path is
+implemented; original DINOv3 presets remain the controls. Complete native-chart
+training/GPU qualification before treating this as a train-ready replacement.
+Preserve the scoped local results. Do not mark coarse conditioning, world/final
+closure, sampled endpoint training or physical recovery solved by this unit.
+
 ## M10b online visual integration checkpoint
 
 DINOv3 online producer, common full-image derived raster, per-camera G3/S

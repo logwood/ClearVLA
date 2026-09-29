@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..executed_world import ExecutedWorldPlanValues
+from ..global_task import global_intent_memory
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import is_binary_gripper_selection
 from ..interfaces import CurrentObservation, ObservableHistory, OnlinePolicyInput
@@ -1249,17 +1250,18 @@ class ExecutionBottomStage(nn.Module):
             contracts.append(head(canvas, slices))
         return contracts
 
-    @staticmethod
     def _intent_memory(
+        self,
         intent: ObjectIntentState,
         state_tokens: Tensor,
         executed_tokens: Tensor,
     ) -> dict[str, Tensor]:
-        del intent
-        return {
-            "state": state_tokens,
-            "executed": executed_tokens,
-        }
+        return global_intent_memory(
+            mode=self.core_config.global_condition_mode,
+            compiled=intent.compiled_global_task,
+            source=intent.public_interval_carrier,
+            state=state_tokens, executed=executed_tokens,
+        )
 
     def _set_eval_intervention(self, mode: str) -> None:
         if mode == "learned":

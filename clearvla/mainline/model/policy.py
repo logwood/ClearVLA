@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..global_task import COMPILED_TASK_GLOBAL
 from ..config import ExperimentConfig
 from ..executed_world import ExecutedWorldFeedback, ExecutedWorldPlanValues, ExecutedWorldWindow
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE, TYPED_CHANGE_MODES
@@ -143,6 +144,12 @@ class OnlinePolicyCache:
 
     def validate(self, config: ExperimentConfig) -> None:
         self.history.validate(config)
+        compiled_task = self.top.intent.compiled_global_task
+        if (compiled_task is not None) != (config.bottom.global_condition_mode == COMPILED_TASK_GLOBAL):
+            raise ValueError("compiled global task cache differs from selected graph")
+        if compiled_task is not None:
+            compiled_task.validate(self.top.intent.public_interval_carrier,
+                                   hidden=config.dimensions.hidden_size)
         if (self.world_feedback is not None)!=(config.top.world_feedback_mode!="none"):
             raise ValueError("executed world feedback cache differs from selected graph")
         if self.world_feedback is not None:
@@ -361,6 +368,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             operation_intent_mode=top.operation_intent_mode,
             annotation_goal_mode=top.annotation_goal_mode,
             task_execution_mode=top.task_execution_mode,
+            global_condition_mode=config.bottom.global_condition_mode,
             object_view_mode=top.object_view_mode,
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
@@ -1062,6 +1070,11 @@ class ClearVLAMainlinePolicy(nn.Module):
         """Run only the ODE-dependent P2/P3 and action bottom."""
 
         cache.validate(self.config)
+        compiled_task = cache.top.intent.compiled_global_task
+        if compiled_task is not None and compiled_task.compiler_identity != id(
+            self.policy_compiler.plan_compiler.global_task_compiler
+        ):
+            raise ValueError("compiled global task cache belongs to another P3 compiler")
         self.outlet_adapter.validate_world_condition(cache.top.action_condition)
         if flow_step_context is not None:
             flow_step_context.validate(

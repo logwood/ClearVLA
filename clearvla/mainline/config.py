@@ -41,6 +41,7 @@ from .endpoint_supervision import (
     NO_ENDPOINT_SUPERVISION,
     validate_endpoint_mode,
 )
+from .global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
 from .future_time import CONTROL_ALIGNED_FUTURE_TIME, LEGACY_FUTURE_TIME, resolve_future_time
 from .gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
@@ -709,6 +710,7 @@ class TopConfig:
 
 @dataclass(frozen=True)
 class BottomConfig:
+    global_condition_mode: str = PROPRIOCEPTIVE_GLOBAL
     endpoint_supervision_mode: str = NO_ENDPOINT_SUPERVISION
     controller_value_mode: str = LEGACY_CONTROLLER_VALUES
     transition_condition_mode: str = SUMMED_TRANSITION
@@ -760,6 +762,7 @@ class BottomConfig:
     bspine_action_group_mask: str = ""
 
     def validate(self) -> None:
+        validate_global_condition_mode(self.global_condition_mode)
         validate_endpoint_mode(self.endpoint_supervision_mode)
         if self.endpoint_supervision_mode == CLEAN_ENDPOINT_SUPERVISION and self.gripper_output_mode not in {"calvin_binary_command", "maniskill_binary_command"}:
             raise ValueError("clean endpoint supervision requires a binary command outlet")
@@ -1134,6 +1137,13 @@ class ExperimentConfig:
             self.runtime,
         ):
             section.validate()
+        if self.bottom.global_condition_mode == COMPILED_TASK_GLOBAL and (
+            self.top.task_execution_mode != "joint_object_scene_v1"
+            or self.top.p3_coordination_mode != TYPED_HORIZON_PLAN
+            or self.top.future_time_grid_mode != CONTROL_ALIGNED_FUTURE_TIME
+            or self.bottom.evidence_value_mode != MAGNITUDE_EVIDENCE
+        ):
+            raise ValueError("compiled global task requires joint task, aligned typed P3 and magnitude values")
         if self.bottom.transition_condition_mode == TYPED_TRANSITION and (
             self.bottom.evidence_value_mode != MAGNITUDE_EVIDENCE
             or self.top.p3_coordination_mode != TYPED_HORIZON_PLAN
@@ -1392,6 +1402,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.bottom.global_condition_mode == PROPRIOCEPTIVE_GLOBAL:
+            cast(dict[str, object], payload["bottom"]).pop("global_condition_mode")
         if self.bottom.endpoint_supervision_mode == NO_ENDPOINT_SUPERVISION:
             cast(dict[str, object], payload["bottom"]).pop("endpoint_supervision_mode")
         if self.bottom.controller_value_mode == LEGACY_CONTROLLER_VALUES:

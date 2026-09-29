@@ -26,6 +26,7 @@ from torch import Tensor, nn
 
 from ..bottom_evidence import MAGNITUDE_EVIDENCE
 from ..config import ExperimentConfig
+from ..global_task import COMPILED_TASK_GLOBAL, global_intent_memory
 from ..future_time import resolve_future_time
 from ..interfaces import ObservableHistory
 from ..v120_core.bspine import (
@@ -82,6 +83,7 @@ def _build_decoder_config(config: ExperimentConfig):
         hidden_size=dims.hidden_size,
         evidence_value_mode=bottom.evidence_value_mode,
         controller_value_mode=bottom.controller_value_mode,
+        global_condition_mode=bottom.global_condition_mode,
         num_heads=dims.num_heads,
         visual_token_dim=dims.visual_token_dim,
         patches_per_camera=dims.patches_per_camera,
@@ -263,14 +265,14 @@ class RestoredV120EvidenceBottom(nn.Module):
             # ``config.validate`` normally owns this error; retain a local
             # fail-closed guard at the selected construction boundary.
             raise ValueError("unsupported execution-bottom B-spine implementation")
-        # These generic intent aliases are structurally absent from the V120
-        # object path (which passes only current state and last execution).
-        # Freezing unreachable projections changes no forward value and keeps
-        # optimizer ownership honest without reintroducing the aliases.
-        for source_name in ("task", "state_history", "proposal"):
-            self.decoder.evidence_adapter.intent_proj[source_name].requires_grad_(
-                False
-            )
+        # Historical aliases stay frozen unless an actual selected producer
+        # owns their input. The new P3 task value projection must participate
+        # in the optimizer; a live forward through frozen weights is not enough.
+        unused_sources = ("state_history", "proposal")
+        if bottom.global_condition_mode != COMPILED_TASK_GLOBAL:
+            unused_sources = ("task", *unused_sources)
+        for source_name in unused_sources:
+            self.decoder.evidence_adapter.intent_proj[source_name].requires_grad_(False)
         if bottom.evidence_value_mode == MAGNITUDE_EVIDENCE:
             # This mainline always supplies a zero generic trajectory. An
             # identity keeps the placeholder honest without dead parameters.
@@ -588,17 +590,18 @@ class RestoredV120EvidenceBottom(nn.Module):
             contracts.append(head(canvas, slices))
         return contracts
 
-    @staticmethod
     def _intent_memory(
+        self,
         intent: ObjectIntentState,
         state_tokens: Tensor,
         executed_tokens: Tensor,
     ) -> dict[str, Tensor]:
-        del intent
-        return {
-            "state": state_tokens,
-            "executed": executed_tokens,
-        }
+        return global_intent_memory(
+            mode=self.core_config.global_condition_mode,
+            compiled=intent.compiled_global_task,
+            source=intent.public_interval_carrier,
+            state=state_tokens, executed=executed_tokens,
+        )
 
     def _set_eval_intervention(self, mode: str) -> None:
         if mode == "learned":

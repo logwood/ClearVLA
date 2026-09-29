@@ -1,3 +1,35 @@
+## Compiled causal task in the bottom global condition (2026-09-29 candidate)
+
+`bottom.global_condition_mode="p3_compiled_task_v1"` is an explicit new graph;
+the default `proprioceptive_prior_v1` remains omitted from old serialization.
+P3 compiles the finalized causal S public interval carrier exactly once in
+`prepare_instruction_values`. Its bias-free nonlinear value projection preserves
+four intervals and carries the exact source reference and compiler identity.
+`ObjectIntentState.compiled_global_task` is reused unchanged across W rebuild,
+proposal/refined passes and numerical nodes; new observation encoding creates a
+new record. The runtime record is not checkpoint state. No raw language, raw
+image, future label, candidate W or noisy action enters this compiler.
+
+Both actual bottom adapters now admit the same compiled values alongside the
+unchanged current-state and executed-history memory. In this selected mode the
+existing task projection is bias-free, has no task type-embedding value, and is
+trainable instead of remaining in the historical unreachable-alias freeze list.
+The real layer-value scan and latent organizer consume it. Global task content
+therefore has a path unavailable in the original state/execution-only latent.
+The existing P3/CT/local-evidence paths, solver, gripper head and losses remain.
+Zero compiled source stays zero in the task ingress, not a forced robot stop;
+adding a memory source can still change attention normalization. Global hidden
+normalizations retain their existing semantics, not universal scale equivariance.
+
+Use `configs/mainline/dinov3_online_task_global_calvin.json` for a fresh candidate.
+Existing DINOv3 configs/launcher defaults and all inherited online, per-camera,
+RoPE, raster-layout and candidate-tiling changes remain unmodified controls.
+Configuration, P3/bottom component selections and deployment ABI identify this
+new graph; old policies are not silently resumed/migrated. Source connectivity
+and parameter updates are not trained task-direction or recovery guarantees.
+The coarse-query bottleneck, richer discrepancy/status representation, W/final
+alignment and sampled-endpoint supervision remain separate open work.
+
 ## M10b — online DINOv3 and camera-owned visual values (2026-09-29 UTC)
 
 Branch `codex/dinov3-online-aligned-vision-20260928`, inherited M10a unchanged.

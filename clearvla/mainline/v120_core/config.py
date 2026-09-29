@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..global_task import PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
+
 from dataclasses import dataclass
 
 from ..bottom_evidence import MAGNITUDE_EVIDENCE, NORMALIZED_EVIDENCE, validate_evidence_value_mode
@@ -728,6 +730,7 @@ class V39PolicyConfig(V38PolicyConfig):
     # decoder.  Costs two extra decodes per eval batch; diagnostic runs only.
     latent_cvae_z_probe: int = 0
     evidence_value_mode: str = NORMALIZED_EVIDENCE
+    global_condition_mode: str = PROPRIOCEPTIVE_GLOBAL
     controller_value_mode: str = LEGACY_CONTROLLER_VALUES
     latent_cvae_output_init_std: float = 1e-3
     latent_cvae_mu_bound: float = 1.5
@@ -1099,6 +1102,7 @@ class V39PolicyConfig(V38PolicyConfig):
     def validate(self) -> None:
         super().validate()
         validate_evidence_value_mode(self.evidence_value_mode)
+        validate_global_condition_mode(self.global_condition_mode)
         validate_controller_value_mode(self.controller_value_mode)
         if self.controller_value_mode == RAW_CONTROLLER_VALUES and self.evidence_value_mode != MAGNITUDE_EVIDENCE:
             raise ValueError("separate controller values require magnitude-preserving evidence")

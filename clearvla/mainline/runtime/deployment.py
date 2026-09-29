@@ -57,6 +57,7 @@ from ..endpoint_supervision import (
 )
 from ..executed_world import EXECUTED_WORLD_FEEDBACK, executed_world_metadata
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
+from ..global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, global_task_metadata
 from ..gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
     CONTINUOUS_GRIPPER_OUTPUT_MODE,
@@ -397,6 +398,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"global_task": global_task_metadata()}
+           if config.bottom.global_condition_mode == COMPILED_TASK_GLOBAL else {}),
         **({"task_execution": task_execution_metadata()}
            if config.top.task_execution_mode == JOINT_TASK_EXECUTION else {}),
         **({"endpoint_supervision": endpoint_supervision_metadata()}
@@ -523,6 +526,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     if str(abi.get("graph_config_sha256", "")) != canonical_sha256(graph):
         raise ValueError("deployment ABI graph digest is inconsistent")
     graph_bottom = _mapping(graph.get("bottom"), name="graph_config.bottom")
+    global_mode = graph_bottom.get("global_condition_mode", PROPRIOCEPTIVE_GLOBAL)
+    if global_mode == COMPILED_TASK_GLOBAL:
+        if abi.get("global_task") != global_task_metadata():
+            raise ValueError("compiled global task ABI semantics mismatch")
+    elif global_mode != PROPRIOCEPTIVE_GLOBAL or "global_task" in abi:
+        raise ValueError("unknown or unselected global task ABI")
     endpoint_mode = graph_bottom.get("endpoint_supervision_mode", NO_ENDPOINT_SUPERVISION)
     if endpoint_mode == CLEAN_ENDPOINT_SUPERVISION:
         if abi.get("endpoint_supervision") != endpoint_supervision_metadata():

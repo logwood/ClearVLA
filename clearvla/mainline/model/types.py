@@ -21,6 +21,7 @@ from clearvla.vision.entity_history import ObservedEntityHistory
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
 
 from ..annotation_goal import AnnotatedGoalEvidence, AnnotatedGoalValues
+from ..global_task import CompiledGlobalTask
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import InstructionChangeEvidence
 from ..instruction_posterior import InstructionChangeValues
@@ -1168,6 +1169,7 @@ class ObjectIntentState:
     operation_expectation: OperationExpectation | None = None
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
+    compiled_global_task: CompiledGlobalTask | None = None
 
     @property
     def interval_queries(self) -> Tensor:
@@ -1248,6 +1250,8 @@ class ObjectIntentState:
 
     def validate(self, *, horizon: int, hidden: int) -> None:
         resolve_future_time(self.time_grid_mode)
+        if self.compiled_global_task is not None:
+            self.compiled_global_task.validate(self.public_interval_carrier, hidden=hidden)
         if self.task_relation is not None:
             self.task_relation.validate(hidden=hidden)
             if self.task_relation.binding is not self.target_binding:
@@ -1377,6 +1381,7 @@ class ObjectIntentState:
                 raise ValueError("goal permutation lost instruction evidence")
             annotated_goal = self.annotated_goal.permute(change)
         return ObjectIntentState(
+            compiled_global_task=self.compiled_global_task,
             time_grid_mode=self.time_grid_mode,
             protected_goal_set=self.protected_goal_set,
             history_tokens=self.history_tokens,

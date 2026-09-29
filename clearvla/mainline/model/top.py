@@ -26,6 +26,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..annotation_goal import AnnotationEndpoint
+from ..global_task import PROPRIOCEPTIVE_GLOBAL
 from ..future_time import LEGACY_FUTURE_TIME
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE
 from ..instruction_reference import InstructionReference
@@ -231,6 +232,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         operation_intent_mode: str = POSTERIOR_INTENT,
         annotation_goal_mode: str = "none",
         task_execution_mode: str = NO_TASK_EXECUTION,
+        global_condition_mode: str = PROPRIOCEPTIVE_GLOBAL,
         object_view_mode: str = "pooled_v1",
         history_encoding_mode: str = "paired_rows_v1",
         entity_context_mode: str = "candidate_only_v1",
@@ -370,6 +372,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             operation_intent_mode=operation_intent_mode,
             annotation_goal_mode=annotation_goal_mode,
             task_execution_mode=task_execution_mode,
+            global_condition_mode=global_condition_mode,
             instruction_change_mode=instruction_change_mode, content_dim=content_dim,
             camera_names=camera_names,
             hidden=hidden,
