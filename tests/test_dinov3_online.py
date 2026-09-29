@@ -7,6 +7,7 @@ from clearvla.vision.dinov3_online import (
     DinoV3SpatialSpec, FrozenDinoV3Encoder, extract_native_patches,
     full_image_to_patch_grid, patch_centers_in_full_image,
     preprocess_full_fov, sample_native_patch_chart,
+    _restore_dinov3_rope_periods,
 )
 
 class MarkerModel(nn.Module):
@@ -108,3 +109,24 @@ def test_no_legacy_production_switch_is_implied():
     # This unit alone must not make the existing production path claim DINOv3.
     config=ExperimentConfig()
     assert 'dinov2' in config.data.dinov2_model
+
+
+def test_quantized_official_rope_periods_restore():
+    model = SimpleNamespace(
+        config=SimpleNamespace(dinov3_rope_periods=[float(i + 1) for i in range(16)]),
+        rope_embeddings=SimpleNamespace(inv_freq=torch.zeros(16)),
+    )
+    _restore_dinov3_rope_periods(model)
+    torch.testing.assert_close(
+        model.rope_embeddings.inv_freq,
+        torch.tensor([1.0 / float(i + 1) for i in range(16)]),
+    )
+
+
+def test_invalid_quantized_rope_periods_fail():
+    model = SimpleNamespace(
+        config=SimpleNamespace(dinov3_rope_periods=[1.0] * 15),
+        rope_embeddings=SimpleNamespace(inv_freq=torch.zeros(16)),
+    )
+    with pytest.raises(ValueError):
+        _restore_dinov3_rope_periods(model)

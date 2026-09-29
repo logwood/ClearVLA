@@ -164,6 +164,29 @@ def _local_weight_identity(root: Path) -> dict[str, object]:
     return {"kind": "local_safetensors_sha256", "files": manifest, "digest": _digest(manifest)}
 
 
+def _restore_dinov3_rope_periods(model: nn.Module) -> None:
+    """Restore quantized official RoPE periods recorded by the raw checkpoint converter.
+
+    Transformers recreates inv_freq from a single rope_theta value. The official
+    checkpoint stores the periods as bfloat16, so that recreation loses the exact
+    values used by the pretrained model. The converter records those periods in
+    the local config; restore them before dtype/device casting. Random or ordinary
+    HF checkpoints omit this field and keep Transformers' default behavior.
+    """
+    config = getattr(model, "config", None)
+    values = getattr(config, "dinov3_rope_periods", None)
+    if values is None:
+        return
+    rope = getattr(model, "rope_embeddings", None)
+    target = getattr(rope, "inv_freq", None)
+    if target is None or type(values) is not list or len(values) != 16:
+        raise ValueError("DINOv3 local config has an invalid quantized RoPE period table")
+    periods = torch.as_tensor(values, dtype=torch.float32, device=target.device)
+    if not bool(torch.isfinite(periods).all()) or bool((periods <= 0).any()):
+        raise ValueError("DINOv3 RoPE periods must be finite and positive")
+    target.copy_(periods.reciprocal().to(dtype=target.dtype))
+
+
 class FrozenDinoV3Encoder(nn.Module):
     """One resident frozen encoder, bounded online image batches, no disk token store.
 
@@ -209,7 +232,8 @@ class FrozenDinoV3Encoder(nn.Module):
             output_loading_info=True, torch_dtype=torch.float32)
         failures = {key: info.get(key) for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs") if info.get(key)}
         if failures:
-            raise ValueError(f"DINOv3 checkpoint must load strictly: {failures}")
+            raise ValueError("DINOv3 checkpoint must load strictly: {}".format(failures))
+        _restore_dinov3_rope_periods(loaded)
         if dtype not in (torch.float32, torch.bfloat16, torch.float16):
             raise ValueError("unsupported encoder compute dtype")
         if torch.device(device).type == "cpu" and dtype == torch.float16:

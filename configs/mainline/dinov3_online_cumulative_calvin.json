@@ -24,7 +24,7 @@
     "visual_pread_max_open_files": 16,
     "window_boundary_contract": "observed_tail_v1",
     "visual_feature_mode": "dinov3_online_v1",
-    "dinov3_model": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+    "dinov3_model": "/data/senwang/clearvla/third_party/dinov3/hf-vitb16-lvd1689m",
     "dinov3_revision": "",
     "dinov3_local_files_only": true,
     "dinov3_microbatch": 2,

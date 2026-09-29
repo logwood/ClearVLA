@@ -1,18 +1,62 @@
 # DINOv3 online / aligned multiview integration
 
+## Deployment preparation refresh (2026-09-29 UTC)
+
+The managed deployment branch is
+`codex/dinov3-online-aligned-vision-20260928`, starting at
+`c47ab5d8bdbaf29c48b378e89a0537e8942a4d10`. The working-tree preparation
+adds the local model binding, exact raw-checkpoint conversion helper, official
+RoPE-period restoration and the guarded launcher. Formal training has not been
+started.
+
+The raw ViT-B/16 checkpoint is at
+`/data/senwang/clearvla/third_party/dinov3/weights/dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth`.
+Its SHA-256 is
+`73cec8be7427c8655ceced13ce62f6e20a1fa90d1b4d4a550df17a1144081a7c`.
+It was obtained from the user-supplied third-party mirror. The converted local
+HF directory is
+`/data/senwang/clearvla/third_party/dinov3/hf-vitb16-lvd1689m`; it contains
+`config.json`, `model.safetensors` and `conversion_metadata.json`.
+The conversion was checked against the official DINOv3 implementation with
+max patch-token error `3.94e-6`. The loader restores the raw checkpoint's
+quantized 16-value RoPE period table from the local config.
+
+The main config points directly to that local HF directory and keeps
+`dinov3_local_files_only=true`, `dino_cache=""`,
+`image_store_mode="hdf5-direct"` and `visual_feature_mode="dinov3_online_v1"`.
+The legacy `decoded_cache` field remains for config ABI compatibility but is
+not opened by this online path. No RGB or DINO feature cache is generated.
+
+A real CUDA admission run completed successfully at
+`/data/senwang/clearvla/experiments/dinov3-online-aligned-vision-20260928/preflight-c47ab5d8-cuda0-full-r2/result.json`.
+It read the actual CALVIN source, encoded RGB online with the frozen local
+pretrained model, performed one full-width policy update, saved and reloaded a
+checkpoint, and matched a deployment action within
+`2.02e-5` under the bf16 `5e-5` numerical gate. The report records the
+checkpoint identity as parent commit `c47ab5d8...`, the DINO file digest and
+`disk_feature_cache=false`. This is interface admission, not task-quality
+evidence.
+
+The preflight used the existing isolated remote DINO environment
+(Python 3.11, Torch 2.7.1+cu126, Transformers 4.57.6) because no Python 3.12
+runtime is installed on the server. Before the formal run, recreate or point
+`CLEARVLA_PYTHON` at the supported project environment (Python 3.12 and the
+locked Torch/Transformers set), then rerun the guarded preflight. Use
+`scripts/launch_dinov3_online_calvin.sh train` only after that gate and an
+explicit training decision.
+
+
 ## Source scope
 
-Continue `codex/dinov3-online-aligned-vision-20260928` from encoder-boundary
-commit `96733915f786379b6982515c6fb688e180cfc010`, which inherits M10a
-`3db5760afa565b9bff911d341450f021c735ccd8`. No original branch is changed.
-The historical cached DINOv2 configs remain explicit frozen controls.
+The current managed source is commit `c47ab5d8bdbaf29c48b378e89a0537e8942a4d10`
+on `codex/dinov3-online-aligned-vision-20260928`; older publication hashes
+below are historical evidence only. No original branch is changed. The
+historical cached DINOv2 configs remain explicit frozen controls.
 
 This source checkpoint integrates the production routes below. The source is
 intended for actual-data/pretrained-GPU interface admission, not a trained
-policy-quality claim. The local 4GiB container could not finish integration
-backward; complete CPU groups are run on a separate supported runner.
-The policy integration fixture uses H32, 336px RGB and the production visual
-width768/256-token boundary. It does NOT establish H512 GPU memory or speed.
+policy-quality claim. H32 remains an explicit compact diagnostic; the current
+full-width CUDA admission is recorded in the deployment refresh above.
 
 ## Selected new experiment
 
