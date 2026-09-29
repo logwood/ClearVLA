@@ -17,6 +17,29 @@ MOMENT_LOCAL_SUPPORT = "moment_local_v1"
 FULL_POSTERIOR_SUPPORT = "full_posterior_lattice_v1"
 
 
+def _weighted_contract(weights: Tensor, values: Tensor) -> Tensor:
+    """Contract [B,Q,G,C,...] weights with [B,C,...,D] values.
+
+    The explicit batched matrix product keeps the physical C/I/J/M/K order
+    visible and avoids einsum's layout planner materializing intermediate
+    transposes for the same contraction.
+    """
+    if weights.ndim < 4 or values.ndim != weights.ndim - 1:
+        raise ValueError("weighted support contraction ranks are misaligned")
+    batch, query, group = (
+        int(weights.shape[0]),
+        int(weights.shape[1]),
+        int(weights.shape[2]),
+    )
+    if tuple(weights.shape[3:]) != tuple(values.shape[1:-1]):
+        raise ValueError("weighted support contraction axes are misaligned")
+    feature = int(values.shape[-1])
+    weight_matrix = weights.reshape(batch, query * group, -1)
+    value_matrix = values.reshape(batch, -1, feature)
+    return torch.bmm(weight_matrix, value_matrix).reshape(batch, query, group, feature)
+
+
+
 def candidate_support_metadata(
     mode: str, *, source_candidate_count: int = 64
 ) -> dict[str, object]:
@@ -201,6 +224,7 @@ def prepare_posterior_microgrid_cache(
     *,
     microgrid_side: int = 3,
     cache_detail: bool = True,
+    detail_dtype: torch.dtype | None = None,
 ) -> PosteriorMicrogridCache:
     """Sample each query-independent local support point exactly once."""
     if coordinates.ndim != 7 or coordinates.shape[-1] != 2:
@@ -261,11 +285,14 @@ def prepare_posterior_microgrid_cache(
                 )
                 sampled_detail = torch.zeros(
                     b, c, *prefix, n, int(detail_chart.shape[2]),
-                    device=detail_chart.device, dtype=torch.float32,
+                    device=detail_chart.device,
+                    dtype=torch.float32 if detail_dtype is None else detail_dtype,
                 )
             else:
                 sampled_rgb = sample(rgb_chart, points)
                 sampled_detail = sample(detail_chart, points) if cache_detail else None
+                if sampled_detail is not None and detail_dtype is not None:
+                    sampled_detail = sampled_detail.to(dtype=detail_dtype)
             point_rows.append(points)
             valid_rows.append(valid)
             rgb_rows.append(sampled_rgb)
@@ -389,11 +416,7 @@ def posterior_microgrid_expectation(
                 ~validity_tile[..., None], 0.0
             )
             partials.append(
-                torch.einsum(
-                    "bqgcijmk,bcijmkv->bqgv",
-                    weight_tile,
-                    safe_values,
-                )
+                _weighted_contract(weight_tile, safe_values)
             )
         return torch.stack(partials, dim=0).sum(dim=0)
 
@@ -414,11 +437,7 @@ def posterior_microgrid_expectation(
                 ~validity_tile[..., None], 0.0
             )
             partials.append(
-                torch.einsum(
-                    "bqgcijmk,bcijmkv->bqgv",
-                    weight_tile,
-                    safe_values,
-                )
+                _weighted_contract(weight_tile, safe_values)
             )
         return torch.stack(partials, dim=0).sum(dim=0)
 
@@ -492,5 +511,5 @@ def posterior_microgrid_expectation(
                                 valid,
                             )
                         )
-            coord_rows.append(torch.einsum("bqgcijmk,bcijmkd->bqgd", joint, points))
+            coord_rows.append(_weighted_contract(joint, points))
     return torch.stack(rgb_rows, -2), torch.stack(detail_rows, -2), torch.stack(coord_rows, -2)
