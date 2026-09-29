@@ -1,0 +1,33 @@
+diff --git a/clearvla/mainline/train.py b/clearvla/mainline/train.py
+index fcf62a2..fcc33df 100644
+--- a/clearvla/mainline/train.py
++++ b/clearvla/mainline/train.py
+@@ -263,13 +263,13 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
+         data = replace(data, raw_hdf5_root=str(args.data_root))
+     if args.decoded_cache is not None:
+         data = replace(data, decoded_cache=str(args.decoded_cache))
+-    if args.dinov3_model is not None:
++    if getattr(args, "dinov3_model", None) is not None:
+         data = replace(data, dinov3_model=args.dinov3_model)
+-    if args.dinov3_revision is not None:
++    if getattr(args, "dinov3_revision", None) is not None:
+         data = replace(data, dinov3_revision=args.dinov3_revision)
+-    if args.dinov3_microbatch is not None:
++    if getattr(args, "dinov3_microbatch", None) is not None:
+         data = replace(data, dinov3_microbatch=args.dinov3_microbatch)
+-    if args.dinov3_allow_download:
++    if getattr(args, "dinov3_allow_download", False):
+         data = replace(data, dinov3_local_files_only=False)
+     if args.dino_cache is not None:
+         data = replace(data, dino_cache=str(args.dino_cache))
+@@ -2482,6 +2482,10 @@ def main() -> None:
+             else "training"
+         ),
+     }
++    if bundle.visual_encoder is not None:
++        context["visual_encoder"] = bundle.visual_encoder.identity()
++        print("[mainline-vision] mode=dinov3_online_v1 frozen=true feature_cache=none "
++              "input=full_fov_256 native_grid=16x16 policy_chart=full_rgb_endpoint_v1", flush=True)
+     if initialization_state is not None:
+         if initialization_checkpoint_resolved is None:
+             raise RuntimeError("model initialization checkpoint provenance was not resolved")
