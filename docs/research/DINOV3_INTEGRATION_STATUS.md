@@ -7,10 +7,12 @@ commit `96733915f786379b6982515c6fb688e180cfc010`, which inherits M10a
 `3db5760afa565b9bff911d341450f021c735ccd8`. No original branch is changed.
 The historical cached DINOv2 configs remain explicit frozen controls.
 
-This source checkpoint integrates the production routes below. Full-width
-CPU engine/checkpoint tests are pending on a larger runner: this container has
-4GiB and completed the forward but was killed during backward. Passing marker
-or compact tests is NOT pretrained, production-CUDA, or robot-task acceptance.
+This source checkpoint integrates the production routes below. The source is
+intended for actual-data/pretrained-GPU interface admission, not a trained
+policy-quality claim. The local 4GiB container could not finish integration
+backward; complete CPU groups are run on a separate supported runner.
+The policy integration fixture uses H32, 336px RGB and the production visual
+width768/256-token boundary. It does NOT establish H512 GPU memory or speed.
 
 ## Selected new experiment
 
@@ -50,6 +52,10 @@ weight/config bytes are hashed, allowing identical files to be relocated.
   to full-image endpoints. DINO coarse/Teacher sampling uses endpoint-preserving
   interpolation. Existing G1/G2/P1/Teacher/reference/transport consumers receive
   the same declared chart, not mixtures of crop and full image.
+  The new chart canonicalizes RGB/DINO memory layout after time gathering;
+  the producer exports a contiguous raster and declares this in its identity.
+  Tensor strides are not allowed to silently choose different train/adapter
+  convolution layouts. Legacy charts retain their original arithmetic.
 * G3 retains four actual value types per camera before fusion, using its single
   object law. New S binding compares task with those per-view values. Joint
   relations consume these values without expanding a pooled global attribute
@@ -116,3 +122,45 @@ fallback in production. Full model-shape HF safetensors/load/forward is an
 opt-in test using explicitly random weights (`CLEARVLA_TEST_HF_DINOV3=1`); it
 checks library integration, not pretrained semantics. GPU/authorized weights
 and real CALVIN closed-loop results must be recorded separately.
+
+## Interrupted acceptance and exact-layout repair (2026-09-29 UTC)
+
+Source was already published at `a183c777a29fd33b4993cb614367a6b57d63ce05`
+when the conversation stopped. This was not another empty-branch recovery.
+Run `36523911471` had one failing original adapter equality assertion (5/168
+native action elements, maximum absolute difference 9.313225746154785e-9),
+with 9 other production tests, 31 visual tests, 1 HF interface test and 90
+regressions passing. Run `36524358555` passed the formal CLI test plus 89 runtime
+tests, but did not rerun or supersede that failing adapter test.
+
+Read-only diagnosis `36526758966` compared exact input values and parameter
+hashes. They matched. Current DINO/RGB and reference tensors had different
+memory strides; canonical contiguous inputs made the sampled actions exactly
+equal. The controlled seed44 replay otherwise showed maximum native difference
+2.2351741790771484e-8. A small real RGB-pyramid probe independently reproduced
+the layout-dependent numerical effect. These tests use artificial visual
+markers and do not explain the old policy's centimeter-scale behavior.
+
+The fix in `de706c296bf4897ba6c9269f4bd056122a5ef876` preserves values, source
+clocks and gradient paths; it adds new-chart-only contiguous observation ingress
+and a contiguous online visual raster. Original `atol=0, rtol=0` adapter tests
+are unchanged. A layout identity change intentionally invalidates intermediate
+smoke checkpoints with the earlier raster identity; do not silently migrate
+those or any cached DINOv2 policy.
+
+Final acceptance run `36527063256` tested source
+`de706c296bf4897ba6c9269f4bd056122a5ef876` with Python3.12/Torch2.11 CPU
+and Transformers4.57.6. All six groups completed: 228 passed, zero failures,
+errors or skips. Breakdown: production 10, visual
+37, HF architecture interface 1,
+formal CLI 1, related regression 90,
+runtime/bridge 89. The original zero-tolerance deployed
+action assertion passed unchanged. Final cleanup only updates this status and
+removes temporary publication/diagnostic workflows; tested production source
+is unchanged. Logs, JUnit and environment are retained in the delivery archive.
+
+
+The first diagnosis helper mistakenly called `to_dict` instead of `as_dict`;
+that helper error and the local OOM attempts are retained in delivery evidence,
+not counted as passing tests or attributed to production DINOv3 behavior.
+No authorized pretrained/CUDA/full-H512/robot closed-loop result is claimed.
