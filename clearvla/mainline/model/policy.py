@@ -155,7 +155,7 @@ class OnlinePolicyCache:
         if self.world_feedback is not None:
             fb=self.world_feedback
             fb.feedback.validate()
-            if fb.current_facts.content is not self.top.belief.content:
+            if fb.current_content is not self.top.belief.content:
                 raise ValueError("executed world feedback belongs to another current chart")
             if fb.feedback.window is not self.history.executed_world_window:
                 raise ValueError("executed world feedback belongs to another source window")

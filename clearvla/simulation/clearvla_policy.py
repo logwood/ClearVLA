@@ -57,7 +57,9 @@ class ClearVLACheckpointPolicy:
         dinov3_model: str | Path | None = None,
         dinov3_allow_download: bool = False,
         seed: int = 0,
+        deployment_fastpath: bool = False,
     ) -> None:
+        self.deployment_fastpath = bool(deployment_fastpath)
         self.bundle: DeploymentBundle = load_deployment_checkpoint(
             checkpoint,
             device=device,
@@ -303,9 +305,17 @@ class ClearVLACheckpointPolicy:
                 raise ValueError("checkpoint requires extended confirmed-command history")
             source.validate(now=history.time_index)
             if source.observed:
-                # Three-frame encoder ABI adds one encoder call; reuse the two
-                # identical overlapping frames from the current cached batch.
-                old_dino,images=self.encoder.encode(source.rgb_history,self.preprocessing)
+                # Only the oldest source pair is new. DINOv3 keeps its
+                # original fixed microbatch companions; legacy DINOv2 keeps
+                # the established full-window path.
+                if isinstance(self.encoder, DinoV3OnlineEncoder):
+                    old_dino, images = self.encoder.encode_oldest(
+                        source.rgb_history, self.preprocessing
+                    )
+                else:
+                    old_dino, images = self.encoder.encode(
+                        source.rgb_history, self.preprocessing
+                    )
                 old_dino=torch.cat((old_dino[:1],dino[:2]),0)
                 old_rgb=torch.from_numpy(np.ascontiguousarray(images[:1])).permute(0,1,4,2,3)
                 old_rgb=old_rgb.unsqueeze(0).to(device=self.device,dtype=torch.float32)/255.
@@ -358,6 +368,7 @@ class ClearVLACheckpointPolicy:
             online,
             config,
             generator=self._generator,
+            deployment_fastpath=getattr(self, "deployment_fastpath", False),
         )
         normalized = sampled.action[0].float().cpu().numpy()
         raw = self.bundle.action_normalizer.decode(normalized).astype(np.float32)

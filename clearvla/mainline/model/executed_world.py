@@ -100,7 +100,7 @@ class ExecutedWorldPlanRead(nn.Module):
         with torch.autocast(device_type=query.device.type, enabled=False):
             per_current = torch.einsum("bkj,bjh->bkh", match, value.float())
             prepared = (per_current * binding.mass[..., None]).sum(1)
-        return ExecutedWorldPlanValues(prepared, feedback, facts, id(self), binding)
+        return ExecutedWorldPlanValues(prepared, feedback, facts.content, id(self), binding)
 
     def forward(
         self, prepared: ExecutedWorldPlanValues, context: Tensor, binding: TargetBinding | None
