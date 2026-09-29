@@ -358,6 +358,32 @@ class ActionQueryEncoder(nn.Module):
         )
         return context
 
+    def context_with_role(
+        self,
+        history: ObservableHistory,
+        *,
+        executed_memory: Tensor,
+        action_history_keep: Tensor,
+        role: Tensor,
+    ) -> V120SeedContext:
+        """Build the ODE-invariant observable context once for a shared role table."""
+        if tuple(role.shape) != (8, self.hidden):
+            raise ValueError("shared V120 role table must be [8,H]")
+        return self._context_from_role(
+            history,
+            executed_memory=executed_memory,
+            action_history_keep=action_history_keep,
+            role=role,
+        )
+
+    def action_with_role(self, noisy_action_field: Tensor, role: Tensor) -> Tensor:
+        """Encode only the time-varying noisy action for one ODE node."""
+        if tuple(noisy_action_field.shape[1:]) != (self.horizon, self.action_dim):
+            raise ValueError("noisy physical action field must be [B,T,Aphysical]")
+        if tuple(role.shape) != (8, self.hidden):
+            raise ValueError("shared V120 role table must be [8,H]")
+        return self._action_from_role(noisy_action_field, role)
+
     def forward_with_context(
         self,
         noisy_action_field: Tensor,

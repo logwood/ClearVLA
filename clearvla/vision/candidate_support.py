@@ -148,6 +148,146 @@ def sample_candidate_expectation(chart: Tensor, coordinates: Tensor, probability
     return torch.cat(outputs, dim=-1)
 
 
+# Larger candidate tiles reduce grid_sample launch overhead while remaining
+# within the validated B8 memory envelope.
+_POSTERIOR_CANDIDATE_TILE = 16
+
+@dataclass(frozen=True)
+class PosteriorMicrogridCache:
+    """Query-independent sampled support reused across P1 query chunks."""
+    points: Tensor
+    valid: Tensor
+    rgb: Tensor
+    detail: Tensor | None
+
+    def validate(
+        self,
+        *,
+        coordinates: Tensor,
+        candidate_valid: Tensor,
+        rgb_chart: Tensor,
+        detail_chart: Tensor,
+        microgrid_side: int,
+    ) -> None:
+        cells = int(microgrid_side) ** 2
+        expected_prefix = (*coordinates.shape[:-2], cells)
+        if tuple(self.points.shape[:-2]) != expected_prefix or self.points.shape[-1] != 2:
+            raise ValueError("posterior microgrid cache points have an invalid shape")
+        if tuple(self.valid.shape[:-1]) != expected_prefix:
+            raise ValueError("posterior microgrid cache validity has an invalid shape")
+        if tuple(self.rgb.shape[:-2]) != expected_prefix or self.rgb.shape[-1] != int(rgb_chart.shape[2]):
+            raise ValueError("posterior microgrid cache RGB values have an invalid shape")
+        if self.detail is not None:
+            if tuple(self.detail.shape[:-2]) != expected_prefix or self.detail.shape[-1] != int(detail_chart.shape[2]):
+                raise ValueError("posterior microgrid cache detail values have an invalid shape")
+        if self.points.device != coordinates.device or self.valid.device != coordinates.device:
+            raise ValueError("posterior microgrid cache address tensors use another device")
+        if self.rgb.device != rgb_chart.device:
+            raise ValueError("posterior microgrid cache RGB values use another device")
+        if self.detail is not None and self.detail.device != detail_chart.device:
+            raise ValueError("posterior microgrid cache detail values use another device")
+        if self.valid.dtype != torch.bool:
+            raise ValueError("posterior microgrid cache validity must be bool")
+        if tuple(self.valid.shape[:-2]) != tuple(candidate_valid.shape[:-1]):
+            raise ValueError("posterior microgrid cache lost candidate identity")
+
+
+def prepare_posterior_microgrid_cache(
+    coordinates: Tensor,
+    radius: Tensor,
+    candidate_valid: Tensor,
+    rgb_chart: Tensor,
+    detail_chart: Tensor,
+    *,
+    microgrid_side: int = 3,
+    cache_detail: bool = True,
+) -> PosteriorMicrogridCache:
+    """Sample each query-independent local support point exactly once."""
+    if coordinates.ndim != 7 or coordinates.shape[-1] != 2:
+        raise ValueError("posterior cache coordinates must be [B,C,I,J,M,K,2]")
+    if candidate_valid.dtype is not torch.bool or tuple(candidate_valid.shape) != tuple(coordinates.shape[:-1]):
+        raise ValueError("posterior cache candidate validity must retain every candidate")
+    if tuple(radius.shape) != tuple(coordinates.shape[:-2]):
+        raise ValueError("posterior cache radius must retain source hypothesis identity")
+    b, c = coordinates.shape[:2]
+    prefix = tuple(coordinates.shape[2:-2])
+    n = int(coordinates.shape[-2])
+    if microgrid_side < 1:
+        raise ValueError("microgrid side must be positive")
+    if rgb_chart.ndim != 5 or detail_chart.ndim != 5:
+        raise ValueError("posterior cache charts must be [B,C,D,H,W]")
+    if tuple(rgb_chart.shape[:2]) != (b, c) or tuple(detail_chart.shape[:2]) != (b, c):
+        raise ValueError("posterior cache charts lost camera identity")
+
+    def sample(chart: Tensor, points: Tensor) -> Tensor:
+        d, sy, sx = chart.shape[2:]
+        n_local = int(points.shape[-2])
+        value = F.grid_sample(
+            chart.float().reshape(b * c, d, sy, sx),
+            points.reshape(b * c, -1, n_local, 2),
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True,
+        )
+        return value.permute(0, 2, 3, 1).reshape(b, c, *prefix, n_local, d)
+
+    with torch.autocast(device_type=coordinates.device.type, enabled=False):
+        axis = (
+            torch.linspace(-1.0, 1.0, microgrid_side, device=coordinates.device)
+            if microgrid_side > 1
+            else coordinates.new_zeros(1).float()
+        )
+        safe_coordinates = coordinates.float().masked_fill(
+            ~candidate_valid[..., None], 0.0
+        )
+        safe_radius = radius.float().masked_fill(
+            ~candidate_valid.any(dim=-1), 0.0
+        )
+        point_rows: list[Tensor] = []
+        valid_rows: list[Tensor] = []
+        rgb_rows: list[Tensor] = []
+        detail_rows: list[Tensor] = []
+        center_index = microgrid_side**2 // 2
+        for cell_index, (y, x) in enumerate(
+            ((y, x) for y in axis.unbind() for x in axis.unbind())
+        ):
+            offset = torch.stack((x, y))
+            points = safe_coordinates + safe_radius[..., None, None] * offset
+            valid = (points.abs() <= 1.0).all(dim=-1) & candidate_valid
+            if microgrid_side % 2 and cell_index == center_index:
+                sampled_rgb = torch.zeros(
+                    b, c, *prefix, n, int(rgb_chart.shape[2]),
+                    device=rgb_chart.device, dtype=torch.float32,
+                )
+                sampled_detail = torch.zeros(
+                    b, c, *prefix, n, int(detail_chart.shape[2]),
+                    device=detail_chart.device, dtype=torch.float32,
+                )
+            else:
+                sampled_rgb = sample(rgb_chart, points)
+                sampled_detail = sample(detail_chart, points) if cache_detail else None
+            point_rows.append(points)
+            valid_rows.append(valid)
+            rgb_rows.append(sampled_rgb)
+            if cache_detail:
+                assert sampled_detail is not None
+                detail_rows.append(sampled_detail)
+    cache = PosteriorMicrogridCache(
+        points=torch.stack(point_rows, dim=-3),
+        valid=torch.stack(valid_rows, dim=-2),
+        rgb=torch.stack(rgb_rows, dim=-3),
+        detail=torch.stack(detail_rows, dim=-3) if cache_detail else None,
+    )
+    cache.validate(
+        coordinates=coordinates,
+        candidate_valid=candidate_valid,
+        rgb_chart=rgb_chart,
+        detail_chart=detail_chart,
+        microgrid_side=microgrid_side,
+    )
+    return cache
+
+
 def posterior_microgrid_expectation(
     route_weights: Tensor,
     fine_logits: Tensor,
@@ -160,6 +300,7 @@ def posterior_microgrid_expectation(
     center_detail: Tensor,
     *,
     microgrid_side: int = 3,
+    cache: PosteriorMicrogridCache | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Sample a real local patch at EACH possible location before marginalizing.
 
@@ -212,17 +353,46 @@ def posterior_microgrid_expectation(
 
     def weighted_dense(chart: Tensor, points: Tensor, weights: Tensor) -> Tensor:
         partials: list[Tensor] = []
-        tile = 8
-        for start in range(0, n, tile):
-            stop = min(start + tile, n)
-            sampled = sample(chart, points[..., start:stop, :]).masked_fill(
-                ~candidate_valid[..., start:stop, None], 0.0
+        tile = _POSTERIOR_CANDIDATE_TILE
+        point_tiles = points.split(tile, dim=-2)
+        weight_tiles = weights.split(tile, dim=-1)
+        valid_tiles = candidate_valid.split(tile, dim=-1)
+        for point_tile, weight_tile, valid_tile in zip(
+            point_tiles, weight_tiles, valid_tiles, strict=True
+        ):
+            sampled = sample(chart, point_tile).masked_fill(
+                ~valid_tile[..., None], 0.0
             )
             partials.append(
                 torch.einsum(
                     "bqgcijmk,bcijmkv->bqgv",
-                    weights[..., start:stop],
+                    weight_tile,
                     sampled,
+                )
+            )
+        return torch.stack(partials, dim=0).sum(dim=0)
+
+    def weighted_cached_dense(
+        sampled_values: Tensor,
+        weights: Tensor,
+        validity: Tensor,
+    ) -> Tensor:
+        partials: list[Tensor] = []
+        tile = _POSTERIOR_CANDIDATE_TILE
+        value_tiles = sampled_values.split(tile, dim=-2)
+        weight_tiles = weights.split(tile, dim=-1)
+        validity_tiles = validity.split(tile, dim=-1)
+        for value_tile, weight_tile, validity_tile in zip(
+            value_tiles, weight_tiles, validity_tiles, strict=True
+        ):
+            safe_values = value_tile.float().masked_fill(
+                ~validity_tile[..., None], 0.0
+            )
+            partials.append(
+                torch.einsum(
+                    "bqgcijmk,bcijmkv->bqgv",
+                    weight_tile,
+                    safe_values,
                 )
             )
         return torch.stack(partials, dim=0).sum(dim=0)
@@ -233,21 +403,33 @@ def posterior_microgrid_expectation(
         validity: Tensor,
     ) -> Tensor:
         partials: list[Tensor] = []
-        tile = 8
-        for start in range(0, n, tile):
-            stop = min(start + tile, n)
-            safe_values = values[..., start:stop, :].float().masked_fill(
-                ~validity[..., start:stop, None], 0.0
+        tile = _POSTERIOR_CANDIDATE_TILE
+        value_tiles = values.split(tile, dim=-2)
+        weight_tiles = weights.split(tile, dim=-1)
+        validity_tiles = validity.split(tile, dim=-1)
+        for value_tile, weight_tile, validity_tile in zip(
+            value_tiles, weight_tiles, validity_tiles, strict=True
+        ):
+            safe_values = value_tile.float().masked_fill(
+                ~validity_tile[..., None], 0.0
             )
             partials.append(
                 torch.einsum(
                     "bqgcijmk,bcijmkv->bqgv",
-                    weights[..., start:stop],
+                    weight_tile,
                     safe_values,
                 )
             )
         return torch.stack(partials, dim=0).sum(dim=0)
 
+    if cache is not None:
+        cache.validate(
+            coordinates=coordinates,
+            candidate_valid=candidate_valid,
+            rgb_chart=rgb_chart,
+            detail_chart=detail_chart,
+            microgrid_side=microgrid_side,
+        )
     rgb_rows: list[Tensor] = []
     detail_rows: list[Tensor] = []
     coord_rows: list[Tensor] = []
@@ -257,9 +439,11 @@ def posterior_microgrid_expectation(
             if microgrid_side > 1
             else coordinates.new_zeros(1).float()
         )
-        for y in axis.unbind():
-            for x in axis.unbind():
-                offset = torch.stack((x, y))
+        for cell_index, (y, x) in enumerate(
+            ((y, x) for y in axis.unbind() for x in axis.unbind())
+        ):
+            offset = torch.stack((x, y))
+            if cache is None:
                 safe_coordinates = coordinates.float().masked_fill(
                     ~candidate_valid[..., None], 0.0
                 )
@@ -268,22 +452,45 @@ def posterior_microgrid_expectation(
                 )
                 points = safe_coordinates + safe_radius[..., None, None] * offset
                 valid = (points.abs() <= 1.0).all(dim=-1) & candidate_valid
-                observed = valid[:, None, None]
-                logits = fine_logits.float().masked_fill(~observed, torch.finfo(torch.float32).min)
-                supported = observed.any(dim=-1, keepdim=True)
-                safe_logits = logits.masked_fill(~supported, 0.0)
-                weights = torch.softmax(safe_logits, dim=-1) * observed.float()
-                joint = route_weights.float()[..., None] * weights
-                cell_index = len(rgb_rows)
-                if microgrid_side % 2 and cell_index == microgrid_side**2 // 2:
-                    rgb_rows.append(
-                        weighted_center(center_rgb, joint, candidate_valid)
-                    )
-                    detail_rows.append(
-                        weighted_center(center_detail, joint, candidate_valid)
-                    )
-                else:
+            else:
+                points = cache.points[..., cell_index, :, :]
+                valid = cache.valid[..., cell_index, :]
+            observed = valid[:, None, None]
+            logits = fine_logits.float().masked_fill(
+                ~observed, torch.finfo(torch.float32).min
+            )
+            supported = observed.any(dim=-1, keepdim=True)
+            safe_logits = logits.masked_fill(~supported, 0.0)
+            weights = torch.softmax(safe_logits, dim=-1) * observed.float()
+            joint = route_weights.float()[..., None] * weights
+            if microgrid_side % 2 and cell_index == microgrid_side**2 // 2:
+                rgb_rows.append(
+                    weighted_center(center_rgb, joint, candidate_valid)
+                )
+                detail_rows.append(
+                    weighted_center(center_detail, joint, candidate_valid)
+                )
+            else:
+                if cache is None:
                     rgb_rows.append(weighted_dense(rgb_chart, points, joint))
                     detail_rows.append(weighted_dense(detail_chart, points, joint))
-                coord_rows.append(torch.einsum("bqgcijmk,bcijmkd->bqgd", joint, points))
+                else:
+                    rgb_rows.append(
+                        weighted_cached_dense(
+                            cache.rgb[..., cell_index, :, :],
+                            joint,
+                            valid,
+                        )
+                    )
+                    if cache.detail is None:
+                        detail_rows.append(weighted_dense(detail_chart, points, joint))
+                    else:
+                        detail_rows.append(
+                            weighted_cached_dense(
+                                cache.detail[..., cell_index, :, :],
+                                joint,
+                                valid,
+                            )
+                        )
+            coord_rows.append(torch.einsum("bqgcijmk,bcijmkd->bqgd", joint, points))
     return torch.stack(rgb_rows, -2), torch.stack(detail_rows, -2), torch.stack(coord_rows, -2)

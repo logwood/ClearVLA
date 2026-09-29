@@ -21,7 +21,7 @@ from ..supervision import quarantine, supported_mean
 from ..task_execution import JOINT_TASK_EXECUTION
 from ..world_robot import OBSERVED_ROBOT_VIEWS, RobotWorldObservation
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
-from .action_contract import BottomOutput
+from .action_contract import BottomOutput, V120SeedContext
 from .annotation_goal import supervise_annotated_goal
 from .component_contracts import ComponentSelection, modular_to_legacy_name
 from .components import (
@@ -142,6 +142,13 @@ class OnlinePolicyCache:
     world_feedback: ExecutedWorldPlanValues | None = None
     instruction_reference: InstructionReference | None = None
 
+    @property
+    def seed_context(self) -> V120SeedContext | None:
+        # Keep the public dataclass schema stable for checkpoint/contract
+        # audits while attaching this runtime-only ODE invariant to the
+        # ephemeral cache object.
+        return getattr(self, "_seed_context", None)
+
     def validate(self, config: ExperimentConfig) -> None:
         self.history.validate(config)
         compiled_task = self.top.intent.compiled_global_task
@@ -255,7 +262,16 @@ class OnlinePolicyCache:
             raise ValueError("online cache action-history keep mask must be [B]")
         if tuple(self.role_table.shape) != (8, config.dimensions.hidden_size):
             raise ValueError("online cache lost the shared V120 role table")
-
+        if self.seed_context is not None:
+            self.seed_context.validate(
+                hidden=config.dimensions.hidden_size,
+                state_history=int(config.dimensions.visual_history_length),
+                executed=int(config.top.proposal_summary_tokens + config.top.proposal_recent_tokens),
+            )
+            if self.seed_context.state.device != self.history.state.device:
+                raise ValueError("online cache seed context is on another device")
+            if self.seed_context.state.shape[0] != self.history.state.shape[0]:
+                raise ValueError("online cache seed context has another batch")
 
 @dataclass(frozen=True)
 class OnlineTrainingState:
@@ -736,6 +752,12 @@ class ClearVLAMainlinePolicy(nn.Module):
             geometry_supervision=geometry_supervision,
         )
         role_table = self.bridge.sample_role_context(prepared.pack.value_tokens)
+        seed_context = self.bridge.static_context(
+            conditioned_policy_input.history,
+            executed_memory=history_proposal.history_tokens,
+            action_history_keep=history_keep,
+            role=role_table,
+        )
         grounding_canvas, grounding_slices = self.bridge.build_grounding_seed(
             state=conditioned_policy_input.history.state,
             rollout_init=prepared.pack.future_queries,
@@ -946,6 +968,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             action_history_keep=history_keep,
             role_table=role_table,
         )
+        object.__setattr__(cache, "_seed_context", seed_context)
         training_state = OnlineTrainingState(
             robot_response_loss=robot_response_loss,
             observation=evidence,
@@ -1097,14 +1120,22 @@ class ClearVLAMainlinePolicy(nn.Module):
         model_action_field = self.outlet_adapter.prepare_model_input(
             noisy_action_field
         )
-        action_query, seed_context = self.bridge.action_and_context(
-            model_action_field,
-            time,
-            cache.history,
-            executed_memory=cache.executed_memory,
-            action_history_keep=cache.action_history_keep,
-            role=cache.role_table,
-        )
+        if cache.seed_context is None:
+            # Compatibility for hand-built caches from the contract tests.
+            action_query, seed_context = self.bridge.action_and_context(
+                model_action_field,
+                time,
+                cache.history,
+                executed_memory=cache.executed_memory,
+                action_history_keep=cache.action_history_keep,
+                role=cache.role_table,
+            )
+        else:
+            action_query = self.bridge.action_query_with_role(
+                model_action_field,
+                cache.role_table,
+            )
+            seed_context = cache.seed_context
         p1_state, p1_metrics = self.p1.update_dynamic(
             action_query=action_query,
             factual=cache.factual_dock,

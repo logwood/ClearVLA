@@ -17,7 +17,9 @@ from torch.utils.checkpoint import checkpoint
 
 from clearvla.vision.candidate_support import (
     FULL_POSTERIOR_SUPPORT,
+    PosteriorMicrogridCache,
     posterior_microgrid_expectation,
+    prepare_posterior_microgrid_cache,
 )
 
 from ..v120_core.config import V39PolicyConfig
@@ -1776,10 +1778,24 @@ class LateRawDetailPolicyReader(nn.Module):
     def _posterior_microgrid_expectation(
         self, route: Tensor, fine_logits: Tensor, candidate_valid: Tensor, coordinates: Tensor, radius: Tensor,
         rgb: Tensor, detail: Tensor, center_rgb: Tensor, center_detail: Tensor,
+        cache_points: Tensor | None = None,
+        cache_valid: Tensor | None = None,
+        cache_rgb: Tensor | None = None,
+        cache_detail: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
+        cache = None
+        if cache_points is not None:
+            if cache_valid is None or cache_rgb is None:
+                raise ValueError("posterior microgrid cache is incomplete")
+            cache = PosteriorMicrogridCache(
+                points=cache_points,
+                valid=cache_valid,
+                rgb=cache_rgb,
+                detail=cache_detail,
+            )
         return posterior_microgrid_expectation(
             route, fine_logits, candidate_valid, coordinates, radius, rgb, detail, center_rgb, center_detail,
-            microgrid_side=self.raw_micro_grid,
+            microgrid_side=self.raw_micro_grid, cache=cache,
         )
 
     def set_address_eval_intervention(self, mode: str) -> None:
@@ -2809,6 +2825,7 @@ class LateRawDetailPolicyReader(nn.Module):
                         )
                     )
                     break
+        posterior_microgrid_cache: PosteriorMicrogridCache | None = None
         for start in range(0, int(query.shape[1]), chunk):
             stop = min(start + chunk, int(query.shape[1]))
             query_row = query[:, start:stop]
@@ -3555,8 +3572,31 @@ class LateRawDetailPolicyReader(nn.Module):
                             detail_chart = detail_chart.roll(1, 1)
                         if intervention == "fine_offset_zero":
                             radius = torch.zeros_like(radius)
-                        micro_inputs = (route_weights, safe_fine_logits, fine_valid, typed_coordinates, radius,
-                                        rgb_chart, detail_chart, typed_literal_rgb, fine_values)
+                        if posterior_microgrid_cache is None:
+                            posterior_microgrid_cache = prepare_posterior_microgrid_cache(
+                                typed_coordinates,
+                                radius,
+                                fine_valid,
+                                rgb_chart,
+                                detail_chart,
+                                microgrid_side=self.raw_micro_grid,
+                                cache_detail=False,
+                            )
+                        micro_inputs = (
+                            route_weights,
+                            safe_fine_logits,
+                            fine_valid,
+                            typed_coordinates,
+                            radius,
+                            rgb_chart,
+                            detail_chart,
+                            typed_literal_rgb,
+                            fine_values,
+                            posterior_microgrid_cache.points,
+                            posterior_microgrid_cache.valid,
+                            posterior_microgrid_cache.rgb,
+                            posterior_microgrid_cache.detail,
+                        )
                         micro_reader = self._posterior_microgrid_expectation
                     if activation_checkpoint_active:
                         (
@@ -3606,16 +3646,11 @@ class LateRawDetailPolicyReader(nn.Module):
                                 key_value.float(),
                             )
 
-                        for candidate_start in range(0, candidate_count, tile):
-                            candidate_stop = min(
-                                candidate_start + tile, candidate_count
-                            )
-                            fine_tile = fine[
-                                ..., candidate_start:candidate_stop
-                            ]
-                            key_tile = key[
-                                ..., candidate_start:candidate_stop, :
-                            ]
+                        fine_tiles = fine.split(tile, dim=-1)
+                        key_tiles = key.split(tile, dim=-2)
+                        for fine_tile, key_tile in zip(
+                            fine_tiles, key_tiles, strict=True
+                        ):
                             if torch.is_grad_enabled() and (
                                 route.requires_grad
                                 or fine_tile.requires_grad
