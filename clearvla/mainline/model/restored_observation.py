@@ -162,6 +162,17 @@ class RestoredV120ObservationCompiler(nn.Module):
             time = VisualSourceTime(source_offsets)
             time.validate(batch=observation.batch, frames=int(observation.dino_history.shape[1]), device=observation.dino_history.device, strict=True)
             observation = replace(observation, dino_history=time.canonicalize(observation.dino_history), raw_rgb=time.canonicalize(observation.raw_rgb))
+        if self.config.observation.visual_chart_mode == "full_rgb_endpoint_v1":
+            # Dataset collation is NCHW-contiguous; camera transport arrives as
+            # an HWC-permuted view. Equal pixels otherwise select different
+            # convolution/reduction layouts and break exact adapter parity.
+            # Canonicalize only the new chart, after source-time gathering,
+            # without changing values, provenance, gradients or legacy math.
+            observation = replace(
+                observation,
+                dino_history=observation.dino_history.contiguous(),
+                raw_rgb=observation.raw_rgb.contiguous(),
+            )
         if context_mask is not None:
             raise ValueError(
                 "the restored V120 compiler owns its early mask; an arbitrary post-hoc "

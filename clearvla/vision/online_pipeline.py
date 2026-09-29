@@ -22,6 +22,7 @@ def raster_identity() -> dict[str, object]:
             "grid": "linspace_-1_1_rgb_pixel_centers",
             "sample": "bilinear_native_patch_centers_border",
             "derived_not_native": True,
+            "tensor_layout": "contiguous_row_major_visual_ingress",
             "raw_pyramid_centers": "padded_odd_kernel_strides_4_8_to_full_endpoints",
             "early_raw_context": "full_endpoint_2G_then_stride2_raster"}
 
@@ -83,7 +84,9 @@ class OnlineVisionPipeline(nn.Module):
     def forward(self, rgb: Tensor) -> Tensor:
         if rgb.shape[-3:] != (3, 336, 336):
             raise ValueError("online mainline expects full 336px RGB, not a hidden crop")
-        return rasterize_full_rgb(self.encoder(rgb), (336, 336))
+        # Worker scatter produces contiguous rows; online inference must return
+        # the same layout rather than grid_sample's channel-major view.
+        return rasterize_full_rgb(self.encoder(rgb), (336, 336)).contiguous()
 
     @torch.no_grad()
     def prepare_batch(self, batch: Mapping[str, Tensor], config) -> dict[str, Tensor]:
