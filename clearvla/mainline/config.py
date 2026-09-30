@@ -1085,6 +1085,10 @@ class OptimizerConfig:
 @dataclass(frozen=True)
 class RuntimeConfig:
     compute_dtype: str = "bf16"
+    # Allow TF32 for FP32 matmul paths (notably P1 routing) on CUDA.
+    # This keeps tensor dtypes and model contracts unchanged while using the
+    # Tensor Core path on Ampere+ GPUs.
+    cuda_tf32: bool = True
     inference_steps: int = 5
     # Deployment flow time is independent of the training t distribution and
     # the 24-row action-time chart. None preserves the historical uniform ABI.
