@@ -27,7 +27,7 @@
     "dinov3_model": "/data/senwang/clearvla/third_party/dinov3/hf-vitb16-lvd1689m",
     "dinov3_revision": "",
     "dinov3_local_files_only": true,
-    "dinov3_microbatch": 16,
+    "dinov3_microbatch": 8,
     "image_store_mode": "hdf5-direct"
   },
   "top": {
