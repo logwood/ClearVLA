@@ -21,7 +21,7 @@ from ..instruction_change import (
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
-from ..task_execution import JOINT_TASK_EXECUTION, NO_TASK_EXECUTION
+from ..task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
 from .annotation_goal import AnnotatedGoalValueRead, EndpointGoalPredictor, compare_goal_to_current
 from .instruction_change import TypedInstructionReferenceRead
@@ -356,7 +356,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.goal_input = nn.Linear(goal_dim, hidden, bias=False)
         self.goal_queries = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.goal_read = _CrossRead(
-            hidden, heads, source_values_only=task_execution_mode == JOINT_TASK_EXECUTION
+            hidden, heads, source_values_only=task_execution_mode in JOINT_TASK_EXECUTION_MODES
         )
         self.goal_self = _SelfBlock(hidden, heads)
         self.history_encoding_mode = history_encoding_mode
@@ -385,12 +385,13 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.interval_clock_code: Tensor | None
         self.register_buffer("interval_clock_code", self.time_grid.interval_encoding(hidden)[None] if self.time_grid.aligned else None)
         self.interval_goal = _CrossRead(
-            hidden, heads, source_values_only=task_execution_mode == JOINT_TASK_EXECUTION
+            hidden, heads, source_values_only=task_execution_mode in JOINT_TASK_EXECUTION_MODES
         )
         self.interval_history = _CrossRead(hidden, heads)
         self.task_relation_encoder = (
-            JointTaskRelationEncoder(hidden=hidden, state_dim=state_dim, camera_names=camera_names)
-            if task_execution_mode == JOINT_TASK_EXECUTION else None
+            JointTaskRelationEncoder(hidden=hidden, state_dim=state_dim, camera_names=camera_names,
+                                     task_execution_mode=task_execution_mode)
+            if task_execution_mode in JOINT_TASK_EXECUTION_MODES else None
         )
         self.interval_object = (
             TaskRelationRead(hidden, heads) if self.task_relation_encoder is not None else
@@ -443,7 +444,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             if not camera_names or len(set(camera_names)) != len(camera_names):
                 raise ValueError("target evidence requires unique declared cameras")
             self.shared_binder = (TaskConditionedTargetBinder(hidden, heads)
-                                  if task_execution_mode == JOINT_TASK_EXECUTION else SharedTargetBinder(hidden))
+                                  if task_execution_mode in JOINT_TASK_EXECUTION_MODES else SharedTargetBinder(hidden))
             self.target_coordinate = nn.Linear(2, hidden, bias=False)
             self.target_state = nn.Linear(state_dim, hidden, bias=False)
             self.target_view = nn.Embedding(len(camera_names), hidden)
@@ -1392,7 +1393,7 @@ class CoarseActionIntent(nn.Module):
             )
         self.intent_read = _CrossRead(hidden, heads)
         self.object_read = (
-            TaskRelationRead(hidden, heads) if task_execution_mode == JOINT_TASK_EXECUTION else
+            TaskRelationRead(hidden, heads) if task_execution_mode in JOINT_TASK_EXECUTION_MODES else
             BoundTargetRead(hidden, heads) if target_binding_mode == SHARED_TARGET_BINDING
             else _CrossRead(hidden, heads)
         )

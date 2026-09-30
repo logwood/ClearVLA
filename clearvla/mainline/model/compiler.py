@@ -22,7 +22,7 @@ from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from ..robot_execution import RobotResponseFeedback
-from ..task_execution import JOINT_TASK_EXECUTION, NO_TASK_EXECUTION, TaskExecutionPlan
+from ..task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION, TaskExecutionPlan
 from .action_codec import ACTION_BAND_ENDS
 from .annotation_goal import AnnotatedGoalPlanRead
 from .executed_world import ExecutedWorldPlanRead
@@ -282,8 +282,9 @@ class ObjectFutureEffectReader(nn.Module):
     ) -> None:
         super().__init__()
         self.task_execution = (
-            TaskOutcomePlanRead(hidden=hidden, content_dim=content_dim, heads=heads, camera_names=camera_names)
-            if task_execution_mode == JOINT_TASK_EXECUTION else None
+            TaskOutcomePlanRead(hidden=hidden, content_dim=content_dim, heads=heads, camera_names=camera_names,
+                                task_execution_mode=task_execution_mode)
+            if task_execution_mode in JOINT_TASK_EXECUTION_MODES else None
         )
 
         if spatial_intent_mode not in {
@@ -1519,7 +1520,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
         validate_global_condition_mode(global_condition_mode)
         self.global_condition_mode = global_condition_mode
         if global_condition_mode == COMPILED_TASK_GLOBAL and (
-            task_execution_mode != JOINT_TASK_EXECUTION
+            task_execution_mode not in JOINT_TASK_EXECUTION_MODES
             or coordination_mode != TYPED_HORIZON_PLAN or not self.time_grid.aligned
         ):
             raise ValueError("P3 global task compilation requires aligned joint task coordination")
@@ -1628,7 +1629,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
             -1, -1, self.basis, -1
         )
         consequence_innovation = consequence.innovation()
-        if self.task_execution_mode == JOINT_TASK_EXECUTION:
+        if self.task_execution_mode in JOINT_TASK_EXECUTION_MODES:
             if task_execution is None or task_execution.relation is not intent.task_relation:
                 raise ValueError("joint P3 lost the exact P2-compiled task relation")
             task_execution.validate(hidden=self.hidden, horizon=self.horizon, basis=self.basis)

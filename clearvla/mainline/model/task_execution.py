@@ -9,10 +9,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 
 from ..future_time import CONTROL_ALIGNED_FUTURE_TIME, resolve_future_time
-from ..task_execution import TaskRelationEvidence
+from ..task_execution import (
+    JOINT_SPATIAL_TASK_EXECUTION, JOINT_TASK_EXECUTION, JOINT_TASK_EXECUTION_MODES,
+    TaskRelationEvidence,
+)
 from .routing import smooth_rms_contract
 from .target_binding import BoundTargetRead, TargetBinding, TargetEvidence, masked_probability
 
@@ -31,8 +36,17 @@ class JointTaskRelationEncoder(nn.Module):
 
     role_basis: Tensor
 
-    def __init__(self, *, hidden: int, state_dim: int, camera_names: tuple[str, ...]) -> None:
+    def __init__(
+        self, *, hidden: int, state_dim: int, camera_names: tuple[str, ...],
+        task_execution_mode: str = JOINT_TASK_EXECUTION, spatial_tile_size: int = 16,
+    ) -> None:
         super().__init__()
+        if task_execution_mode not in JOINT_TASK_EXECUTION_MODES:
+            raise ValueError("unknown task relation execution mode")
+        if type(spatial_tile_size) is not int or spatial_tile_size < 1:
+            raise ValueError("spatial tile size must be a positive integer")
+        self.task_execution_mode = task_execution_mode
+        self.spatial_tile_size = spatial_tile_size
         self.hidden = hidden
         self.camera_names = tuple(camera_names)
         if hidden < 1 or not camera_names or len(set(camera_names)) != len(camera_names):
@@ -61,6 +75,53 @@ class JointTaskRelationEncoder(nn.Module):
             torch.eye(len(names))[[names.index(n) for n in camera_names]],
             persistent=False,
         )
+        # Within the existing S owner; v1 creates no parameters or RNG draws.
+        self.spatial_context = (
+            nn.Linear(4 * hidden, hidden, bias=False)
+            if task_execution_mode == JOINT_SPATIAL_TASK_EXECUTION else None
+        )
+
+    def _spatial_expectation(
+        self, features: Tensor, context: Tensor, probability: Tensor,
+    ) -> Tensor:
+        """Condition BEFORE marginalizing the original G3 spatial law.
+
+        E_p[SiLU(q + phi(x)) - SiLU(q)] is a learned image/robot relation,
+        not pixels minus metres or a calibrated pose. p is neither reselected
+        nor renormalized. Zero coordinate features yield zero spatial values.
+        Non-reentrant recomputation bounds saved pointwise activations as well
+        as forward temporaries. Tile order affects floating rounding only.
+        """
+        if features.ndim != 2 or features.shape[-1] != self.hidden:
+            raise ValueError("spatial basis must be [N,H]")
+        if context.ndim != 5 or context.shape[1] != 4 or context.shape[-1] != self.hidden:
+            raise ValueError("spatial context must retain [B,4,K,C,H]")
+        b, _, k, c, _ = context.shape
+        if features.shape[0] < 1 or probability.shape != (b, k, c, features.shape[0]):
+            raise ValueError("spatial expectation lost its native source law")
+        if features.device != context.device or probability.device != context.device:
+            raise ValueError("spatial expectation sources must share a device")
+
+        def integrate(q: Tensor, points: Tensor, mass: Tensor) -> Tensor:
+            with torch.autocast(device_type=q.device.type, enabled=False):
+                qf = q.float()
+                local = F.silu(qf[..., None, :] + points.float()[None, None, None, None])
+                local = local - F.silu(qf)[..., None, :]
+                return torch.einsum("bkcn,bikcnh->bikch", mass.float(), local)
+
+        with torch.autocast(device_type=context.device.type, enabled=False):
+            result = torch.zeros_like(context, dtype=torch.float32)
+            for start in range(0, features.shape[0], self.spatial_tile_size):
+                stop = min(start + self.spatial_tile_size, features.shape[0])
+                points = features[start:stop]
+                mass = probability[..., start:stop]
+                if torch.is_grad_enabled() and any(x.requires_grad for x in (context, points, mass)):
+                    piece = checkpoint(integrate, context, points, mass,
+                                       use_reentrant=False, preserve_rng_state=False)
+                else:
+                    piece = integrate(context, points, mass)
+                result = result + piece
+        return result
 
     def forward(
         self,
@@ -118,19 +179,42 @@ class JointTaskRelationEncoder(nn.Module):
             raise ValueError(
                 "task relation position law must be source-normalized within each view"
             )
-        features = self.coordinates(position_grid.to(dtype))
-        with torch.autocast(device_type=features.device.type, enabled=False):
-            xy = torch.einsum("bkcn,nh->bkch", p, features.float()).to(a.dtype)
-        robot = self.robot(state.to(dtype))[:, None, None].expand(-1, k, c, -1)
-        role = self.view(self.role_basis.to(dtype))[None, None].expand(b, k, -1, -1)
-        spatial = self.relation(torch.cat((a, xy, robot, role), -1))
-        # Joint values, not another object score. Preserve separate sources
-        # until a nonlinear interaction; no learned coordinate-as-meter claim.
-        spatial = spatial * (
-            1.0 + torch.tanh(self.history(history_context.to(dtype)))[:, None, None]
-        )
-        task = self.task(task_intervals.to(dtype))[:, :, None, None].expand(-1, -1, k, c, -1)
-        rel = spatial[:, None].expand(-1, 4, -1, -1, -1)
+        if self.spatial_context is None:
+            features = self.coordinates(position_grid.to(dtype))
+            with torch.autocast(device_type=features.device.type, enabled=False):
+                xy = torch.einsum("bkcn,nh->bkch", p, features.float()).to(a.dtype)
+            robot = self.robot(state.to(dtype))[:, None, None].expand(-1, k, c, -1)
+            role = self.view(self.role_basis.to(dtype))[None, None].expand(b, k, -1, -1)
+            spatial = self.relation(torch.cat((a, xy, robot, role), -1))
+            # Joint values, not another object score. Preserve separate sources
+            # until a nonlinear interaction; no learned coordinate-as-meter claim.
+            spatial = spatial * (
+                1.0 + torch.tanh(self.history(history_context.to(dtype)))[:, None, None]
+            )
+            task = self.task(task_intervals.to(dtype))[:, :, None, None].expand(-1, -1, k, c, -1)
+            rel = spatial[:, None].expand(-1, 4, -1, -1, -1)
+        else:
+            for value in (position_grid, state, history_context, task_intervals):
+                if value.device != attributes.device or not value.is_floating_point():
+                    raise ValueError("spatial relation contexts must be colocated floating tensors")
+                if not bool(torch.isfinite(value).all()):
+                    raise ValueError("nonfinite supported spatial relation context")
+            robot = self.robot(state.to(dtype))[:, None, None].expand(-1, k, c, -1)
+            role = self.view(self.role_basis.to(dtype))[None, None].expand(b, k, -1, -1)
+            task = self.task(task_intervals.to(dtype))[:, :, None, None].expand(-1, -1, k, c, -1)
+            obj = a[:, None].expand(-1, 4, -1, -1, -1)
+            robot = robot[:, None].expand_as(obj)
+            role = role[:, None].expand_as(obj)
+            with torch.autocast(device_type=a.device.type, enabled=False):
+                features = F.linear(
+                    F.silu(F.linear(position_grid.float(), self.coordinates[0].weight.float())),
+                    self.coordinates[2].weight.float(),
+                )
+                context = F.linear(torch.cat((obj, robot, role, task), -1).float(),
+                                   self.spatial_context.weight.float())
+                xy = self._spatial_expectation(features, context, p)
+            rel = self.relation(torch.cat((obj, xy.to(obj.dtype), robot, role), -1))
+            rel = rel * (1.0 + torch.tanh(self.history(history_context.to(dtype))))[:, None, None, None]
         # No relation-only or task-only additive value bypass. This
         # constrains representation ownership, not a robot behavior rule.
         values = self.interaction(
@@ -138,7 +222,8 @@ class JointTaskRelationEncoder(nn.Module):
         )
         values = torch.where(valid[:, None, :, :, None], values, 0.0)
         result = TaskRelationEvidence(
-            values, valid, binding, self.camera_names, current_content, state
+            values, valid, binding, self.camera_names, current_content, state,
+            execution_mode=self.task_execution_mode,
         )
         result.validate(hidden=h)
         return result
@@ -258,9 +343,13 @@ class TaskOutcomePlanRead(nn.Module):
     time_code: Tensor
 
     def __init__(
-        self, *, hidden: int, content_dim: int, heads: int, camera_names: tuple[str, ...]
+        self, *, hidden: int, content_dim: int, heads: int, camera_names: tuple[str, ...],
+        task_execution_mode: str = JOINT_TASK_EXECUTION,
     ) -> None:
         super().__init__()
+        if task_execution_mode not in JOINT_TASK_EXECUTION_MODES:
+            raise ValueError("unknown task outcome execution mode")
+        self.task_execution_mode = task_execution_mode
         self.hidden, self.camera_names = hidden, tuple(camera_names)
         self.semantic = nn.Linear(content_dim, hidden, bias=False)
         self.image = nn.Linear(2, hidden, bias=False)
@@ -278,6 +367,37 @@ class TaskOutcomePlanRead(nn.Module):
         grid = resolve_future_time(CONTROL_ALIGNED_FUTURE_TIME)
         self.register_buffer("time_code", grid.interval_encoding(hidden), persistent=True)
 
+        self.effect_context_key = (
+            nn.Linear(2 * hidden, hidden, bias=False)
+            if task_execution_mode == JOINT_SPATIAL_TASK_EXECUTION else None
+        )
+
+    def _effect_comparison(self, expected: Tensor, predicted: Tensor) -> tuple[Tensor, Tensor]:
+        """Compare effects after a SHARED nonlinear encoding, before I/K/C pooling.
+
+        Both operands are online predictions, not labels or observed progress.
+        Equal operands give exactly zero discrepancy; swapping negates it.
+        The midpoint is selector-only, never an additive motor/value shortcut.
+        Keep projections in FP32 so BF16 does not round large similar operands
+        to equality before the discrepancy is formed.
+        """
+        if self.effect_context_key is None:
+            raise ValueError("paired effect comparison belongs to the v2 task graph")
+        if expected.shape != predicted.shape or expected.shape[-1] != 2 * self.hidden:
+            raise ValueError("paired effects must share their content/image chart")
+        if expected.device != predicted.device:
+            raise ValueError("paired effects must share a device")
+        with torch.autocast(device_type=expected.device.type, enabled=False):
+            pair = torch.stack((expected.float(), predicted.float()), -2)
+            encoded = F.linear(F.silu(F.linear(pair, self.gap_model[0].weight.float())),
+                               self.gap_model[2].weight.float())
+            gap = encoded[..., 0, :] - encoded[..., 1, :]
+            midpoint = 0.5 * (expected.float() + predicted.float())
+            difference = expected.float() - predicted.float()
+            key = F.linear(difference, self.effect_key.weight.float())
+            key = key + F.linear(midpoint, self.effect_context_key.weight.float())
+        return gap, key
+
     def forward(
         self,
         query: Tensor,
@@ -286,6 +406,8 @@ class TaskOutcomePlanRead(nn.Module):
         predicted: FutureObjectDynamics,
     ) -> tuple[Tensor, Tensor]:
         relation.validate(hidden=self.hidden)
+        if relation.execution_mode != self.task_execution_mode:
+            raise ValueError("task comparison cannot mix execution graphs")
         expected.validate()
         predicted.validate()
         if expected.binding is not relation.binding:
@@ -327,20 +449,36 @@ class TaskOutcomePlanRead(nn.Module):
         predicted_sem = torch.where(sem_valid[..., None], predicted.semantic_delta, 0.0)
         expected_img = torch.where(support[..., None], expected.image_delta, 0.0)
         predicted_img = torch.where(support[..., None], predicted.transport_mean, 0.0)
-        sem = self.semantic((expected_sem.float() - predicted_sem.float()).to(dtype))
-        sem = sem[:, :, :, None].expand(-1, -1, -1, len(self.camera_names), -1)
-        image = self.image((expected_img.float() - predicted_img.float()).to(dtype))
-        # Keep content and image errors distinct until a nonlinear joint read.
-        # Quarantine the common support BEFORE any trainable projection or
-        # product. Masking only the final value can still yield NaN * 0 in
-        # Linear weight gradients from an unavailable relation/view.
-        relation_values = torch.where(support[..., None], relation.values, 0.0)
-        gap = self.gap_model(torch.cat((sem, image), -1))
-        gap = gap * (1.0 + torch.tanh(self.task_modulation(relation_values.to(dtype))))
-        gap = torch.where(support[..., None], gap, 0.0)
-        key = self.relation_key(relation_values.to(dtype)) + self.effect_key(
-            torch.cat((sem, image), -1)
-        )
+        if self.effect_context_key is None:
+            sem = self.semantic((expected_sem.float() - predicted_sem.float()).to(dtype))
+            sem = sem[:, :, :, None].expand(-1, -1, -1, len(self.camera_names), -1)
+            image = self.image((expected_img.float() - predicted_img.float()).to(dtype))
+            # Keep content and image errors distinct until a nonlinear joint read.
+            # Quarantine the common support BEFORE any trainable projection or
+            # product. Masking only the final value can still yield NaN * 0 in
+            # Linear weight gradients from an unavailable relation/view.
+            relation_values = torch.where(support[..., None], relation.values, 0.0)
+            gap = self.gap_model(torch.cat((sem, image), -1))
+            gap = gap * (1.0 + torch.tanh(self.task_modulation(relation_values.to(dtype))))
+            gap = torch.where(support[..., None], gap, 0.0)
+            key = self.relation_key(relation_values.to(dtype)) + self.effect_key(
+                torch.cat((sem, image), -1)
+            )
+        else:
+            with torch.autocast(device_type=query.device.type, enabled=False):
+                semantic_pair = F.linear(torch.stack((expected_sem, predicted_sem), -2).float(),
+                                         self.semantic.weight.float())
+                semantic_pair = semantic_pair[:, :, :, None].expand(
+                    -1, -1, -1, len(self.camera_names), -1, -1)
+                image_pair = F.linear(torch.stack((expected_img, predicted_img), -2).float(),
+                                      self.image.weight.float())
+                effects = torch.cat((semantic_pair, image_pair), -1)
+                effects = torch.where(support[..., None, None], effects, 0.0)
+                relation_values = torch.where(support[..., None], relation.values, 0.0)
+                gap, effect_key = self._effect_comparison(effects[..., 0, :], effects[..., 1, :])
+            gap = gap * (1.0 + torch.tanh(self.task_modulation(relation_values.to(dtype))))
+            gap = torch.where(support[..., None], gap, 0.0)
+            key = self.relation_key(relation_values.to(dtype)) + effect_key
         key = key + self.time_code.to(key)[None, :, None, None]
         mass = relation.binding.mass
         target = self.target_relation(query, key, relation_values, support, mass)

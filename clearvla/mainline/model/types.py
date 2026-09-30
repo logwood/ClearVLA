@@ -1380,7 +1380,23 @@ class ObjectIntentState:
             if change is None:
                 raise ValueError("goal permutation lost instruction evidence")
             annotated_goal = self.annotated_goal.permute(change)
+        relation = None
+        if self.task_relation is not None:
+            if binding is None:
+                raise ValueError("task relation permutation lost shared target")
+            # Reuse the very same permuted source as the paired S expectation;
+            # independently indexing it would create a different owner object.
+            source = (operation.current_content if operation is not None
+                      else self.task_relation.current_content[:, index])
+            relation = replace(
+                self.task_relation,
+                values=self.task_relation.values[:, :, index],
+                view_observed=self.task_relation.view_observed[:, index],
+                binding=binding,
+                current_content=source,
+            )
         return ObjectIntentState(
+            task_relation=relation,
             compiled_global_task=self.compiled_global_task,
             time_grid_mode=self.time_grid_mode,
             protected_goal_set=self.protected_goal_set,

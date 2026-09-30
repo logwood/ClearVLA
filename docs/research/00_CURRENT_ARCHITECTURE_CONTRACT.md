@@ -1,3 +1,47 @@
+## Native spatial/effect execution v2 (2026-09-30 candidate)
+
+Branch `codex/integrated-spatial-adaptation-20260930` starts from
+`f47c5263ed98e756065a4eaf872f06651c5189c8`, not the old ManiSkill E8.
+`top.task_execution_mode="joint_spatial_effect_v2"` replaces two computations
+inside the existing S relation owner and P2 outcome reader. It does not add a
+side policy, action correction, new target selector, physical phase rule or loss.
+The v1/default graph remains selectable with its original parameters and math.
+The new preset `dinov3_online_spatial_effect_calvin.json` differs from the
+existing task-global preset only in this selection and output directory.
+
+S keeps the original G3 law and the I/K/C axes. It integrates
+`E_p[SiLU(q + phi(x)) - SiLU(q)]`, with q learned from task/object/robot/view
+context, BEFORE marginalizing spatial support. This extends the original
+context-independent spatial basis; it is not evidence that the old finite
+basis was non-injective, nor a calibrated 3D or translation-equivariance claim.
+Original target/null mass, named camera support and factual P1 values remain.
+Non-reentrant checkpointed tiles retain ordinary source and parameter gradients;
+small lattice contractions and paired effect projections are performed in FP32.
+This changes compute cost; H512/CUDA cost and robustness need measurement.
+
+P2 retains S and W effect operands until AFTER their shared nonlinear encoder:
+`gap = phi(S_effect) - phi(W_effect)`. The symmetric midpoint supplies retrieval
+keys only, never an additive correction value. Equal effects yield zero gap;
+current target relations remain available, so equality is not a stop rule.
+These are online predictions, not ground-truth progress or contact. W remains
+language-invariant at fixed observed facts and known action. P3, compiled global
+task lifetime, protected evidence, sampler, native action codec and losses remain.
+
+The runtime relation, component selection, source snapshot and deployment ABI
+identify v2. Old weights are not silently loaded into new parameters. Object-slot
+relabeling also preserves the task relation and shares the exact permuted source
+with S's operation expectation; the old helper dropped this field. This fixes a
+bundle/diagnostic contract, not evidence of a physical rollout failure cause.
+
+Validation entry: `bash scripts/check_spatial_effect_v2.sh /tmp/spatial-v2-checks`.
+Tests explicitly separate synthetic compact optimizer/action-gradient checks,
+native 336px/256x768 marker-encoder interface checks, and legacy regressions.
+Their XML/logs are the result authority, not the presence of a test definition.
+The marker is never a pretrained visual model; no physical success claim follows.
+No trained spatial response, held-out recovery, full-width GPU qualification,
+ex-ante prediction memory, coarse-query redesign or W/final-action closure is
+claimed by this revision. Preserve these limits when interpreting experiments.
+
 ## Compiled causal task in the bottom global condition (2026-09-29 candidate)
 
 `bottom.global_condition_mode="p3_compiled_task_v1"` is an explicit new graph;

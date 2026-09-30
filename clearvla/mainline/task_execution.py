@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 NO_TASK_EXECUTION = "none"
 JOINT_TASK_EXECUTION = "joint_object_scene_v1"
+JOINT_SPATIAL_TASK_EXECUTION = "joint_spatial_effect_v2"
+JOINT_TASK_EXECUTION_MODES = (JOINT_TASK_EXECUTION, JOINT_SPATIAL_TASK_EXECUTION)
 
 
 @dataclass(frozen=True)
@@ -35,8 +37,11 @@ class TaskRelationEvidence:
     current_content: Tensor
     current_state: Tensor
     time_grid_mode: str = CONTROL_ALIGNED_FUTURE_TIME
+    execution_mode: str = JOINT_TASK_EXECUTION
 
     def validate(self, *, hidden: int) -> None:
+        if self.execution_mode not in JOINT_TASK_EXECUTION_MODES:
+            raise ValueError("task relation execution semantics are unknown")
         if self.values.ndim != 5 or self.values.shape[1] != 4 or self.values.shape[-1] != hidden:
             raise ValueError("task relations must preserve [B,4,K,C,H]")
         b, _, k, c, _ = self.values.shape
@@ -65,8 +70,10 @@ class TaskRelationEvidence:
             raise ValueError("task relation cannot invent unsupported objects")
 
 
-def task_execution_metadata() -> dict[str, object]:
-    return {
+def task_execution_metadata(mode: str = JOINT_TASK_EXECUTION) -> dict[str, object]:
+    if mode not in JOINT_TASK_EXECUTION_MODES:
+        raise ValueError("task execution metadata requires a selected joint graph")
+    result = {
         "schema": "joint-task-object-scene-execution-v1",
         "relation": "task-times-object-native-spatial-expectation-and-robot-before-role-reduction",
         "spatial": "nonlinear-native-grid-features-before-G3-law-expectation-no-centroid-only-input",
@@ -80,6 +87,16 @@ def task_execution_metadata() -> dict[str, object]:
         "physical_contact_claim": False,
         "persistent_identity_claim": False,
     }
+    if mode == JOINT_SPATIAL_TASK_EXECUTION:
+        result.update({
+            "schema": "joint-spatial-effect-execution-v2",
+            "spatial": "task-object-robot-view-conditioned-nonlinearity-before-original-G3-law-expectation",
+            "comparison": "shared-nonlinear-S-W-effect-difference-with-midpoint-selector-only",
+            "spatial_zero": "zero-coordinate-feature-has-zero-spatial-value",
+            "effect_zero": "equal-predictions-have-exact-zero-discrepancy-not-a-stop-rule",
+            "precision": "FP32-spatial-integration-and-paired-effect-projection",
+        })
+    return result
 
 
 @dataclass(frozen=True)

@@ -18,7 +18,7 @@ from ..operation_expectation import OBJECT_OUTCOME_INTENT
 from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT
 from ..robot_execution import RobotResponseFeedback
 from ..supervision import quarantine, supported_mean
-from ..task_execution import JOINT_TASK_EXECUTION
+from ..task_execution import JOINT_TASK_EXECUTION_MODES
 from ..world_robot import OBSERVED_ROBOT_VIEWS, RobotWorldObservation
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
 from .action_contract import BottomOutput
@@ -173,10 +173,12 @@ class OnlinePolicyCache:
             if endpoint_goal.prediction.reference is not self.instruction_reference:
                 raise ValueError("annotated goal belongs to another instruction start")
         relation = self.top.intent.task_relation
-        if (relation is not None) != (config.top.task_execution_mode == JOINT_TASK_EXECUTION):
+        if (relation is not None) != (config.top.task_execution_mode in JOINT_TASK_EXECUTION_MODES):
             raise ValueError("task relation cache differs from configured graph")
         if relation is not None:
             relation.validate(hidden=config.dimensions.hidden_size)
+            if relation.execution_mode != config.top.task_execution_mode:
+                raise ValueError("task relation cache belongs to another execution graph")
             if (relation.binding is not self.top.intent.target_binding
                     or relation.current_content is not self.top.belief.content
                     or relation.current_state is not self.history.state):
@@ -411,7 +413,7 @@ class ClearVLAMainlinePolicy(nn.Module):
 
         raw_target_reader = (
             TaskAwareFactualRead(dims.hidden_size, dims.num_heads)
-            if top.task_execution_mode == JOINT_TASK_EXECUTION else
+            if top.task_execution_mode in JOINT_TASK_EXECUTION_MODES else
             BoundTargetRead(dims.hidden_size, dims.num_heads)
             if top.target_binding_mode == SHARED_TARGET_BINDING else None
         )

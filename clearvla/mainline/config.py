@@ -59,7 +59,7 @@ from .manifest import ARCHITECTURE_MANIFEST
 from .operation_expectation import OBJECT_OUTCOME_INTENT, OPERATION_INTENT_MODES, POSTERIOR_INTENT
 from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from .p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
-from .task_execution import JOINT_TASK_EXECUTION, NO_TASK_EXECUTION
+from .task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION
 from .temporal import TIMED_HISTORY_ENCODING
 from .transition_condition import (
     SUMMED_TRANSITION,
@@ -563,9 +563,9 @@ class TopConfig:
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
             or self.history_encoding_mode != TIMED_HISTORY_ENCODING):
             raise ValueError("executed world feedback requires aligned sequence W, current-image G3, shared target and typed P3")
-        if self.task_execution_mode not in {NO_TASK_EXECUTION, JOINT_TASK_EXECUTION}:
+        if self.task_execution_mode not in {NO_TASK_EXECUTION, *JOINT_TASK_EXECUTION_MODES}:
             raise ValueError("unknown task_execution_mode")
-        if self.task_execution_mode == JOINT_TASK_EXECUTION and (
+        if self.task_execution_mode in JOINT_TASK_EXECUTION_MODES and (
             self.operation_intent_mode != OBJECT_OUTCOME_INTENT
             or self.target_binding_mode != "shared_operation_v1"
             or self.future_time_grid_mode != "control_aligned_24_v1"
@@ -1138,7 +1138,7 @@ class ExperimentConfig:
         ):
             section.validate()
         if self.bottom.global_condition_mode == COMPILED_TASK_GLOBAL and (
-            self.top.task_execution_mode != "joint_object_scene_v1"
+            self.top.task_execution_mode not in JOINT_TASK_EXECUTION_MODES
             or self.top.p3_coordination_mode != TYPED_HORIZON_PLAN
             or self.top.future_time_grid_mode != CONTROL_ALIGNED_FUTURE_TIME
             or self.bottom.evidence_value_mode != MAGNITUDE_EVIDENCE
@@ -1165,7 +1165,7 @@ class ExperimentConfig:
         if online_visual and (self.dimensions.visual_token_dim != 768 or self.dimensions.patches_per_camera != 256):
             raise ValueError("DINOv3 ViT-B/16 requires 256 spatial tokens of width 768")
         if self.top.object_view_mode == "per_camera_values_v1" and (
-            self.top.task_execution_mode != JOINT_TASK_EXECUTION
+            self.top.task_execution_mode not in JOINT_TASK_EXECUTION_MODES
             or self.top.entity_context_mode != "completed_g3_v1"
         ):
             raise ValueError("per-camera values require the completed G3 and joint task consumer")

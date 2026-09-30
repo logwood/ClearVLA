@@ -31,7 +31,7 @@ from ..future_time import LEGACY_FUTURE_TIME
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE
 from ..instruction_reference import InstructionReference
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
-from ..task_execution import JOINT_TASK_EXECUTION, NO_TASK_EXECUTION
+from ..task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION
 from ..temporal import HistoryTiming
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
 from ..v120_core.role_delta_attnres import AffineVarianceFlooredCenteredNorm
@@ -285,7 +285,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             entity_chart_mode=entity_chart_mode,
             entity_history_mode=entity_history_mode,
             entity_motion_mode=entity_motion_mode,
-            retain_image_source=(instruction_change_mode == POSTERIOR_REFERENCE_CHANGE or task_execution_mode == JOINT_TASK_EXECUTION),
+            retain_image_source=(instruction_change_mode == POSTERIOR_REFERENCE_CHANGE or task_execution_mode in JOINT_TASK_EXECUTION_MODES),
             object_view_mode=object_view_mode,
         )
         self.intent = StatelessObjectIntentOrganizer(
