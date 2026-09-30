@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from dataclasses import replace
+from pathlib import Path
 from typing import Mapping, cast
 
 import numpy as np
@@ -41,6 +41,26 @@ def _mapping(value: object, *, name: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError(f"deployment ABI {name} must be a mapping")
     return cast(Mapping[str, object], value)
+
+
+def _normalized_rgb_tensor(images: np.ndarray, *, device: torch.device) -> torch.Tensor:
+    """Materialize worker-compatible normalized NCHW RGB on the CPU first.
+
+    Training's image store converts uint8 pixels to float32 before the batch is
+    copied to the accelerator. Doing the division after a CUDA transfer changes
+    a few float32 ulps and leaves a permuted HWC stride; both differences can
+    alter the raw pyramid despite identical pixels.
+    """
+
+    value = (
+        torch.from_numpy(np.ascontiguousarray(images))
+        .permute(0, 1, 4, 2, 3)
+        .unsqueeze(0)
+        .contiguous()
+        .float()
+        .div(255.0)
+    )
+    return value.to(device=device, dtype=torch.float32)
 
 
 class ClearVLACheckpointPolicy:
@@ -242,13 +262,7 @@ class ClearVLACheckpointPolicy:
             raise ValueError("checkpoint requires the extended confirmed-command history")
         goal_tokens, goal_mask = self._goal(instruction)
         dino, images = self.encoder.encode(history.rgb_history, self.preprocessing)
-        raw_rgb = (
-            torch.from_numpy(np.ascontiguousarray(images))
-            .permute(0, 1, 4, 2, 3)
-            .unsqueeze(0)
-            .to(device=self.device, dtype=torch.float32)
-            .div_(255.0)
-        )
+        raw_rgb = _normalized_rgb_tensor(images, device=self.device)
         action_state = self._normal(history.action_state[None], action=True)
         executed_action_history = self._normal(
             history.executed_action_history[None],
@@ -307,8 +321,7 @@ class ClearVLACheckpointPolicy:
                 # identical overlapping frames from the current cached batch.
                 old_dino,images=self.encoder.encode(source.rgb_history,self.preprocessing)
                 old_dino=torch.cat((old_dino[:1],dino[:2]),0)
-                old_rgb=torch.from_numpy(np.ascontiguousarray(images[:1])).permute(0,1,4,2,3)
-                old_rgb=old_rgb.unsqueeze(0).to(device=self.device,dtype=torch.float32)/255.
+                old_rgb=_normalized_rgb_tensor(images[:1], device=self.device)
                 old_rgb=torch.cat((old_rgb,raw_rgb[:,:2]),1)
             else:
                 old_dino=torch.zeros_like(dino)

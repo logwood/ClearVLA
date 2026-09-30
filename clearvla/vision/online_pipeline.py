@@ -8,6 +8,7 @@ the nearest patch-center feature; they do not claim extra observed pixels.
 from __future__ import annotations
 
 from typing import Mapping
+
 import torch
 from torch import Tensor, nn
 
@@ -138,19 +139,26 @@ class OnlineVisionPipeline(nn.Module):
         result = {k:v for k,v in batch.items() if not k.startswith("visual_request_")}
         h = 3
         f = int(config.dimensions.future_supports)
-        result["history_dinov2_tokens"] = output[:,:h]
-        result["target_future_dinov2_tokens"] = output[:,h:h+f]
+        # Materialize each role as its own contiguous tensor.  Slicing a
+        # larger request canvas otherwise preserves the full-role stride in
+        # the leading dimension.  Deployment encodes only the causal window,
+        # so the same values arrive with a different layout; downstream
+        # kernels can then take different BF16 paths and exact adapter parity
+        # is lost.  The role boundary is the right place to make layout part
+        # of the producer contract.
+        result["history_dinov2_tokens"] = output[:, :h].clone(memory_format=torch.contiguous_format)
+        result["target_future_dinov2_tokens"] = output[:, h:h+f].clone(memory_format=torch.contiguous_format)
         # Legacy tensor field names are ABI-internal containers, not encoder IDs.
         cursor = h+f
         if config.top.instruction_reference_mode != "none":
-            result["instruction_reference_dino"] = output[:,cursor]
+            result["instruction_reference_dino"] = output[:,cursor].clone(memory_format=torch.contiguous_format)
             result["instruction_reference_observed"] = valid[:,cursor].to(tokens.device)[...,None].expand(-1,-1,256)
             cursor += 1
         if config.top.world_feedback_mode != "none":
-            result["executed_world_dino"] = output[:,cursor:cursor+3]
+            result["executed_world_dino"] = output[:,cursor:cursor+3].clone(memory_format=torch.contiguous_format)
             cursor += 3
         if config.top.annotation_goal_mode != "none":
-            result["annotation_endpoint_dino"] = output[:,cursor]
+            result["annotation_endpoint_dino"] = output[:,cursor].clone(memory_format=torch.contiguous_format)
             result["annotation_endpoint_visual_observed"] = valid[:,cursor].to(tokens.device)[...,None].expand(-1,-1,256)
             cursor += 1
         if cursor != output.shape[1]:

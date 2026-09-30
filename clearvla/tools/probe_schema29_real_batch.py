@@ -1154,6 +1154,17 @@ def main() -> None:
     # state and AdamW construction consumes no model-forward RNG.
     _seed(config.data.seed)
     bundle = load_mainline_data(config)
+    if config.data.visual_feature_mode == "dinov3_online_v1":
+        # Match the formal training CLI.  The loader intentionally leaves the
+        # online encoder unset because it is device-owned and resident; a
+        # real-batch probe must construct the same encoder before converting
+        # the first raw loader batch.
+        from clearvla.vision.online_pipeline import OnlineVisionPipeline
+
+        bundle = replace(
+            bundle,
+            visual_encoder=OnlineVisionPipeline.from_config(config, device),
+        )
     train_loader_generator = torch.Generator().manual_seed(config.data.seed + 101)
     train_flow_generator = _owned_generator(device, config.data.seed + 102)
     train_condition_generator = _owned_generator(device, config.data.seed + 103)
@@ -1177,6 +1188,7 @@ def main() -> None:
     batch = to_training_batch(
         raw_batch,
         goal=bundle.goal,
+        visual_encoder=bundle.visual_encoder,
         config=config,
         device=device,
     )

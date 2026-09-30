@@ -278,6 +278,28 @@ def test_actual_training_step_or_bf16_backward_is_finite(bf16: bool):
     assert all(p.grad is None or torch.isfinite(p.grad).all() for p in m.parameters())
 
 
+def test_training_step_keeps_matched_w_head_gradients_attached():
+    """The mixed candidate/supervised W graph must update its output heads.
+
+    Candidate W is built before the training-only observed-control W branch.
+    Under CUDA autocast, reusing the parameter cast created by a no-grad read
+    silently removes the VJP to these shared heads.  The formal training step
+    disables that cache; this assertion catches a regression without relying
+    on a particular nonzero learned value.
+    """
+
+    m, engine, b = _setup()
+    before = {
+        name: getattr(m.world.dynamics, name).weight.detach().clone()
+        for name in ("delta_head", "transport_head", "covariance_head")
+    }
+    engine.train_step(b, collect_diagnostics=False)
+    for name, value in before.items():
+        after = getattr(m.world.dynamics, name).weight.detach()
+        assert torch.isfinite(after).all()
+        assert not torch.equal(after, value), name
+
+
 def test_exact_checkpoint_and_W_contract_reload(tmp_path: Path, monkeypatch):
     import test_mainline_target_binding as old
 

@@ -453,6 +453,72 @@ class MainlineTrainingEngine:
             )
         return metrics
 
+    def _world_gradient_route_probe(self, ledger: LossLedger) -> dict[str, Tensor]:
+        """Probe the live future-W loss path before the ordinary backward.
+
+        The formal matched-world objective can report a finite, nonzero loss
+        while the active W prediction is detached or no longer reaches its
+        owner parameters.  The normal post-backward gradient table cannot
+        distinguish those cases from a genuinely zero derivative.  This
+        diagnostic VJP keeps the graph and asks the exact future-dynamics
+        scalar for its pull on the three W output heads.
+        """
+
+        loss = ledger.terms.get("future_dynamics")
+        dynamics = getattr(getattr(self.model, "world", None), "dynamics", None)
+        heads = tuple(
+            (name, getattr(getattr(dynamics, head, None), "weight", None))
+            for name, head in (
+                ("delta", "delta_head"),
+                ("transport", "transport_head"),
+                ("covariance", "covariance_head"),
+            )
+        )
+        heads = tuple((name, parameter) for name, parameter in heads if parameter is not None)
+        reference = next(self.model.parameters())
+        result: dict[str, Tensor] = {
+            "gradient_probe_w_future_loss_requires_grad": reference.new_tensor(
+                float(loss is not None and loss.requires_grad), dtype=torch.float32
+            ),
+            "gradient_probe_w_autograd_enabled": reference.new_tensor(
+                float(torch.is_grad_enabled()), dtype=torch.float32
+            ),
+        }
+        for name, parameter in heads:
+            result[f"gradient_probe_w_{name}_head_requires_grad"] = reference.new_tensor(
+                float(parameter.requires_grad), dtype=torch.float32
+            )
+            result[f"gradient_probe_w_future_loss_{name}_head_weight_rms"] = reference.new_zeros(
+                (), dtype=torch.float32
+            )
+            result[f"gradient_probe_w_future_loss_{name}_head_connected"] = reference.new_zeros(
+                (), dtype=torch.float32
+            )
+        heads = tuple((name, parameter) for name, parameter in heads if parameter.requires_grad)
+        if (
+            loss is None
+            or not loss.requires_grad
+            or not torch.is_grad_enabled()
+            or not heads
+        ):
+            return result
+        gradients = torch.autograd.grad(
+            loss,
+            tuple(parameter for _, parameter in heads),
+            retain_graph=True,
+            create_graph=False,
+            allow_unused=True,
+        )
+        for (name, _), gradient in zip(heads, gradients, strict=True):
+            if gradient is not None:
+                result[f"gradient_probe_w_future_loss_{name}_head_connected"] = reference.new_ones(
+                    (), dtype=torch.float32
+                )
+                result[f"gradient_probe_w_future_loss_{name}_head_weight_rms"] = (
+                    gradient.detach().float().square().mean().sqrt()
+                )
+        return result
+
     @staticmethod
     def _gradient_probe_vector(
         gradients: tuple[Tensor | None, ...],
@@ -1069,7 +1135,14 @@ class MainlineTrainingEngine:
         # mainline permanently at the warm-up identity boundary.
         self.model.set_training_step(self.global_step)
         self.optimizer.zero_grad(set_to_none=True)
-        with _autocast(self.device, self.dtype):
+        # Executed-world replay first reads shared W heads under no_grad;
+        # both the subsequent candidate W and matched supervised W need
+        # parameter gradients. CUDA autocast's weight cache can otherwise
+        # reuse the replay's detached cast, leaving a live-looking activation
+        # with no VJP to its owner.
+        # Disable that cache for the mixed-grad training graph; this is a
+        # correctness boundary, not a loss or optimizer change.
+        with _autocast(self.device, self.dtype, cache_enabled=False):
             ledger, metrics = self._forward(
                 batch,
                 training=True,
@@ -1088,6 +1161,8 @@ class MainlineTrainingEngine:
                 f"non-finite training loss ({label}) at completed step {self.global_step}"
             )
         if collect_diagnostics:
+            # Run only after finite-loss admission, before ordinary backward.
+            metrics.update(self._world_gradient_route_probe(ledger))
             # Keep the joint arm/gripper route intact.  These probes expose
             # where the real training losses pull the B-spine; they do not
             # detach, reweight or otherwise participate in the update.

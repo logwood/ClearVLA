@@ -229,5 +229,17 @@ class DinoV3OnlineEncoder(nn.Module):
     @torch.no_grad()
     def encode(self, rgb_history, preprocessing):
         images = preprocess_rgb_history(rgb_history, preprocessing=preprocessing, camera_names=("top", "wrist"))
-        rgb = torch.from_numpy(images).permute(0,1,4,2,3).float().div(255)
+        # Keep the deployment ingress layout identical to the worker's
+        # contiguous [T,C,3,H,W] transport.  A permuted HWC view is numerically
+        # equivalent in theory, but it can select a different interpolation /
+        # reduction kernel (and therefore different BF16 rounding) inside the
+        # frozen encoder.  The online training producer receives contiguous
+        # worker tensors, so make that boundary explicit here as well.
+        rgb = (
+            torch.from_numpy(images)
+            .permute(0, 1, 4, 2, 3)
+            .contiguous()
+            .float()
+            .div(255)
+        )
         return self.pipeline(rgb), images

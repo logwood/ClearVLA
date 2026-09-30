@@ -1,3 +1,29 @@
+## WP2 — mixed-gradient W and visual-ingress parity repair (2026-09-30 candidate)
+
+Branch `codex/wp2-parity-repair-20260930` is a correctness repair based on
+`codex/integrated-spatial-adaptation-20260930`; it does not change the W loss,
+the action chart, the solver schedule, camera roles or supervision budgets.
+The real-batch probe found that the candidate W read is constructed before the
+matched observed-control W read. With CUDA autocast's parameter cache enabled,
+the later gradient path could reuse a cast weight created by the earlier
+no-grad path: activations and losses remained attached-looking, but the W
+output-head VJP was absent. The training step therefore disables the autocast
+weight cache for its mixed-grad forward. Evaluation and deployment remain on
+their existing no-grad path. The engine emits a diagnostic VJP for the delta,
+transport and covariance heads; a nonzero future loss with a missing VJP is a
+route failure, not an optimization result.
+
+The same branch makes the online DINOv3 producer and deployment adapter use a
+canonical contiguous `[T,C,3,H,W]` ingress and materializes each role slice
+with a canonical contiguous layout. Deployment raw RGB is normalized on the
+CPU before the device copy, matching the worker path exactly. This preserves
+values and provenance but removes hidden HWC-view, device-rounding and
+full-request-canvas strides that caused the frozen encoder/raw pyramid to take
+different numerical paths. A real pretrained CUDA/BF16 interface preflight on
+GPU6 then passed with DINO, raw-RGB, and sampled-action max error `0` under the
+existing `5e-5` BF16 gate. This is interface admission, not a learned-policy
+or closed-loop behavior claim.
+
 ## Native spatial/effect execution v2 (2026-09-30 candidate)
 
 Branch `codex/integrated-spatial-adaptation-20260930` starts from

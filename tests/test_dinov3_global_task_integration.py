@@ -8,12 +8,12 @@ import gc
 from dataclasses import replace
 
 import pytest
+import test_dinov3_production_integration as baseline
 import torch
 from torch.utils.data import default_collate
 
-import test_dinov3_production_integration as baseline
-from clearvla.mainline.global_task import COMPILED_TASK_GLOBAL
 from clearvla.mainline.data.loading import to_training_batch
+from clearvla.mainline.global_task import COMPILED_TASK_GLOBAL
 from clearvla.mainline.runtime.sampling import sample_action
 
 
@@ -31,6 +31,10 @@ def test_native_chart_update_with_cumulative_task_global(tmp_path, amp):
     batch = to_training_batch(default_collate([b.datasets['train'][0]]), goal=b.goal,
         config=cfg, device=torch.device('cpu'), visual_encoder=b.visual_encoder)
     assert batch.online.observation.dino_history.shape == (1,3,2,256,768)
+    # Role slices must own the canonical layout independently of the larger
+    # request canvas that also carries future/reference/world rows.
+    assert batch.online.observation.dino_history.is_contiguous()
+    assert batch.online.observation.dino_history.stride() == (3*2*256*768, 2*256*768, 256*768, 768, 1)
     assert batch.online.observation.raw_rgb.shape[-2:] == (336,336)
     m,e = baseline.engine(cfg,b)
     tracked = {n:p for n,p in m.named_parameters()
@@ -80,9 +84,10 @@ def test_native_chart_forward_without_update(tmp_path, amp):
 def test_native_fresh_checkpoint_real_adapter(tmp_path, monkeypatch):
     """Fresh-weight save/adapter parity, NOT a train-step or learned-policy test."""
     from pathlib import Path
+
     from clearvla.mainline.checkpoint import build_checkpoint_identity
-    from clearvla.mainline.runtime.identity import dataset_identity, language_identity
     from clearvla.mainline.runtime.checkpoints import save_checkpoint
+    from clearvla.mainline.runtime.identity import dataset_identity, language_identity
     from clearvla.mainline.train import _data_state
     from clearvla.simulation.clearvla_policy import ClearVLACheckpointPolicy
     from clearvla.simulation.history import CausalHistory
@@ -110,7 +115,8 @@ def test_native_fresh_checkpoint_real_adapter(tmp_path, monkeypatch):
     episode=b.episodes[b.splits['train'][0]]
     history=CausalHistory(executed_world=True)
     history.reset(baseline._observation(episode,0))
-    for i in range(24):history.append(episode.actions_raw[i],baseline._observation(episode,i+1))
+    for i in range(24):
+        history.append(episode.actions_raw[i], baseline._observation(episode, i + 1))
     action,online=policy.act_with_input(history.snapshot(),episode.instruction)
     baseline._assert_same_tree(batch.online,online)
     torch.testing.assert_close(torch.from_numpy(action),torch.from_numpy(expected),rtol=0,atol=0)

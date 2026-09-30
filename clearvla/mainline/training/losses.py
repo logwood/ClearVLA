@@ -972,6 +972,23 @@ def future_dynamics_terms(
         "future_transport_raw_coordinate": transport_raw_coordinate.detach(),
         "future_covariance": covariance,
         "future_transition": transition,
+        # These are diagnostic facts about the active prediction tensor.  They
+        # are intentionally scalar constants: they must report whether the
+        # real W prediction is attached to autograd without becoming another
+        # training objective.  A nonzero future loss with a false flag is a
+        # broken training route, not a difficult optimization example.
+        "future_prediction_semantic_requires_grad": prediction.semantic_delta.new_tensor(
+            float(prediction.semantic_delta.requires_grad), dtype=torch.float32
+        ),
+        "future_prediction_transport_requires_grad": prediction.transport_mean.new_tensor(
+            float(prediction.transport_mean.requires_grad), dtype=torch.float32
+        ),
+        "future_prediction_semantic_grad_fn_present": prediction.semantic_delta.new_tensor(
+            float(prediction.semantic_delta.grad_fn is not None), dtype=torch.float32
+        ),
+        "future_prediction_transport_grad_fn_present": prediction.transport_mean.new_tensor(
+            float(prediction.transport_mean.grad_fn is not None), dtype=torch.float32
+        ),
     }
     if collect_diagnostics:
         # Diagnostics must obey the same support boundary as the active

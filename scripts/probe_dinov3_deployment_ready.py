@@ -124,15 +124,30 @@ def main() -> None:
             expected=bundle.action_normalizer.decode(sampled.action[0].float().cpu().numpy()).astype(np.float32)
             if sampled.gripper_command is not None:
                 expected[:,-1]=sampled.gripper_command[0].float().cpu().numpy()
+        train_observation = single.online.observation
         del model,optimizer,schedule,engine,batch,raw_single,single,sampled
         bundle=replace(bundle,visual_encoder=None)
         gc.collect()
         if device.type=='cuda':torch.cuda.empty_cache()
         policy=ClearVLACheckpointPolicy(checkpoint,device=device,seed=50,
             dinov3_model=a.model,dinov3_allow_download=a.allow_download)
-        action,_=policy.act_with_input(history.snapshot(),episode.instruction)
+        action,deployed_online=policy.act_with_input(history.snapshot(),episode.instruction)
         error=float(np.max(np.abs(action-expected)))
         report['deployment_action_max_abs_difference']=error
+        # Keep visual ingress drift separate from policy numerical drift.  A
+        # failed admission must expose the causal feature/stride mismatch
+        # instead of hiding it behind one action maximum.
+        report['deployment_visual_parity']={}
+        for name in ('dino_history','raw_rgb'):
+            train_value=getattr(train_observation,name)
+            deploy_value=getattr(deployed_online.observation,name)
+            delta=(train_value.detach().float()-deploy_value.detach().float()).abs()
+            report['deployment_visual_parity'][name]={
+                'max_abs':float(delta.max()),
+                'mean_abs':float(delta.mean()),
+                'train_stride':list(train_value.stride()),
+                'deploy_stride':list(deploy_value.stride()),
+            }
         # CUDA bf16 reductions can differ by a few ulps between the in-process
         # training sample and a freshly reconstructed deployment adapter.  The
         # checkpoint-owned dtype and microbatch identity are still required;
