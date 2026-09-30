@@ -1778,13 +1778,13 @@ class LateRawDetailPolicyReader(nn.Module):
     def _posterior_microgrid_expectation(
         self, route: Tensor, fine_logits: Tensor, candidate_valid: Tensor, coordinates: Tensor, radius: Tensor,
         rgb: Tensor, detail: Tensor, center_rgb: Tensor, center_detail: Tensor,
-        cache_points: Tensor | None = None,
+        cache_points: Tensor | PosteriorMicrogridCache | None = None,
         cache_valid: Tensor | None = None,
         cache_rgb: Tensor | None = None,
         cache_detail: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        cache = None
-        if cache_points is not None:
+        cache = cache_points if isinstance(cache_points, PosteriorMicrogridCache) else None
+        if cache_points is not None and cache is None:
             if cache_valid is None or cache_rgb is None:
                 raise ValueError("posterior microgrid cache is incomplete")
             cache = PosteriorMicrogridCache(
@@ -3035,10 +3035,6 @@ class LateRawDetailPolicyReader(nn.Module):
             with torch.autocast(device_type=query.device.type, enabled=False):
                 query_f = query_row.float()
                 if typed_fine_keys:
-                    if query.device.type == 'cuda':
-                        # Drop allocator-only blocks before the first full
-                        # precision candidate-key projection.
-                        torch.cuda.empty_cache()
                     typed_fine_logit_rms: dict[str, Tensor] = {}
                     typed_fine_logits: dict[str, Tensor] = {}
                     for name, typed_key in typed_fine_keys.items():
@@ -3662,7 +3658,7 @@ class LateRawDetailPolicyReader(nn.Module):
                     if not isinstance(self.typed_micro_basis, Tensor):
                         raise RuntimeError("typed P1 microgrid basis is missing")
                     assert typed_future_rows is not None
-                    micro_inputs: tuple[Tensor, ...] = (
+                    micro_inputs: tuple[Tensor | PosteriorMicrogridCache, ...] = (
                         route_weights,
                         fine_weights,
                         self.typed_micro_basis,
@@ -3704,10 +3700,7 @@ class LateRawDetailPolicyReader(nn.Module):
                             detail_chart,
                             typed_literal_rgb,
                             fine_values,
-                            posterior_microgrid_cache.points,
-                            posterior_microgrid_cache.valid,
-                            posterior_microgrid_cache.rgb,
-                            posterior_microgrid_cache.detail,
+                            posterior_microgrid_cache,
                         )
                         micro_reader = self._posterior_microgrid_expectation
                     if activation_checkpoint_active:
@@ -3726,12 +3719,6 @@ class LateRawDetailPolicyReader(nn.Module):
                             typed_detail_micro,
                             typed_coordinate_micro,
                         ) = micro_reader(*micro_inputs)
-                    if route_weights.is_cuda:
-                        # Release allocator blocks before candidate context
-                        # contractions; the projection-side release bounds
-                        # fragmentation across full-support query chunks.
-                        torch.cuda.empty_cache()
-
                     def _typed_context_from_candidates(
                         route: Tensor,
                         fine: Tensor,

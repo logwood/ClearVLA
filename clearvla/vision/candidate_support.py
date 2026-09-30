@@ -6,7 +6,7 @@ This module has no parameters, task input, additional evidence, or top-k quota.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F
@@ -182,6 +182,29 @@ class PosteriorMicrogridCache:
     valid: Tensor
     rgb: Tensor
     detail: Tensor | None
+    values_masked: bool = False
+    point_cells: tuple[Tensor, ...] = field(init=False, repr=False)
+    valid_cells: tuple[Tensor, ...] = field(init=False, repr=False)
+    rgb_tiles: tuple[tuple[Tensor, ...], ...] = field(init=False, repr=False)
+    detail_tiles: tuple[tuple[Tensor, ...], ...] | None = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # Own the view graph once per observation. Recreating select/split
+        # nodes in each query checkpoint expands every partial gradient into
+        # the complete sampled-support tensor before accumulating it.
+        object.__setattr__(self, "point_cells", self.points.unbind(dim=-3))
+        object.__setattr__(self, "valid_cells", self.valid.unbind(dim=-2))
+        object.__setattr__(
+            self, "rgb_tiles",
+            tuple(cell.split(_POSTERIOR_CANDIDATE_TILE, dim=-2)
+                  for cell in self.rgb.unbind(dim=-3)),
+        )
+        object.__setattr__(
+            self, "detail_tiles",
+            None if self.detail is None else
+            tuple(cell.split(_POSTERIOR_CANDIDATE_TILE, dim=-2)
+                  for cell in self.detail.unbind(dim=-3)),
+        )
 
     def validate(
         self,
@@ -293,6 +316,11 @@ def prepare_posterior_microgrid_cache(
                 sampled_detail = sample(detail_chart, points) if cache_detail else None
                 if sampled_detail is not None and detail_dtype is not None:
                     sampled_detail = sampled_detail.to(dtype=detail_dtype)
+            # Apply the query-independent support mask once. The same masked
+            # samples are consumed by every P1 query chunk.
+            sampled_rgb = sampled_rgb.masked_fill(~valid[..., None], 0.0)
+            if sampled_detail is not None:
+                sampled_detail = sampled_detail.masked_fill(~valid[..., None], 0.0)
             point_rows.append(points)
             valid_rows.append(valid)
             rgb_rows.append(sampled_rgb)
@@ -304,6 +332,7 @@ def prepare_posterior_microgrid_cache(
         valid=torch.stack(valid_rows, dim=-2),
         rgb=torch.stack(rgb_rows, dim=-3),
         detail=torch.stack(detail_rows, dim=-3) if cache_detail else None,
+        values_masked=True,
     )
     cache.validate(
         coordinates=coordinates,
@@ -400,20 +429,23 @@ def posterior_microgrid_expectation(
         return torch.stack(partials, dim=0).sum(dim=0)
 
     def weighted_cached_dense(
-        sampled_values: Tensor,
+        value_tiles: tuple[Tensor, ...],
         weights: Tensor,
         validity: Tensor,
+        *,
+        values_masked: bool = False,
     ) -> Tensor:
         partials: list[Tensor] = []
         tile = _POSTERIOR_CANDIDATE_TILE
-        value_tiles = sampled_values.split(tile, dim=-2)
         weight_tiles = weights.split(tile, dim=-1)
         validity_tiles = validity.split(tile, dim=-1)
         for value_tile, weight_tile, validity_tile in zip(
             value_tiles, weight_tiles, validity_tiles, strict=True
         ):
-            safe_values = value_tile.float().masked_fill(
-                ~validity_tile[..., None], 0.0
+            safe_values = (
+                value_tile.float()
+                if values_masked
+                else value_tile.float().masked_fill(~validity_tile[..., None], 0.0)
             )
             partials.append(
                 _weighted_contract(weight_tile, safe_values)
@@ -472,8 +504,8 @@ def posterior_microgrid_expectation(
                 points = safe_coordinates + safe_radius[..., None, None] * offset
                 valid = (points.abs() <= 1.0).all(dim=-1) & candidate_valid
             else:
-                points = cache.points[..., cell_index, :, :]
-                valid = cache.valid[..., cell_index, :]
+                points = cache.point_cells[cell_index]
+                valid = cache.valid_cells[cell_index]
             observed = valid[:, None, None]
             logits = fine_logits.float().masked_fill(
                 ~observed, torch.finfo(torch.float32).min
@@ -496,9 +528,10 @@ def posterior_microgrid_expectation(
                 else:
                     rgb_rows.append(
                         weighted_cached_dense(
-                            cache.rgb[..., cell_index, :, :],
+                            cache.rgb_tiles[cell_index],
                             joint,
                             valid,
+                            values_masked=cache.values_masked,
                         )
                     )
                     if cache.detail is None:
@@ -506,9 +539,10 @@ def posterior_microgrid_expectation(
                     else:
                         detail_rows.append(
                             weighted_cached_dense(
-                                cache.detail[..., cell_index, :, :],
+                                cache.detail_tiles[cell_index],
                                 joint,
                                 valid,
+                                values_masked=cache.values_masked,
                             )
                         )
             coord_rows.append(_weighted_contract(joint, points))
