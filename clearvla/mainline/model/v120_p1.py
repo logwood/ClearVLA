@@ -2916,6 +2916,7 @@ class LateRawDetailPolicyReader(nn.Module):
                 the native key view and recomputes the FP32 cast in backward.
                 """
                 del equation  # the two supported layouts are shape-dispatched below
+                projection_scale = float(self.lattice_route_dim) ** -0.5
                 candidate_count = int(projection_key.shape[-2])
                 candidate_tile = 128
                 parts: list[Tensor] = []
@@ -2956,7 +2957,9 @@ class LateRawDetailPolicyReader(nn.Module):
                                 width,
                                 rows * cols * micro * candidates_tile,
                             )
-                            projected = torch.bmm(query_matrix, key_matrix)
+                            projected = (
+                                torch.bmm(query_matrix, key_matrix) * projection_scale
+                            )
                             return projected.reshape(
                                 batch_size,
                                 cameras,
@@ -3001,7 +3004,9 @@ class LateRawDetailPolicyReader(nn.Module):
                                 width,
                                 candidates_tile,
                             )
-                            projected = torch.bmm(query_matrix, key_matrix)
+                            projected = (
+                                torch.bmm(query_matrix, key_matrix) * projection_scale
+                            )
                             return projected.reshape(
                                 batch_size,
                                 cameras,
@@ -3688,7 +3693,12 @@ class LateRawDetailPolicyReader(nn.Module):
                                 detail_chart,
                                 microgrid_side=self.raw_micro_grid,
                                 cache_detail=True,
-                                detail_dtype=torch.float16,
+                                # Keep cached neighborhood values in the same FP32
+                                # arithmetic domain as the original uncached grid_sample
+                                # path. The center microcell uses center_detail directly,
+                                # so an FP16-only cache would make center and neighbors
+                                # disagree numerically.
+                                detail_dtype=None,
                             )
                         micro_inputs = (
                             route_weights,
