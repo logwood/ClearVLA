@@ -1135,14 +1135,12 @@ class MainlineTrainingEngine:
         # mainline permanently at the warm-up identity boundary.
         self.model.set_training_step(self.global_step)
         self.optimizer.zero_grad(set_to_none=True)
-        # Executed-world replay first reads shared W heads under no_grad;
-        # both the subsequent candidate W and matched supervised W need
-        # parameter gradients. CUDA autocast's weight cache can otherwise
-        # reuse the replay's detached cast, leaving a live-looking activation
-        # with no VJP to its owner.
-        # Disable that cache for the mixed-grad training graph; this is a
-        # correctness boundary, not a loss or optimizer change.
-        with _autocast(self.device, self.dtype, cache_enabled=False):
+        # Executed-world replay clears CUDA autocast's detached weight casts
+        # before the differentiable candidate/supervised W passes. Keep the
+        # normal weight cache for the hot path; the clear is the narrow
+        # correctness boundary in ``encode_online`` rather than a global
+        # cache disable that would recast every parameter on every operator.
+        with _autocast(self.device, self.dtype):
             ledger, metrics = self._forward(
                 batch,
                 training=True,

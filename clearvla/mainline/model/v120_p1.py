@@ -17,7 +17,9 @@ from torch.utils.checkpoint import checkpoint
 
 from clearvla.vision.candidate_support import (
     FULL_POSTERIOR_SUPPORT,
+    PosteriorMicrogridCache,
     posterior_microgrid_expectation,
+    prepare_posterior_microgrid_cache,
 )
 
 from ..v120_core.config import V39PolicyConfig
@@ -1776,10 +1778,24 @@ class LateRawDetailPolicyReader(nn.Module):
     def _posterior_microgrid_expectation(
         self, route: Tensor, fine_logits: Tensor, candidate_valid: Tensor, coordinates: Tensor, radius: Tensor,
         rgb: Tensor, detail: Tensor, center_rgb: Tensor, center_detail: Tensor,
+        cache_points: Tensor | PosteriorMicrogridCache | None = None,
+        cache_valid: Tensor | None = None,
+        cache_rgb: Tensor | None = None,
+        cache_detail: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
+        cache = cache_points if isinstance(cache_points, PosteriorMicrogridCache) else None
+        if cache_points is not None and cache is None:
+            if cache_valid is None or cache_rgb is None:
+                raise ValueError("posterior microgrid cache is incomplete")
+            cache = PosteriorMicrogridCache(
+                points=cache_points,
+                valid=cache_valid,
+                rgb=cache_rgb,
+                detail=cache_detail,
+            )
         return posterior_microgrid_expectation(
             route, fine_logits, candidate_valid, coordinates, radius, rgb, detail, center_rgb, center_detail,
-            microgrid_side=self.raw_micro_grid,
+            microgrid_side=self.raw_micro_grid, cache=cache,
         )
 
     def set_address_eval_intervention(self, mode: str) -> None:
@@ -2809,6 +2825,7 @@ class LateRawDetailPolicyReader(nn.Module):
                         )
                     )
                     break
+        posterior_microgrid_cache: PosteriorMicrogridCache | None = None
         for start in range(0, int(query.shape[1]), chunk):
             stop = min(start + chunk, int(query.shape[1]))
             query_row = query[:, start:stop]
@@ -2854,6 +2871,37 @@ class LateRawDetailPolicyReader(nn.Module):
                             )
                         )
                     )
+            def _typed_coarse_projection(
+                projection_query: Tensor,
+                projection_key: Tensor,
+            ) -> Tensor:
+                # The camera axis is a matched batch axis, not a contraction
+                # axis. Flatten it into B and use one batched matmul for the
+                # R contraction while retaining every C/I/J/M state.
+                query_f = projection_query.float()
+                key_f = projection_key.float()
+                batch_size, query_count, glimpse_count, cameras, width = (
+                    query_f.shape
+                )
+                if tuple(key_f.shape[:2]) != (batch_size, cameras):
+                    raise ValueError("typed coarse projection camera axes disagree")
+                if int(key_f.shape[-1]) != int(width):
+                    raise ValueError("typed coarse projection widths disagree")
+                state_count = math.prod(int(value) for value in key_f.shape[2:-1])
+                query_matrix = query_f.permute(0, 3, 1, 2, 4).reshape(
+                    batch_size * cameras, query_count * glimpse_count, width
+                )
+                key_matrix = key_f.permute(0, 1, 5, 2, 3, 4).reshape(
+                    batch_size * cameras, width, state_count
+                )
+                return torch.bmm(query_matrix, key_matrix).reshape(
+                    batch_size,
+                    cameras,
+                    query_count,
+                    glimpse_count,
+                    *key_f.shape[2:-1],
+                ).permute(0, 2, 3, 1, 4, 5, 6)
+
             def _tiled_typed_fine_projection(
                 projection_query: Tensor,
                 projection_key: Tensor,
@@ -2867,8 +2915,9 @@ class LateRawDetailPolicyReader(nn.Module):
                 instead; training tiles are checkpointed so autograd retains
                 the native key view and recomputes the FP32 cast in backward.
                 """
+                del equation  # the two supported layouts are shape-dispatched below
                 candidate_count = int(projection_key.shape[-2])
-                candidate_tile = 64
+                candidate_tile = 128
                 parts: list[Tensor] = []
                 for candidate_start in range(0, candidate_count, candidate_tile):
                     candidate_stop = min(
@@ -2882,11 +2931,91 @@ class LateRawDetailPolicyReader(nn.Module):
                         query_value: Tensor,
                         key_value: Tensor,
                     ) -> Tensor:
-                        return torch.einsum(
-                            equation,
-                            query_value.float(),
-                            key_value.float(),
-                        ) * (float(self.lattice_route_dim) ** -0.5)
+                        query_f = query_value.float()
+                        key_f = key_value.float()
+                        if query_f.ndim == 5 and key_f.ndim == 7:
+                            batch_size, query_count, glimpse_count, cameras, width = (
+                                query_f.shape
+                            )
+                            _, key_cameras, rows, cols, micro, candidates_tile, key_width = (
+                                key_f.shape
+                            )
+                            if cameras != key_cameras or width != key_width:
+                                raise ValueError("typed fine projection axes disagree")
+                            query_matrix = query_f.permute(
+                                0, 3, 1, 2, 4
+                            ).reshape(
+                                batch_size * cameras,
+                                query_count * glimpse_count,
+                                width,
+                            )
+                            key_matrix = key_f.permute(
+                                0, 1, 6, 2, 3, 4, 5
+                            ).reshape(
+                                batch_size * cameras,
+                                width,
+                                rows * cols * micro * candidates_tile,
+                            )
+                            projected = torch.bmm(query_matrix, key_matrix)
+                            return projected.reshape(
+                                batch_size,
+                                cameras,
+                                query_count,
+                                glimpse_count,
+                                rows,
+                                cols,
+                                micro,
+                                candidates_tile,
+                            ).permute(0, 2, 3, 1, 4, 5, 6, 7)
+                        if query_f.ndim == 8 and key_f.ndim == 7:
+                            (
+                                batch_size,
+                                query_count,
+                                glimpse_count,
+                                cameras,
+                                rows,
+                                cols,
+                                micro,
+                                width,
+                            ) = query_f.shape
+                            _, key_cameras, key_rows, key_cols, key_micro, candidates_tile, key_width = (
+                                key_f.shape
+                            )
+                            if (
+                                cameras != key_cameras
+                                or (rows, cols, micro, width)
+                                != (key_rows, key_cols, key_micro, key_width)
+                            ):
+                                raise ValueError("typed gateway projection axes disagree")
+                            query_matrix = query_f.permute(
+                                0, 3, 4, 5, 6, 1, 2, 7
+                            ).reshape(
+                                batch_size * cameras * rows * cols * micro,
+                                query_count * glimpse_count,
+                                width,
+                            )
+                            key_matrix = key_f.permute(
+                                0, 1, 2, 3, 4, 6, 5
+                            ).reshape(
+                                batch_size * cameras * rows * cols * micro,
+                                width,
+                                candidates_tile,
+                            )
+                            projected = torch.bmm(query_matrix, key_matrix)
+                            return projected.reshape(
+                                batch_size,
+                                cameras,
+                                rows,
+                                cols,
+                                micro,
+                                query_count,
+                                glimpse_count,
+                                candidates_tile,
+                            ).permute(0, 5, 6, 1, 2, 3, 4, 7)
+                        raise ValueError(
+                            "unsupported typed fine projection layout: "
+                            f"query={tuple(query_f.shape)} key={tuple(key_f.shape)}"
+                        )
 
                     if torch.is_grad_enabled() and (
                         projection_query.requires_grad or key_tile.requires_grad
@@ -2906,10 +3035,6 @@ class LateRawDetailPolicyReader(nn.Module):
             with torch.autocast(device_type=query.device.type, enabled=False):
                 query_f = query_row.float()
                 if typed_fine_keys:
-                    if query.device.type == 'cuda':
-                        # Drop allocator-only blocks before the first full
-                        # precision candidate-key projection.
-                        torch.cuda.empty_cache()
                     typed_fine_logit_rms: dict[str, Tensor] = {}
                     typed_fine_logits: dict[str, Tensor] = {}
                     for name, typed_key in typed_fine_keys.items():
@@ -3328,10 +3453,9 @@ class LateRawDetailPolicyReader(nn.Module):
                     typed_route_logit_rms: dict[str, Tensor] = {}
                     typed_route_logits: dict[str, Tensor] = {}
                     for name, typed_key in typed_coarse_keys.items():
-                        typed_logit = torch.einsum(
-                            "bqgcr,bcijmr->bqgcijm",
-                            typed_coarse_query_rows[name].float(),
-                            typed_key.float(),
+                        typed_logit = _typed_coarse_projection(
+                            typed_coarse_query_rows[name],
+                            typed_key,
                         ) * (float(self.lattice_route_dim) ** -0.5)
                         if collect_diagnostics:
                             typed_route_logit_rms[name] = (
@@ -3394,11 +3518,11 @@ class LateRawDetailPolicyReader(nn.Module):
                 # (legacy versions retain their W-organized chart).  Add its
                 # current-fact compatibility once per camera/xy cell and let
                 # the existing selector choose slot and sub-cell offset.
-                world_logits = torch.einsum(
-                    "bqgcr,bqcijr->bqgcij",
-                    query_f,
-                    world_route[:, start:stop].float(),
-                ) * (float(self.lattice_route_dim) ** -0.5)
+                world_value = world_route[:, start:stop].float()
+                world_logits = (
+                    query_f[:, :, :, :, None, None, :]
+                    * world_value[:, :, None, :, :, :, :]
+                ).sum(dim=-1) * (float(self.lattice_route_dim) ** -0.5)
                 route_logits = route_logits + world_logits[..., None]
                 if (
                     self.functional_mainline_routing
@@ -3534,7 +3658,7 @@ class LateRawDetailPolicyReader(nn.Module):
                     if not isinstance(self.typed_micro_basis, Tensor):
                         raise RuntimeError("typed P1 microgrid basis is missing")
                     assert typed_future_rows is not None
-                    micro_inputs: tuple[Tensor, ...] = (
+                    micro_inputs: tuple[Tensor | PosteriorMicrogridCache, ...] = (
                         route_weights,
                         fine_weights,
                         self.typed_micro_basis,
@@ -3555,8 +3679,29 @@ class LateRawDetailPolicyReader(nn.Module):
                             detail_chart = detail_chart.roll(1, 1)
                         if intervention == "fine_offset_zero":
                             radius = torch.zeros_like(radius)
-                        micro_inputs = (route_weights, safe_fine_logits, fine_valid, typed_coordinates, radius,
-                                        rgb_chart, detail_chart, typed_literal_rgb, fine_values)
+                        if posterior_microgrid_cache is None:
+                            posterior_microgrid_cache = prepare_posterior_microgrid_cache(
+                                typed_coordinates,
+                                radius,
+                                fine_valid,
+                                rgb_chart,
+                                detail_chart,
+                                microgrid_side=self.raw_micro_grid,
+                                cache_detail=True,
+                                detail_dtype=torch.float16,
+                            )
+                        micro_inputs = (
+                            route_weights,
+                            safe_fine_logits,
+                            fine_valid,
+                            typed_coordinates,
+                            radius,
+                            rgb_chart,
+                            detail_chart,
+                            typed_literal_rgb,
+                            fine_values,
+                            posterior_microgrid_cache,
+                        )
                         micro_reader = self._posterior_microgrid_expectation
                     if activation_checkpoint_active:
                         (
@@ -3574,12 +3719,6 @@ class LateRawDetailPolicyReader(nn.Module):
                             typed_detail_micro,
                             typed_coordinate_micro,
                         ) = micro_reader(*micro_inputs)
-                    if route_weights.is_cuda:
-                        # The candidate-tiled path keeps the live graph intact;
-                        # release only allocator blocks left unused between the
-                        # microgrid checkpoint and the next contraction.
-                        torch.cuda.empty_cache()
-
                     def _typed_context_from_candidates(
                         route: Tensor,
                         fine: Tensor,
@@ -3592,30 +3731,41 @@ class LateRawDetailPolicyReader(nn.Module):
                         # posterior support and gradients within 24 GB.
                         candidate_count = int(fine.shape[-1])
                         partials: list[Tensor] = []
-                        tile = 16
+                        tile = 64
 
                         def _context_piece(
                             route_value: Tensor,
                             fine_value: Tensor,
                             key_value: Tensor,
                         ) -> Tensor:
-                            return torch.einsum(
-                                "bqgcijm,bqgcijmk,bcijmkr->bqgr",
-                                route_value,
-                                fine_value,
-                                key_value.float(),
+                            # Flatten the physical C/I/J/M/K axes for one
+                            # batched matrix product. This preserves every
+                            # posterior term while avoiding einsum's repeated
+                            # high-rank layout planning.
+                            batch_size = int(route_value.shape[0])
+                            query_count = int(route_value.shape[1])
+                            glimpse_count = int(route_value.shape[2])
+                            joint = route_value.unsqueeze(-1) * fine_value
+                            weight_matrix = joint.reshape(
+                                batch_size, query_count * glimpse_count, -1
+                            )
+                            key_matrix = key_value.float().reshape(
+                                batch_size, -1, int(key_value.shape[-1])
+                            )
+                            return torch.bmm(
+                                weight_matrix, key_matrix
+                            ).reshape(
+                                batch_size,
+                                query_count,
+                                glimpse_count,
+                                int(key_value.shape[-1]),
                             )
 
-                        for candidate_start in range(0, candidate_count, tile):
-                            candidate_stop = min(
-                                candidate_start + tile, candidate_count
-                            )
-                            fine_tile = fine[
-                                ..., candidate_start:candidate_stop
-                            ]
-                            key_tile = key[
-                                ..., candidate_start:candidate_stop, :
-                            ]
+                        fine_tiles = fine.split(tile, dim=-1)
+                        key_tiles = key.split(tile, dim=-2)
+                        for fine_tile, key_tile in zip(
+                            fine_tiles, key_tiles, strict=True
+                        ):
                             if torch.is_grad_enabled() and (
                                 route.requires_grad
                                 or fine_tile.requires_grad

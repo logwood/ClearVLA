@@ -792,6 +792,18 @@ class ClearVLAMainlinePolicy(nn.Module):
             if intent.target_binding is None:
                 raise ValueError("executed world feedback lost current target")
             feedback=self._replay_executed_world(conditioned_policy_input,role_table)
+            # The replay is intentionally no-grad, but it invokes the same W
+            # heads that the candidate and matched supervised passes must
+            # differentiate. CUDA autocast caches cast weights by parameter
+            # rather than by grad mode; clear those detached casts at the
+            # boundary so the next use builds a live VJP path without paying
+            # the global cache-disabled cost for the entire step.
+            if torch.is_grad_enabled():
+                clear_autocast_cache = getattr(torch, "clear_autocast_cache", None)
+                if clear_autocast_cache is None:
+                    clear_autocast_cache = getattr(torch._C, "clear_autocast_cache", None)
+                if clear_autocast_cache is not None:
+                    clear_autocast_cache()
             world_feedback=reader.prepare(feedback,facts,intent.target_binding)
         action_intent = intent.action_dock()
         coarse = self.intent.propose_action(
