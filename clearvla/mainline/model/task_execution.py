@@ -511,6 +511,14 @@ class TaskConditionedTargetBinder(nn.Module):
         )
         self.compatibility = nn.Linear(hidden, hidden, bias=False)
         self.score = nn.Linear(hidden, 1, bias=False)
+        # Keep one shared K+null binder, but expose an explicit task/object
+        # interaction to the ordinary action losses.  The previous
+        # cross-attention output was nearly K-common when object queries were
+        # similar, so language changed a global score without changing the K
+        # ranking.  Exact-zero initialization preserves the old neutral start
+        # while giving training a direct, non-selector side path to learn.
+        self.task_object_score = nn.Linear(2 * hidden, 1, bias=False)
+        nn.init.zeros_(self.task_object_score.weight)
         self.null = nn.Linear(hidden, 1)
 
     def forward(
@@ -545,7 +553,10 @@ class TaskConditionedTargetBinder(nn.Module):
         query = self.query_norm(obj + self.history_query(history)[:, None])
         task_value = self.task_value(task)
         read, _ = self.task_read(query, self.task_norm(task_value), task_value, need_weights=False)
-        score = self.score(read * torch.tanh(self.compatibility(obj)))[..., 0]
+        object_score = self.score(read * torch.tanh(self.compatibility(obj)))[..., 0]
+        task_context = task_value.mean(1)[:, None].expand(-1, obj.shape[1], -1)
+        task_object_score = self.task_object_score(torch.cat((obj, task_context), dim=-1))[..., 0]
+        score = object_score + task_object_score
         if per_view:
             score = score.reshape(task.shape[0], object_count, -1).float()
             # Log-mean-exp is permutation equivariant and does not reward an

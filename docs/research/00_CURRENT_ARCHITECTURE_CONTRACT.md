@@ -175,7 +175,12 @@ Evidence motivates a coordinated candidate, not a proven neural root cause.
   not forced to stop. Historical modes retain the original arithmetic.
 - One shared task-conditioned binder: task/object interaction scores, with
   history in task-read queries only; no additive history target-value path.
-  It preserves one K-plus-null law, not a second object selector.
+  It preserves one K-plus-null law, not a second object selector. In the
+  per-camera chart path, identity binding consumes the pooled G object facts;
+  per-camera attributes remain target evidence after identity is resolved,
+  because camera-local location normalization removes the global K allocation
+  signal. The binder also has one exact-zero-start direct task/object score
+  head, trained by ordinary action losses within that same K-plus-null law.
 - S forms task-by-object-by-view-by-robot relations before any role pooling.
   Nonlinear native-grid features are integrated over the full current G3
   image law. A centroid alone is not the spatial input. These are learned

@@ -25,6 +25,7 @@ from clearvla.mainline.model.target_binding import (
     TargetBinding,
     TargetEvidence,
 )
+from clearvla.mainline.model.task_execution import TaskConditionedTargetBinder
 from clearvla.mainline.runtime.checkpoints import load_checkpoint_exact, save_checkpoint
 from clearvla.mainline.runtime.deployment import (
     build_deployment_abi,
@@ -160,6 +161,21 @@ def test_invalid_internal_values_and_empty_objects_have_zero_gradients():
     assert tokens.grad is not None and torch.isfinite(tokens.grad).all()
     assert torch.count_nonzero(tokens.grad[~valid]) == 0
     assert scores.grad is not None and scores.grad[0, -1] == 0
+
+
+def test_joint_binder_direct_task_object_score_is_zero_start_and_connected():
+    torch.manual_seed(831)
+    binder = TaskConditionedTargetBinder(16, 4)
+    assert torch.count_nonzero(binder.task_object_score.weight) == 0
+    task = torch.randn(2, 3, 16)
+    objects = torch.randn(2, 4, 16)
+    history = torch.randn(2, 16)
+    supported = torch.ones(2, 4, dtype=torch.bool)
+    binding = binder(task, objects, supported, history=history)
+    weighted = (binding.mass * torch.arange(1, 5, dtype=binding.mass.dtype)[None]).sum()
+    weighted.backward()
+    grad = binder.task_object_score.weight.grad
+    assert grad is not None and torch.isfinite(grad).all() and grad.abs().sum() > 0
 
 
 def test_soft_binding_is_task_conditioned_and_object_equivariant():

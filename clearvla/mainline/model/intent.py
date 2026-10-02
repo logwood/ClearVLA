@@ -801,10 +801,13 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 if view_attribute_tokens is None:
                     target_binding = self.shared_binder(protected_goal, objects, object_validity, history=history_context)
                 else:
-                    # Shared K+null binding, evaluated on actual per-view values.
+                    # Bind once from the pooled G object facts. Per-camera
+                    # values are retained for target evidence after identity
+                    # is resolved; their camera-local normalization removes
+                    # the K allocation signal needed by the shared binder.
                     target_binding = self.shared_binder(
-                        protected_goal, view_attribute_tokens.sum(-2) / 2.0, object_validity,
-                        history=history_context, view_support=camera_valid,
+                        protected_goal, objects, object_validity,
+                        history=history_context,
                     )
             else:
                 target_binding = self.shared_binder(protected_goal.mean(1) + history_context, objects, object_validity)
