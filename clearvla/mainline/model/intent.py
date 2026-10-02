@@ -393,6 +393,18 @@ class StatelessObjectIntentOrganizer(nn.Module):
                                      task_execution_mode=task_execution_mode)
             if task_execution_mode in JOINT_TASK_EXECUTION_MODES else None
         )
+        # Joint task execution keeps the relation reader as the sole source
+        # of task/object values, but its current query/value chain can attenuate
+        # a real language difference before it reaches the public interval
+        # carrier. This exact-zero interval-aligned carrier is trained by the
+        # ordinary action losses; it is not a selector and cannot change the
+        # neutral initialization or constructor RNG stream.
+        if self.task_relation_encoder is not None:
+            self.language_identity_residual_weight = nn.Parameter(
+                torch.zeros(hidden, hidden)
+            )
+        else:
+            self.register_parameter("language_identity_residual_weight", None)
         self.interval_object = (
             TaskRelationRead(hidden, heads) if self.task_relation_encoder is not None else
             BoundTargetRead(hidden, heads) if target_binding_mode == SHARED_TARGET_BINDING
@@ -910,15 +922,37 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 language_object_query, interval_objects, padding_mask=~object_validity,
                 diagnostics=collect_diagnostics,
             )
+        language_identity_residual = torch.zeros_like(object_innovation)
+        if self.language_identity_residual_weight is not None:
+            # Use the protected language value rather than the already-read
+            # interval innovation. This is the last S-owned point where a
+            # true instruction difference is still available before the
+            # interval self-read can attenuate it.
+            language_identity_residual, _ = smooth_rms_contract(
+                F.linear(
+                    protected_goal,
+                    self.language_identity_residual_weight.to(
+                        device=protected_goal.device,
+                        dtype=protected_goal.dtype,
+                    ),
+                ),
+                0.20,
+            )
         if self.task_relation_encoder is not None:
-            # Query identity/history locate evidence; they no longer provide a
-            # standalone task value that can bypass the joint relation read.
+            # Query identity/history still locate evidence through the joint
+            # relation read. The bounded residual is an interval-aligned language identity
+            # carrier, not a second selector or raw task
+            # value bypass.
             interval_source = object_innovation
         else:
             interval_source = interval_base + goal_innovation + history_innovation + object_innovation
         if progress is not None:
             interval_source = interval_source + progress[:, None]
         public_intervals = self.interval_self(interval_source)
+        if self.task_relation_encoder is not None:
+            # Add the carrier after the interval self-read so its identity
+            # difference cannot be normalized away by another S block.
+            public_intervals = public_intervals + language_identity_residual
         annotated_goal = None
         if self.endpoint_goal is not None:
             if instruction_reference is None or instruction_change is None or self.endpoint_goal_read is None or self.endpoint_goal_output is None:
@@ -1104,6 +1138,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_goal_innovation_rms": goal_innovation.detach().float().square().mean().sqrt(),
             "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
             "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
+            "object_intent_language_identity_residual_rms": language_identity_residual.detach().float().square().mean().sqrt(),
             "object_intent_typed_action_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
             "object_intent_target_address_logit_rms": target_object_address_logit.detach().square().mean().sqrt(),
             "object_intent_target_address_logit_k_variation": target_object_address_logit.detach().std(
@@ -1164,6 +1199,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
             object_innovation,
             metrics,
             "gradient_tensor_s_language_object_attention_rms",
+        )
+        register_gradient_rms_metric(
+            language_identity_residual,
+            metrics,
+            "gradient_tensor_s_language_identity_residual_rms",
         )
         if self.target_object_address is not None:
             register_gradient_rms_metric(

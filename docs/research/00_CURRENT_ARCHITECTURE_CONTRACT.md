@@ -188,7 +188,10 @@ Evidence motivates a coordinated candidate, not a proven neural root cause.
 - Independent S/coarse consumers read those relations with separate target
   and scene weights. Their task values no longer add standalone temporal-query
   or history content: these enter queries/modulation, not a task-value bypass. P1 uses them only in its query; its factual values still
-  come exclusively from actual current evidence.
+  come exclusively from actual current evidence. Joint S additionally has a
+  zero-start, bounded language-identity carrier aligned to the interval axis;
+  it preserves a learned target difference after the relation read without
+  creating a selector or a raw language-to-action path.
 - The existing all-object S outcome prediction is relation-conditioned under
   its existing source-supported future losses. P2 compares this expectation
   with the actual candidate W on the same I/K/C chart BEFORE pooling, retaining

@@ -157,6 +157,9 @@ JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS = frozenset(
 JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY = (
     "intent.organizer.shared_binder.task_object_score.weight"
 )
+JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY = (
+    "intent.organizer.language_identity_residual_weight"
+)
 JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_SOURCE_PATHS = (
     JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
 )
@@ -1628,9 +1631,14 @@ def load_checkpoint_for_initialization(
     }:
         missing = set(current_model) - set(mapped_model)
         unexpected = set(mapped_model) - set(current_model)
-        if missing != {JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY} or unexpected:
+        expected_missing = {
+            JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY,
+            JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY,
+        }
+        if missing != expected_missing or unexpected:
             raise ValueError(
-                "joint task-object binding migration must add exactly its one score weight"
+                "joint task-object binding migration must add exactly its score "
+                "and language identity weights"
             )
         hidden = int(config.dimensions.hidden_size)
         new_score = current_model[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY]
@@ -1649,9 +1657,31 @@ def load_checkpoint_for_initialization(
             raise ValueError(
                 "joint task-object binding migration requires a finite exact-zero score weight"
             )
+        new_identity = current_model[
+            JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY
+        ]
+        if (
+            not isinstance(new_identity, torch.Tensor)
+            or tuple(new_identity.shape) != (hidden, hidden)
+            or new_identity.dtype != torch.float32
+        ):
+            raise ValueError(
+                "joint task-object binding migration requires one FP32 "
+                f"[{hidden},{hidden}] language identity weight"
+            )
+        if not bool(torch.isfinite(new_identity).all()) or int(
+            torch.count_nonzero(new_identity).item()
+        ) != 0:
+            raise ValueError(
+                "joint task-object binding migration requires a finite exact-zero "
+                "language identity weight"
+            )
         mapped_model = dict(mapped_model)
         mapped_model[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY] = (
             new_score.detach().clone()
+        )
+        mapped_model[JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY] = (
+            new_identity.detach().clone()
         )
     elif set(mapped_model) != set(current_model):
         raise ValueError("model initialization parameter ownership differs")
@@ -1836,6 +1866,7 @@ __all__ = [
     "P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS",
     "JOINT_TASK_OBJECT_BINDING_V1_MIGRATION",
     "JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY",
+    "JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY",
     "JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS",
     "JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION",
     "JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_SOURCE_PATHS",

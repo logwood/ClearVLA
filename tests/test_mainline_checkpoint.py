@@ -27,6 +27,7 @@ from clearvla.mainline.runtime.checkpoints import (
     CHECKPOINT_SCHEMA,
     JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
     JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
+    JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY,
     JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY,
     JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS,
     P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
@@ -1204,7 +1205,7 @@ def test_schema31_bspine_round_trip_and_schema30_exact_resume_rejection(
     for name, value in restored_model.state_dict().items():
         assert torch.equal(value, before[name]), name
 
-def test_joint_task_object_binding_initializes_one_zero_score_weight(
+def test_joint_task_object_binding_initializes_zero_start_weights(
     tmp_path: Path,
 ) -> None:
     root = Path(__file__).resolve().parents[1]
@@ -1267,6 +1268,7 @@ def test_joint_task_object_binding_initializes_one_zero_score_weight(
     )
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     payload["model"].pop(JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY)
+    payload["model"].pop(JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY)
     torch.save(payload, checkpoint)
 
     torch.manual_seed(102)
@@ -1285,12 +1287,23 @@ def test_joint_task_object_binding_initializes_one_zero_score_weight(
     assert state.model_contract_migration == JOINT_TASK_OBJECT_BINDING_V1_MIGRATION
     assert set(state.changed_source_files) == changed_paths
     for name, value in source.state_dict().items():
-        if name == JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY:
+        if name in {
+            JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY,
+            JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY,
+        }:
             continue
         torch.testing.assert_close(target.state_dict()[name], value, atol=0.0, rtol=0.0)
     torch.testing.assert_close(
         target.state_dict()[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY],
         torch.zeros_like(target_before[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY]),
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        target.state_dict()[JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY],
+        torch.zeros_like(
+            target_before[JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY]
+        ),
         atol=0.0,
         rtol=0.0,
     )
