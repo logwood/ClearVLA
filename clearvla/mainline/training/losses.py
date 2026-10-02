@@ -1988,6 +1988,40 @@ def action_terms(
         command_loss = command_loss_unbalanced
         command_positive_weight = command_loss.new_ones(())
         command_negative_weight = command_loss.new_ones(())
+        # CALVIN deployment consumes a contiguous prefix of this horizon. A
+        # per-row CE can be correct on average while still alternating the
+        # command on adjacent rows, which is exactly what the replan8 traces
+        # expose. This optional term compares the differentiable expected
+        # command delta with the source binary delta; it is zero by default so
+        # the historical objective remains unchanged unless opted in.
+        transition_pair_valid = valid[:, 1:] & valid[:, :-1]
+        transition_pair_weight = 0.5 * (
+            horizon_step_weight[:, 1:] + horizon_step_weight[:, :-1]
+        )
+        command_probability = command_logits.float().softmax(dim=-1)[..., 1]
+        predicted_command_value = command_probability.mul(2.0).sub(1.0)
+        target_command_value = command_target.float().mul(2.0).sub(1.0)
+        predicted_command_delta = predicted_command_value[:, 1:] - predicted_command_value[:, :-1]
+        target_command_delta = target_command_value[:, 1:] - target_command_value[:, :-1]
+        command_transition_rows = F.smooth_l1_loss(
+            predicted_command_delta,
+            target_command_delta,
+            reduction="none",
+            beta=1.0,
+        )
+        transition_weighted_support = transition_pair_weight * transition_pair_valid
+        command_transition_loss = (
+            command_transition_rows * transition_weighted_support
+        ).sum() / transition_weighted_support.sum().clamp_min(1.0)
+        predicted_transition = command_prediction[:, 1:] != command_prediction[:, :-1]
+        target_transition = command_target[:, 1:] != command_target[:, :-1]
+        transition_rows = transition_pair_valid.float().sum().clamp_min(1.0)
+        command_transition_rate = (
+            predicted_transition.float() * transition_pair_valid
+        ).sum() / transition_rows
+        command_transition_target_rate = (
+            target_transition.float() * transition_pair_valid
+        ).sum() / transition_rows
     else:
         zero_command = prediction.new_zeros((), dtype=torch.float32)
         command_accuracy = zero_command
@@ -1999,6 +2033,9 @@ def action_terms(
         command_rows_count = zero_command
         command_loss = prediction.sum() * 0.0
         command_loss_unbalanced = zero_command
+        command_transition_loss = zero_command
+        command_transition_rate = zero_command
+        command_transition_target_rate = zero_command
         command_positive_weight = zero_command
         command_negative_weight = zero_command
     event_mask = event_mask.to(dtype=gripper_error_legacy.dtype)
@@ -2278,6 +2315,9 @@ def action_terms(
         # compatibility metrics on continuous paths.
         "gripper_command": command_loss,
         "gripper_command_unbalanced_audit": command_loss_unbalanced.detach(),
+        "gripper_command_transition": command_transition_loss,
+        "gripper_command_transition_rate": command_transition_rate,
+        "gripper_command_transition_target_rate": command_transition_target_rate,
         "gripper_command_positive_class_weight": command_positive_weight.detach(),
         "gripper_command_negative_class_weight": command_negative_weight.detach(),
         "gripper_command_accuracy": command_accuracy,
@@ -2439,6 +2479,7 @@ def compose_losses(
         action["action_flow"]
         + objective.decoded_action * action["decoded_action"]
         + objective.gripper_command * action["gripper_command"]
+        + objective.gripper_command_transition * action["gripper_command_transition"]
         + objective.gripper_trajectory * action["gripper_trajectory"]
         + objective.gripper_first_step_release * action["gripper_first_step_release"]
         + objective.gripper_first_step_hold * action["gripper_first_step_hold"]
@@ -2502,6 +2543,10 @@ def compose_losses(
         "action_flow": action["action_flow"],
         "decoded_action": objective.decoded_action * action["decoded_action"],
         "gripper_command": objective.gripper_command * action["gripper_command"],
+        "gripper_command_transition": (
+            objective.gripper_command_transition
+            * action["gripper_command_transition"]
+        ),
         "gripper_trajectory": (
             objective.gripper_trajectory * action["gripper_trajectory"]
         ),
