@@ -25,6 +25,7 @@ from clearvla.mainline.model.component_contracts import (
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.runtime.checkpoints import (
     CHECKPOINT_SCHEMA,
+    JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
     JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
     JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY,
     JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS,
@@ -1292,6 +1293,39 @@ def test_joint_task_object_binding_initializes_one_zero_score_weight(
         torch.zeros_like(target_before[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY]),
         atol=0.0,
         rtol=0.0,
+    )
+
+    trajectory_config = replace(
+        config,
+        objectives=replace(
+            config.objectives,
+            gripper_command_transition=0.05,
+            calvin_frame_weight_mode="motion_event_v1",
+            calvin_frame_motion_gain=0.75,
+            calvin_frame_event_gain=1.5,
+            calvin_frame_event_radius=1,
+            calvin_frame_max_weight=3.0,
+        ),
+    )
+    trajectory_config.validate()
+    trajectory_identity = build_checkpoint_identity(
+        trajectory_config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="9" * 40,
+    )
+    trajectory_target = ClearVLAMainlinePolicy(trajectory_config)
+    trajectory_state = load_checkpoint_for_initialization(
+        checkpoint,
+        model=trajectory_target,
+        config=trajectory_config,
+        identity=trajectory_identity,
+        model_contract_migration=JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
+    )
+    assert (
+        trajectory_state.model_contract_migration
+        == JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION
     )
 
 

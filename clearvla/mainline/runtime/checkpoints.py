@@ -46,6 +46,9 @@ P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION = (
 )
 P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION = "p2_post_pool_pread_control_v1"
 JOINT_TASK_OBJECT_BINDING_V1_MIGRATION = "joint_task_object_binding_v1"
+JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION = (
+    "joint_task_object_binding_trajectory_v1"
+)
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/model/compiler.py",
@@ -142,6 +145,7 @@ JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS = frozenset(
         "clearvla/mainline/model/v120_p1.py",
         "clearvla/mainline/runtime/checkpoints.py",
         "clearvla/mainline/runtime/deployment.py",
+        "clearvla/mainline/runtime/logging.py",
         "clearvla/mainline/task_execution.py",
         "clearvla/mainline/train.py",
         "clearvla/mainline/training/engine.py",
@@ -152,6 +156,9 @@ JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS = frozenset(
 )
 JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY = (
     "intent.organizer.shared_binder.task_object_score.weight"
+)
+JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_SOURCE_PATHS = (
+    JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
 )
 P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
     "intent.organizer.target_object_address.weight"
@@ -1017,6 +1024,26 @@ def _p2_post_pool_pread_control_migration_config_view(
     return payload
 
 
+def _joint_task_object_binding_trajectory_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove only the opt-in CALVIN trajectory-supervision selectors."""
+
+    payload = _initialization_config_view(config)
+    objectives = dict(cast(Mapping[str, object], payload["objectives"]))
+    for name in (
+        "gripper_command_transition",
+        "calvin_frame_weight_mode",
+        "calvin_frame_motion_gain",
+        "calvin_frame_event_gain",
+        "calvin_frame_event_radius",
+        "calvin_frame_max_weight",
+    ):
+        objectives.pop(name, None)
+    payload["objectives"] = objectives
+    return payload
+
+
 def load_checkpoint_for_initialization(
     path: str | Path,
     *,
@@ -1096,6 +1123,7 @@ def load_checkpoint_for_initialization(
         P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
         WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
+        JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
     }:
         raise ValueError(
             "unknown model-initialization model migration "
@@ -1267,6 +1295,30 @@ def load_checkpoint_for_initialization(
             raise ValueError(
                 "W camera-condition migration requires identical dataset identity"
             )
+    elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION:
+        if (
+            saved_config.data.data_profile != "calvin_relative_7d_v1"
+            or config.data.data_profile != "calvin_relative_7d_v1"
+            or saved_config.objectives.calvin_frame_weight_mode != "uniform"
+            or config.objectives.calvin_frame_weight_mode != "motion_event_v1"
+            or saved_config.objectives.gripper_command_transition != 0.0
+            or config.objectives.gripper_command_transition <= 0.0
+        ):
+            raise ValueError(
+                "joint binding trajectory migration requires uniform source and "
+                "motion_event_v1 target with a positive transition weight"
+            )
+        if _joint_task_object_binding_trajectory_migration_config_view(
+            saved_config
+        ) != _joint_task_object_binding_trajectory_migration_config_view(config):
+            raise ValueError(
+                "joint binding trajectory migration differs outside its six "
+                "trajectory-supervision selectors"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "joint binding trajectory migration requires identical dataset identity"
+            )
     elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_V1_MIGRATION:
         if _initialization_config_view(saved_config) != _initialization_config_view(
             config
@@ -1432,7 +1484,10 @@ def load_checkpoint_for_initialization(
         allowed_source_paths = P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS
     elif selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
         allowed_source_paths = WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS
-    elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_V1_MIGRATION:
+    elif selected_model_migration in {
+        JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
+        JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
+    }:
         allowed_source_paths = JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
     else:
         allowed_source_paths = (
@@ -1567,7 +1622,10 @@ def load_checkpoint_for_initialization(
             )
         mapped_model = dict(mapped_model)
         mapped_model[new_condition_key] = new_condition.detach().clone()
-    elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_V1_MIGRATION:
+    elif selected_model_migration in {
+        JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
+        JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
+    }:
         missing = set(current_model) - set(mapped_model)
         unexpected = set(mapped_model) - set(current_model)
         if missing != {JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY} or unexpected:
@@ -1779,6 +1837,8 @@ __all__ = [
     "JOINT_TASK_OBJECT_BINDING_V1_MIGRATION",
     "JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY",
     "JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS",
+    "JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION",
+    "JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION",
