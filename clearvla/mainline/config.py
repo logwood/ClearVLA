@@ -925,6 +925,11 @@ class ObjectiveConfig:
     # CALVIN's discrete gripper command-state objective.  It is deliberately
     # zero for the continuous Pen/RDT paths so their loss ledger is unchanged.
     gripper_command: float = 0.0
+    # Optional adjacent-row command trajectory objective for binary outlets.
+    # A zero keeps the historical per-row CE path bit-exact; a positive value
+    # teaches the deployed horizon not to introduce unsupported command
+    # switches between adjacent rows.
+    gripper_command_transition: float = 0.0
     # Relative per-channel weight for the four non-deployed gripper
     # compatibility coordinates (anchor_delta, previous, abs_delta,
     # positive_delta).  The first two coordinates (absolute and local delta)
