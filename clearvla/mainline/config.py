@@ -541,6 +541,9 @@ class TopConfig:
     object_view_mode: str = "pooled_v1"
     task_execution_mode: str = NO_TASK_EXECUTION
     annotation_goal_mode: str = "none"
+    # Bound the full-posterior P1 query work so batch-8 keeps a stable
+    # memory margin while avoiding one-query-at-a-time sampling.
+    flow_jepa_address_query_batch_budget: int = 96
 
     def validate(self) -> None:
         if self.annotation_goal_mode not in {"none", "annotated_endpoint_relation_v1"}:
@@ -686,6 +689,8 @@ class TopConfig:
             )
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")
+        if int(self.flow_jepa_address_query_batch_budget) < 1:
+            raise ValueError("top flow_jepa_address_query_batch_budget must be positive")
         if (
             self.grounder_iterations <= 0
             or self.teacher_key_dim <= 0
@@ -1080,6 +1085,10 @@ class OptimizerConfig:
 @dataclass(frozen=True)
 class RuntimeConfig:
     compute_dtype: str = "bf16"
+    # Allow TF32 for FP32 matmul paths (notably P1 routing) on CUDA.
+    # This keeps tensor dtypes and model contracts unchanged while using the
+    # Tensor Core path on Ampere+ GPUs.
+    cuda_tf32: bool = True
     inference_steps: int = 5
     # Deployment flow time is independent of the training t distribution and
     # the 24-row action-time chart. None preserves the historical uniform ABI.

@@ -502,3 +502,72 @@ def test_zero_radius_means_the_center_of_each_hypothesis_not_one_global_index():
     )
     for value in output:
         torch.testing.assert_close(value, value[..., 4:5, :].expand_as(value), rtol=0, atol=0)
+
+@pytest.mark.parametrize("all_invalid", [False, True])
+@pytest.mark.parametrize("cache_detail", [False, True])
+def test_shared_microgrid_cache_preserves_chunk_checkpoint_outputs_and_gradients(
+    all_invalid, cache_detail
+):
+    from torch.utils.checkpoint import checkpoint
+    from clearvla.vision.candidate_support import prepare_posterior_microgrid_cache
+
+    generator = torch.Generator().manual_seed(9931)
+    support_shape = (1, 2, 1, 1, 2, 19)
+    valid = torch.rand(support_shape, generator=generator) > 0.2
+    if all_invalid:
+        valid.zero_()
+    coordinates = torch.rand((*support_shape, 2), generator=generator) * 1.8 - 0.9
+    coordinates.masked_fill_(~valid[..., None], torch.nan)
+    logits = torch.randn((1, 5, 2, *support_shape[1:]), generator=generator)
+    logits.masked_fill_(~valid[:, None, None], torch.nan)
+    center_rgb = torch.randn((*support_shape, 3), generator=generator)
+    center_detail = torch.randn((*support_shape, 5), generator=generator)
+    center_rgb.masked_fill_(~valid[..., None], torch.nan)
+    center_detail.masked_fill_(~valid[..., None], torch.nan)
+    values = (
+        torch.rand((1, 5, 2, *support_shape[1:-1]), generator=generator),
+        logits,
+        coordinates,
+        torch.full(support_shape[:-1], 0.25),
+        torch.randn((1, 2, 3, 7, 9), generator=generator),
+        torch.randn((1, 2, 5, 7, 9), generator=generator),
+        center_rgb,
+        center_detail,
+    )
+    weights = tuple(
+        torch.randn((1, 5, 2, 9, width), generator=generator)
+        for width in (3, 5, 2)
+    )
+
+    def run(cached):
+        inputs = tuple(value.clone().requires_grad_() for value in values)
+        route, fine, points, radius, rgb, detail, center_rgb, center_detail = inputs
+        if cached:
+            cache = prepare_posterior_microgrid_cache(
+                points, radius, valid, rgb, detail, cache_detail=cache_detail
+            )
+            chunks = [
+                checkpoint(
+                    posterior_microgrid_expectation,
+                    route[:, start:start + 2],
+                    fine[:, start:start + 2],
+                    valid, points, radius, rgb, detail, center_rgb, center_detail,
+                    cache=cache,
+                    use_reentrant=False,
+                )
+                for start in range(0, 5, 2)
+            ]
+            output = tuple(torch.cat([chunk[i] for chunk in chunks], dim=1) for i in range(3))
+        else:
+            output = posterior_microgrid_expectation(
+                route, fine, valid, points, radius, rgb, detail, center_rgb, center_detail
+            )
+        loss = sum((value * weight).sum() for value, weight in zip(output, weights, strict=True))
+        return output, torch.autograd.grad(loss, inputs)
+
+    reference, reference_grads = run(False)
+    actual, actual_grads = run(True)
+    for actual_value, reference_value in zip(actual, reference, strict=True):
+        torch.testing.assert_close(actual_value, reference_value, rtol=2e-5, atol=2e-5)
+    for actual_grad, reference_grad in zip(actual_grads, reference_grads, strict=True):
+        torch.testing.assert_close(actual_grad, reference_grad, rtol=5e-5, atol=5e-5)

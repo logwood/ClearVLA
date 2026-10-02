@@ -243,3 +243,26 @@ class DinoV3OnlineEncoder(nn.Module):
             .div(255)
         )
         return self.pipeline(rgb), images
+
+    @torch.no_grad()
+    def encode_oldest(self, rgb_history, preprocessing):
+        """Encode the oldest source pair with the original DINO microbatch ABI.
+
+        The complete source window is still validated and preprocessed. Only
+        the first fixed microbatch containing the two oldest camera images is
+        sent through DINO; companions are retained when microbatch > 2 so the
+        encoder's batching/padding behavior remains unchanged.
+        """
+        images = preprocess_rgb_history(
+            rgb_history, preprocessing=preprocessing, camera_names=("top", "wrist")
+        )
+        rgb = torch.from_numpy(images).permute(0, 1, 4, 2, 3).float().div(255)
+        flat = rgb.flatten(0, 1)
+        microbatch = self.pipeline.encoder.microbatch
+        if type(microbatch) is not int or microbatch < 1:
+            raise ValueError("DINOv3 microbatch must be a positive integer")
+        needed = min(flat.shape[0], ((2 + microbatch - 1) // microbatch) * microbatch)
+        encoded = self.pipeline(flat[:needed])
+        if encoded.shape[0] < 2:
+            raise ValueError("DINOv3 oldest encoder result is missing a camera pair")
+        return encoded[:2].reshape(1, 2, *encoded.shape[-2:]), images

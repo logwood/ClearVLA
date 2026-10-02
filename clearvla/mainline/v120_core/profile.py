@@ -146,6 +146,9 @@ def build_v120_visual_config(mainline_config: Any) -> V39PolicyConfig:
         build_v120_policy_config(),
         action_dim=int(dims.action_dim),
         state_dim=int(dims.state_dim),
+        flow_jepa_address_query_batch_budget=int(
+            mainline_config.top.flow_jepa_address_query_batch_budget
+        ),
         state_feature_mode=str(mainline_config.top.state_feature_mode),
         flow_jepa_source_time_mode=str(mainline_config.observation.source_time_mode),
         flow_jepa_candidate_support_mode=str(mainline_config.observation.candidate_support_mode),

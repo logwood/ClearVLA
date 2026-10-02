@@ -274,6 +274,24 @@ class BridgeStage(nn.Module):
     def action_query(self, noisy_action_field: Tensor, time: Tensor) -> Tensor:
         return self.query_encoder(noisy_action_field, time)
 
+    def action_query_with_role(self, noisy_action_field: Tensor, role: Tensor) -> Tensor:
+        return self.query_encoder.action_with_role(noisy_action_field, role)
+
+    def static_context(
+        self,
+        history: ObservableHistory,
+        *,
+        executed_memory: Tensor,
+        action_history_keep: Tensor,
+        role: Tensor,
+    ) -> V120SeedContext:
+        return self.query_encoder.context_with_role(
+            history,
+            executed_memory=executed_memory,
+            action_history_keep=action_history_keep,
+            role=role,
+        )
+
     def action_and_context(
         self,
         noisy_action_field: Tensor,

@@ -248,6 +248,16 @@ def _device(value: str) -> torch.device:
     return result
 
 
+def _configure_cuda_math(*, device: torch.device, enable_tf32: bool) -> None:
+    if device.type != "cuda":
+        return
+    torch.backends.cuda.matmul.allow_tf32 = bool(enable_tf32)
+    torch.backends.cudnn.allow_tf32 = bool(enable_tf32)
+    # "high" enables TF32-backed FP32 matmul where the backend supports it;
+    # BF16/FP32 tensor contracts and explicit FP32 reductions remain intact.
+    torch.set_float32_matmul_precision("high" if enable_tf32 else "highest")
+
+
 def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
     if getattr(args, "validation_flow_schedule", None) is not None and (
         args.validate_checkpoint is None or args.resume is not None
@@ -2276,6 +2286,7 @@ def main() -> None:
     )
     _seed(config.data.seed)
     device = _device(args.device)
+    _configure_cuda_math(device=device, enable_tf32=bool(config.runtime.cuda_tf32))
     dtype = resolve_compute_dtype(config)
     output_dir = Path(config.data.output_dir)
     _prepare_output_directory(output_dir, exact_resume=args.resume is not None)

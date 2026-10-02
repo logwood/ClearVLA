@@ -196,6 +196,6 @@ class ExecutedWorldFeedback:
 class ExecutedWorldPlanValues:
     value: Tensor
     feedback: ExecutedWorldFeedback
-    current_facts: ObjectFactSet
+    current_content: Tensor  # exact source anchor; do not retain the dense ObjectFactSet
     reader_identity: int
     binding: TargetBinding

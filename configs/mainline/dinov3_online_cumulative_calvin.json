@@ -27,7 +27,7 @@
     "dinov3_model": "/data/senwang/clearvla/third_party/dinov3/hf-vitb16-lvd1689m",
     "dinov3_revision": "",
     "dinov3_local_files_only": true,
-    "dinov3_microbatch": 2,
+    "dinov3_microbatch": 8,
     "image_store_mode": "hdf5-direct"
   },
   "top": {
@@ -53,6 +53,7 @@
     "operation_intent_mode": "object_outcome_v1",
     "world_feedback_mode": "executed_four_step_world_v1",
     "annotation_goal_mode": "annotated_endpoint_relation_v1",
+    "flow_jepa_address_query_batch_budget": 192,
     "task_execution_mode": "joint_object_scene_v1",
     "object_view_mode": "per_camera_values_v1"
   },
@@ -75,6 +76,7 @@
     "batch_size": 8
   },
   "runtime": {
+    "cuda_tf32": true,
     "max_train_batches": 11012,
     "max_val_batches": 256,
     "log_every": 50,

@@ -478,6 +478,7 @@ def test_production_online_adapter_emits_source_clock(
     norm = ArrayNormalizer.fit_identity([np.zeros((2, 7), np.float32)])
     # Constructor dependencies are fixtures; act_with_input below is the production method.
     policy = cast(Any, module.ClearVLACheckpointPolicy.__new__(module.ClearVLACheckpointPolicy))
+    policy.deployment_fastpath = True
     policy.bundle = SimpleNamespace(
         config=config,
         state_normalizer=norm,
@@ -501,11 +502,13 @@ def test_production_online_adapter_emits_source_clock(
         _model: object, online: OnlinePolicyInput, _config: ExperimentConfig, **_kwargs: Any
     ):
         captured["online"] = online
+        captured["kwargs"] = dict(_kwargs)
         return SimpleNamespace(action=torch.zeros(1, 24, 7), gripper_command=None)
 
     monkeypatch.setattr(module, "sample_action", sample)
     raw, online = policy.act_with_input(history.snapshot(), "test instruction")
     assert raw.shape == (24, 7) and captured["online"] is online
+    assert captured["kwargs"]["deployment_fastpath"] is True
     assert online.history.timing is not None
     for key, value in history.snapshot().timing_arrays().items():
         np.testing.assert_array_equal(online.history.timing.as_mapping()[key][0].numpy(), value)

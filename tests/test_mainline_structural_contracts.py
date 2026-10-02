@@ -1263,12 +1263,16 @@ def test_teacher_quarantines_nan_invalid_dense_candidates() -> None:
     )
     for name in (
         "current_reference",
+        "source_content",
         "successor_content",
         "semantic_delta",
         "transport_mean",
         "transport_covariance",
     ):
-        assert torch.isfinite(getattr(target, name)).all(), name
+        value = getattr(target, name)
+        if value is None:
+            continue
+        assert torch.isfinite(value).all(), name
 
 
 def test_teacher_quarantines_nan_invalid_object_camera_rows() -> None:
@@ -1725,6 +1729,7 @@ def test_future_dynamics_abi_retains_camera_geometry_and_has_no_status_alias() -
         "time_grid_mode",
         "camera_names",
         "current_reference",
+        "source_content",
         "successor_content",
         "semantic_delta",
         "transport_mean",
@@ -5028,7 +5033,7 @@ def test_deployment_cache_has_only_declared_causal_sources_and_no_future_labels(
         "view_observed", "window", "current_dino", "camera_names", "measurement_shape",
     }
     assert {field.name for field in fields(ExecutedWorldPlanValues)} == {
-        "value", "feedback", "current_facts", "reader_identity", "binding",
+        "value", "feedback", "current_content", "reader_identity", "binding",
     }
     # Deployment owns one compact belief. The optional current_world_belief
     # is an OnlineTopContext source; it is not a second deployment belief.
