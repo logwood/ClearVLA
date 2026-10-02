@@ -45,6 +45,7 @@ P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION = (
     "p2_shared_target_prior_sequence_prefix_pread_v1"
 )
 P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION = "p2_post_pool_pread_control_v1"
+JOINT_TASK_OBJECT_BINDING_V1_MIGRATION = "joint_task_object_binding_v1"
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/model/compiler.py",
@@ -127,6 +128,30 @@ P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_SOURCE_PATHS = (
 )
 P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS = (
     P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
+)
+JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/model/compiler.py",
+        "clearvla/mainline/model/component_contracts.py",
+        "clearvla/mainline/model/intent.py",
+        "clearvla/mainline/model/policy.py",
+        "clearvla/mainline/model/task_execution.py",
+        "clearvla/mainline/model/top.py",
+        "clearvla/mainline/model/types.py",
+        "clearvla/mainline/model/v120_p1.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/runtime/deployment.py",
+        "clearvla/mainline/task_execution.py",
+        "clearvla/mainline/train.py",
+        "clearvla/mainline/training/engine.py",
+        "clearvla/mainline/training/losses.py",
+        "clearvla/vision/candidate_support.py",
+        "clearvla/vision/online_pipeline.py",
+    }
+)
+JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY = (
+    "intent.organizer.shared_binder.task_object_score.weight"
 )
 P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
     "intent.organizer.target_object_address.weight"
@@ -1070,6 +1095,7 @@ def load_checkpoint_for_initialization(
         P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION,
         P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
         WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
+        JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
     }:
         raise ValueError(
             "unknown model-initialization model migration "
@@ -1241,6 +1267,17 @@ def load_checkpoint_for_initialization(
             raise ValueError(
                 "W camera-condition migration requires identical dataset identity"
             )
+    elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_V1_MIGRATION:
+        if _initialization_config_view(saved_config) != _initialization_config_view(
+            config
+        ):
+            raise ValueError(
+                "joint task-object binding migration differs outside its model parameters"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "joint task-object binding migration requires identical dataset identity"
+            )
     elif selected_migration is None:
         if _initialization_config_view(saved_config) != _initialization_config_view(config):
             raise ValueError(
@@ -1395,6 +1432,8 @@ def load_checkpoint_for_initialization(
         allowed_source_paths = P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS
     elif selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
         allowed_source_paths = WORLD_CAMERA_COORDINATE_ROLE_V1_SOURCE_PATHS
+    elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_V1_MIGRATION:
+        allowed_source_paths = JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
     else:
         allowed_source_paths = (
             INITIALIZATION_SOURCE_PATHS
@@ -1528,6 +1567,34 @@ def load_checkpoint_for_initialization(
             )
         mapped_model = dict(mapped_model)
         mapped_model[new_condition_key] = new_condition.detach().clone()
+    elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_V1_MIGRATION:
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        if missing != {JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY} or unexpected:
+            raise ValueError(
+                "joint task-object binding migration must add exactly its one score weight"
+            )
+        hidden = int(config.dimensions.hidden_size)
+        new_score = current_model[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY]
+        if (
+            not isinstance(new_score, torch.Tensor)
+            or tuple(new_score.shape) != (1, 2 * hidden)
+            or new_score.dtype != torch.float32
+        ):
+            raise ValueError(
+                "joint task-object binding migration requires one FP32 "
+                f"[1,{2 * hidden}] score weight"
+            )
+        if not bool(torch.isfinite(new_score).all()) or int(
+            torch.count_nonzero(new_score).item()
+        ) != 0:
+            raise ValueError(
+                "joint task-object binding migration requires a finite exact-zero score weight"
+            )
+        mapped_model = dict(mapped_model)
+        mapped_model[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY] = (
+            new_score.detach().clone()
+        )
     elif set(mapped_model) != set(current_model):
         raise ValueError("model initialization parameter ownership differs")
     for name, current_value in current_model.items():
@@ -1709,6 +1776,9 @@ __all__ = [
     "LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS",
     "P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION",
     "P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS",
+    "JOINT_TASK_OBJECT_BINDING_V1_MIGRATION",
+    "JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY",
+    "JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION",

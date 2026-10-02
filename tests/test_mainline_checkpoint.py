@@ -25,6 +25,9 @@ from clearvla.mainline.model.component_contracts import (
 from clearvla.mainline.model.policy import ClearVLAMainlinePolicy
 from clearvla.mainline.runtime.checkpoints import (
     CHECKPOINT_SCHEMA,
+    JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
+    JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY,
+    JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS,
     P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
     P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS,
     P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
@@ -100,6 +103,64 @@ def _reduced_modular_config() -> ExperimentConfig:
         ),
         optimizer=replace(base.optimizer, warmup_steps=2),
         runtime=replace(base.runtime, compute_dtype="fp32"),
+    )
+    config.validate()
+    return config
+
+
+def _reduced_joint_calvin_config() -> ExperimentConfig:
+    base = _reduced_modular_config()
+    top = replace(
+        base.top,
+        world_camera_condition_mode="coordinate_role_v1",
+        world_action_condition_mode="sequence_prefix_v1",
+        future_time_grid_mode="control_aligned_24_v1",
+        world_supervision_mode="matched_observed_sequence_v1",
+        world_control_mode="known_prefix_v1",
+        world_robot_condition_mode="observed_state_views_v1",
+        p2_geometry_mode="view_conditioned_transport_v1",
+        p3_coordination_mode="typed_horizon_v1",
+        robot_feedback_mode="one_step_proprioceptive_v1",
+        world_feedback_mode="executed_four_step_world_v1",
+        history_encoding_mode="timestamped_streams_v1",
+        state_feature_mode="calvin_tcp_rotation6d_v1",
+        entity_context_mode="completed_g3_v1",
+        entity_chart_mode="current_image_support_v1",
+        entity_history_mode="flow_pulled_history_v1",
+        entity_motion_mode="current_entity_support_v1",
+        target_binding_mode="shared_operation_v1",
+        instruction_reference_mode="instruction_start_observation_v1",
+        instruction_change_mode="g3_posterior_reference_v1",
+        operation_intent_mode="object_outcome_v1",
+        object_view_mode="per_camera_values_v1",
+        task_execution_mode="joint_object_scene_v1",
+        annotation_goal_mode="annotated_endpoint_relation_v1",
+    )
+    observation = replace(
+        base.observation,
+        source_time_mode="source_history_steps_v1",
+        candidate_support_mode="full_posterior_lattice_v1",
+        local_ownership_mode="coupled_observation_v1",
+    )
+    config = replace(
+        base,
+        top=top,
+        dimensions=replace(base.dimensions, state_dim=10, future_supports=6),
+        data=replace(base.data, data_profile="calvin_relative_7d_v1"),
+        observation=observation,
+        bottom=replace(
+            base.bottom,
+            gripper_output_mode="calvin_binary_command",
+            transition_condition_mode="typed_plan_v1",
+            evidence_value_mode="magnitude_preserving_v1",
+            arm_flow_mode="relative_command_adapter",
+        ),
+        objectives=replace(
+            base.objectives,
+            annotated_goal=1.0,
+            robot_response=1.0,
+            gripper_command=1.0,
+        ),
     )
     config.validate()
     return config
@@ -1141,6 +1202,98 @@ def test_schema31_bspine_round_trip_and_schema30_exact_resume_rejection(
         raise AssertionError("Schema30 must not exact-resume into Schema31")
     for name, value in restored_model.state_dict().items():
         assert torch.equal(value, before[name]), name
+
+def test_joint_task_object_binding_initializes_one_zero_score_weight(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    condition = tmp_path / "goal-joint-binding.pt"
+    condition.write_bytes(b"t5-condition")
+    language = ArtifactIdentity.from_file("t5_goal", condition)
+    config = _reduced_joint_calvin_config()
+    identity = build_checkpoint_identity(
+        config,
+        repo_root=root,
+        dataset=_dataset(),
+        language=language,
+        commit="9" * 40,
+    )
+    changed_paths = set(JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS)
+    saved_rows = list(identity.source.files)
+    assert changed_paths <= {name for name, _digest in saved_rows}
+    for index, (name, _digest) in enumerate(saved_rows):
+        if name in changed_paths:
+            saved_rows[index] = (
+                name,
+                hashlib.sha256(f"pre-joint-binding:{name}".encode()).hexdigest(),
+            )
+    saved_source_rows = tuple(saved_rows)
+    saved_identity = replace(
+        identity,
+        source=replace(
+            identity.source,
+            files=saved_source_rows,
+            digest=hashlib.sha256(
+                json.dumps(
+                    saved_source_rows,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest(),
+        ),
+    )
+    torch.manual_seed(101)
+    source = ClearVLAMainlinePolicy(config)
+    optimizer, _ = build_optimizer(source, config)
+    schedule = WarmupCosineSchedule(
+        optimizer,
+        warmup_steps=2,
+        total_steps=4,
+        minimum_ratio=0.1,
+    )
+    checkpoint = tmp_path / "joint-binding.pt"
+    save_checkpoint(
+        checkpoint,
+        model=source,
+        optimizer=optimizer,
+        schedule=schedule,
+        config=config,
+        identity=saved_identity,
+        epoch=1,
+        global_step=0,
+        best_metric=0.2,
+    )
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    payload["model"].pop(JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY)
+    torch.save(payload, checkpoint)
+
+    torch.manual_seed(102)
+    target = ClearVLAMainlinePolicy(config)
+    target_before = {
+        name: value.detach().clone()
+        for name, value in target.state_dict().items()
+    }
+    state = load_checkpoint_for_initialization(
+        checkpoint,
+        model=target,
+        config=config,
+        identity=identity,
+        model_contract_migration=JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
+    )
+    assert state.model_contract_migration == JOINT_TASK_OBJECT_BINDING_V1_MIGRATION
+    assert set(state.changed_source_files) == changed_paths
+    for name, value in source.state_dict().items():
+        if name == JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY:
+            continue
+        torch.testing.assert_close(target.state_dict()[name], value, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(
+        target.state_dict()[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY],
+        torch.zeros_like(target_before[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY]),
+        atol=0.0,
+        rtol=0.0,
+    )
+
 
 def test_p2_shared_target_prior_pread_has_one_explicit_combined_initialization(
     tmp_path: Path,
