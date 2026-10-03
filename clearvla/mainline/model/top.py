@@ -210,6 +210,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         objects: int = 4,
         grounder_iterations: int = 3,
         teacher_key_dim: int = 64,
+        teacher_current_reference_mode: str = "g_assignment_v1",
         flow_reference_frames: int = 4,
         role_host_depth: int = 3,
         role_host_expansion: float = 4.0,
@@ -239,6 +240,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         entity_chart_mode: str = "query_lattice_v1",
         entity_history_mode: str = "current_only_v1",
         entity_motion_mode: str = "query_anchor_v1",
+        p2_target_value_mode: str = "none",
         core_config=None,
     ) -> None:
         super().__init__()
@@ -343,6 +345,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             content_dim=content_dim,
             key_dim=teacher_key_dim,
             flow_reference_frames=flow_reference_frames,
+            current_reference_mode=teacher_current_reference_mode,
         )
         self.recognizer = OperationExpectationSupervisor() if operation_intent_mode == OBJECT_OUTCOME_INTENT else FuturePlanRecognizer(
             future_time_grid_mode=future_time_grid_mode,
@@ -363,6 +366,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             world_control_mode=world_control_mode,
             target_binding_mode=target_binding_mode,
             task_execution_mode=task_execution_mode, heads=heads,
+            target_value_mode=p2_target_value_mode,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)
         self.plan_compiler = ObjectPolicyPlanCompiler(

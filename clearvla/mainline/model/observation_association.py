@@ -46,6 +46,11 @@ class ObjectObservationMeasurement:
 class ObjectObservationAssociation(nn.Module):
     """Established frozen association law, not learned persistent identity."""
 
+    CURRENT_REFERENCE_MODES = (
+        "g_assignment_v1",
+        "raw_chart_v1",
+    )
+
     def __init__(
         self,
         *,
@@ -53,12 +58,19 @@ class ObjectObservationAssociation(nn.Module):
         key_dim: int = 64,
         flow_reference_frames: int = 4,
         camera_names: tuple[str, ...] = (),
+        current_reference_mode: str = "g_assignment_v1",
     ) -> None:
         super().__init__()
         self.camera_names = tuple(camera_names)
         self.content_dim = int(content_dim)
         self.key_dim = int(key_dim)
         self.flow_reference_frames = int(flow_reference_frames)
+        self.current_reference_mode = str(current_reference_mode)
+        if self.current_reference_mode not in self.CURRENT_REFERENCE_MODES:
+            raise ValueError(
+                "unknown Teacher current-reference mode: "
+                f"{self.current_reference_mode!r}"
+            )
         if self.flow_reference_frames <= 0:
             raise ValueError("teacher flow reference frames must be positive")
         self.semantic_content_key = nn.Linear(content_dim, key_dim, bias=False)
@@ -181,14 +193,18 @@ class ObjectObservationAssociation(nn.Module):
         if not bool(torch.isfinite(offsets.float()).all()):
             raise ValueError("Teacher future offsets contain non-finite values")
         objects = facts.objects
+
         # ``DenseObjectGrounder`` quarantines invalid candidate rows before its
         # learned projections, but the complete dense chart intentionally keeps
         # the producer values for reconstruction/audit.  A malformed invalid
-        # row can therefore still be NaN here.  The Teacher consumes detached
-        # G assignments, so applying the producer-owned validity boundary once
-        # before the assignment/value product is the only safe way to prevent
-        # ``NaN * 0`` from poisoning the target plane (and the downstream loss
-        # graph when the target is later read by the recognizer).
+        # row can therefore still be NaN here.  The historical Teacher used
+        # typed G assignments and G content as its current key/value plane;
+        # that made the target's measured change move whenever the learned G
+        # representation moved.  The raw-chart mode keeps the shared K
+        # address (the one physical identity owner) but reads current values
+        # directly from the independently observed DINO chart.  Thus G may
+        # say which K address is being evaluated, while it cannot manufacture
+        # the current appearance/semantic value used by the frozen match.
         candidate_validity = torch.nan_to_num(
             facts.dense_chart.candidate_validity.detach().float(),
             nan=0.0,
@@ -216,16 +232,43 @@ class ObjectObservationAssociation(nn.Module):
             flat_value = value.detach().float().flatten(1, -2)
             return torch.einsum("bkn,bnd->bkd", weight, flat_value)
 
-        # The typed G posterior selects full-DINO current content before the
-        # fixed association projection.  This keeps current/future keys in one
-        # measurable space; comparing a learned route vector with an unrelated
-        # random DINO projection would only manufacture an appearance score.
-        semantic_current_content = typed_current(
-            facts.semantic_candidate_assignment, candidate_content
-        )
-        appearance_current_content = typed_current(
-            facts.appearance_candidate_assignment, candidate_content
-        )
+        if self.current_reference_mode == "raw_chart_v1":
+            chart_support = facts.dense_chart.cell_observed[..., 0]
+            current_chart = self._supported_finite(
+                facts.dense_chart.dino_content,
+                chart_support[..., None],
+                name="raw current DINO chart",
+            )
+            address = torch.nan_to_num(
+                facts.object_to_chart.detach().float(),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp_min(0.0)
+            address = torch.where(
+                chart_support[:, None], address, torch.zeros_like(address)
+            )
+            address = address.flatten(2)
+            address = address / address.sum(dim=-1, keepdim=True).clamp_min(1.0e-6)
+            current_reference = torch.einsum(
+                "bkn,bnd->bkd",
+                address,
+                current_chart.flatten(1, -2),
+            )
+            # Both fixed association keys are now built from the same raw
+            # current observation.  They remain separate frozen projections,
+            # so semantic and appearance matching retain their prior owners.
+            semantic_current_content = current_reference
+            appearance_current_content = current_reference
+        else:
+            # The legacy mode is intentionally preserved byte-for-byte for old
+            # configs and control checkpoints.
+            semantic_current_content = typed_current(
+                facts.semantic_candidate_assignment, candidate_content
+            )
+            appearance_current_content = typed_current(
+                facts.appearance_candidate_assignment, candidate_content
+            )
         current_semantic_key = F.normalize(
             self.semantic_content_key(semantic_current_content),
             dim=-1,
@@ -406,11 +449,14 @@ class ObjectObservationAssociation(nn.Module):
         uncertainty_per_support = null_probability + association_real_mass_per_support * entropy
         association_confidence = (1.0 - entropy).clamp(0.0, 1.0)
         reliability_per_support = association_real_mass_per_support * association_confidence
-        current_reference = self._supported_finite(
-            facts.content,
-            object_validity,
-            name="current object content",
-        )[:, None]
+        if self.current_reference_mode == "g_assignment_v1":
+            current_reference = self._supported_finite(
+                facts.content,
+                object_validity,
+                name="current object content",
+            )[:, None]
+        else:
+            current_reference = current_reference[:, None]
         # This is the exact V120 physical target algebra.  Null mass already
         # supplies the only identity fallback.  Association confidence remains
         # a calibration diagnostic and must not contract a diffuse-but-visible

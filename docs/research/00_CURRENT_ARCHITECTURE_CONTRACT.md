@@ -1,3 +1,39 @@
+## WP3 — DINOv3 target-flow / Teacher self-reference repair (2026-10-03 candidate)
+
+The isolated candidate is `codex/dinov3-deep-repair-20261003`, with preset
+`configs/mainline/dinov3_online_deep_repair_calvin.json`. It initializes from
+the current identity/trajectory checkpoint through the explicit
+`dinov3_deep_repair_v1` model migration; the optimizer, scheduler and RNG are
+fresh. This is a source and finite-run qualification, not learned task
+acceptance.
+
+The opt-in Teacher mode `raw_chart_v1` retains the single G-owned K address but
+constructs current semantic/appearance keys and the null fallback from the
+independently observed current DINO chart. G typed candidate values no longer
+decide the measured current value in this target plane. The frozen association
+still owns the same semantic/appearance/geometry law, future supports remain
+training-only, and no second identity selector or physical tracker is added.
+
+The opt-in P2 `bounded_zero_start_v1` carrier selects S typed target evidence
+with the existing K/view posterior and adds it only as a bounded hidden value
+residual. Its scalar gain is a new exact-zero FP32 parameter, so the restored
+checkpoint is bit-identical at initialization while ordinary action gradients
+can learn the route. It does not read raw language, create a selector, or
+change W's goal-free ownership. The existing S/P2 common/residual identity and
+producer validity masks remain required.
+
+For binary CALVIN, the existing command-transition objective is restricted to
+the declared `controlled_action_tokens` prefix and uses the same motion/event
+row weights as action supervision. The deployed ABI and command head are
+unchanged. The candidate sets `image_frame_lru_capacity=0`; decoded/DINO
+feature caches remain disabled by the online HDF5 path. HDF5 file-handle reuse
+is an I/O descriptor policy, not an RGB/feature value cache.
+
+Required qualification: migration/source allow-list, old-mode zero-parity,
+raw-chart Teacher numerical checks, target-carrier parameter VJP, one real
+batch-8 update and matched closed-loop evidence. Do not call the repair a task
+success, stable physical identity, or final deployment until those gates pass.
+
 ## WP2 — mixed-gradient W and visual-ingress parity repair (2026-09-30 candidate)
 
 Branch `codex/wp2-parity-repair-20260930` is a correctness repair based on

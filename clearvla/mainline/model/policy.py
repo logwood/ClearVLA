@@ -364,6 +364,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             objects=top.object_slots,
             grounder_iterations=top.grounder_iterations,
             teacher_key_dim=top.teacher_key_dim,
+            teacher_current_reference_mode=top.teacher_current_reference_mode,
             flow_reference_frames=obs.flow_reference_frames,
             role_host_depth=top.role_host_depth,
             role_host_expansion=top.role_host_ffn_expansion,
@@ -393,6 +394,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             entity_chart_mode=top.entity_chart_mode,
             entity_history_mode=top.entity_history_mode,
             entity_motion_mode=top.entity_motion_mode,
+            p2_target_value_mode=top.p2_target_value_mode,
             core_config=raw_observation.v120_config,
         )
         raw_history_proposal = HistoryActionProposal(

@@ -499,6 +499,10 @@ class TopConfig:
     object_slots: int = 4
     grounder_iterations: int = 3
     teacher_key_dim: int = 64
+    # The control uses G's learned K address and typed values.  The raw-chart
+    # candidate keeps that one identity address but measures current values
+    # from the independently observed DINO chart before the frozen match.
+    teacher_current_reference_mode: str = "g_assignment_v1"
     role_host_depth: int = 3
     role_host_ffn_expansion: float = 4.0
     role_host_dropout: float = 0.05
@@ -544,6 +548,10 @@ class TopConfig:
     # Bound the full-posterior P1 query work so batch-8 keeps a stable
     # memory margin while avoiding one-query-at-a-time sampling.
     flow_jepa_address_query_batch_budget: int = 96
+    # Optional zero-start, bounded S target-value carrier. It is a value path
+    # after the existing shared K selector; it never creates a second selector
+    # or a raw-language action shortcut.
+    p2_target_value_mode: str = "none"
 
     def validate(self) -> None:
         if self.annotation_goal_mode not in {"none", "annotated_endpoint_relation_v1"}:
@@ -554,6 +562,17 @@ class TopConfig:
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
         ):
             raise ValueError("annotated goal requires native soft instruction evidence and typed P3")
+        if self.teacher_current_reference_mode not in {
+            "g_assignment_v1",
+            "raw_chart_v1",
+        }:
+            raise ValueError("unknown top teacher_current_reference_mode")
+        if self.p2_target_value_mode not in {"none", "bounded_zero_start_v1"}:
+            raise ValueError("unknown top p2_target_value_mode")
+        if self.p2_target_value_mode != "none" and self.target_binding_mode != "shared_operation_v1":
+            raise ValueError(
+                "the bounded P2 target-value carrier requires the shared K binding"
+            )
         if self.world_feedback_mode not in {"none","executed_four_step_world_v1"}:
             raise ValueError("unknown world_feedback_mode")
         if self.world_feedback_mode != "none" and (
@@ -1490,6 +1509,12 @@ class ExperimentConfig:
             cast(dict[str, object], payload["top"]).pop(
                 "world_camera_condition_mode"
             )
+        if self.top.teacher_current_reference_mode == "g_assignment_v1":
+            cast(dict[str, object], payload["top"]).pop(
+                "teacher_current_reference_mode"
+            )
+        if self.top.p2_target_value_mode == "none":
+            cast(dict[str, object], payload["top"]).pop("p2_target_value_mode")
         if self.top.world_action_condition_mode == "interval_mean_v1":
             # The sequence condition is an explicit model-contract change;
             # keep old config/checkpoint identities byte-compatible by

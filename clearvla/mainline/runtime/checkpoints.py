@@ -163,6 +163,26 @@ JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY = (
 JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_SOURCE_PATHS = (
     JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
 )
+DINOV3_DEEP_REPAIR_V1_MIGRATION = "dinov3_deep_repair_v1"
+DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY = (
+    "policy_compiler.effect_reader.target_value_gain"
+)
+DINOV3_DEEP_REPAIR_V1_SOURCE_PATHS = (
+    JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
+    | frozenset(
+        {
+            "clearvla/mainline/config.py",
+            "clearvla/mainline/model/compiler.py",
+            "clearvla/mainline/model/observation_association.py",
+            "clearvla/mainline/model/policy.py",
+            "clearvla/mainline/model/teacher.py",
+            "clearvla/mainline/model/top.py",
+            "clearvla/mainline/runtime/checkpoints.py",
+            "clearvla/mainline/train.py",
+            "clearvla/mainline/training/losses.py",
+        }
+    )
+)
 P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
     "intent.organizer.target_object_address.weight"
 )
@@ -1047,6 +1067,22 @@ def _joint_task_object_binding_trajectory_migration_config_view(
     return payload
 
 
+def _dinov3_deep_repair_migration_config_view(
+    config: ExperimentConfig,
+) -> dict[str, object]:
+    """Remove exactly the new target/cache selectors admitted by this repair."""
+
+    payload = _initialization_config_view(config)
+    top = dict(cast(Mapping[str, object], payload["top"]))
+    top.pop("teacher_current_reference_mode", None)
+    top.pop("p2_target_value_mode", None)
+    payload["top"] = top
+    data = dict(cast(Mapping[str, object], payload["data"]))
+    data.pop("image_frame_lru_capacity", None)
+    payload["data"] = data
+    return payload
+
+
 def load_checkpoint_for_initialization(
     path: str | Path,
     *,
@@ -1127,6 +1163,7 @@ def load_checkpoint_for_initialization(
         WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
+        DINOV3_DEEP_REPAIR_V1_MIGRATION,
     }:
         raise ValueError(
             "unknown model-initialization model migration "
@@ -1297,6 +1334,29 @@ def load_checkpoint_for_initialization(
         if saved_identity.dataset != identity.dataset:
             raise ValueError(
                 "W camera-condition migration requires identical dataset identity"
+            )
+    elif selected_model_migration == DINOV3_DEEP_REPAIR_V1_MIGRATION:
+        if (
+            saved_config.top.teacher_current_reference_mode != "g_assignment_v1"
+            or config.top.teacher_current_reference_mode != "raw_chart_v1"
+            or saved_config.top.p2_target_value_mode != "none"
+            or config.top.p2_target_value_mode != "bounded_zero_start_v1"
+            or int(saved_config.data.image_frame_lru_capacity) != 512
+            or int(config.data.image_frame_lru_capacity) != 0
+        ):
+            raise ValueError(
+                "DINOv3 deep repair migration requires the declared raw-chart, "
+                "zero-start target-value and frame-cache selectors"
+            )
+        if _dinov3_deep_repair_migration_config_view(
+            saved_config
+        ) != _dinov3_deep_repair_migration_config_view(config):
+            raise ValueError(
+                "DINOv3 deep repair migration differs outside its admitted selectors"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "DINOv3 deep repair migration requires identical dataset identity"
             )
     elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION:
         if (
@@ -1490,8 +1550,13 @@ def load_checkpoint_for_initialization(
     elif selected_model_migration in {
         JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
+        DINOV3_DEEP_REPAIR_V1_MIGRATION,
     }:
-        allowed_source_paths = JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
+        allowed_source_paths = (
+            DINOV3_DEEP_REPAIR_V1_SOURCE_PATHS
+            if selected_model_migration == DINOV3_DEEP_REPAIR_V1_MIGRATION
+            else JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
+        )
     else:
         allowed_source_paths = (
             INITIALIZATION_SOURCE_PATHS
@@ -1625,6 +1690,26 @@ def load_checkpoint_for_initialization(
             )
         mapped_model = dict(mapped_model)
         mapped_model[new_condition_key] = new_condition.detach().clone()
+    elif selected_model_migration == DINOV3_DEEP_REPAIR_V1_MIGRATION:
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        if missing != {DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY} or unexpected:
+            raise ValueError(
+                "DINOv3 deep repair migration must add exactly its target-value gain"
+            )
+        new_gain = current_model[DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY]
+        if (
+            not isinstance(new_gain, torch.Tensor)
+            or tuple(new_gain.shape) != ()
+            or new_gain.dtype != torch.float32
+            or not bool(torch.isfinite(new_gain).all())
+            or int(torch.count_nonzero(new_gain).item()) != 0
+        ):
+            raise ValueError(
+                "DINOv3 deep repair migration requires a finite exact-zero FP32 gain"
+            )
+        mapped_model = dict(mapped_model)
+        mapped_model[DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY] = new_gain.detach().clone()
     elif selected_model_migration in {
         JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
@@ -1870,6 +1955,9 @@ __all__ = [
     "JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS",
     "JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION",
     "JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_SOURCE_PATHS",
+    "DINOV3_DEEP_REPAIR_V1_MIGRATION",
+    "DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY",
+    "DINOV3_DEEP_REPAIR_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION",

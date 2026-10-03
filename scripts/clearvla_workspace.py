@@ -44,6 +44,9 @@ MODEL_CONTRACT_MIGRATIONS = (
     "p2_shared_target_prior_sequence_prefix_pread_v1",
     "p2_shared_target_prior_v1",
     "world_camera_coordinate_role_v1",
+    "joint_task_object_binding_v1",
+    "joint_task_object_binding_trajectory_v1",
+    "dinov3_deep_repair_v1",
 )
 
 

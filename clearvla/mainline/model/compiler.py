@@ -163,6 +163,12 @@ class SelectedIntervalEvidence:
     geometry_residual_value: Tensor
     selected_s_context: Tensor  # [B,T,Q,I,Z,H]
     support: Tensor  # bool [B,I,Z]
+    # S typed target evidence after the same existing K/view posterior. This
+    # is a value carrier only; shared K binding remains the sole identity
+    # selector. The optional P2 reader consumes it through a zero-start gain.
+    # ``None`` keeps direct structural fixtures source-compatible; live
+    # spatial selection always supplies the explicit carrier.
+    selected_target_value: Tensor | None = None  # [B,T,Q,I,Z,H]
     time_grid_mode: str = LEGACY_FUTURE_TIME
     geometry_mode: str = POOLED_TRANSPORT
 
@@ -173,6 +179,10 @@ class SelectedIntervalEvidence:
         expected = tuple(self.key.shape)
         if tuple(self.selected_s_context.shape) != expected:
             raise ValueError("selected P2 S context lost an identity axis")
+        if self.selected_target_value is not None and tuple(
+            self.selected_target_value.shape
+        ) != expected:
+            raise ValueError("selected P2 target value lost an identity axis")
         if tuple(self.support.shape) != (expected[0], expected[3], expected[4]):
             raise ValueError("selected P2 support must be [B,I,2]")
         if self.support.dtype != torch.bool:
@@ -278,6 +288,7 @@ class ObjectFutureEffectReader(nn.Module):
         geometry_mode: str = POOLED_TRANSPORT,
         camera_names: tuple[str, ...] = (),
         task_execution_mode: str = NO_TASK_EXECUTION,
+        target_value_mode: str = "none",
         heads: int = 1,
     ) -> None:
         super().__init__()
@@ -301,6 +312,16 @@ class ObjectFutureEffectReader(nn.Module):
             raise ValueError("unknown P2 world control domain mode")
         self.target_binding_mode = target_binding_mode
         self.spatial_intent_mode = str(spatial_intent_mode)
+        self.target_value_mode = str(target_value_mode)
+        if self.target_value_mode not in {"none", "bounded_zero_start_v1"}:
+            raise ValueError("unknown P2 target-value mode")
+        if self.target_value_mode == "bounded_zero_start_v1":
+            # Exact old-function initialization with a live VJP: the carrier
+            # is zero at restore, but its scalar owner can learn from ordinary
+            # action losses without introducing a second projection/selector.
+            self.target_value_gain = nn.Parameter(torch.zeros((), dtype=torch.float32))
+        else:
+            self.register_parameter("target_value_gain", None)
         self.source_query = nn.ModuleList(
             nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
         )
@@ -758,6 +779,7 @@ class ObjectFutureEffectReader(nn.Module):
         selected_common_values: list[Tensor] = []
         selected_residual_values: list[Tensor] = []
         selected_s_contexts: list[Tensor] = []
+        selected_target_values: list[Tensor] = []
         interval_supports: list[Tensor] = []
         spatial_posteriors: list[Tensor] = []
         source_scores: list[Tensor] = []
@@ -904,6 +926,7 @@ class ObjectFutureEffectReader(nn.Module):
             selected_s_contexts.append(
                 public_interval[:, None, None] + selected_typed.float()
             )
+            selected_target_values.append(selected_typed.float())
             interval_supports.append(interval_support)
             spatial_posteriors.append(posterior)
             source_scores.append(source_score)
@@ -923,6 +946,7 @@ class ObjectFutureEffectReader(nn.Module):
             geometry_common_value=selected_common_values[1],
             geometry_residual_value=selected_residual_values[1],
             selected_s_context=torch.stack(selected_s_contexts, dim=4),
+            selected_target_value=torch.stack(selected_target_values, dim=4),
             support=torch.stack(interval_supports, dim=-1),
         )
         selected.validate()
@@ -1112,10 +1136,38 @@ class ObjectFutureEffectReader(nn.Module):
         semantic_selected = semantic_common + semantic_residual
         geometry_selected = geometry_common + geometry_residual
         semantic_effect = self.semantic_value(semantic_selected)
+        if self.target_value_gain is None:
+            target_value_scale = action_query.new_zeros((), dtype=torch.float32)
+        else:
+            target_value_scale = 0.10 * torch.tanh(self.target_value_gain.float())
+        target_value_source = (
+            selected.selected_s_context
+            if selected.selected_target_value is None
+            else selected.selected_target_value
+        )
+        selected_target_value = torch.einsum(
+            "btqiz,btqizh->btqzh",
+            posterior.float(),
+            target_value_source.float(),
+        )
+        target_value_effect = target_value_scale.to(
+            dtype=selected_target_value.dtype
+        ) * selected_target_value
+        semantic_effect = semantic_effect + target_value_effect[..., 0, :].to(
+            dtype=semantic_effect.dtype
+        )
         effect = ObjectTypedEffect(
             semantic=semantic_effect,
-            geometry=(geometry_selected.to(dtype=semantic_effect.dtype)
-                      if self.view_geometry is not None else self.transport_value(geometry_selected)),
+            geometry=(
+                geometry_selected.to(dtype=semantic_effect.dtype)
+                if self.view_geometry is not None
+                else self.transport_value(geometry_selected)
+            ),
+        )
+        effect = ObjectTypedEffect(
+            semantic=effect.semantic,
+            geometry=effect.geometry
+            + target_value_effect[..., 1, :].to(dtype=effect.geometry.dtype),
         )
         effect.validate()
         value_by_type = torch.stack((effect.semantic, effect.geometry), dim=3)
@@ -1133,6 +1185,17 @@ class ObjectFutureEffectReader(nn.Module):
                 gradient_metrics,
                 "gradient_tensor_p2_geometry_effect_rms",
             )
+            register_gradient_rms_metric(
+                selected_target_value,
+                gradient_metrics,
+                "gradient_tensor_p2_target_value_route_rms",
+            )
+            if self.target_value_gain is not None:
+                register_gradient_rms_metric(
+                    self.target_value_gain,
+                    gradient_metrics,
+                    "gradient_parameter_p2_target_value_gain_rms",
+                )
         if not collect_diagnostics:
             return effect, {}
         neutral_key_score = torch.einsum(
@@ -1234,6 +1297,20 @@ class ObjectFutureEffectReader(nn.Module):
             .mean()
             .sqrt(),
             "object_p2_geometry_value_weight_rms": self.transport_value.weight.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_p2_target_value_mode_enabled": action_query.new_tensor(
+                float(self.target_value_gain is not None), dtype=torch.float32
+            ),
+            "object_p2_target_value_gain": action_query.new_tensor(
+                0.0
+                if self.target_value_gain is None
+                else float(0.10 * torch.tanh(self.target_value_gain.detach()).item()),
+                dtype=torch.float32,
+            ),
+            "object_p2_target_value_effect_rms": target_value_effect.detach()
             .float()
             .square()
             .mean()

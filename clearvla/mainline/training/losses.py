@@ -1994,9 +1994,30 @@ def action_terms(
         # expose. This optional term compares the differentiable expected
         # command delta with the source binary delta; it is zero by default so
         # the historical objective remains unchanged unless opted in.
-        transition_pair_valid = valid[:, 1:] & valid[:, :-1]
+        # CALVIN executes a contiguous controlled prefix at every replan.
+        # A full-horizon transition loss can therefore spend its budget on
+        # rows that are never consumed while leaving alternating commands in
+        # the deployed prefix untouched.  Keep the existing objective owner,
+        # but restrict its pairs to the declared prefix and retain the
+        # per-row motion/event weights used by the formal action path.
+        controlled_prefix = min(
+            int(config.bottom.controlled_action_tokens),
+            int(target.normalized.shape[1]),
+        )
+        prefix_pair_mask = (
+            torch.arange(
+                max(int(target.normalized.shape[1]) - 1, 0),
+                device=valid.device,
+            )
+            < max(controlled_prefix - 1, 0)
+        )[None]
+        transition_pair_valid = (
+            valid[:, 1:]
+            & valid[:, :-1]
+            & prefix_pair_mask
+        )
         transition_pair_weight = 0.5 * (
-            horizon_step_weight[:, 1:] + horizon_step_weight[:, :-1]
+            step_weight[:, 1:] + step_weight[:, :-1]
         )
         command_probability = command_logits.float().softmax(dim=-1)[..., 1]
         predicted_command_value = command_probability.mul(2.0).sub(1.0)
@@ -2022,6 +2043,9 @@ def action_terms(
         command_transition_target_rate = (
             target_transition.float() * transition_pair_valid
         ).sum() / transition_rows
+        command_transition_prefix_rows = command_loss.new_tensor(
+            float(controlled_prefix)
+        )
     else:
         zero_command = prediction.new_zeros((), dtype=torch.float32)
         command_accuracy = zero_command
@@ -2036,6 +2060,7 @@ def action_terms(
         command_transition_loss = zero_command
         command_transition_rate = zero_command
         command_transition_target_rate = zero_command
+        command_transition_prefix_rows = zero_command
         command_positive_weight = zero_command
         command_negative_weight = zero_command
     event_mask = event_mask.to(dtype=gripper_error_legacy.dtype)
@@ -2318,6 +2343,7 @@ def action_terms(
         "gripper_command_transition": command_transition_loss,
         "gripper_command_transition_rate": command_transition_rate,
         "gripper_command_transition_target_rate": command_transition_target_rate,
+        "gripper_command_transition_prefix_rows": command_transition_prefix_rows,
         "gripper_command_positive_class_weight": command_positive_weight.detach(),
         "gripper_command_negative_class_weight": command_negative_weight.detach(),
         "gripper_command_accuracy": command_accuracy,
