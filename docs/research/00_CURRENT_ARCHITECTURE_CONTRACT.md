@@ -87,6 +87,11 @@ checks, target-carrier parameter VJP, interval-axis carrier variation, one real
 batch-8 update and matched closed-loop evidence. Do not call the repair a task
 success, stable physical identity, or final deployment until those gates pass.
 
+## Causal-chain C1: conditional target residual (2026-10-04)
+On the shared zero-start task/object residual, pointwise object*mean-task and object*tanh(mean-task) products replace the old [object, task] features.
+The old concatenated linear task term was K-common and could not change real-K relative ranking. Source tests cover conditional ranking, gradients, zero-task neutrality, permutations and support.
+The K-plus-null owner, support masks and per-view reduction remain unchanged; the changed weight meaning is recorded by task_execution.binding_residual and old concat weights are not exact-resume compatible.
+Source-level evidence only; this does not establish learned grounding or robot success.
 ## WP2 — mixed-gradient W and visual-ingress parity repair (2026-09-30 candidate)
 
 Branch `codex/wp2-parity-repair-20260930` is a correctness repair based on
