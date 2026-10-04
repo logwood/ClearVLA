@@ -670,6 +670,15 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # read), so it is not raw language/time and it cannot invent an object
         # when the shared binding has no support.
         task_value = self._bounded_unit(typed_query)[:, :, None, :, :]
+        # Preserve the interval direction before the per-row bounded query
+        # normalization.  The normalized task value above is useful as a
+        # bounded common carrier, but it attenuates the centered interval
+        # direction by cancelling most of its shared magnitude.  This residual
+        # is centered over I, bounded per row, and remains under the same
+        # producer-route and shared-target support law as the task carrier.
+        task_interval_residual = self._bounded_unit(
+            typed_query - typed_query.mean(dim=1, keepdim=True)
+        )[:, :, None, :, :]
         # A typed task value may follow a route only when that producer type
         # has an actual current fact.  This keeps a zero semantic/appearance/
         # geometry source exactly zero instead of fabricating a value from S.
@@ -679,17 +688,26 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if binding is None:
             task_gate = validity.to(dtype=relevance_mass.dtype) * route_support[:, None]
         else:
+            # Exclude the shared null mass from value amplitude; it is a selector
+            # fallback, not S evidence.
+            target_mass = binding.mass.float()
+            target_mass = target_mass / target_mass.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(1.0e-6)
             task_gate = (
-                binding.mass[:, None, :, None, None]
+                target_mass[:, None, :, None, None]
                 * object_support[:, None, :, None, None].to(
                     dtype=relevance_mass.dtype
                 )
                 * route_support[:, None]
             )
+        # Unit gain preserves the bounded interval value instead of erasing it.
         relevance_value = relevance_value + (
-            0.35
-            * task_gate
-            * task_value.to(dtype=relevance_mass.dtype)
+            task_gate
+            * (
+                task_value.to(dtype=relevance_mass.dtype)
+                + task_interval_residual.to(dtype=relevance_mass.dtype)
+            )
         )
 
         components: list[Tensor] = []
@@ -1024,13 +1042,16 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 0.20,
             )
         if self.task_relation_encoder is not None:
-            # Query identity/history still locate evidence through the joint
-            # relation read. The bounded residual is an interval-aligned language identity
-            # carrier, not a second selector or raw task
-            # value bypass.
-            interval_source = object_innovation
+            # The joint relation owns the K/object read, but it does not replace the
+            # existing interval/goal/history value carriers. Dropping those carriers
+            # makes public S nearly interval-invariant despite distinct interval identity.
+            interval_source = (
+                interval_base + goal_innovation + history_innovation + object_innovation
+            )
         else:
-            interval_source = interval_base + goal_innovation + history_innovation + object_innovation
+            interval_source = (
+                interval_base + goal_innovation + history_innovation + object_innovation
+            )
         if progress is not None:
             interval_source = interval_source + progress[:, None]
         public_intervals = self.interval_self(interval_source)

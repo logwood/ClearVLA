@@ -2965,3 +2965,24 @@ be mistaken for disagreement merely because NaN is unequal to itself.
 Temporal/observability validation remains earlier, the response record retains
 its own strict finite-payload check, and no values are repaired or reclassified
 as unobserved. This corrects a regression found by the cumulative M7j inventory.
+
+
+## C7: retain the full S interval value path (2026-10-05 candidate)
+
+When task_relation_encoder is active, the joint relation owns the shared K/object
+read, but it does not replace S's existing interval identity, goal innovation or
+history innovation values. Public S therefore receives the same summed value
+carrier as the legacy path before interval_self; the relation still owns the
+object read and K support. The typed S value lane adds a centered bounded interval
+residual and normalizes the learned binding mass over supported K only, excluding
+the shared null fallback from value amplitude. Unsupported producer routes remain
+exactly zero, the K axis and selector posterior are unchanged, and no raw language
+or future label enters the value lane.
+
+A matched online-DINO/no-cache fixed-checkpoint probe increased public S interval
+variation from about 0.0037 to 0.0371, typed semantic/geometry S value variation
+to about 0.0263/0.0259, and a real BS8 16-batch validation measured
+0.02586/0.02651 with full closure/intervention coverage. The short run stayed
+finite at about 7.18 s/batch and 23.26 GiB peak process estimate. These are
+source-path qualifications; a long run and closed-loop task success remain
+separate acceptance gates.
