@@ -1,3 +1,15 @@
+## Stage two C5/C6 (2026-10-04)
+
+Continue on causal-chain-repair-20261004 after a7cad7d5. The new explicit
+`dinov3_causal_chain_stage2_calvin.json` enables query-conditioned native role
+values and observed comparison-status values. Stage-one preset and launcher
+remain unchanged; no new losses, target selectors or fixed recovery rules.
+C5 addresses value-read query insensitivity, not all upstream geometric loss.
+C6 uses existing causal observation association, not future labels or a revised
+Teacher objective. Future-target null/uncertainty, block-internal binary chatter,
+R1/R8 ABI, native CUDA behavior and learned performance remain open. Keep source
+changes and incomplete/failing test evidence distinct from task success.
+
 ## Causal-chain repair branch, 2026-10-04
 
 On isolated `codex/causal-chain-repair-20261004` from 4f0a5b9b: C1 replaces the
