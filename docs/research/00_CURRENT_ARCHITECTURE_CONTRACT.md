@@ -1,3 +1,13 @@
+## Causal-chain C2: observe pre-decomposition S values (2026-10-04)
+
+S diagnostic hooks now observe the ORIGINAL `typed_relevance_value`, including
+per-type ordinary VJPs. For C=mean(V), R=V-C, total C gradients can cancel even
+with a live V/producer gradient. Historical C/R metrics remain compatibility
+observations, explicitly not independent partial derivatives or route-health
+verdicts. No tensor is detached, recomposed for a sibling hook, or altered to
+make a gradient look nonzero. Diagnostic on/off tests keep the SAME grad mode;
+no-grad vs grad can select different numerical kernels and is a separate test.
+
 ## Causal-chain C1: conditional target residual (2026-10-04)
 
 On `codex/causal-chain-repair-20261004`, the existing zero-start

@@ -936,6 +936,9 @@ class ClearVLAMainlinePolicy(nn.Module):
                 gradient_metrics,
                 "gradient_tensor_s_public_object_memory_rms",
             )
+            # Historical metrics below are TOTAL intermediate-node VJPs, not
+            # partial derivatives with residuals held fixed. Use S's original
+            # typed_value_predecomposition metric for producer connectivity.
             register_gradient_rms_metric(
                 context.intent.typed_common_value,
                 gradient_metrics,

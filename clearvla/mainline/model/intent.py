@@ -28,7 +28,7 @@ from .instruction_change import TypedInstructionReferenceRead
 from .instruction_posterior import PosteriorInstructionReferenceRead
 from .instruction_progress import InstructionReferenceRead
 from .operation_expectation import ObjectOperationPredictor, OperationExpectationRead
-from .routing import register_gradient_rms_metric, smooth_rms_contract
+from .routing import register_gradient_axis_rms_metrics, register_gradient_rms_metric, smooth_rms_contract
 from .target_binding import (
     LOCAL_TARGET_READERS,
     SHARED_TARGET_BINDING,
@@ -1185,6 +1185,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # its bounded object innovation.  Keep the historical attention name
         # as a compatibility alias, but bind it to the consumed innovation
         # rather than reporting a guaranteed zero from a sibling output.
+        # C=mean(V), R=V-C has a redundant intermediate C. The total VJP at C
+        # can cancel through R even when the producer learns normally. Observe
+        # the ORIGINAL consumed V, not a reconstructed sibling or detached leaf.
+        register_gradient_rms_metric(
+            typed_relevance_value, metrics,
+            "gradient_tensor_s_typed_value_predecomposition_rms",
+        )
+        register_gradient_axis_rms_metrics(
+            typed_relevance_value, metrics,
+            tuple(f"gradient_tensor_s_{name}_value_predecomposition_rms"
+                  for name in TYPED_INTENT_NAMES),
+            dim=3,
+        )
         register_gradient_rms_metric(
             language_object_query,
             metrics,
