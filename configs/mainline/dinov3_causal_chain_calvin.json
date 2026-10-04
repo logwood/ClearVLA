@@ -55,7 +55,8 @@
     "annotation_goal_mode": "annotated_endpoint_relation_v1",
     "task_execution_mode": "joint_object_scene_v1",
     "object_view_mode": "per_camera_values_v1",
-    "p2_effect_value_mode": "s_conditioned_values_v1"
+    "p2_effect_value_mode": "s_conditioned_values_v1",
+    "p2_target_value_mode": "bounded_zero_start_v1"
   },
   "bottom": {
     "arm_flow_mode": "relative_command_adapter",
