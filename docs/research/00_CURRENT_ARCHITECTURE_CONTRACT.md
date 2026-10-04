@@ -1,3 +1,32 @@
+## Causal-chain C3: S-conditioned P2 effect values (2026-10-04 candidate)
+
+`top.p2_effect_value_mode="s_conditioned_values_v1"` adds a value interaction
+INSIDE the existing P2 terminal, after named-view/shared-K selection and before
+interval reduction. For each semantic/geometry type, P2 retains its original
+result and adds `sum_I(p_I * projected_W_I * tanh(S_I)) * tanh(gain_type)`.
+The two H-dimensional trainable channel gains start at exact zero with no RNG
+draw. No object reselection, query-only value, extra W rollout, phase/contact
+rule or objective is introduced. Zero W/null-target evidence still gives zero
+extra effect. Existing common/residual identities and dynamic interventions
+remain valid. The old `world_values_v1` mode remains default/serialization-
+omitted and has no new parameters; a separate candidate preset opts in.
+
+This removes the interval-address-only restriction when W interval effects are
+similar; it does not restore information already lost in G, S or K/C pooling,
+certify physical geometry, or guarantee trained position robustness. Original
+W is zero at initialization, so this zero-preserving downstream gain correctly
+has zero gradient on the FIRST full-model update. A second ordinary update
+(after W learns from its existing targets) yields a finite gain VJP/update;
+no forced nonzero W or hidden warm-start change is made. Full compact two-pass
+initial actions match the same-code old-value mode exactly at zero gain.
+
+Config, component identity and `p2_effect_values` ABI declare the new source
+semantics. `configs/mainline/dinov3_causal_chain_calvin.json` differs from the
+existing task-global preset only in this mode and output directory. Existing
+launcher defaults do not switch. No old checkpoint is silently migrated.
+The extra 2H parameters (1024 at H512) do not imply measured CUDA throughput;
+per-interval value projection adds compute that still needs GPU profiling.
+
 ## Causal-chain C2: observe pre-decomposition S values (2026-10-04)
 
 S diagnostic hooks now observe the ORIGINAL `typed_relevance_value`, including
