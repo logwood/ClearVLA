@@ -113,3 +113,26 @@ def test_explicit_configuration_roundtrip_and_original_preset_unchanged():
     assert replace(new,top=old.top,data=old.data)==old
     with pytest.raises(ValueError):replace(new,top=replace(new.top,p2_effect_value_mode='guess')).validate()
     with pytest.raises(ValueError):replace(new,top=replace(new.top,target_binding_mode='reader_local_v1')).validate()
+
+
+def test_fixed_interval_weights_do_not_limit_context_jacobian_to_three_directions():
+    # This is a local H16 value-path property, not the rank of the whole policy.
+    # The old four-value read can change only mixture coefficients. Hold those
+    # coefficients uniform to isolate the new source-conditioned value change.
+    torch.manual_seed(1009)
+    m = reader()
+    with torch.no_grad():
+        m.contextual_effect_gain.fill_(.25)
+        for layer in m.terminal_query:
+            layer.weight.zero_()
+    s = selected()
+    q = torch.randn(2, 3, 2, 16)
+    def response(x):
+        context = s.selected_s_context.clone()
+        context[0, 0, 0, :, 0, :] = x[None].expand(4, -1)
+        value, _ = m.temporal_terminal(q, replace(s, selected_s_context=context), collect_diagnostics=False)
+        return value.semantic[0, 0, 0]
+    j = torch.autograd.functional.jacobian(response, torch.zeros(16))
+    singular = torch.linalg.svdvals(j)
+    assert torch.isfinite(singular).all()
+    assert (singular > singular.max()*1e-5).sum() > 3

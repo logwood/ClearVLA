@@ -22,7 +22,11 @@ def terms(probability, *, target_positive=True, boundary_positive=True, valid=No
     target=ActionSupervision(normalized=raw,raw_units=raw,current_raw_units=boundary,
         gripper_transition_boundary=boundary,gripper_transition_boundary_raw_units=boundary,
         support=None if valid is None else FutureLabelSupport(
-            action=valid, state=valid.clone(), visual=valid[:, [3, 7, 15, 23]].clone()))
+            action=valid, state=valid.clone(), visual=valid[:, 3::4].clone()))
+    if target.support is not None:
+        target.support.validate(batch=b, horizon=t,
+            offsets=torch.arange(4,t+1,4,dtype=torch.long)[None].expand(b,-1),
+            device=raw.device, strict=True)
     field=adapter.encode(raw,boundary)
     zero=torch.zeros_like(field)
     prediction=(field+torch.linspace(0,.3,t)[None,:,None]).detach().requires_grad_()
