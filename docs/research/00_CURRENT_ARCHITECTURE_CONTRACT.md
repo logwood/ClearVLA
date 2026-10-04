@@ -1,3 +1,22 @@
+## Causal-chain C1: conditional target residual (2026-10-04)
+
+On `codex/causal-chain-repair-20261004`, the existing zero-start
+`TaskConditionedTargetBinder.task_object_score` now reads
+`[object * mean(task), object * tanh(mean(task))]`, not `[object, task]`.
+The old linear concatenation added a K-common task scalar; it could change
+real/null odds but not real-K relative ranking through that task half.
+No second selector, parameter, object ID, loss, support threshold or task rule
+is introduced. Zero task no longer permits the residual's object half to invent
+an identity preference. Original nonlinear score, null head, per-view log-mean-
+exp and one shared binding remain. Zero-start values and initialization draws
+are unchanged; trained concat weights are NOT silently compatible with the new
+cross-feature meaning. `task_execution.binding_residual` in deployment ABI
+records this and rejects old metadata. Source/checkpoint identity gates remain.
+
+Source tests separately exercise conditional odds/gradients (excluding null),
+zero-start equality, null-task neutrality, K/view permutations and support.
+They are not pretrained-grounding or robot-success evidence.
+
 ## WP2 — mixed-gradient W and visual-ingress parity repair (2026-09-30 candidate)
 
 Branch `codex/wp2-parity-repair-20260930` is a correctness repair based on

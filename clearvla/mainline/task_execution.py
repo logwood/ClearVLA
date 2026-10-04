@@ -78,6 +78,13 @@ def task_execution_metadata(mode: str = JOINT_TASK_EXECUTION) -> dict[str, objec
         "relation": "task-times-object-native-spatial-expectation-and-robot-before-role-reduction",
         "spatial": "nonlinear-native-grid-features-before-G3-law-expectation-no-centroid-only-input",
         "binding": "task-object-interaction-K-plus-null-history-query-only-no-reselection",
+        "binding_residual": {
+            "schema": "pointwise-task-object-products-v1",
+            "features": "object*mean-task;object*tanh(mean-task)",
+            "owner": "existing-zero-start-task_object_score",
+            "null": "unchanged-separate-head",
+            "migration": "concat-score-weights-are-not-exact-resume-compatible",
+        },
         "task_content": "source-only-language-and-interval-values-with-zero-start-bounded-identity-carrier-no-query-FFN",
         "task_value": "S-and-coarse-joint-relation-values-no-additive-history-query-scaffold",
         "comparison": "S-expected-minus-candidate-W-on-common-K-C-control-chart",
