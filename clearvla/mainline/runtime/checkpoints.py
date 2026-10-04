@@ -190,6 +190,7 @@ S_INTERVAL_VALUE_REPAIR_V1_SOURCE_PATHS = frozenset(
         "clearvla/mainline/model/intent.py",
         "clearvla/mainline/model/task_execution.py",
         "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/train.py",
     }
 )
 P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
