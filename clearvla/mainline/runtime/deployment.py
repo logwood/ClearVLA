@@ -80,6 +80,7 @@ from ..operation_expectation import (
     POSTERIOR_INTENT,
     operation_expectation_metadata,
 )
+from ..role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, role_value_metadata
 from ..p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, p2_effect_value_metadata
 from ..p2_geometry import POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, p2_geometry_metadata
 from ..p3_coordination import POINTWISE_PLAN, TYPED_HORIZON_PLAN, p3_coordination_metadata
@@ -399,6 +400,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"task_role_values": role_value_metadata()}
+           if config.top.task_role_value_mode == CONTEXTUAL_ROLE_VALUES else {}),
         **({"p2_effect_values": p2_effect_value_metadata()}
            if config.top.p2_effect_value_mode == CONTEXTUAL_EFFECT_VALUES else {}),
         **({"global_task": global_task_metadata()}
@@ -633,6 +636,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
             raise ValueError("deployment P3 coordination semantics differ from trained graph")
     elif plan_mode != POINTWISE_PLAN or "p3_coordination" in abi:
         raise ValueError("unknown or undeclared deployment P3 coordination mode")
+    role_mode = graph_top.get("task_role_value_mode", ADDRESS_ONLY_ROLE)
+    if role_mode == CONTEXTUAL_ROLE_VALUES:
+        if abi.get("task_role_values") != role_value_metadata():
+            raise ValueError("task role value ABI mismatch")
+    elif role_mode != ADDRESS_ONLY_ROLE or "task_role_values" in abi:
+        raise ValueError("unknown or unselected task role value ABI")
     value_mode = graph_top.get("p2_effect_value_mode", WORLD_EFFECT_VALUES)
     if value_mode == CONTEXTUAL_EFFECT_VALUES:
         if abi.get("p2_effect_values") != p2_effect_value_metadata():

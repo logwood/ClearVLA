@@ -377,6 +377,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             state_feature_mode=top.state_feature_mode,
             p2_spatial_intent_mode=top.p2_spatial_intent_mode,
             p2_effect_value_mode=top.p2_effect_value_mode,
+            task_role_value_mode=top.task_role_value_mode,
             p2_geometry_mode=top.p2_geometry_mode,
             p3_coordination_mode=top.p3_coordination_mode,
             robot_feedback_mode=top.robot_feedback_mode,
@@ -429,7 +430,7 @@ class ClearVLAMainlinePolicy(nn.Module):
         )
 
         raw_target_reader = (
-            TaskAwareFactualRead(dims.hidden_size, dims.num_heads)
+            TaskAwareFactualRead(dims.hidden_size, dims.num_heads, role_value_mode=top.task_role_value_mode)
             if top.task_execution_mode in JOINT_TASK_EXECUTION_MODES else
             BoundTargetRead(dims.hidden_size, dims.num_heads)
             if top.target_binding_mode == SHARED_TARGET_BINDING else None

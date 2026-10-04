@@ -1,3 +1,24 @@
+## C5: source-conditioned native role reads (2026-10-04 candidate)
+
+`top.task_role_value_mode="source_conditioned_values_v1"` adds one zero-start H
+channel gain inside each existing S/coarse/P1-relation/P2 object-role reader.
+The projected query modulates the per-head attended SOURCE value before output
+projection and K mass: `v_attended*(1+tanh(gain)*tanh(q))`. Since q does not vary
+on I/C, this equals the same conditional linear value transform before that
+expectation without constructing a query-by-candidate tensor. This is not a
+second object selector or query-only residual: zero values, zero role mass and
+missing supports stay zero, and shared K+null/camera roles remain unchanged.
+The address-only mode is still default and serialization-omitted; zero gain
+preserves its initial output and old-parameter VJPs, without new RNG draws.
+
+This restores query influence when supported within-object I/C values are
+homogeneous. It cannot recover upstream missing geometry, avoid cancellations
+between already pooled values, certify target identity, or guarantee trained
+control. Nine H gains participate in the actual optimizer; full compact two
+ordinary updates produced finite updates, including small (~1e-9) P1/P2 role
+VJPs. Nonzero is not an effectiveness certificate. Mode/ABI prevents relabeling
+old checkpoints. No loss, DINO chart, solver or gripper behavior rule changes.
+
 ## C4 binary boundary coverage and diagnostic identity (2026-10-04)
 
 The existing optional `gripper_command_transition` objective now includes the

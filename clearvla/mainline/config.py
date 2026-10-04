@@ -57,6 +57,7 @@ from .instruction_change import (
 )
 from .manifest import ARCHITECTURE_MANIFEST
 from .operation_expectation import OBJECT_OUTCOME_INTENT, OPERATION_INTENT_MODES, POSTERIOR_INTENT
+from .role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, ROLE_VALUE_MODES
 from .p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, P2_EFFECT_VALUE_MODES
 from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from .p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
@@ -524,6 +525,7 @@ class TopConfig:
     # address, shared over semantic and geometry readers, while W retains
     # value/support authority and the geometry reader retains its camera axis.
     p2_spatial_intent_mode: str = "post_pool_only"
+    task_role_value_mode: str = ADDRESS_ONLY_ROLE
     p2_effect_value_mode: str = WORLD_EFFECT_VALUES
     p2_geometry_mode: str = POOLED_TRANSPORT
     p3_coordination_mode: str = POINTWISE_PLAN
@@ -613,6 +615,13 @@ class TopConfig:
             or self.target_binding_mode != "shared_operation_v1"
         ):
             raise ValueError("typed P3 requires aligned, shared-target, named-view P2 context")
+        if self.task_role_value_mode not in ROLE_VALUE_MODES:
+            raise ValueError("unknown task role value mode")
+        if self.task_role_value_mode == CONTEXTUAL_ROLE_VALUES and (
+            self.task_execution_mode not in JOINT_TASK_EXECUTION_MODES
+            or self.target_binding_mode != "shared_operation_v1"
+        ):
+            raise ValueError("contextual role values require joint shared-target execution")
         if self.p2_effect_value_mode not in P2_EFFECT_VALUE_MODES:
             raise ValueError("unknown P2 effect value mode")
         if self.p2_effect_value_mode == CONTEXTUAL_EFFECT_VALUES and (
@@ -1461,6 +1470,8 @@ class ExperimentConfig:
             cast(dict[str, object], payload["objectives"]).pop("robot_response")
         if self.top.p3_coordination_mode == POINTWISE_PLAN:
             cast(dict[str, object], payload["top"]).pop("p3_coordination_mode")
+        if self.top.task_role_value_mode == ADDRESS_ONLY_ROLE:
+            cast(dict[str, object], payload["top"]).pop("task_role_value_mode")
         if self.top.p2_effect_value_mode == WORLD_EFFECT_VALUES:
             cast(dict[str, object], payload["top"]).pop("p2_effect_value_mode")
         if self.top.p2_geometry_mode == POOLED_TRANSPORT:

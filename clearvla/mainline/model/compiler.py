@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from ..annotation_goal import ANNOTATED_ENDPOINT_GOAL
 from ..executed_world import EXECUTED_WORLD_FEEDBACK, ExecutedWorldPlanValues
 from ..global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
+from ..role_values import ADDRESS_ONLY_ROLE
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import (
     INSTRUCTION_CHANGE_MODES,
@@ -280,12 +281,13 @@ class ObjectFutureEffectReader(nn.Module):
         geometry_mode: str = POOLED_TRANSPORT,
         camera_names: tuple[str, ...] = (),
         task_execution_mode: str = NO_TASK_EXECUTION,
+        role_value_mode: str = ADDRESS_ONLY_ROLE,
         heads: int = 1,
     ) -> None:
         super().__init__()
         self.task_execution = (
             TaskOutcomePlanRead(hidden=hidden, content_dim=content_dim, heads=heads, camera_names=camera_names,
-                                task_execution_mode=task_execution_mode)
+                                task_execution_mode=task_execution_mode, role_value_mode=role_value_mode)
             if task_execution_mode in JOINT_TASK_EXECUTION_MODES else None
         )
 
