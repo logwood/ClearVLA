@@ -558,7 +558,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Build fixed-zero, per-type relevance without collapsing K."""
 
-        query_source = self.typed_query_norm(public_interval_carrier)
+        # LayerNorm removes each interval's mean and scale.  The formal run
+        # retained a large public interval signal, but the typed score lost
+        # most of its usable direction after that normalization.  Retain a
+        # bounded RMS-normalized copy alongside the centered direction; this
+        # keeps the original cosine path while preserving interval identity.
+        query_centered = self.typed_query_norm(public_interval_carrier)
+        query_rms = public_interval_carrier.float() / (
+            public_interval_carrier.float().square().mean(dim=-1, keepdim=True)
+            + 0.25**2
+        ).sqrt()
+        query_source = query_centered + 0.50 * query_rms.to(
+            dtype=query_centered.dtype
+        )
         typed_query = torch.stack(
             tuple(projection(query_source) for projection in self.typed_relevance_queries),
             dim=2,
@@ -649,6 +661,33 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 else relevance_value[..., type_index, :].sum(dim=2)
             )
             component, _ = smooth_rms_contract(projection(selected_route), 0.35)
+            # Keep a bounded, target-gated interval residual in the same typed
+            # route.  The selected object value remains the owner of the path;
+            # this residual only prevents a time/language difference from
+            # disappearing when the relevance mass is nearly constant.
+            query_residual = typed_query[:, :, type_index]
+            query_residual = query_residual - query_residual.mean(
+                dim=1, keepdim=True
+            )
+            query_component, _ = smooth_rms_contract(
+                projection(query_residual), 0.35
+            )
+            if binding is not None:
+                # The typed residual is already target-owned.  Do not gate it
+                # by relevance_mass: that includes the sigmoid evidence
+                # probability and was the last multiplicative attenuation of a
+                # valid S-to-action difference.  Normalize only the shared
+                # K-plus-null binding mass, retaining zero when no real target
+                # is supported.
+                target_gate = binding.mass.float()
+                target_gate = target_gate / target_gate.sum(
+                    dim=-1, keepdim=True
+                ).clamp_min(1.0e-6)
+                target_gate = target_gate.sum(dim=-1, keepdim=True)[..., None]
+                target_gate = target_gate.expand(
+                    -1, component.shape[1], -1
+                ).to(dtype=component.dtype)
+                component = component + 0.50 * query_component * target_gate
             components.append(component)
         typed_components = torch.stack(components, dim=2)
         raw_context = typed_components.sum(dim=2) / (3.0**0.5)
@@ -1129,6 +1168,26 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_public_interval_variation": public_intervals.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
+            "object_intent_public_interval_common_mode_variation": public_intervals.detach()
+            .float()
+            .mean(dim=-1)
+            .std(dim=1, unbiased=False)
+            .mean(),
+            "object_intent_public_interval_centered_variation": (
+                public_intervals.detach().float()
+                - public_intervals.detach().float().mean(dim=-1, keepdim=True)
+            )
+            .std(dim=1, unbiased=False)
+            .mean(),
+            "object_intent_typed_score_interval_variation": typed_relevance_score.detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
+            "object_intent_typed_relevance_mass_interval_variation": typed_relevance_mass.detach()
+            .float()
+            .squeeze(-1)
+            .std(dim=1, unbiased=False)
+            .mean(),
             "object_intent_policy_interval_variation": policy_intervals.detach().float().std(
                 dim=1, unbiased=False
             ).mean(),
@@ -1140,6 +1199,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
             "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
             "object_intent_language_identity_residual_rms": language_identity_residual.detach().float().square().mean().sqrt(),
             "object_intent_typed_action_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
+            "object_intent_typed_policy_context_interval_variation": typed_policy_context.detach().float().std(
+                dim=1, unbiased=False
+            ).mean(),
             "object_intent_target_address_logit_rms": target_object_address_logit.detach().square().mean().sqrt(),
             "object_intent_target_address_logit_k_variation": target_object_address_logit.detach().std(
                 dim=2, unbiased=False
@@ -1199,6 +1261,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
             object_innovation,
             metrics,
             "gradient_tensor_s_language_object_attention_rms",
+        )
+        register_gradient_rms_metric(
+            typed_policy_context,
+            metrics,
+            "gradient_tensor_s_typed_policy_context_rms",
         )
         register_gradient_rms_metric(
             language_identity_residual,

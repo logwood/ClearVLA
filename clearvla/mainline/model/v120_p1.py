@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
@@ -2443,6 +2444,17 @@ class LateRawDetailPolicyReader(nn.Module):
                 or self.typed_micro_basis is None
             ):
                 raise RuntimeError("typed P1/P2 reader is incomplete")
+            # The generic G3 key carries the only persistent local-slot axis
+            # that survives the shared typed projections.  Center and normalize
+            # it across M before adding it to each typed coarse key; the common
+            # component is removed, so this is an address selector only and
+            # cannot inject a second value stream.
+            coarse_slot_identity = coarse_keys.float() - coarse_keys.float().mean(
+                dim=-2, keepdim=True
+            )
+            coarse_slot_identity = F.normalize(
+                coarse_slot_identity, dim=-1, eps=1.0e-6
+            ).to(dtype=coarse_keys.dtype)
             for name, fine_value, coarse_value in (
                 (
                     "semantic",
@@ -2462,7 +2474,10 @@ class LateRawDetailPolicyReader(nn.Module):
             ):
                 assert fine_value is not None and coarse_value is not None
                 typed_fine_keys[name] = self.lattice_key_norm(fine_value)
-                typed_coarse_keys[name] = self.lattice_key_norm(coarse_value)
+                typed_coarse_keys[name] = (
+                    self.lattice_key_norm(coarse_value)
+                    + 1.00 * coarse_slot_identity
+                )
             typed_literal_rgb = progressive.dynamic_literal_rgb
             typed_coordinates = progressive.dynamic_fine_coordinates
             if typed_literal_rgb is None or typed_coordinates is None:

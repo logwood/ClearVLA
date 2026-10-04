@@ -1,3 +1,38 @@
+## WP4  K-address retention and typed S carrier qualification (2026-10-03 candidate)
+
+The first formal dinov3_deep_repair_v1 run was stopped at batch 500 after a
+repeated structural failure: final DenseObjectGrounder slots had pair cosine
+about 0.937 while their learned seed identities had pair cosine about
+-0.064; the P1 local address posterior had effective count about 3.99/4
+and query variation about 0.002; S public interval variation was about
+0.17 while the typed selected semantic/geometry value variation stayed near
+5e-4. The run log is retained under the remote experiment directory and no
+partial checkpoint is accepted.
+
+The candidate repair keeps the shared K transition/value law but adds a
+centered, FP32-normalized slot identity axis to the G competition and to each
+iteration's slot query. P1 typed coarse keys receive the centered G3 slot
+identity only in the coarse address selector; it is not a value path. S typed
+relevance keeps a bounded RMS-normalized copy beside the existing centered
+query and adds a target-gated, centered typed query residual to the typed policy
+context. These changes add no state tensors, keep the existing migration
+contract, preserve the K-plus-null owner, and do not reintroduce RGB/DINO
+caching.
+
+A matched real batch-8 probe from the old checkpoint (online DINO, no feature
+cache) with identity scale 1.0 measured G slot pair cosine 0.916, P1
+effective count 3.68/4 and query variation 0.0205. After removing the
+relevance-probability factor from the target-gated typed residual, the
+consumed typed policy-context interval variation reached 0.056, its direct
+consumed-context VJP was about 2e-5, and the full policy interval variation
+was 0.178; the typed score variation was 0.030. The legacy selected
+semantic/geometry value variation remains near 5e-4 because it measures the
+pre-residual selector value, not the consumed action context. The short
+validation panel completed with coverage 1; a fresh long run and closed-loop
+trajectory evidence are still required before deployment acceptance. Keep the
+direct consumed-context gradient metric separate from the legacy selected-value
+VJP metrics.
+
 ## WP3 — DINOv3 target-flow / Teacher self-reference repair (2026-10-03 candidate)
 
 The isolated candidate is `codex/dinov3-deep-repair-20261003`, with preset

@@ -173,6 +173,7 @@ DINOV3_DEEP_REPAIR_V1_SOURCE_PATHS = (
         {
             "clearvla/mainline/config.py",
             "clearvla/mainline/model/compiler.py",
+            "clearvla/mainline/model/grounding.py",
             "clearvla/mainline/model/observation_association.py",
             "clearvla/mainline/model/policy.py",
             "clearvla/mainline/model/teacher.py",

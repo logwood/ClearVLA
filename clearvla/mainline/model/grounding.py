@@ -406,6 +406,21 @@ class DenseObjectGrounder(nn.Module):
             slot_key = self.slot_norm(slots.float())
             logits = torch.einsum("bkh,bnh->bnk", slot_key, safe_candidates)
             logits = logits / math.sqrt(float(self.hidden))
+            # Keep a K-indexed address key in the competition itself.  The
+            # transition/value path remains shared, but candidate evidence now
+            # sees a persistent role identity instead of relying on the
+            # quickly-forgotten hidden seed alone.
+            slot_identity = self.slot_seed.to(
+                device=safe_candidates.device, dtype=torch.float32
+            )
+            slot_identity = slot_identity - slot_identity.mean(dim=1, keepdim=True)
+            slot_identity = F.normalize(slot_identity, dim=-1, eps=1.0e-6)
+            identity_logits = torch.einsum(
+                "bkh,bnh->bnk",
+                slot_identity.expand(batch, -1, -1),
+                safe_candidates,
+            ) / math.sqrt(float(self.hidden))
+            logits = logits + identity_logits
             null = torch.einsum(
                 "bnh,bqh->bnq",
                 safe_candidates,
@@ -531,7 +546,20 @@ class DenseObjectGrounder(nn.Module):
                 .to(dtype=slots.dtype)
             )
             ffn, _ = smooth_rms_contract(self.update_ffn(next_slots), self.maximum_update_rms)
-            slots = next_slots + ffn
+            # The shared transition is permutation-equivariant in K.  Without
+            # a persistent role carrier, distinct seeds are forgotten after the
+            # first content read and the final object slots become near
+            # duplicates.  Keep the carrier centered across K so it cannot add
+            # a common object value, and normalize it in FP32 before the
+            # bounded residual.  This is a fixed identity axis, not a second
+            # candidate/value path.
+            with torch.autocast(device_type=slots.device.type, enabled=False):
+                slot_identity = self.slot_seed.to(
+                    device=slots.device, dtype=torch.float32
+                )
+                slot_identity = slot_identity - slot_identity.mean(dim=1, keepdim=True)
+                slot_identity = F.normalize(slot_identity, dim=-1, eps=1.0e-6)
+            slots = next_slots + ffn + 1.00 * slot_identity.to(dtype=next_slots.dtype)
         # The final GRU/FFN update changes the slot queries.  Reusing the
         # pre-update posterior here would combine a stale G2 assignment with
         # a new G3 slot state.  Recompute the parent posterior once so the
@@ -1028,6 +1056,11 @@ class DenseObjectGrounder(nn.Module):
             .abs()
             .amax(),
             "object_grounding_object_content_pair_cosine": self._pair_cosine(content),
+            "object_grounding_slot_pair_cosine": self._pair_cosine(slots),
+            "object_grounding_slot_identity_pair_cosine": self._pair_cosine(
+                self.slot_seed.to(device=slots.device, dtype=slots.dtype).expand_as(slots)
+            ),
+            "object_grounding_slot_pair_rms": slots.detach().float().square().mean().sqrt(),
             "object_grounding_object_chart_pair_overlap": self._pair_overlap(chart_read.flatten(2)),
             "object_grounding_semantic_appearance_posterior_l1": (
                 0.5
