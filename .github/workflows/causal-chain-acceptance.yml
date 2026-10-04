@@ -1,0 +1,67 @@
+name: Causal chain acceptance
+
+on:
+  push:
+    branches: [codex/causal-chain-repair-20261004]
+    paths:
+      - .github/workflows/causal-chain-acceptance.yml
+      - scripts/run_causal_chain_acceptance.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: causal-chain-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Preserve exact source without weights or private runtime data
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/causal-chain"
+          mkdir -p "$OUT"
+          BASE=4f0a5b9b78c0e70e4dd768685b59cc988639a57a
+          test "$(git rev-parse "$BASE^{tree}")" = f3bbec189bba851cc4c7a6c9dc65a0dbe8714282
+          git archive --format=tar.gz "$BASE" > "$OUT/baseline-source.tar.gz"
+          git archive --format=tar.gz HEAD > "$OUT/current-source.tar.gz"
+          git cat-file commit "$BASE" > "$OUT/baseline-commit.txt"
+          git cat-file commit HEAD > "$OUT/current-commit.txt"
+          git ls-tree -r "$BASE" > "$OUT/baseline-tree.txt"
+          git ls-tree -r HEAD > "$OUT/current-tree.txt"
+          git rev-parse HEAD > "$OUT/checked-commit.txt"
+          git diff --binary "$BASE" HEAD > "$OUT/source.patch"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        if: hashFiles('scripts/run_causal_chain_acceptance.py') != ''
+        with:
+          python-version: '3.12'
+      - name: Install CPU-only test dependencies
+        if: hashFiles('scripts/run_causal_chain_acceptance.py') != ''
+        run: |
+          python -m pip install 'torch==2.11.0' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'pytest>=8,<10' 'numpy>=1.26,<3' 'h5py>=3.10,<4' 'pillow>=10,<13' 'rich>=13,<15' 'safetensors>=0.4,<1'
+      - name: Run declared acceptance, not training or pretrained inference
+        if: hashFiles('scripts/run_causal_chain_acceptance.py') != ''
+        run: python scripts/run_causal_chain_acceptance.py --output "$RUNNER_TEMP/causal-chain/tests"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: causal-chain-${{ github.sha }}
+          path: ${{ runner.temp }}/causal-chain
+          retention-days: 14
+          if-no-files-found: error
