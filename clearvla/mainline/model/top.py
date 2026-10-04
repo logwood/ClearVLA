@@ -28,6 +28,7 @@ from torch import Tensor, nn
 from ..annotation_goal import AnnotationEndpoint
 from ..global_task import PROPRIOCEPTIVE_GLOBAL
 from ..role_values import ADDRESS_ONLY_ROLE
+from ..feedback_values import INNOVATION_ONLY
 from ..future_time import LEGACY_FUTURE_TIME
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE
 from ..instruction_reference import InstructionReference
@@ -229,6 +230,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         p3_coordination_mode: str = "pointwise_legacy_v1",
         robot_feedback_mode: str = "none",
         world_feedback_mode: str = "none",
+        world_feedback_value_mode: str = INNOVATION_ONLY,
         target_binding_mode: str = "reader_local_v1",
         instruction_reference_mode: str = "none",
         instruction_change_mode: str = "mixed_reference_v1",
@@ -372,7 +374,8 @@ class ObjectIntentDynamicsTop(nn.Module):
         self.plan_compiler = ObjectPolicyPlanCompiler(
             future_time_grid_mode=future_time_grid_mode,
             coordination_mode=p3_coordination_mode, heads=heads,
-            robot_feedback_mode=robot_feedback_mode, world_feedback_mode=world_feedback_mode, state_dim=state_dim, action_dim=action_dim,
+            robot_feedback_mode=robot_feedback_mode, world_feedback_mode=world_feedback_mode,
+            world_feedback_value_mode=world_feedback_value_mode, state_dim=state_dim, action_dim=action_dim,
             operation_intent_mode=operation_intent_mode,
             annotation_goal_mode=annotation_goal_mode,
             task_execution_mode=task_execution_mode,

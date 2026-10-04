@@ -12,6 +12,7 @@ from ..annotation_goal import ANNOTATED_ENDPOINT_GOAL
 from ..executed_world import EXECUTED_WORLD_FEEDBACK, ExecutedWorldPlanValues
 from ..global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
 from ..role_values import ADDRESS_ONLY_ROLE
+from ..feedback_values import INNOVATION_ONLY
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import (
     INSTRUCTION_CHANGE_MODES,
@@ -1546,6 +1547,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
                  annotation_goal_mode: str = "none",
                  task_execution_mode: str = NO_TASK_EXECUTION,
                  global_condition_mode: str = PROPRIOCEPTIVE_GLOBAL,
+                 world_feedback_value_mode: str = INNOVATION_ONLY,
                  camera_names: tuple[str, ...] = ("top", "wrist")) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
@@ -1595,7 +1597,7 @@ class ObjectPolicyPlanCompiler(nn.Module):
         if world_feedback_mode != "none" and coordination_mode != TYPED_HORIZON_PLAN:
             raise ValueError("executed world feedback requires typed P3")
         self.world_feedback_read=(ExecutedWorldPlanRead(hidden=hidden,content_dim=content_dim,
-            camera_names=camera_names) if world_feedback_mode != "none" else None)
+            camera_names=camera_names, value_mode=world_feedback_value_mode) if world_feedback_mode != "none" else None)
         if annotation_goal_mode not in {"none", ANNOTATED_ENDPOINT_GOAL}:
             raise ValueError("unknown annotated goal P3 reader")
         self.annotated_goal_read = (AnnotatedGoalPlanRead(hidden=hidden, content_dim=content_dim,

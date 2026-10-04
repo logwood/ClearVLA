@@ -382,6 +382,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             p3_coordination_mode=top.p3_coordination_mode,
             robot_feedback_mode=top.robot_feedback_mode,
             world_feedback_mode=top.world_feedback_mode,
+            world_feedback_value_mode=top.world_feedback_value_mode,
             target_binding_mode=top.target_binding_mode,
             instruction_reference_mode=top.instruction_reference_mode,
             instruction_change_mode=top.instruction_change_mode,

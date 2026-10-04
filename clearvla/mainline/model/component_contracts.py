@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Mapping, Protocol
 from torch import Tensor, nn
 
 from ..role_values import CONTEXTUAL_ROLE_VALUES
+from ..feedback_values import INNOVATION_AND_STATUS
 from ..p2_values import CONTEXTUAL_EFFECT_VALUES
 from ..global_task import COMPILED_TASK_GLOBAL
 from ..task_execution import JOINT_SPATIAL_TASK_EXECUTION, JOINT_TASK_EXECUTION_MODES
@@ -77,7 +78,8 @@ def _base_execution_bottom_selection(config: "ExperimentConfig") -> str:
 def _policy_compiler_selection(config: "ExperimentConfig") -> str:
     base = _base_policy_compiler_selection(config)
     base = base + "_s_values" if config.top.p2_effect_value_mode == CONTEXTUAL_EFFECT_VALUES else base
-    return base + "_role_values" if config.top.task_role_value_mode == CONTEXTUAL_ROLE_VALUES else base
+    base = base + "_role_values" if config.top.task_role_value_mode == CONTEXTUAL_ROLE_VALUES else base
+    return base + "_observed_status" if config.top.world_feedback_value_mode == INNOVATION_AND_STATUS else base
 
 
 def _base_policy_compiler_selection(config: "ExperimentConfig") -> str:

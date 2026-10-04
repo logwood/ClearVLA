@@ -199,3 +199,4 @@ class ExecutedWorldPlanValues:
     current_content: Tensor  # exact source anchor; do not retain the dense ObjectFactSet
     reader_identity: int
     binding: TargetBinding
+    status_features: Tensor | None = None  # B,3; separate epistemic state, not error
