@@ -58,6 +58,7 @@ from .instruction_change import (
 from .manifest import ARCHITECTURE_MANIFEST
 from .operation_expectation import OBJECT_OUTCOME_INTENT, OPERATION_INTENT_MODES, POSTERIOR_INTENT
 from .role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, ROLE_VALUE_MODES
+from .feedback_values import INNOVATION_ONLY, INNOVATION_AND_STATUS, FEEDBACK_VALUE_MODES
 from .p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, P2_EFFECT_VALUE_MODES
 from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from .p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
@@ -534,6 +535,7 @@ class TopConfig:
     p2_geometry_mode: str = POOLED_TRANSPORT
     p3_coordination_mode: str = POINTWISE_PLAN
     robot_feedback_mode: str = "none"
+    world_feedback_value_mode: str = INNOVATION_ONLY
     world_feedback_mode: str = "none"
     # Explicit new behavior; legacy checkpoints keep their existing history chart.
     history_encoding_mode: str = "paired_rows_v1"
@@ -577,6 +579,10 @@ class TopConfig:
             raise ValueError(
                 "the bounded P2 target-value carrier requires the shared K binding"
             )
+        if self.world_feedback_value_mode not in FEEDBACK_VALUE_MODES:
+            raise ValueError("unknown world feedback value mode")
+        if self.world_feedback_value_mode == INNOVATION_AND_STATUS and self.world_feedback_mode != "executed_four_step_world_v1":
+            raise ValueError("comparison status requires the observed executed-world source")
         if self.world_feedback_mode not in {"none","executed_four_step_world_v1"}:
             raise ValueError("unknown world_feedback_mode")
         if self.world_feedback_mode != "none" and (
@@ -1481,6 +1487,8 @@ class ExperimentConfig:
             cast(dict[str, object], payload["top"]).pop("operation_intent_mode")
         if self.top.instruction_change_mode == MIXED_REFERENCE_CHANGE:
             cast(dict[str, object], payload["top"]).pop("instruction_change_mode")
+        if self.top.world_feedback_value_mode == INNOVATION_ONLY:
+            cast(dict[str, object], payload["top"]).pop("world_feedback_value_mode")
         if self.top.world_feedback_mode == "none":
             cast(dict[str,object],payload["top"]).pop("world_feedback_mode")
         if self.top.robot_feedback_mode == "none":

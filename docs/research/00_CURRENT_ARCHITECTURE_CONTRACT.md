@@ -1,3 +1,25 @@
+## C6: observed comparison state is independent of signed innovation (2026-10-04)
+
+`top.world_feedback_value_mode="innovation_and_status_v1"` preserves the existing
+world innovation path and adds a zero-start 3xH source-status projection inside
+its P3 reader. Once per observed-world preparation, derive the SAME joint
+camera/cell/null entropy as measurement, plus current-to-past soft-match null
+and entropy. Per-current-target features are match-null, expected measurement
+uncertainty with unmatched floor, and match entropy, reduced under the original
+binding mass and actual observed support. These are inferred evidence states,
+not calibrated object correctness, contact, physical progress or loss masks.
+
+The status value uses `output(status_projection * (1+tanh(context)))` alongside
+the original innovation. Thus a supported uncertain comparison can be represented
+even with zero innovation/context, while reset/unobserved or null-target sources
+cannot invent a status value. The exact-zero new projection preserves original
+initial outputs and consumes no RNG. No extra G/W/Teacher replay, future label,
+loss, fixed stop/hold threshold or cache lifetime is introduced. Factory, graph
+and ABI identities explicitly select the new value semantics. Learned current
+matching still contributes uncertainty and can be wrong; this is not independent
+physical validation. Teacher future-target aggregation and its losses are NOT
+changed by C6 and remain an open supervision question.
+
 ## C5: source-conditioned native role reads (2026-10-04 candidate)
 
 top.task_role_value_mode="source_conditioned_values_v1" adds one zero-start H

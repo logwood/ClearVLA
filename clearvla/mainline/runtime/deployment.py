@@ -81,6 +81,7 @@ from ..operation_expectation import (
     operation_expectation_metadata,
 )
 from ..role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, role_value_metadata
+from ..feedback_values import INNOVATION_ONLY, INNOVATION_AND_STATUS, feedback_value_metadata
 from ..p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, p2_effect_value_metadata
 from ..p2_geometry import POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, p2_geometry_metadata
 from ..p3_coordination import POINTWISE_PLAN, TYPED_HORIZON_PLAN, p3_coordination_metadata
@@ -400,6 +401,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"world_feedback_values": feedback_value_metadata()}
+           if config.top.world_feedback_value_mode == INNOVATION_AND_STATUS else {}),
         **({"task_role_values": role_value_metadata()}
            if config.top.task_role_value_mode == CONTEXTUAL_ROLE_VALUES else {}),
         **({"p2_effect_values": p2_effect_value_metadata()}
@@ -636,6 +639,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
             raise ValueError("deployment P3 coordination semantics differ from trained graph")
     elif plan_mode != POINTWISE_PLAN or "p3_coordination" in abi:
         raise ValueError("unknown or undeclared deployment P3 coordination mode")
+    feedback_value_mode = graph_top.get("world_feedback_value_mode", INNOVATION_ONLY)
+    if feedback_value_mode == INNOVATION_AND_STATUS:
+        if abi.get("world_feedback_values") != feedback_value_metadata():
+            raise ValueError("observed feedback status ABI mismatch")
+    elif feedback_value_mode != INNOVATION_ONLY or "world_feedback_values" in abi:
+        raise ValueError("unknown or unselected observed feedback status ABI")
     role_mode = graph_top.get("task_role_value_mode", ADDRESS_ONLY_ROLE)
     if role_mode == CONTEXTUAL_ROLE_VALUES:
         if abi.get("task_role_values") != role_value_metadata():
