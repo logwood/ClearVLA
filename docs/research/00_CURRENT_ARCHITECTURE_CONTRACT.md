@@ -1,3 +1,23 @@
+## C4 binary boundary coverage and diagnostic identity (2026-10-04)
+
+The existing optional `gripper_command_transition` objective now includes the
+profile-owned last executed command -> row-zero boundary as well as the original
+23 interior pairs. It keeps SmoothL1, current weights, valid-row support and the
+native binary alphabet; the default objective weight stays zero. At the boundary
+the shared source value cancels algebraically, giving a row-zero absolute expected
+command error, not knowledge of physical grip/contact or a runtime hold rule.
+The interior-only transition rates retain their old interpretation; new boundary
+rates, absolute logit margin and independent-Bernoulli expected flip rate distinguish
+missing seam coverage from within-plan low-margin switching. This does not repair
+all hard-event chatter and must not be claimed to fix the observed 145 interior
+switches. Continuous compatibility trajectory losses remain excluded from binary
+ownership. Source identity distinguishes the changed training term; no old exact
+resume metadata is rewritten.
+
+The native-flow diagnostic now retains selected motion/event row reallocation
+when all requested rows are source-supported. The formal action-flow objective
+already had those weights and is not replaced by this reporting correction.
+
 ## Causal-chain C3: S-conditioned P2 effect values (2026-10-04 candidate)
 
 `top.p2_effect_value_mode="s_conditioned_values_v1"` adds a value interaction

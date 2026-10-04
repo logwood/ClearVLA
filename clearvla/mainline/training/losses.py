@@ -1705,7 +1705,10 @@ def action_terms(
     native_flow = (native_error * step_weight).mean()
     if row_valid is not None:
         complete = row_valid.all(dim=1)
-        native_flow = supported_mean(native_error * horizon_weight[None], complete)
+        # This is a diagnostic of the SELECTED native objective, not the
+        # uniform historical comparator. Complete rows still keep the declared
+        # motion/event reallocation; support filtering must not erase it.
+        native_flow = supported_mean(native_error * horizon_weight[None] * frame_weight, complete)
     remaining = (1.0 - flow_state.time.float())[:, None, None]
     clean_physical = flow_state.noisy_physical.float() + remaining * prediction
     if row_valid is not None:
@@ -2001,15 +2004,26 @@ def action_terms(
         command_probability = command_logits.float().softmax(dim=-1)[..., 1]
         predicted_command_value = command_probability.mul(2.0).sub(1.0)
         target_command_value = command_target.float().mul(2.0).sub(1.0)
-        predicted_command_delta = predicted_command_value[:, 1:] - predicted_command_value[:, :-1]
-        target_command_delta = target_command_value[:, 1:] - target_command_value[:, :-1]
+        # Include the real last-command -> row-zero seam, not an invented
+        # held command or a target-generated history row. Interior pairs keep
+        # their existing source validity and SmoothL1 formula.
+        boundary_value = (
+            target.gripper_transition_boundary_raw_units[:, -1:].float() >= 0.0
+        ).float().mul(2.0).sub(1.0)
+        previous_prediction = torch.cat((boundary_value, predicted_command_value[:, :-1]), 1)
+        previous_target = torch.cat((boundary_value, target_command_value[:, :-1]), 1)
+        predicted_command_delta = predicted_command_value - previous_prediction
+        target_command_delta = target_command_value - previous_target
         command_transition_rows = F.smooth_l1_loss(
             predicted_command_delta,
             target_command_delta,
             reduction="none",
             beta=1.0,
         )
-        transition_weighted_support = transition_pair_weight * transition_pair_valid
+        transition_weighted_support = torch.cat((
+            horizon_step_weight[:, :1] * valid[:, :1],
+            transition_pair_weight * transition_pair_valid,
+        ), dim=1)
         command_transition_loss = (
             command_transition_rows * transition_weighted_support
         ).sum() / transition_weighted_support.sum().clamp_min(1.0)
@@ -2022,6 +2036,22 @@ def action_terms(
         command_transition_target_rate = (
             target_transition.float() * transition_pair_valid
         ).sum() / transition_rows
+        # Distinguish soft expected deltas from actual discrete switching. The
+        # extra fields are diagnostics, NOT a holding rule or another loss.
+        boundary_prediction = command_prediction[:, :1] != (boundary_value >= 0)
+        boundary_target = command_target[:, :1] != (boundary_value >= 0)
+        boundary_rows = valid[:, 0].float().sum().clamp_min(1.0)
+        command_boundary_rate = (boundary_prediction[:, 0] * valid[:, 0]).float().sum() / boundary_rows
+        command_boundary_target_rate = (boundary_target[:, 0] * valid[:, 0]).float().sum() / boundary_rows
+        command_margin = (command_logits[..., 1] - command_logits[..., 0]).detach().abs()
+        command_margin_mean = mean_rows(command_margin)
+        previous_probability = torch.cat(((boundary_value + 1.0) * 0.5, command_probability[:, :-1]), 1)
+        flip_probability = previous_probability * (1.0 - command_probability) + (
+            1.0 - previous_probability
+        ) * command_probability
+        command_expected_flip_rate = (flip_probability.detach() * transition_weighted_support).sum() / (
+            transition_weighted_support.sum().clamp_min(1.0)
+        )
     else:
         zero_command = prediction.new_zeros((), dtype=torch.float32)
         command_accuracy = zero_command
@@ -2036,6 +2066,10 @@ def action_terms(
         command_transition_loss = zero_command
         command_transition_rate = zero_command
         command_transition_target_rate = zero_command
+        command_boundary_rate = zero_command
+        command_boundary_target_rate = zero_command
+        command_margin_mean = zero_command
+        command_expected_flip_rate = zero_command
         command_positive_weight = zero_command
         command_negative_weight = zero_command
     event_mask = event_mask.to(dtype=gripper_error_legacy.dtype)
@@ -2318,6 +2352,10 @@ def action_terms(
         "gripper_command_transition": command_transition_loss,
         "gripper_command_transition_rate": command_transition_rate,
         "gripper_command_transition_target_rate": command_transition_target_rate,
+        "gripper_command_boundary_transition_rate": command_boundary_rate,
+        "gripper_command_boundary_target_rate": command_boundary_target_rate,
+        "gripper_command_logit_margin_mean": command_margin_mean,
+        "gripper_command_expected_flip_rate": command_expected_flip_rate,
         "gripper_command_positive_class_weight": command_positive_weight.detach(),
         "gripper_command_negative_class_weight": command_negative_weight.detach(),
         "gripper_command_accuracy": command_accuracy,
