@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from ..command_sequence import CommandChainBoundary, CONDITIONAL_COMMANDS
 from ..global_task import COMPILED_TASK_GLOBAL
 from ..config import ExperimentConfig
 from ..executed_world import ExecutedWorldFeedback, ExecutedWorldPlanValues, ExecutedWorldWindow
@@ -86,6 +87,7 @@ def _temporary_source_legacy_name(name: str) -> str:
     """Flatten the newly injected controller only in the old-order ledger."""
 
     for modular, legacy in (
+        ("terminal_controller.command_sequence", "gripper_command_sequence"),
         ("terminal_controller.optional_command_head", "gripper_command_head"),
         ("terminal_controller.optional_event_head", "event_head"),
         ("terminal_controller.action_norm", "action_norm"),
@@ -141,6 +143,7 @@ class OnlinePolicyCache:
     robot_feedback: RobotResponseFeedback | None = None
     world_feedback: ExecutedWorldPlanValues | None = None
     instruction_reference: InstructionReference | None = None
+    command_boundary: CommandChainBoundary | None = None
 
     @property
     def seed_context(self) -> V120SeedContext | None:
@@ -151,6 +154,10 @@ class OnlinePolicyCache:
 
     def validate(self, config: ExperimentConfig) -> None:
         self.history.validate(config)
+        if (self.command_boundary is not None) != (config.bottom.command_sequence_mode == CONDITIONAL_COMMANDS):
+            raise ValueError("command chain cache differs from selected graph")
+        if self.command_boundary is not None:
+            self.command_boundary.validate(self.history.executed_robot_step)
         compiled_task = self.top.intent.compiled_global_task
         if (compiled_task is not None) != (config.bottom.global_condition_mode == COMPILED_TASK_GLOBAL):
             raise ValueError("compiled global task cache differs from selected graph")
@@ -975,7 +982,12 @@ class ClearVLAMainlinePolicy(nn.Module):
             g3_rollout=g3_rollout,
             collect_diagnostics=collect_diagnostics,
         )
+        command_boundary = None
+        if self.config.bottom.command_sequence_mode == CONDITIONAL_COMMANDS:
+            command_boundary = self.outlet_adapter.prepare_binary_command_boundary(
+                conditioned_policy_input.history.executed_robot_step)
         cache = OnlinePolicyCache(
+            command_boundary=command_boundary,
             world_feedback=world_feedback,
             robot_feedback=robot_feedback,
             instruction_reference=(conditioned_policy_input.instruction_reference
@@ -1113,6 +1125,9 @@ class ClearVLAMainlinePolicy(nn.Module):
         """Run only the ODE-dependent P2/P3 and action bottom."""
 
         cache.validate(self.config)
+        if cache.command_boundary is not None:
+            cache.command_boundary.validate(cache.history.executed_robot_step,
+                                           self.outlet_adapter._normalizer_identity())
         compiled_task = cache.top.intent.compiled_global_task
         if compiled_task is not None and compiled_task.compiler_identity != id(
             self.policy_compiler.plan_compiler.global_task_compiler
@@ -1185,6 +1200,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             collect_diagnostics=collect_diagnostics,
         )
         bottom_core, bottom_metrics = self.execution_bottom.step(
+            command_boundary=cache.command_boundary,
             noisy_action_field=model_action_field,
             time=time,
             flow_step_context=flow_step_context,

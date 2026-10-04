@@ -26,6 +26,7 @@ from torch import Tensor, nn
 
 from ..bottom_evidence import MAGNITUDE_EVIDENCE
 from ..config import ExperimentConfig
+from ..command_sequence import CommandChainBoundary
 from ..global_task import COMPILED_TASK_GLOBAL, global_intent_memory
 from ..future_time import resolve_future_time
 from ..interfaces import ObservableHistory
@@ -84,6 +85,7 @@ def _build_decoder_config(config: ExperimentConfig):
         evidence_value_mode=bottom.evidence_value_mode,
         controller_value_mode=bottom.controller_value_mode,
         global_condition_mode=bottom.global_condition_mode,
+        command_sequence_mode=bottom.command_sequence_mode,
         num_heads=dims.num_heads,
         visual_token_dim=dims.visual_token_dim,
         patches_per_camera=dims.patches_per_camera,
@@ -691,6 +693,7 @@ class RestoredV120EvidenceBottom(nn.Module):
         transition: ControlledTransitionState,
         execution_mode: str = "learned",
         require_execution_supervision: bool = False,
+        command_boundary: CommandChainBoundary | None = None,
         collect_diagnostics: bool = False,
     ) -> tuple[BottomDecoderOutput, dict[str, Tensor]]:
         expected_query = (
@@ -735,6 +738,7 @@ class RestoredV120EvidenceBottom(nn.Module):
         try:
             raw = self.decoder(
                 noisy_physical=noisy_action_field,
+                command_boundary=command_boundary,
                 time=time,
                 flow_step_context=flow_step_context,
                 trajectory_tokens=trajectory,

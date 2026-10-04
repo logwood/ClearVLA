@@ -22,6 +22,8 @@ from ..bottom_evidence import (
     NORMALIZED_EVIDENCE,
     validate_evidence_value_mode,
 )
+from ..command_sequence import INDEPENDENT_COMMANDS, CONDITIONAL_COMMANDS, CommandChainBoundary, validate_command_sequence_mode
+from ..model.command_sequence import ConditionalBinaryCommand
 from ..global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
 from ..execution_values import execution_value_score
 from ..gripper_contract import VALID_GRIPPER_OUTPUT_MODES, is_binary_gripper_mode
@@ -955,6 +957,8 @@ class TerminalActionController(nn.Module):
         optional_event_head: nn.Sequential | None,
         motion_head: nn.Sequential,
         arm_dim: int,
+        command_sequence_mode: str = INDEPENDENT_COMMANDS,
+        hidden: int | None = None,
     ) -> None:
         super().__init__()
         self.action_norm = action_norm
@@ -963,6 +967,11 @@ class TerminalActionController(nn.Module):
         self.optional_event_head = optional_event_head
         self.motion_head = motion_head
         self.arm_dim = int(arm_dim)
+        validate_command_sequence_mode(command_sequence_mode)
+        self.command_sequence_mode = command_sequence_mode
+        if command_sequence_mode == CONDITIONAL_COMMANDS and (hidden is None or optional_command_head is None):
+            raise ValueError("conditional command controller needs existing private binary head")
+        self.command_sequence = ConditionalBinaryCommand(hidden) if command_sequence_mode == CONDITIONAL_COMMANDS else None
 
     def normalize(self, action: Tensor) -> Tensor:
         return self.action_norm(action)
@@ -1030,6 +1039,7 @@ class TerminalActionController(nn.Module):
         arm_private_correction: Tensor | None = None,
         collect_diagnostics: bool,
         collect_gripper_diagnostics: bool | None = None,
+        command_boundary: CommandChainBoundary | None = None,
     ) -> TerminalHeadOutput:
         if collect_gripper_diagnostics is None:
             collect_gripper_diagnostics = collect_diagnostics
@@ -1045,6 +1055,14 @@ class TerminalActionController(nn.Module):
             if self.optional_command_head is not None
             else None
         )
+        command_pairs = None
+        if self.command_sequence is not None:
+            if command_boundary is None or command_logits is None:
+                raise ValueError("conditional command terminal requires its recorded boundary")
+            command_logits, command_pairs = self.command_sequence(
+                gripper_state, command_logits, command_boundary.probability)
+        elif command_boundary is not None:
+            raise ValueError("independent command terminal cannot accept a chain boundary")
         if command_logits is not None:
             arm_channels = 2 * int(self.arm_dim)
             pred_velocity = torch.cat(
@@ -1091,6 +1109,7 @@ class TerminalActionController(nn.Module):
             command_logits=command_logits,
             event_logits=event_logits,
             diagnostics=metrics,
+            command_pair_probability=command_pairs,
         )
 
 
@@ -1295,6 +1314,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             optional_event_head=optional_event_head,
             motion_head=motion_head,
             arm_dim=self.arm_dim,
+            hidden=h,
+            command_sequence_mode=getattr(config, "command_sequence_mode", INDEPENDENT_COMMANDS),
         )
         self._initialize_outputs(config)
         if not bool(hidden_event_head):
@@ -3298,6 +3319,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         self,
         *,
         result: dict[str, Any],
+        command_boundary: CommandChainBoundary | None = None,
         organized: dict[str, Tensor | dict[str, Tensor]],
         semantic_seed: Tensor,
         action_state_tokens: Tensor,
@@ -3311,6 +3333,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         action = self.terminal_controller.normalize(result["action"])
         terminal = self.terminal_controller.read_heads(
             action,
+            command_boundary=command_boundary,
             arm_private_correction=arm_private_correction,
             collect_diagnostics=collect_diagnostics,
             collect_gripper_diagnostics=collect_gripper_diagnostics,
@@ -3330,6 +3353,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 output["event_logits"] = event_logits
             if gripper_command_logits is not None:
                 output["gripper_command_logits"] = gripper_command_logits
+            if terminal.command_pair_probability is not None:
+                output["gripper_command_pair_probability"] = terminal.command_pair_probability
             return output
         out: dict[str, Tensor] = {
             "pred_velocity": pred_velocity,
@@ -3353,6 +3378,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             out["event_logits"] = event_logits
         if gripper_command_logits is not None:
             out["gripper_command_logits"] = gripper_command_logits
+        if terminal.command_pair_probability is not None:
+            out["gripper_command_pair_probability"] = terminal.command_pair_probability
         block_rows = result["block_rows"]
         zero = torch.zeros((), device=action.device, dtype=torch.float32)
         for name in (
@@ -3583,6 +3610,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         *,
         noisy_physical: Tensor,
         time: Tensor,
+        command_boundary: CommandChainBoundary | None = None,
         flow_step_context: FlowStepContext | None = None,
         trajectory_tokens: Tensor,
         trajectory_workspace_tokens: Tensor | None = None,
@@ -3842,6 +3870,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             )
             dynamic_output = self._finalize_dynamic_output(
                 result=dynamic_result,
+                command_boundary=command_boundary,
                 organized=organized,
                 semantic_seed=semantic_seed,
                 action_state_tokens=action_state_tokens,
@@ -4139,6 +4168,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
         action = self.terminal_controller.normalize(action)
         terminal = self.terminal_controller.read_heads(
             action,
+            command_boundary=command_boundary,
             arm_private_correction=arm_private_correction,
             collect_diagnostics=collect_diagnostics,
             collect_gripper_diagnostics=collect_gripper_diagnostics,
@@ -4158,6 +4188,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 output["event_logits"] = event_logits
             if gripper_command_logits is not None:
                 output["gripper_command_logits"] = gripper_command_logits
+            if terminal.command_pair_probability is not None:
+                output["gripper_command_pair_probability"] = terminal.command_pair_probability
             return output
         out: dict[str, Tensor] = {
             "pred_velocity": pred_velocity,
@@ -4203,6 +4235,8 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             out["event_logits"] = event_logits
         if gripper_command_logits is not None:
             out["gripper_command_logits"] = gripper_command_logits
+        if terminal.command_pair_probability is not None:
+            out["gripper_command_pair_probability"] = terminal.command_pair_probability
         out.update(policy_delta_metrics)
         out.update(spine_metrics)
 

@@ -90,6 +90,7 @@ ROLE_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
             # decoder owner so it receives the existing 0.7x LR/decay policy
             # while still being covered exactly once by the optimizer audit.
             "bottom.decoder.gripper_command_head.",
+            "bottom.decoder.gripper_command_sequence.",
             "bottom.decoder.motion_head.",
         ),
     ),

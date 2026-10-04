@@ -41,6 +41,7 @@ from .endpoint_supervision import (
     NO_ENDPOINT_SUPERVISION,
     validate_endpoint_mode,
 )
+from .command_sequence import INDEPENDENT_COMMANDS, CONDITIONAL_COMMANDS, validate_command_sequence_mode
 from .global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
 from .future_time import CONTROL_ALIGNED_FUTURE_TIME, LEGACY_FUTURE_TIME, resolve_future_time
 from .gripper_contract import (
@@ -740,6 +741,7 @@ class TopConfig:
 
 @dataclass(frozen=True)
 class BottomConfig:
+    command_sequence_mode: str = INDEPENDENT_COMMANDS
     global_condition_mode: str = PROPRIOCEPTIVE_GLOBAL
     endpoint_supervision_mode: str = NO_ENDPOINT_SUPERVISION
     controller_value_mode: str = LEGACY_CONTROLLER_VALUES
@@ -792,6 +794,7 @@ class BottomConfig:
     bspine_action_group_mask: str = ""
 
     def validate(self) -> None:
+        validate_command_sequence_mode(self.command_sequence_mode)
         validate_global_condition_mode(self.global_condition_mode)
         validate_endpoint_mode(self.endpoint_supervision_mode)
         if self.endpoint_supervision_mode == CLEAN_ENDPOINT_SUPERVISION and self.gripper_output_mode not in {"calvin_binary_command", "maniskill_binary_command"}:
@@ -1176,6 +1179,12 @@ class ExperimentConfig:
             self.runtime,
         ):
             section.validate()
+        if self.bottom.command_sequence_mode == CONDITIONAL_COMMANDS and (
+            self.bottom.gripper_output_mode not in {"calvin_binary_command", "maniskill_binary_command"}
+            or self.bottom.endpoint_supervision_mode != CLEAN_ENDPOINT_SUPERVISION
+            or self.top.robot_feedback_mode != "one_step_proprioceptive_v1"
+        ):
+            raise ValueError("conditional command needs a binary outlet, clean endpoint and recorded one-step source")
         if self.bottom.global_condition_mode == COMPILED_TASK_GLOBAL and (
             self.top.task_execution_mode not in JOINT_TASK_EXECUTION_MODES
             or self.top.p3_coordination_mode != TYPED_HORIZON_PLAN
@@ -1441,6 +1450,8 @@ class ExperimentConfig:
 
     def as_dict(self) -> dict[str, object]:
         payload = cast(dict[str, object], asdict(self))
+        if self.bottom.command_sequence_mode == INDEPENDENT_COMMANDS:
+            cast(dict[str, object], payload["bottom"]).pop("command_sequence_mode")
         if self.bottom.global_condition_mode == PROPRIOCEPTIVE_GLOBAL:
             cast(dict[str, object], payload["bottom"]).pop("global_condition_mode")
         if self.bottom.endpoint_supervision_mode == NO_ENDPOINT_SUPERVISION:

@@ -57,6 +57,7 @@ from ..endpoint_supervision import (
 )
 from ..executed_world import EXECUTED_WORLD_FEEDBACK, executed_world_metadata
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
+from ..command_sequence import INDEPENDENT_COMMANDS, CONDITIONAL_COMMANDS, command_sequence_metadata
 from ..global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, global_task_metadata
 from ..gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
@@ -401,6 +402,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"binary_command_sequence": command_sequence_metadata()}
+           if config.bottom.command_sequence_mode == CONDITIONAL_COMMANDS else {}),
         **({"world_feedback_values": feedback_value_metadata()}
            if config.top.world_feedback_value_mode == INNOVATION_AND_STATUS else {}),
         **({"task_role_values": role_value_metadata()}
@@ -535,6 +538,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     if str(abi.get("graph_config_sha256", "")) != canonical_sha256(graph):
         raise ValueError("deployment ABI graph digest is inconsistent")
     graph_bottom = _mapping(graph.get("bottom"), name="graph_config.bottom")
+    command_mode = graph_bottom.get("command_sequence_mode", INDEPENDENT_COMMANDS)
+    if command_mode == CONDITIONAL_COMMANDS:
+        if abi.get("binary_command_sequence") != command_sequence_metadata():
+            raise ValueError("binary command sequence ABI semantics mismatch")
+    elif command_mode != INDEPENDENT_COMMANDS or "binary_command_sequence" in abi:
+        raise ValueError("unknown or unselected binary command sequence ABI")
     global_mode = graph_bottom.get("global_condition_mode", PROPRIOCEPTIVE_GLOBAL)
     if global_mode == COMPILED_TASK_GLOBAL:
         if abi.get("global_task") != global_task_metadata():

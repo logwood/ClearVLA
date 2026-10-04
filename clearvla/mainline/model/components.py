@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..executed_world import ExecutedWorldPlanValues
+from ..command_sequence import CommandChainBoundary, CONDITIONAL_COMMANDS, prepare_command_boundary
 from ..global_task import global_intent_memory
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import is_binary_gripper_selection
@@ -1375,6 +1376,7 @@ class ExecutionBottomStage(nn.Module):
         execution_mode: str = "learned",
         deployment_fastpath: bool = False,
         require_execution_supervision: bool = False,
+        command_boundary: CommandChainBoundary | None = None,
         collect_diagnostics: bool = False,
     ) -> tuple[BottomDecoderOutput, dict[str, Tensor]]:
         expected_query = (
@@ -1420,6 +1422,7 @@ class ExecutionBottomStage(nn.Module):
         try:
             raw = self.decoder(
                 noisy_physical=noisy_action_field,
+                command_boundary=command_boundary,
                 time=time,
                 flow_step_context=flow_step_context,
                 trajectory_tokens=trajectory,
@@ -1656,6 +1659,13 @@ class OutletAdapter(nn.Module):
         self._action_normalizer_fingerprint = (
             physical_action_normalizer_fingerprint(offset, scale)
         )
+
+    def prepare_binary_command_boundary(self, step):
+        if not self.is_binary_command or step is None:
+            raise ValueError("conditional command boundary needs an observed-step binary outlet")
+        offset, scale = self._normalizer_chart(step.command, dtype=torch.float32)
+        return prepare_command_boundary(step, offset=offset[..., -1], scale=scale[..., -1],
+                                        fingerprint=self._normalizer_identity())
 
     def _normalizer_chart(
         self,

@@ -17,6 +17,7 @@ from torch import Tensor, nn
 from ..role_values import CONTEXTUAL_ROLE_VALUES
 from ..feedback_values import INNOVATION_AND_STATUS
 from ..p2_values import CONTEXTUAL_EFFECT_VALUES
+from ..command_sequence import CONDITIONAL_COMMANDS
 from ..global_task import COMPILED_TASK_GLOBAL
 from ..task_execution import JOINT_SPATIAL_TASK_EXECUTION, JOINT_TASK_EXECUTION_MODES
 from ..gripper_contract import (
@@ -188,7 +189,7 @@ class ComponentSelection:
                 p1=("task_query_current_factual_p1_v1" if config.top.task_execution_mode in JOINT_TASK_EXECUTION_MODES else "v120_factual_dynamic_p1_v1"),
                 policy_compiler=_policy_compiler_selection(config),
                 execution_bottom=_execution_bottom_selection(config),
-                terminal_controller="calvin_binary_command_v1",
+                terminal_controller=("calvin_conditional_binary_command_v1" if config.bottom.command_sequence_mode == CONDITIONAL_COMMANDS else "calvin_binary_command_v1"),
                 outlet_adapter="calvin_7d_binary_v1",
             )
         if profile == "libero_relative_7d_v1":
@@ -217,7 +218,7 @@ class ComponentSelection:
                 p1=("task_query_current_factual_p1_v1" if config.top.task_execution_mode in JOINT_TASK_EXECUTION_MODES else "v120_factual_dynamic_p1_v1"),
                 policy_compiler=_policy_compiler_selection(config),
                     execution_bottom=_execution_bottom_selection(config),
-                    terminal_controller="maniskill_binary_command_v1",
+                    terminal_controller=("maniskill_conditional_binary_command_v1" if config.bottom.command_sequence_mode == CONDITIONAL_COMMANDS else "maniskill_binary_command_v1"),
                     outlet_adapter=MANISKILL_BINARY_GRIPPER_SELECTION,
                 )
             return cls(
@@ -324,6 +325,7 @@ class TerminalHeadOutput:
     command_logits: Tensor | None
     event_logits: Tensor | None
     diagnostics: Mapping[str, Tensor]
+    command_pair_probability: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -367,6 +369,7 @@ class ExecutionBottomStageContract(Protocol):
 
 # Longest/specialized prefixes must precede their containing decoder prefix.
 MODULAR_TO_LEGACY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("execution_bottom.decoder.terminal_controller.command_sequence.", "bottom.decoder.gripper_command_sequence."),
     (
         "execution_bottom.decoder.terminal_controller.optional_command_head.",
         "bottom.decoder.gripper_command_head.",
