@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only source/CPU acceptance for C1-C6. No server/pretrained/robot use.
+"""Read-only source/CPU acceptance for C1-C7. No server/pretrained/robot use.
 
 The argument output directory must be new. Each pytest group has a fresh process;
 failures/timeouts/skips are recorded, never converted into passes. Synthetic
@@ -36,6 +36,17 @@ def main() -> int:
     def git(*a: str) -> str:
         return subprocess.check_output(['git', *a], cwd=root, text=True).strip()
     groups = [
+        ('C7_command_law', ['tests/test_causal_command_sequence.py']),
+        ('stage3_fp32_update', ['tests/test_causal_stage3_integration.py::test_zero_start_and_real_two_updates_preserve_arm_ownership[False]']),
+        ('stage3_bf16_update', ['tests/test_causal_stage3_integration.py::test_zero_start_and_real_two_updates_preserve_arm_ownership[True]']),
+        ('stage3_lifecycle', ['tests/test_causal_stage3_integration.py::test_whole_sampler_boundary_is_once_per_observation_not_unexecuted_proposal']),
+        ('stage3_future', ['tests/test_causal_stage3_integration.py::test_future_labels_do_not_change_online_chain_or_logits']),
+        ('stage3_boundary', ['tests/test_causal_stage3_integration.py::test_chain_source_rejection_before_decoder']),
+        ('stage3_config_abi', ['tests/test_causal_stage3_integration.py::test_modes_preset_and_objectives', 'tests/test_causal_stage3_integration.py::test_abi_identity']),
+        ('stage3_checkpoint', ['tests/test_causal_stage3_integration.py::test_new_checkpoint_exact_restore_and_deployment']),
+        ('stage3_native_fp32', ['tests/test_causal_stage3_native.py::test_native_command_sequence_forward[False]']),
+        ('stage3_native_bf16', ['tests/test_causal_stage3_native.py::test_native_command_sequence_forward[True]']),
+        ('stage3_native_adapter', ['tests/test_causal_stage3_native.py::test_native_command_sequence_fresh_adapter']),
         ('C5_role_values', ['tests/test_causal_role_values.py']),
         ('C6_observed_status', ['tests/test_causal_observed_status.py']),
         ('stage2_updates', ['tests/test_causal_stage2_integration.py::test_full_zero_start_and_ordinary_training_update']),
@@ -66,7 +77,7 @@ def main() -> int:
         ('existing_action', ['tests/test_mainline_action_field.py']),
         ('existing_encoder', ['tests/test_dinov3_online.py']),
     ]
-    record = {'schema': 'causal-chain-C1-C6-acceptance-v1',
+    record = {'schema': 'causal-chain-C1-C7-acceptance-v1',
               'head': git('rev-parse', 'HEAD'), 'tree': git('rev-parse','HEAD^{tree}'),
               'working_tree_before': git('status', '--porcelain'),
               'python': platform.python_version(), 'torch': torch.__version__,

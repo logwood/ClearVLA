@@ -13,6 +13,7 @@ from torch import Tensor
 from clearvla.action_solvers.flow_solver.spec import ScheduleSpec
 from clearvla.data.action_chart import resolve_action_state_profile
 
+from ..command_sequence import CONDITIONAL_COMMANDS, joint_command_event_statistics
 from ..config import ExperimentConfig
 from ..endpoint_supervision import CLEAN_ENDPOINT_SUPERVISION, EndpointHeadSupervision
 from ..execution_values import execution_value_component_weights
@@ -1964,6 +1965,9 @@ def action_terms(
     if phase_mode != "stackcube_phase_v1":
         phase_arm_flow = phase_arm_flow * 0.0
         pre_event_hold = pre_event_hold * 0.0
+    command_joint_flip_rate = prediction.new_zeros((), dtype=torch.float32)
+    command_joint_rows = prediction.new_zeros((), dtype=torch.float32)
+    command_joint_available = prediction.new_zeros((), dtype=torch.float32)
     if binary_command:
         if command_target is None or command_logits is None:
             raise RuntimeError("binary command target/logits were not materialized")
@@ -2052,6 +2056,21 @@ def action_terms(
         command_expected_flip_rate = (flip_probability.detach() * transition_weighted_support).sum() / (
             transition_weighted_support.sum().clamp_min(1.0)
         )
+        if config.bottom.command_sequence_mode == CONDITIONAL_COMMANDS:
+            payload = head_output.bottom.decoder_tensors
+            joint = payload.get("gripper_command_pair_probability")
+            observed = payload.get("gripper_command_boundary_observed")
+            if (joint is None or joint.shape != (*command_logits.shape, 2)
+                    or joint.device != command_logits.device or joint.dtype != torch.float32
+                    or observed is None or observed.shape != (command_logits.shape[0],)
+                    or observed.dtype != torch.bool or observed.device != command_logits.device):
+                raise ValueError("conditional command diagnostics lost the joint endpoint law or observed boundary")
+            # Preserve the old independent-Bernoulli statistic above as an
+            # explicitly separate diagnostic. Correlated command marginals
+            # alone do NOT determine the model's expected number of switches.
+            command_joint_flip_rate, command_joint_rows = joint_command_event_statistics(
+                joint, observed, valid, transition_weighted_support)
+            command_joint_available = prediction.new_ones((), dtype=torch.float32)
     else:
         zero_command = prediction.new_zeros((), dtype=torch.float32)
         command_accuracy = zero_command
@@ -2356,6 +2375,9 @@ def action_terms(
         "gripper_command_boundary_target_rate": command_boundary_target_rate,
         "gripper_command_logit_margin_mean": command_margin_mean,
         "gripper_command_expected_flip_rate": command_expected_flip_rate,
+        "gripper_command_joint_expected_flip_rate": command_joint_flip_rate,
+        "gripper_command_joint_pair_rows": command_joint_rows,
+        "gripper_command_joint_available": command_joint_available,
         "gripper_command_positive_class_weight": command_positive_weight.detach(),
         "gripper_command_negative_class_weight": command_negative_weight.detach(),
         "gripper_command_accuracy": command_accuracy,

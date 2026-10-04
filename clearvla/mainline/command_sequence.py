@@ -69,3 +69,25 @@ def prepare_command_boundary(step: ExecutedRobotStep, *, offset: Tensor, scale: 
     result = CommandChainBoundary(p, step, fingerprint, versions)
     result.validate(step, fingerprint)
     return result
+
+
+def joint_command_event_statistics(joint: Tensor, observed: Tensor, valid: Tensor,
+                                   pair_weights: Tensor) -> tuple[Tensor, Tensor]:
+    """Exact event expectation under the emitted joint law, with source masks.
+
+    This does NOT claim the argmax sequence has the same event count. Unknown
+    pre-reset command pairs are excluded rather than labelled stationary.
+    """
+    if joint.shape != (*valid.shape, 2, 2) or joint.dtype != torch.float32:
+        raise ValueError("joint command law must retain [B,T,2,2] in FP32")
+    if observed.shape != valid.shape[:1] or observed.dtype != torch.bool or valid.dtype != torch.bool:
+        raise ValueError("joint command statistics require source-owned support")
+    if pair_weights.shape != valid.shape or any(v.device != joint.device for v in (observed, valid, pair_weights)):
+        raise ValueError("joint command statistics lost device/time identity")
+    pair_valid = torch.cat((valid[:, :1] & observed[:, None], valid[:, 1:] & valid[:, :-1]), 1)
+    weights = torch.where(pair_valid, pair_weights.detach().float(), 0.0)
+    law = torch.where(pair_valid[..., None, None], joint.detach(), 0.0)
+    if not bool(torch.isfinite(law).all()):
+        raise ValueError("joint command probabilities must be finite on support")
+    flips = law[..., 0, 1] + law[..., 1, 0]
+    return (flips * weights).sum() / weights.sum().clamp_min(1.0), pair_valid.float().sum()

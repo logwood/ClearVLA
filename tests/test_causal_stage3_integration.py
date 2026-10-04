@@ -44,6 +44,8 @@ def test_zero_start_and_real_two_updates_preserve_arm_ownership(amp):
     for _ in range(2):
         out=e.train_step(b)
         assert torch.isfinite(out.loss)
+        # This exact training output uses endpoint joint statistics, not the
+        # old independent-Bernoulli proxy relabelled as a conditional law.
     for n,p in selected.items():
         assert p.grad is not None and torch.isfinite(p.grad).all() and p.grad.abs().max()>0,n
         assert p.detach().abs().max()>0,n
@@ -78,7 +80,13 @@ def test_whole_sampler_boundary_is_once_per_observation_not_unexecuted_proposal(
         assert all(x is count[0].probability for x in seen[:12])
         assert all(x is count[1].probability for x in seen[12:])
         torch.testing.assert_close(out.action,out2.action,rtol=0,atol=0)
-        assert all(s is b.online.history.executed_robot_step for s in steps)
+        # Conditioning may create a supported-view record even in eval. Bind
+        # to that exact admitted source, not to the pre-conditioning container.
+        assert all(record.source is step for record,step in zip(count,steps))
+        for step in steps:
+            torch.testing.assert_close(step.command,b.online.history.executed_robot_step.command,rtol=0,atol=0)
+            torch.testing.assert_close(step.offsets,b.online.history.executed_robot_step.offsets,rtol=0,atol=0)
+            torch.testing.assert_close(step.observed,b.online.history.executed_robot_step.observed,rtol=0,atol=0)
     finally:m.outlet_adapter.prepare_binary_command_boundary=original;hook.remove()
 
 

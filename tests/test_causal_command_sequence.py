@@ -135,3 +135,25 @@ def test_no_rng_or_extra_tensor_state_and_stable_extreme_logits():
     out,p=binary_command_filter(e,t,torch.tensor([[0.,1.]]))
     assert torch.isfinite(out).all() and torch.isfinite(p).all()
     out.square().mean().backward();assert torch.isfinite(e.grad).all() and torch.isfinite(t.grad).all()
+
+
+def test_joint_flip_cannot_be_reconstructed_from_same_marginals():
+    from clearvla.mainline.command_sequence import joint_command_event_statistics
+    valid=torch.ones(1,24,dtype=torch.bool);observed=torch.ones(1,dtype=torch.bool);weights=torch.ones(1,24)
+    # Equal .5/.5 marginals can represent perfectly persistent or alternating pairs.
+    hold=torch.eye(2)[None,None].expand(1,24,2,2)*.5
+    flip=(1-torch.eye(2))[None,None].expand_as(hold)*.5
+    torch.testing.assert_close(hold.sum(2),flip.sum(2))
+    assert joint_command_event_statistics(hold,observed,valid,weights)[0]==0
+    assert joint_command_event_statistics(flip,observed,valid,weights)[0]==1
+    # Marginal-independent proxy reports .5 for both, so keep it labelled separately.
+    assert (hold.sum(2)[...,0]*.5+hold.sum(2)[...,1]*.5).mean()==.5
+
+
+def test_joint_diagnostics_quarantine_invalid_rows_and_unknown_boundary():
+    from clearvla.mainline.command_sequence import joint_command_event_statistics
+    pair=torch.full((1,24,2,2),float('nan'));pair[:,1:3]=.25
+    valid=torch.zeros(1,24,dtype=torch.bool);valid[:,:3]=True
+    rate,rows=joint_command_event_statistics(pair,torch.tensor([False]),valid,torch.ones(1,24))
+    assert rate==.5 and rows==2 and not rate.requires_grad
+    with pytest.raises(ValueError,match='finite'):joint_command_event_statistics(pair,torch.tensor([True]),valid,torch.ones(1,24))

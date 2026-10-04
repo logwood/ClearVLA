@@ -28,21 +28,23 @@ def binary_command_filter(logits: Tensor, transition: Tensor, boundary: Tensor) 
     with torch.autocast(device_type=logits.device.type, enabled=False):
         raw, energy = logits.float(), transition.float()
         initial = torch.where(boundary > 0, boundary.float().clamp_min(torch.finfo(torch.float32).tiny).log(), -torch.inf)
+        conditional_rows = raw[:, :, None, :] + energy
+        normalizers = torch.logsumexp(conditional_rows, -1, keepdim=True)
+        deltas = normalizers - torch.logsumexp(raw, -1)[:, :, None, None]
+        log_ratios = energy - deltas
+        conditional_log = conditional_rows - normalizers
         previous = initial
         rows, pairs = [], []
         for row in range(raw.shape[1]):
-            emission, e = raw[:, row], energy[:, row]
-            conditional = emission[:, None, :] + e
+            emission = raw[:, row]
             # Ratio of each conditional law to the unconditioned emission law.
             # If e==0, the normalizers match and BOTH class corrections are
             # exactly equal; centering below gives bitwise zero, not a branch.
-            normalizer_delta = torch.logsumexp(conditional, -1, keepdim=True) - torch.logsumexp(emission, -1)[:, None, None]
-            correction = torch.logsumexp(previous[:, :, None] + e - normalizer_delta, dim=1)
+            correction = torch.logsumexp(previous[:, :, None] + log_ratios[:, row], dim=1)
             correction = correction - correction.mean(-1, keepdim=True)
             marginal_logits = emission + correction
             rows.append(marginal_logits)
-            log_conditional = conditional - torch.logsumexp(conditional, -1, keepdim=True)
-            pairs.append((previous[:, :, None] + log_conditional).exp())
+            pairs.append((previous[:, :, None] + conditional_log[:, row]).exp())
             previous = torch.log_softmax(marginal_logits, -1)
         return torch.stack(rows, 1), torch.stack(pairs, 1)
 

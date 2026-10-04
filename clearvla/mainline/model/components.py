@@ -21,7 +21,7 @@ from ..global_task import global_intent_memory
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..gripper_contract import is_binary_gripper_selection
 from ..interfaces import CurrentObservation, ObservableHistory, OnlinePolicyInput
-from ..robot_execution import RobotResponseFeedback
+from ..robot_execution import RobotResponseFeedback, ExecutedRobotStep
 from ..supervision import FutureLabelSupport, supported_mean
 from ..task_execution import TaskRelationEvidence
 from ..transition_condition import SUMMED_TRANSITION, validate_transition_condition_mode
@@ -1660,7 +1660,7 @@ class OutletAdapter(nn.Module):
             physical_action_normalizer_fingerprint(offset, scale)
         )
 
-    def prepare_binary_command_boundary(self, step):
+    def prepare_binary_command_boundary(self, step: ExecutedRobotStep | None) -> CommandChainBoundary:
         if not self.is_binary_command or step is None:
             raise ValueError("conditional command boundary needs an observed-step binary outlet")
         offset, scale = self._normalizer_chart(step.command, dtype=torch.float32)

@@ -3355,6 +3355,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 output["gripper_command_logits"] = gripper_command_logits
             if terminal.command_pair_probability is not None:
                 output["gripper_command_pair_probability"] = terminal.command_pair_probability
+                output["gripper_command_boundary_observed"] = command_boundary.source.observed
             return output
         out: dict[str, Tensor] = {
             "pred_velocity": pred_velocity,
@@ -3380,6 +3381,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             out["gripper_command_logits"] = gripper_command_logits
         if terminal.command_pair_probability is not None:
             out["gripper_command_pair_probability"] = terminal.command_pair_probability
+            out["gripper_command_boundary_observed"] = command_boundary.source.observed
         block_rows = result["block_rows"]
         zero = torch.zeros((), device=action.device, dtype=torch.float32)
         for name in (
@@ -4190,6 +4192,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
                 output["gripper_command_logits"] = gripper_command_logits
             if terminal.command_pair_probability is not None:
                 output["gripper_command_pair_probability"] = terminal.command_pair_probability
+                output["gripper_command_boundary_observed"] = command_boundary.source.observed
             return output
         out: dict[str, Tensor] = {
             "pred_velocity": pred_velocity,
@@ -4237,6 +4240,7 @@ class EvidenceLatentMMDiTActionDecoder(nn.Module):
             out["gripper_command_logits"] = gripper_command_logits
         if terminal.command_pair_probability is not None:
             out["gripper_command_pair_probability"] = terminal.command_pair_probability
+            out["gripper_command_boundary_observed"] = command_boundary.source.observed
         out.update(policy_delta_metrics)
         out.update(spine_metrics)
 

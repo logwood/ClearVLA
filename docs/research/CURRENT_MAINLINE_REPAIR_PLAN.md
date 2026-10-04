@@ -1,3 +1,15 @@
+## Stage 3 C7 continuation, 2026-10-04
+
+Continue the isolated causal-chain branch from ce50846a. The conditional native
+command distribution and source-owned boundary now have an implementation and
+component/compact engine checks. Preserve C1-C6, ordinary losses, the full 24-row
+field and two-pass sampling. Unknown history means an unknown boundary, not a
+fabricated previous command. Conditional pair diagnostics must not use products
+of marginal probabilities. Full acceptance results belong to delivery/CI; do
+not infer learned task behavior, GPU speed, or R8 protocol acceptance from them.
+Teacher's future-target uncertainty contract remains open; do not accidentally
+replace its within-support covariance with total temporal mixture covariance.
+
 ## Stage two C5/C6 (2026-10-04)
 
 Continue on causal-chain-repair-20261004 after a7cad7d5. The new explicit

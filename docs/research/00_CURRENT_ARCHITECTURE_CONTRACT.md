@@ -1,3 +1,44 @@
+## C7: source-anchored conditional binary commands (2026-10-04)
+
+`bottom.command_sequence_mode="conditional_binary_chain_v1"` changes the native
+binary distribution INSIDE the existing terminal controller. The private gripper
+head still emits two logits per row; a zero-start Hx4 projection of that SAME
+private state supplies a learned 2x2 conditional transition energy. Causal FP32
+forward marginalization preserves both previous classes, without sampled/argmax
+feedback, hard dwell, a hold threshold, extra loss or external postprocessor.
+The initial law is the source-recorded t-1 native command (inverse checkpoint
+normalizer), or uniform if the producer marks that step absent. It is NOT TCP
+opening, the continuous codec boundary, or an unexecuted previous plan tail.
+The source clock, tensor references/versions and normalizer identity are checked;
+no cross-request filter state is retained. History dropout remains authoritative.
+
+The new command head runs on the same actual private state in training and
+inference. Existing clean-arm endpoint supervision remains teacher-forced and
+is not claimed repaired here. Final output still uses the existing native
+binary argmax; consecutive hard marginals need not form a MAP joint trajectory.
+Zero transition weights preserve initial logits/action values and old-parameter
+state/RNG. Training uses ordinary existing CE/selected budgets; no weights are
+silently raised. Both source factories and both real decoder terminal paths
+carry the same typed boundary. Candidate arm/value reads are unchanged.
+A changed command may still alter the proposal-conditioned W and later arm.
+
+Endpoint outputs include the actual [previous,current] joint probability law.
+The existing independent-Bernoulli expected-flip metric is retained under its
+old definition; `gripper_command_joint_expected_flip_rate` and pair count use
+the emitted joint law and exclude an unobserved row-zero predecessor. Neither
+statistic is a physical contact measurement or an actual hard-event guarantee.
+Both distributions and diagnostic reduction use source masks, not confidence
+thresholds. Fresh conditional graphs have explicit configuration/component/ABI
+identities and exact-resume checks; no checkpoint metadata relabeling is allowed.
+
+The candidate preset `dinov3_causal_chain_stage3_calvin.json` differs from stage2
+only in this mode and output directory. No ODE/history/horizon/execute-rows/loss
+setting changes. Teacher covariance remains the declared mean WITHIN-support
+correspondence covariance, not total temporal variance. Future uncertainty
+supervision, complete target loss/recovery and the R1/R8 ABI difference remain
+separate work. C7 is an expressive, trainable command distribution, not evidence
+that the user's trained policy now persists or switches at the correct time.
+
 ## C6: observed comparison state is independent of signed innovation (2026-10-04)
 
 `top.world_feedback_value_mode="innovation_and_status_v1"` preserves the existing
