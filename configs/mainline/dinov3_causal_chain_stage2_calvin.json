@@ -56,6 +56,7 @@
     "task_execution_mode": "joint_object_scene_v1",
     "object_view_mode": "per_camera_values_v1",
     "p2_effect_value_mode": "s_conditioned_values_v1",
+    "p2_target_value_mode": "bounded_zero_start_v1",
     "task_role_value_mode": "source_conditioned_values_v1",
     "world_feedback_value_mode": "innovation_and_status_v1"
   },
