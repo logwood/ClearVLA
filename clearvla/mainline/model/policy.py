@@ -938,6 +938,8 @@ class ClearVLAMainlinePolicy(nn.Module):
                 gradient_metrics,
                 "gradient_tensor_s_public_object_memory_rms",
             )
+            # These historical common/residual hooks are total intermediate-node
+            # VJPs; use the predecomposition S-value hook for producer connectivity.
             register_gradient_rms_metric(
                 context.intent.typed_common_value,
                 gradient_metrics,

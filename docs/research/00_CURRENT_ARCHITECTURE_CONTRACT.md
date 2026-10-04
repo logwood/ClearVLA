@@ -92,6 +92,11 @@ On the shared zero-start task/object residual, pointwise object*mean-task and ob
 The old concatenated linear task term was K-common and could not change real-K relative ranking. Source tests cover conditional ranking, gradients, zero-task neutrality, permutations and support.
 The K-plus-null owner, support masks and per-view reduction remain unchanged; the changed weight meaning is recorded by task_execution.binding_residual and old concat weights are not exact-resume compatible.
 Source-level evidence only; this does not establish learned grounding or robot success.
+## Causal-chain C2: predecomposition typed S gradient observation (2026-10-04)
+The old common and residual hooks remain for compatibility, but their values are total intermediate-node VJPs and can cancel. The new metrics observe the actual typed_relevance_value before decomposition and report one RMS per semantic, appearance and geometry slice. Diagnostics do not detach or alter the forward path.
+## Causal-chain C4: binary command boundary and native metric ownership (2026-10-04)
+For binary CALVIN, the optional command transition now includes the profile-owned real last-command to row-zero seam, while interior pairs remain restricted to controlled_action_tokens. Boundary rate, target rate, absolute logit margin and expected flip rate are separate diagnostics; this does not claim hard persistence.
+The formal transition coefficient remains configuration-owned; the boundary repair is active only when that objective is selected. Native-flow correction is diagnostic weighting parity, not a new action objective.
 ## WP2 — mixed-gradient W and visual-ingress parity repair (2026-09-30 candidate)
 
 Branch `codex/wp2-parity-repair-20260930` is a correctness repair based on
