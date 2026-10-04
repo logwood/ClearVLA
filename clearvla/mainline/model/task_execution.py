@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
+from ..role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, ROLE_VALUE_MODES
 from ..future_time import CONTROL_ALIGNED_FUTURE_TIME, resolve_future_time
 from ..task_execution import (
     JOINT_SPATIAL_TASK_EXECUTION, JOINT_TASK_EXECUTION, JOINT_TASK_EXECUTION_MODES,
@@ -237,7 +238,7 @@ class ObjectRoleRead(nn.Module):
     reads target and scene with different parameters, never in one competition.
     """
 
-    def __init__(self, hidden: int, heads: int) -> None:
+    def __init__(self, hidden: int, heads: int, *, role_value_mode: str = ADDRESS_ONLY_ROLE) -> None:
         super().__init__()
         if hidden < 1 or heads < 1 or hidden % heads:
             raise ValueError("object-role attention dimensions must be head aligned")
@@ -248,6 +249,13 @@ class ObjectRoleRead(nn.Module):
         self.key = nn.Linear(hidden, hidden, bias=False)
         self.value = nn.Linear(hidden, hidden, bias=False)
         self.output = nn.Linear(hidden, hidden, bias=False)
+        if role_value_mode not in ROLE_VALUE_MODES:
+            raise ValueError("unknown task role value mode")
+        self.role_value_mode = role_value_mode
+        if role_value_mode == CONTEXTUAL_ROLE_VALUES:
+            self.contextual_role_gain = nn.Parameter(torch.zeros(hidden))
+        else:
+            self.register_parameter("contextual_role_gain", None)
 
     def forward(
         self, query: Tensor, keys: Tensor, values: Tensor, support: Tensor, mass: Tensor
@@ -277,6 +285,13 @@ class ObjectRoleRead(nn.Module):
             logits = torch.einsum("bpad,bklad->bpkal", q.float(), kk.float()) * self.width**-0.5
             p = masked_probability(logits, legal[:, None, :, None].expand_as(logits))
         per_object = torch.einsum("bpkal,bklad->bpkad", p.to(vv.dtype), vv)
+        if self.contextual_role_gain is not None:
+            # This is value interpretation INSIDE the same object-role read.
+            # q is independent of I/C, so this equals conditioning each v_l
+            # before the expectation without allocating [B,Q,K,I,C,H].
+            gain = torch.tanh(self.contextual_role_gain).reshape(self.heads, self.width)
+            modulation = torch.tanh(q) * gain.to(q.dtype)
+            per_object = per_object * (1 + modulation[:, :, None].to(per_object.dtype))
         per_object = self.output(per_object.flatten(-2))
         out = (per_object.float() * mass[:, None, :, None]).sum(2)
         return out.to(query.dtype).reshape_as(query)
@@ -287,11 +302,11 @@ class TaskRelationRead(nn.Module):
 
     time_code: Tensor
 
-    def __init__(self, hidden: int, heads: int) -> None:
+    def __init__(self, hidden: int, heads: int, *, role_value_mode: str = ADDRESS_ONLY_ROLE) -> None:
         super().__init__()
         self.hidden = hidden
-        self.target = ObjectRoleRead(hidden, heads)
-        self.scene = ObjectRoleRead(hidden, heads)
+        self.target = ObjectRoleRead(hidden, heads, role_value_mode=role_value_mode)
+        self.scene = ObjectRoleRead(hidden, heads, role_value_mode=role_value_mode)
         grid = resolve_future_time(CONTROL_ALIGNED_FUTURE_TIME)
         self.register_buffer("time_code", grid.interval_encoding(hidden), persistent=True)
 
@@ -312,9 +327,9 @@ class TaskRelationRead(nn.Module):
 class TaskAwareFactualRead(nn.Module):
     """Task relation changes the P1 query, never the factual value source."""
 
-    def __init__(self, hidden: int, heads: int) -> None:
+    def __init__(self, hidden: int, heads: int, *, role_value_mode: str = ADDRESS_ONLY_ROLE) -> None:
         super().__init__()
-        self.relation_query = TaskRelationRead(hidden, heads)
+        self.relation_query = TaskRelationRead(hidden, heads, role_value_mode=role_value_mode)
         self.current_values = BoundTargetRead(hidden, heads)
 
     def forward(
@@ -345,6 +360,7 @@ class TaskOutcomePlanRead(nn.Module):
     def __init__(
         self, *, hidden: int, content_dim: int, heads: int, camera_names: tuple[str, ...],
         task_execution_mode: str = JOINT_TASK_EXECUTION,
+        role_value_mode: str = ADDRESS_ONLY_ROLE,
     ) -> None:
         super().__init__()
         if task_execution_mode not in JOINT_TASK_EXECUTION_MODES:
@@ -361,9 +377,9 @@ class TaskOutcomePlanRead(nn.Module):
             nn.Linear(2 * hidden, hidden, bias=False),
         )
         self.task_modulation = nn.Linear(hidden, hidden, bias=False)
-        self.target_relation = ObjectRoleRead(hidden, heads)
-        self.target_gap = ObjectRoleRead(hidden, heads)
-        self.scene_gap = ObjectRoleRead(hidden, heads)
+        self.target_relation = ObjectRoleRead(hidden, heads, role_value_mode=role_value_mode)
+        self.target_gap = ObjectRoleRead(hidden, heads, role_value_mode=role_value_mode)
+        self.scene_gap = ObjectRoleRead(hidden, heads, role_value_mode=role_value_mode)
         grid = resolve_future_time(CONTROL_ALIGNED_FUTURE_TIME)
         self.register_buffer("time_code", grid.interval_encoding(hidden), persistent=True)
 

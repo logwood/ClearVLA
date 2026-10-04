@@ -27,6 +27,7 @@ from torch import Tensor, nn
 
 from ..annotation_goal import AnnotationEndpoint
 from ..global_task import PROPRIOCEPTIVE_GLOBAL
+from ..role_values import ADDRESS_ONLY_ROLE
 from ..future_time import LEGACY_FUTURE_TIME
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE
 from ..instruction_reference import InstructionReference
@@ -224,6 +225,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         state_feature_mode: str = "native_affine_v1",
         p2_spatial_intent_mode: str = "post_pool_only",
         p2_effect_value_mode: str = "world_values_v1",
+        task_role_value_mode: str = ADDRESS_ONLY_ROLE,
         p2_geometry_mode: str = "pooled_transport_v1",
         p3_coordination_mode: str = "pointwise_legacy_v1",
         robot_feedback_mode: str = "none",
@@ -306,7 +308,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             instruction_reference_mode=instruction_reference_mode,
             operation_intent_mode=operation_intent_mode,
             annotation_goal_mode=annotation_goal_mode,
-            task_execution_mode=task_execution_mode,
+            task_execution_mode=task_execution_mode, role_value_mode=task_role_value_mode,
             instruction_change_mode=instruction_change_mode,
             object_view_mode=object_view_mode,
             camera_names=camera_names,
@@ -320,7 +322,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             horizon=horizon,
             action_condition_mode=self.world_action_condition_mode,
             target_binding_mode=target_binding_mode,
-            task_execution_mode=task_execution_mode,
+            task_execution_mode=task_execution_mode, role_value_mode=task_role_value_mode,
         )
         self.dynamics = ObjectFutureDynamicsCompiler(
             future_time_grid_mode=future_time_grid_mode,
@@ -367,7 +369,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             camera_names=tuple(camera_names or ()),
             world_control_mode=world_control_mode,
             target_binding_mode=target_binding_mode,
-            task_execution_mode=task_execution_mode, heads=heads,
+            task_execution_mode=task_execution_mode, role_value_mode=task_role_value_mode, heads=heads,
             target_value_mode=p2_target_value_mode,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)

@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from clearvla.vision.entity_chart import ImageLogMeasure, current_image_grid
 
 from ..annotation_goal import ANNOTATED_ENDPOINT_GOAL
+from ..role_values import ADDRESS_ONLY_ROLE
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import (
     INSTRUCTION_CHANGE_MODES,
@@ -324,6 +325,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         operation_intent_mode: str = POSTERIOR_INTENT,
         annotation_goal_mode: str = "none",
         task_execution_mode: str = NO_TASK_EXECUTION,
+        role_value_mode: str = ADDRESS_ONLY_ROLE,
         object_view_mode: str = "pooled_v1",
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
@@ -406,7 +408,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         else:
             self.register_parameter("language_identity_residual_weight", None)
         self.interval_object = (
-            TaskRelationRead(hidden, heads) if self.task_relation_encoder is not None else
+            TaskRelationRead(hidden, heads, role_value_mode=role_value_mode) if self.task_relation_encoder is not None else
             BoundTargetRead(hidden, heads) if target_binding_mode == SHARED_TARGET_BINDING
             else _CrossRead(hidden, heads)
         )
@@ -1489,6 +1491,7 @@ class CoarseActionIntent(nn.Module):
         action_condition_mode: str = "interval_mean_v1",
         target_binding_mode: str = LOCAL_TARGET_READERS,
         task_execution_mode: str = NO_TASK_EXECUTION,
+        role_value_mode: str = ADDRESS_ONLY_ROLE,
     ) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
@@ -1514,7 +1517,7 @@ class CoarseActionIntent(nn.Module):
             )
         self.intent_read = _CrossRead(hidden, heads)
         self.object_read = (
-            TaskRelationRead(hidden, heads) if task_execution_mode in JOINT_TASK_EXECUTION_MODES else
+            TaskRelationRead(hidden, heads, role_value_mode=role_value_mode) if task_execution_mode in JOINT_TASK_EXECUTION_MODES else
             BoundTargetRead(hidden, heads) if target_binding_mode == SHARED_TARGET_BINDING
             else _CrossRead(hidden, heads)
         )
