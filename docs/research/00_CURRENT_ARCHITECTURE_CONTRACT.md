@@ -27,11 +27,27 @@ consumed typed policy-context interval variation reached 0.056, its direct
 consumed-context VJP was about 2e-5, and the full policy interval variation
 was 0.178; the typed score variation was 0.030. The legacy selected
 semantic/geometry value variation remains near 5e-4 because it measures the
-pre-residual selector value, not the consumed action context. The short
-validation panel completed with coverage 1; a fresh long run and closed-loop
-trajectory evidence are still required before deployment acceptance. Keep the
-direct consumed-context gradient metric separate from the legacy selected-value
-VJP metrics.
+pre-residual selector value, not the consumed action context.
+
+The same audit found a second loss after the P2 spatial selector: the selected
+S context retained public_interval, but selected_target_value retained
+only the typed value, so the later P2 target-value reader could not see interval
+identity. The repair carries a centered public interval residual through the
+existing target-value tensor, without adding a selector or changing K binding.
+The opt-in reader keeps its serialized bounded_zero_start_v1 mode name for
+checkpoint ABI compatibility, but its effective scale is a small bounded
+bootstrap [0, 0.04] starting at 0.02; strict zero gain would leave this
+lane practically absent at the restored learning rate. A 5-batch diagnostic
+measured source interval-axis variation 0.280 and target-lane variation
+0.00559. A matched 50-batch carrier probe restored the closed-loop outer
+final action-delta mismatch to 0.0181, versus 0.094 for gain-only probes;
+this is a route qualification, not learned task acceptance.
+
+The short validation panel completed with coverage 1. A fresh long run and
+closed-loop trajectory evidence are still required before deployment
+acceptance. Keep the direct consumed-context gradient metric separate from
+legacy selected-value VJP metrics, and keep the interval-axis carrier metric
+separate from temporal variation.
 
 ## WP3 — DINOv3 target-flow / Teacher self-reference repair (2026-10-03 candidate)
 
@@ -49,13 +65,15 @@ decide the measured current value in this target plane. The frozen association
 still owns the same semantic/appearance/geometry law, future supports remain
 training-only, and no second identity selector or physical tracker is added.
 
-The opt-in P2 `bounded_zero_start_v1` carrier selects S typed target evidence
+The opt-in P2 bounded_zero_start_v1 carrier selects S typed target evidence
 with the existing K/view posterior and adds it only as a bounded hidden value
-residual. Its scalar gain is a new exact-zero FP32 parameter, so the restored
-checkpoint is bit-identical at initialization while ordinary action gradients
-can learn the route. It does not read raw language, create a selector, or
-change W's goal-free ownership. The existing S/P2 common/residual identity and
-producer validity masks remain required.
+residual. The scalar parameter is initialized at zero, but the effective carrier
+has a small bounded bootstrap [0, 0.04] starting at 0.02; therefore this
+mode is not an exact old-output parity mode. The selected S public interval
+carrier is retained in the existing target-value tensor so P2 can receive
+interval identity through the same posterior. It does not read raw language,
+create a selector, or change W's goal-free ownership. The existing S/P2
+common/residual identity and producer validity masks remain required.
 
 For binary CALVIN, the existing command-transition objective is restricted to
 the declared `controlled_action_tokens` prefix and uses the same motion/event
@@ -64,8 +82,8 @@ unchanged. The candidate sets `image_frame_lru_capacity=0`; decoded/DINO
 feature caches remain disabled by the online HDF5 path. HDF5 file-handle reuse
 is an I/O descriptor policy, not an RGB/feature value cache.
 
-Required qualification: migration/source allow-list, old-mode zero-parity,
-raw-chart Teacher numerical checks, target-carrier parameter VJP, one real
+Required qualification: migration/source allow-list, Teacher numerical
+checks, target-carrier parameter VJP, interval-axis carrier variation, one real
 batch-8 update and matched closed-loop evidence. Do not call the repair a task
 success, stable physical identity, or final deployment until those gates pass.
 

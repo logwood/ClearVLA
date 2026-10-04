@@ -1347,7 +1347,7 @@ def load_checkpoint_for_initialization(
         ):
             raise ValueError(
                 "DINOv3 deep repair migration requires the declared raw-chart, "
-                "zero-start target-value and frame-cache selectors"
+                "bounded target-value and frame-cache selectors"
             )
         if _dinov3_deep_repair_migration_config_view(
             saved_config

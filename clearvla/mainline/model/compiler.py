@@ -165,7 +165,7 @@ class SelectedIntervalEvidence:
     support: Tensor  # bool [B,I,Z]
     # S typed target evidence after the same existing K/view posterior. This
     # is a value carrier only; shared K binding remains the sole identity
-    # selector. The optional P2 reader consumes it through a zero-start gain.
+    # selector. The optional P2 reader consumes it through a bounded gain.
     # ``None`` keeps direct structural fixtures source-compatible; live
     # spatial selection always supplies the explicit carrier.
     selected_target_value: Tensor | None = None  # [B,T,Q,I,Z,H]
@@ -316,9 +316,14 @@ class ObjectFutureEffectReader(nn.Module):
         if self.target_value_mode not in {"none", "bounded_zero_start_v1"}:
             raise ValueError("unknown P2 target-value mode")
         if self.target_value_mode == "bounded_zero_start_v1":
-            # Exact old-function initialization with a live VJP: the carrier
-            # is zero at restore, but its scalar owner can learn from ordinary
-            # action losses without introducing a second projection/selector.
+            # Keep this optional target-owned value lane bounded, but leave a
+            # small resident carrier at restore.  A strict zero start makes
+            # the only path from the action loss to the selected S target
+            # values pass through one scalar whose first updates are on the
+            # 1e-6 scale at the restored learning rate; the target distinction
+            # therefore remains absent for the useful part of a one-epoch run.
+            # The zero-gain bootstrap below is deliberately small so this
+            # lane cannot dominate the established semantic/geometry effects.
             self.target_value_gain = nn.Parameter(torch.zeros((), dtype=torch.float32))
         else:
             self.register_parameter("target_value_gain", None)
@@ -926,7 +931,19 @@ class ObjectFutureEffectReader(nn.Module):
             selected_s_contexts.append(
                 public_interval[:, None, None] + selected_typed.float()
             )
-            selected_target_values.append(selected_typed.float())
+            # The selected S context contains the public interval carrier,
+            # but the old target-value lane kept only the selected typed value
+            # and therefore discarded the interval-owned part before P2.
+            # Retain the centered public carrier in the existing target value
+            # tensor; it carries interval identity without adding another
+            # selector or changing the shared K binding.
+            public_interval_residual = public_interval - public_interval.mean(
+                dim=1, keepdim=True
+            )
+            selected_target_values.append(
+                selected_typed.float()
+                + public_interval_residual[:, None, None, :, :]
+            )
             interval_supports.append(interval_support)
             spatial_posteriors.append(posterior)
             source_scores.append(source_score)
@@ -1139,7 +1156,13 @@ class ObjectFutureEffectReader(nn.Module):
         if self.target_value_gain is None:
             target_value_scale = action_query.new_zeros((), dtype=torch.float32)
         else:
-            target_value_scale = 0.10 * torch.tanh(self.target_value_gain.float())
+            # Bounded target value carrier: zero gain starts at 0.02 and
+            # remains within [0, 0.04].  This is enough to keep the selected
+            # S target identity live while staying below the established
+            # semantic/geometry carrier amplitudes.
+            target_value_scale = 0.02 + 0.02 * torch.tanh(
+                self.target_value_gain.float()
+            )
         target_value_source = (
             selected.selected_s_context
             if selected.selected_target_value is None
@@ -1307,7 +1330,10 @@ class ObjectFutureEffectReader(nn.Module):
             "object_p2_target_value_gain": action_query.new_tensor(
                 0.0
                 if self.target_value_gain is None
-                else float(0.10 * torch.tanh(self.target_value_gain.detach()).item()),
+                else float(
+                    0.02
+                    + 0.02 * torch.tanh(self.target_value_gain.detach()).item()
+                ),
                 dtype=torch.float32,
             ),
             "object_p2_target_value_effect_rms": target_value_effect.detach()
@@ -1315,6 +1341,19 @@ class ObjectFutureEffectReader(nn.Module):
             .square()
             .mean()
             .sqrt(),
+            # target_value_source retains the interval axis at dim=3
+            # ([B,T,Q,I,Z,H]); measuring dim=1 would only report temporal
+            # variation and would miss the carrier loss this diagnostic audits.
+            "object_p2_target_value_source_interval_variation": target_value_source.detach()
+            .float()
+            .std(dim=3, unbiased=False)
+            .mean(),
+            "object_p2_target_value_interval_variation": (
+                target_value_scale.to(dtype=target_value_source.dtype)
+                * target_value_source.detach().float()
+            )
+            .std(dim=3, unbiased=False)
+            .mean(),
             "object_p2_terminal_common_residual_identity_error": torch.maximum(
                 (
                     semantic_selected.detach().float()

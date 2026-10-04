@@ -548,8 +548,8 @@ class TopConfig:
     # Bound the full-posterior P1 query work so batch-8 keeps a stable
     # memory margin while avoiding one-query-at-a-time sampling.
     flow_jepa_address_query_batch_budget: int = 96
-    # Optional zero-start, bounded S target-value carrier. It is a value path
-    # after the existing shared K selector; it never creates a second selector
+    # Optional bounded S target-value carrier with a small resident bootstrap.
+    # It is a value path after the existing shared K selector; it never creates a second selector
     # or a raw-language action shortcut.
     p2_target_value_mode: str = "none"
 
