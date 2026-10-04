@@ -72,13 +72,24 @@ def _interval_slices(length: int) -> tuple[slice, ...]:
     return tuple(rows)
 
 
-def _interval_common_residual(value: Tensor) -> tuple[Tensor, Tensor]:
-    """Express four interval rows as one common value plus exact residuals."""
+def _interval_common_residual(
+    value: Tensor, *, preserve_common_grad: bool = False
+) -> tuple[Tensor, Tensor]:
+    """Express four interval rows as one common value plus exact residuals.
+
+    ``preserve_common_grad`` is opt-in for a downstream value lane that must
+    train its common carrier separately.  The default keeps the historical
+    algebraic VJP, so generic callers still see the exact source gradient.
+    """
 
     if value.ndim < 2 or int(value.shape[1]) != 4:
         raise ValueError("S decomposition requires four interval rows")
     common = value.mean(dim=1)
-    residual = value - common[:, None]
+    # Keep the forward identity ``common + residual == value``.  In the opt-in
+    # value lane, detaching only the subtraction baseline prevents exact
+    # common-mode cancellation while preserving values and axes.
+    baseline = common.detach() if preserve_common_grad else common
+    residual = value - baseline[:, None]
     return common, residual
 
 
@@ -651,6 +662,35 @@ class StatelessObjectIntentOrganizer(nn.Module):
         relevance_value = (
             relevance_mass * typed_route[:, None].to(dtype=relevance_mass.dtype)
         )
+        # ``relevance_mass * G`` is intentionally kept as the current-object
+        # fact carrier.  It cannot, however, express an interval-specific task
+        # direction: every future row only rescales the same G vector.  Carry a
+        # separate S-owned task value through the same K support law.  This is
+        # derived from the public interval query (already after the relation
+        # read), so it is not raw language/time and it cannot invent an object
+        # when the shared binding has no support.
+        task_value = self._bounded_unit(typed_query)[:, :, None, :, :]
+        # A typed task value may follow a route only when that producer type
+        # has an actual current fact.  This keeps a zero semantic/appearance/
+        # geometry source exactly zero instead of fabricating a value from S.
+        route_support = (
+            typed_route.detach().abs().sum(dim=-1, keepdim=True) > 1.0e-8
+        ).to(dtype=relevance_mass.dtype)
+        if binding is None:
+            task_gate = validity.to(dtype=relevance_mass.dtype) * route_support[:, None]
+        else:
+            task_gate = (
+                binding.mass[:, None, :, None, None]
+                * object_support[:, None, :, None, None].to(
+                    dtype=relevance_mass.dtype
+                )
+                * route_support[:, None]
+            )
+        relevance_value = relevance_value + (
+            0.35
+            * task_gate
+            * task_value.to(dtype=relevance_mass.dtype)
+        )
 
         components: list[Tensor] = []
         for type_index, projection in enumerate(
@@ -944,6 +984,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
             relation_views = spatial_support.flatten(-2).any(-1) & camera_valid
             task_relation = self.task_relation_encoder(
                 task_intervals=goal_innovation,
+                # Keep the interval clock/identity in the S-owned relation
+                # VALUE path.  It was previously used only as an attention key
+                # and was therefore discarded before JointTaskRelationEncoder.
+                interval_context=interval_base,
                 attributes=attribute_tokens if view_attribute_tokens is None else view_attribute_tokens,
                 position_probability=position_probability.flatten(-2),
                 position_grid=current_image_grid(side, side, device=state.device).reshape(-1, 2),
@@ -1028,7 +1072,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
             _interval_common_residual(typed_relevance_mass)
         )
         typed_common_value, typed_interval_residual_value = (
-            _interval_common_residual(typed_relevance_value)
+            _interval_common_residual(
+                typed_relevance_value, preserve_common_grad=True
+            )
         )
         typed_policy_context = typed_policy_components.sum(dim=2) / (3.0**0.5)
         policy_intervals = public_intervals + typed_policy_context

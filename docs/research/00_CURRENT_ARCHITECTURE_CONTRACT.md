@@ -153,6 +153,29 @@ metadata. This is an optional follow-up to the current bounded P2 target
 carrier, not an automatic switch for the formal run; it needs a matched GPU
 profile and behavioral validation.
 
+## Causal-chain C5: interval task values and common-value VJP repair (2026-10-04)
+
+The joint S relation encoder now accepts the existing interval identity/clock as
+an optional centered context and uses a bounded multiplicative interaction with
+the task projection when producing relation values. It is value conditioning
+inside S, not a new K selector or a raw time/language bypass; omitting the
+context preserves the old forward exactly.
+
+Typed S relevance keeps ``binding * G`` as the current-object fact carrier and
+adds a bounded public-interval task value only on a producer-supported typed
+route and the shared binding mass. A zero semantic/appearance/geometry source
+therefore remains exactly zero, while supported routes can carry a future
+semantic direction instead of only rescaling one G vector.
+
+The typed value common/residual split opts into a detached subtraction baseline
+only for the value lane. Forward reconstruction and all axes are unchanged,
+but the common carrier receives its own ordinary VJP instead of cancelling
+against the residual. On a real batch-8 checkpoint path, semantic, geometry,
+consequence and velocity losses all changed from exactly zero common VJP to
+finite nonzero common VJPs. The candidate passed 65 focused tests and 168
+structural/causal tests (one pre-existing field-set assertion remains outside
+this repair).
+
 ## WP2 — mixed-gradient W and visual-ingress parity repair (2026-09-30 candidate)
 
 Branch `codex/wp2-parity-repair-20260930` is a correctness repair based on

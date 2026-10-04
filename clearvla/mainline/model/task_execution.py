@@ -136,6 +136,7 @@ class JointTaskRelationEncoder(nn.Module):
         view_observed: Tensor,
         binding: TargetBinding,
         current_content: Tensor,
+        interval_context: Tensor | None = None,
     ) -> TaskRelationEvidence:
         per_view = attributes.ndim == 5
         if attributes.ndim not in (4, 5):
@@ -160,6 +161,13 @@ class JointTaskRelationEncoder(nn.Module):
             or view_observed.dtype != torch.bool
         ):
             raise ValueError("joint relation task/support axes differ")
+        if interval_context is not None:
+            if interval_context.shape != (b, 4, h):
+                raise ValueError("joint relation interval context axis differs")
+            if interval_context.device != attributes.device or not interval_context.is_floating_point():
+                raise ValueError("joint relation interval context must be colocated floating tensor")
+            if not bool(torch.isfinite(interval_context).all()):
+                raise ValueError("joint relation interval context is nonfinite")
         if state.shape != (b, self.robot.in_features) or history_context.shape != (b, h):
             raise ValueError("joint relation robot/history chart differs")
         valid = view_observed & binding.supported[..., None]
@@ -192,7 +200,17 @@ class JointTaskRelationEncoder(nn.Module):
             spatial = spatial * (
                 1.0 + torch.tanh(self.history(history_context.to(dtype)))[:, None, None]
             )
-            task = self.task(task_intervals.to(dtype))[:, :, None, None].expand(-1, -1, k, c, -1)
+            task_base = self.task(task_intervals.to(dtype))
+            if interval_context is not None:
+                # The future interval context must alter relation VALUES, not
+                # only their address keys.  Centering keeps the current task
+                # carrier unchanged in common mode; the bounded multiplicative
+                # interaction preserves the producer-owned K/C support and
+                # cannot fabricate a task value when task_base is zero.
+                context = interval_context.to(dtype) - interval_context.to(dtype).mean(1, keepdim=True)
+                context_value = self.task(context)
+                task_base = task_base * (1.0 + 0.50 * torch.tanh(context_value))
+            task = task_base[:, :, None, None].expand(-1, -1, k, c, -1)
             rel = spatial[:, None].expand(-1, 4, -1, -1, -1)
         else:
             for value in (position_grid, state, history_context, task_intervals):
@@ -202,7 +220,12 @@ class JointTaskRelationEncoder(nn.Module):
                     raise ValueError("nonfinite supported spatial relation context")
             robot = self.robot(state.to(dtype))[:, None, None].expand(-1, k, c, -1)
             role = self.view(self.role_basis.to(dtype))[None, None].expand(b, k, -1, -1)
-            task = self.task(task_intervals.to(dtype))[:, :, None, None].expand(-1, -1, k, c, -1)
+            task_base = self.task(task_intervals.to(dtype))
+            if interval_context is not None:
+                context = interval_context.to(dtype) - interval_context.to(dtype).mean(1, keepdim=True)
+                context_value = self.task(context)
+                task_base = task_base * (1.0 + 0.50 * torch.tanh(context_value))
+            task = task_base[:, :, None, None].expand(-1, -1, k, c, -1)
             obj = a[:, None].expand(-1, 4, -1, -1, -1)
             robot = robot[:, None].expand_as(obj)
             role = role[:, None].expand_as(obj)

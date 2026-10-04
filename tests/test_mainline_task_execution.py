@@ -347,3 +347,16 @@ def test_same_centroid_distinct_native_support_is_not_forced_to_alias():
     a = enc(**{**kw, "position_probability": pa}).values
     b = enc(**{**kw, "position_probability": pb}).values
     assert not torch.allclose(a, b)
+
+
+def test_interval_context_modulates_relation_values_without_changing_support():
+    enc, kw, relation, _, _ = fixture()
+    zero_context = torch.zeros_like(kw["task_intervals"])
+    zero = enc(**kw, interval_context=zero_context)
+    torch.testing.assert_close(zero.values, relation.values, rtol=0, atol=0)
+    context = torch.randn_like(kw["task_intervals"])
+    changed = enc(**kw, interval_context=context)
+    torch.testing.assert_close(changed.view_observed, relation.view_observed)
+    torch.testing.assert_close(changed.binding.mass, relation.binding.mass)
+    assert (changed.values - relation.values).abs().max() > 1e-7
+    assert changed.values[:, 0].sub(changed.values[:, 1]).abs().mean() > 1e-7
