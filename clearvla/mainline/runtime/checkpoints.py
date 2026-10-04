@@ -184,6 +184,14 @@ DINOV3_DEEP_REPAIR_V1_SOURCE_PATHS = (
         }
     )
 )
+S_INTERVAL_VALUE_REPAIR_V1_MIGRATION = "s_interval_value_repair_v1"
+S_INTERVAL_VALUE_REPAIR_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/model/intent.py",
+        "clearvla/mainline/model/task_execution.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+    }
+)
 P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
     "intent.organizer.target_object_address.weight"
 )
@@ -1165,6 +1173,7 @@ def load_checkpoint_for_initialization(
         JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
         DINOV3_DEEP_REPAIR_V1_MIGRATION,
+        S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
     }:
         raise ValueError(
             "unknown model-initialization model migration "
@@ -1358,6 +1367,17 @@ def load_checkpoint_for_initialization(
         if saved_identity.dataset != identity.dataset:
             raise ValueError(
                 "DINOv3 deep repair migration requires identical dataset identity"
+            )
+    elif selected_model_migration == S_INTERVAL_VALUE_REPAIR_V1_MIGRATION:
+        if _initialization_config_view(saved_config) != _initialization_config_view(
+            config
+        ):
+            raise ValueError(
+                "S interval-value repair migration differs outside source-only changes"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "S interval-value repair migration requires identical dataset identity"
             )
     elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION:
         if (
@@ -1558,6 +1578,8 @@ def load_checkpoint_for_initialization(
             if selected_model_migration == DINOV3_DEEP_REPAIR_V1_MIGRATION
             else JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
         )
+    elif selected_model_migration == S_INTERVAL_VALUE_REPAIR_V1_MIGRATION:
+        allowed_source_paths = S_INTERVAL_VALUE_REPAIR_V1_SOURCE_PATHS
     else:
         allowed_source_paths = (
             INITIALIZATION_SOURCE_PATHS
@@ -1959,6 +1981,8 @@ __all__ = [
     "DINOV3_DEEP_REPAIR_V1_MIGRATION",
     "DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY",
     "DINOV3_DEEP_REPAIR_V1_SOURCE_PATHS",
+    "S_INTERVAL_VALUE_REPAIR_V1_MIGRATION",
+    "S_INTERVAL_VALUE_REPAIR_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION",
