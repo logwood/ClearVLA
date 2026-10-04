@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Mapping, Protocol
 
 from torch import Tensor, nn
 
+from ..p2_values import CONTEXTUAL_EFFECT_VALUES
 from ..global_task import COMPILED_TASK_GLOBAL
 from ..task_execution import JOINT_SPATIAL_TASK_EXECUTION, JOINT_TASK_EXECUTION_MODES
 from ..gripper_contract import (
@@ -73,6 +74,11 @@ def _base_execution_bottom_selection(config: "ExperimentConfig") -> str:
 
 
 def _policy_compiler_selection(config: "ExperimentConfig") -> str:
+    base = _base_policy_compiler_selection(config)
+    return base + "_s_values" if config.top.p2_effect_value_mode == CONTEXTUAL_EFFECT_VALUES else base
+
+
+def _base_policy_compiler_selection(config: "ExperimentConfig") -> str:
     if config.top.task_execution_mode == JOINT_SPATIAL_TASK_EXECUTION:
         return ("joint_spatial_effect_global_p2_p3_v2"
                 if config.bottom.global_condition_mode == COMPILED_TASK_GLOBAL

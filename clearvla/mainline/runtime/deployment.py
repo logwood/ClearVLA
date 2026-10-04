@@ -80,6 +80,7 @@ from ..operation_expectation import (
     POSTERIOR_INTENT,
     operation_expectation_metadata,
 )
+from ..p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, p2_effect_value_metadata
 from ..p2_geometry import POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, p2_geometry_metadata
 from ..p3_coordination import POINTWISE_PLAN, TYPED_HORIZON_PLAN, p3_coordination_metadata
 from ..robot_execution import robot_execution_metadata
@@ -398,6 +399,8 @@ def build_deployment_abi(
         )
     return {
         "schema": DEPLOYMENT_ABI_SCHEMA,
+        **({"p2_effect_values": p2_effect_value_metadata()}
+           if config.top.p2_effect_value_mode == CONTEXTUAL_EFFECT_VALUES else {}),
         **({"global_task": global_task_metadata()}
            if config.bottom.global_condition_mode == COMPILED_TASK_GLOBAL else {}),
         **({"task_execution": task_execution_metadata(config.top.task_execution_mode)}
@@ -630,6 +633,12 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
             raise ValueError("deployment P3 coordination semantics differ from trained graph")
     elif plan_mode != POINTWISE_PLAN or "p3_coordination" in abi:
         raise ValueError("unknown or undeclared deployment P3 coordination mode")
+    value_mode = graph_top.get("p2_effect_value_mode", WORLD_EFFECT_VALUES)
+    if value_mode == CONTEXTUAL_EFFECT_VALUES:
+        if abi.get("p2_effect_values") != p2_effect_value_metadata():
+            raise ValueError("P2 effect-value ABI semantics mismatch")
+    elif value_mode != WORLD_EFFECT_VALUES or "p2_effect_values" in abi:
+        raise ValueError("unknown or unselected P2 effect-value ABI")
     geometry_mode = graph_top.get("p2_geometry_mode", POOLED_TRANSPORT)
     if geometry_mode == VIEW_CONDITIONED_TRANSPORT:
         camera_names = observation.get("camera_names")

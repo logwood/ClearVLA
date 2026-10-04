@@ -377,6 +377,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             world_robot_condition_mode=top.world_robot_condition_mode,
             state_feature_mode=top.state_feature_mode,
             p2_spatial_intent_mode=top.p2_spatial_intent_mode,
+            p2_effect_value_mode=top.p2_effect_value_mode,
             p2_geometry_mode=top.p2_geometry_mode,
             p3_coordination_mode=top.p3_coordination_mode,
             robot_feedback_mode=top.robot_feedback_mode,

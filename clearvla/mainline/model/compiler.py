@@ -19,6 +19,7 @@ from ..instruction_change import (
     TYPED_CHANGE_MODES,
 )
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
+from ..p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, P2_EFFECT_VALUE_MODES
 from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
 from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from ..robot_execution import RobotResponseFeedback
@@ -282,6 +283,7 @@ class ObjectFutureEffectReader(nn.Module):
         content_dim: int,
         route_dim: int,
         spatial_intent_mode: str = "post_pool_only",
+        effect_value_mode: str = WORLD_EFFECT_VALUES,
         target_binding_mode: str = LOCAL_TARGET_READERS,
         world_control_mode: str = "legacy_extrapolation_v1",
         future_time_grid_mode: str = LEGACY_FUTURE_TIME,
@@ -327,6 +329,22 @@ class ObjectFutureEffectReader(nn.Module):
             self.target_value_gain = nn.Parameter(torch.zeros((), dtype=torch.float32))
         else:
             self.register_parameter("target_value_gain", None)
+        if effect_value_mode not in P2_EFFECT_VALUE_MODES:
+            raise ValueError("unknown P2 effect value mode")
+        if effect_value_mode == CONTEXTUAL_EFFECT_VALUES and (
+            target_binding_mode != SHARED_TARGET_BINDING or not self.time_grid.aligned
+            or task_execution_mode not in JOINT_TASK_EXECUTION_MODES
+            or geometry_mode != VIEW_CONDITIONED_TRANSPORT
+        ):
+            raise ValueError("S-conditioned P2 values require aligned joint/shared/named-view sources")
+        self.effect_value_mode = effect_value_mode
+        # Optional value interaction inside the existing P2 terminal. It adds
+        # no selector, rollout or RNG draw; its exact-zero gain preserves the
+        # established effect path until this mode is explicitly selected.
+        self.contextual_effect_gain = (
+            nn.Parameter(torch.zeros(len(self.TYPE_NAMES), hidden))
+            if effect_value_mode == CONTEXTUAL_EFFECT_VALUES else None
+        )
         self.source_query = nn.ModuleList(
             nn.Linear(hidden, hidden, bias=False) for _ in self.TYPE_NAMES
         )
@@ -1192,6 +1210,32 @@ class ObjectFutureEffectReader(nn.Module):
             geometry=effect.geometry
             + target_value_effect[..., 1, :].to(dtype=effect.geometry.dtype),
         )
+        if self.contextual_effect_gain is not None:
+            # S conditions the value interpretation after shared K/view
+            # selection; W remains the multiplicative source.
+            visible = selected.support[:, None, None]
+            context = torch.where(visible[..., None], selected.selected_s_context, 0.0)
+            semantic_rows = self.semantic_value(torch.where(
+                visible[..., 0, None],
+                semantic_common_source + semantic_residual_source, 0.0))
+            geometry_rows = torch.where(
+                visible[..., 1, None],
+                geometry_common_source + geometry_residual_source, 0.0)
+            gains = torch.tanh(self.contextual_effect_gain).to(effect.semantic.dtype)
+            semantic_delta = torch.einsum(
+                "btqi,btqih->btqh",
+                semantic_posterior.to(semantic_rows.dtype),
+                semantic_rows * torch.tanh(context[..., 0, :].to(semantic_rows.dtype)),
+            ) * gains[0]
+            geometry_delta = torch.einsum(
+                "btqi,btqih->btqh",
+                geometry_posterior.to(geometry_rows.dtype),
+                geometry_rows * torch.tanh(context[..., 1, :].to(geometry_rows.dtype)),
+            ) * gains[1]
+            effect = ObjectTypedEffect(
+                effect.semantic + semantic_delta,
+                effect.geometry + geometry_delta.to(effect.geometry.dtype),
+            )
         effect.validate()
         value_by_type = torch.stack((effect.semantic, effect.geometry), dim=3)
         gradient_metrics: dict[str, Tensor] = {}

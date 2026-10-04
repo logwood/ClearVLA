@@ -97,6 +97,19 @@ The old common and residual hooks remain for compatibility, but their values are
 ## Causal-chain C4: binary command boundary and native metric ownership (2026-10-04)
 For binary CALVIN, the optional command transition now includes the profile-owned real last-command to row-zero seam, while interior pairs remain restricted to controlled_action_tokens. Boundary rate, target rate, absolute logit margin and expected flip rate are separate diagnostics; this does not claim hard persistence.
 The formal transition coefficient remains configuration-owned; the boundary repair is active only when that objective is selected. Native-flow correction is diagnostic weighting parity, not a new action objective.
+## Causal-chain C3: optional S-conditioned P2 effect values (2026-10-04)
+
+The opt-in p2_effect_value_mode=s_conditioned_values_v1 adds a value
+interaction inside the existing P2 terminal after shared K and named-view
+selection. It keeps the W effect as the multiplicative source and adds a
+bounded type-channel gain times the interval posterior, projected W value and
+tanh(S) context. It never reselects K, writes into W, creates a second rollout
+or changes the default world_values_v1 path. The new 2H gain starts at exact
+zero without an RNG draw and is declared in component and deployment ABI
+metadata. This is an optional follow-up to the current bounded P2 target
+carrier, not an automatic switch for the formal run; it needs a matched GPU
+profile and behavioral validation.
+
 ## WP2 — mixed-gradient W and visual-ingress parity repair (2026-09-30 candidate)
 
 Branch `codex/wp2-parity-repair-20260930` is a correctness repair based on
