@@ -1,3 +1,22 @@
+## Causal-chain repair branch, 2026-10-04
+
+On isolated `codex/causal-chain-repair-20261004` from 4f0a5b9b: C1 replaces the
+separable target residual by real task/object products inside the SAME binder;
+C2 records typed-source gradients before the redundant common/residual split;
+C3 adds explicit `s_conditioned_values_v1` P2 value interpretation; C4 covers
+the actual command boundary in the existing optional transition objective and
+makes diagnostic weighting/low-margin switching visible. Each unit is saved
+separately. No old checkpoint is relabeled; existing presets remain unchanged.
+
+New `dinov3_causal_chain_calvin.json` differs only in P2 mode/output directory.
+Its transition coefficient remains inherited (default zero); enabling a budget
+is an explicit experiment, not a hidden loss increase. Startup zero-W effects
+correctly give zero gain gradients; after normal W learning the new value owner
+must update. CPU fixtures are not evidence of target success or improved speed.
+Teacher uncertainty export, full hard-event persistence, R1/R8 protocol choice,
+upstream object/position ambiguity and real trained-checkpoint sensitivity remain
+open. Do not call this entire behavior chain solved by code acceptance.
+
 ## DINOv3 continuation: compiled task-global candidate
 
 Continue from the online/aligned source including the batch-eight optimization,
