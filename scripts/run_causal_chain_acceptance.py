@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only source/CPU acceptance for C1-C4. No server/pretrained/robot use.
+"""Read-only source/CPU acceptance for C1-C6. No server/pretrained/robot use.
 
 The argument output directory must be new. Each pytest group has a fresh process;
 failures/timeouts/skips are recorded, never converted into passes. Synthetic
@@ -36,6 +36,17 @@ def main() -> int:
     def git(*a: str) -> str:
         return subprocess.check_output(['git', *a], cwd=root, text=True).strip()
     groups = [
+        ('C5_role_values', ['tests/test_causal_role_values.py']),
+        ('C6_observed_status', ['tests/test_causal_observed_status.py']),
+        ('stage2_updates', ['tests/test_causal_stage2_integration.py::test_full_zero_start_and_ordinary_training_update']),
+        ('stage2_lifecycle', ['tests/test_causal_stage2_integration.py::test_lifecycle_keeps_status_source_once_per_observation']),
+        ('stage2_abi_config', ['tests/test_causal_stage2_integration.py::test_abi_rejects_changed_meanings', 'tests/test_causal_stage2_integration.py::test_config_differences_preserve_other_source_and_objective_choices']),
+        ('stage2_checkpoint', ['tests/test_causal_stage2_integration.py::test_exact_checkpoint_new_graph_restore_and_deployment']),
+        ('stage2_native_fp32', ['tests/test_causal_stage2_native.py::test_native_stage2_forward[False]']),
+        ('stage2_native_bf16', ['tests/test_causal_stage2_native.py::test_native_stage2_forward[True]']),
+        ('stage2_native_adapter', ['tests/test_causal_stage2_native.py::test_native_stage2_fresh_adapter']),
+        ('existing_world_feedback', ['tests/test_mainline_executed_world.py']),
+        ('existing_world_sources', ['tests/test_mainline_executed_world_sources.py']),
         ('C1_binding', ['tests/test_causal_binding_repair.py']),
         ('C2_gradient', ['tests/test_causal_gradient_readout.py']),
         ('C3_values', ['tests/test_causal_p2_value_repair.py']),
@@ -55,7 +66,7 @@ def main() -> int:
         ('existing_action', ['tests/test_mainline_action_field.py']),
         ('existing_encoder', ['tests/test_dinov3_online.py']),
     ]
-    record = {'schema': 'causal-chain-C1-C4-acceptance-v1',
+    record = {'schema': 'causal-chain-C1-C6-acceptance-v1',
               'head': git('rev-parse', 'HEAD'), 'tree': git('rev-parse','HEAD^{tree}'),
               'working_tree_before': git('status', '--porcelain'),
               'python': platform.python_version(), 'torch': torch.__version__,
