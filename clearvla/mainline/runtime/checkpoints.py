@@ -198,6 +198,7 @@ G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION = (
 )
 G_SLOT_IDENTITY_SOURCE_REPAIR_V1_SOURCE_PATHS = frozenset(
     {
+        "clearvla/mainline/model/compiler.py",
         "clearvla/mainline/model/grounding.py",
         "clearvla/mainline/model/intent.py",
         "clearvla/mainline/runtime/checkpoints.py",
