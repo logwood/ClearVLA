@@ -420,7 +420,19 @@ class DenseObjectGrounder(nn.Module):
                 slot_identity.expand(batch, -1, -1),
                 safe_candidates,
             ) / math.sqrt(float(self.hidden))
-            logits = logits + identity_logits
+            # The normalized identity read is intentionally soft, but its
+            # unscaled RMS is only a few percent of the content logit after
+            # candidate normalization.  Match it to a detached fraction of
+            # the current competition scale so the carrier remains observable
+            # without changing candidate values or the probability law axes.
+            main_logit_rms = logits.float().square().mean().sqrt().detach()
+            identity_logit_rms = (
+                identity_logits.float().square().mean().sqrt().detach()
+            )
+            identity_gain = (
+                0.25 * main_logit_rms / identity_logit_rms.clamp_min(1.0e-6)
+            ).clamp(max=8.0)
+            logits = logits + identity_gain * identity_logits
             null = torch.einsum(
                 "bnh,bqh->bnq",
                 safe_candidates,

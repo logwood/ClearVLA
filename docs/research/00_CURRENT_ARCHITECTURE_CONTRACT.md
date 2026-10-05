@@ -3007,3 +3007,10 @@ unmodified source. A separate gradient read reached 209 G/S parameters with no
 nonfinite gradients. Object content remains highly correlated (0.99998 to
 0.99971), so this closes the first-transition identity dilution but leaves the
 second-plan content/assignment attenuation audit open.
+
+
+## C9: adapt the G competition identity logit to the live score scale (2026-10-05 second-plan candidate)
+
+The persistent centered seed already contributes an identity logit inside the FP32 K-plus-null competition. A source probe showed that its unscaled RMS is only 3.1%--5.1% of the main slot-candidate logit after candidate normalization, so it cannot reliably survive the content score. The second-plan candidate uses gain = clamp(0.25 * rms(main_logit) / rms(identity_logit), max=8) with the ratio detached, then adds gain * identity_logit. It changes no candidate or value tensor, adds no parameter, and keeps the same K/null probability law.
+
+On fixed R9, four-layout/four-instruction short audit moved K2/K4 final read cosine 0.9821 to 0.9632, candidate-assignment cosine 0.9821 to 0.9632, and object-chart cosine 0.99828 to 0.99705; content cosine was 0.99971 to 0.99958. 24x18 action velocity RMS was 0.6669 to 0.6670; instruction-pair action cosine stayed above 0.99999; public-S variation stayed near 0.053; P2 semantic interval variation stayed near 0.0263; the gradient read covered 209 parameters with no nonfinite values. Shared binding remains weakly instruction-sensitive and post-pool target address is disabled, so this is the second-plan candidate seam rather than a final behavior claim.
