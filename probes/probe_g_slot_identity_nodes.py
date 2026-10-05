@@ -314,6 +314,20 @@ def install_wrappers(
         patch(coordinator, "forward", coordinator_forward)
 
     bottom_stage = getattr(model, "execution_bottom", None)
+    if bottom_stage is not None:
+        decoder = getattr(bottom_stage, "decoder", None)
+        organizer = getattr(decoder, "organizer", None)
+        if organizer is not None and hasattr(organizer, "forward"):
+            old = organizer.forward
+            def organizer_forward(view: Any, time: torch.Tensor, flow_step_context: Any = None, _old=old):
+                result = _old(view, time, flow_step_context)
+                if isinstance(result, dict):
+                    for name in ("condition", "intent_context", "scan", "latent", "global_condition", "time_hidden"):
+                        value = result.get(name)
+                        if isinstance(value, torch.Tensor):
+                            current["evidence_" + name] = array(value)
+                return result
+            patch(organizer, "forward", organizer_forward)
     if bottom_stage is not None and hasattr(bottom_stage, "_intent_memory"):
         old = bottom_stage._intent_memory
         def intent_memory_forward(intent: Any, state_tokens: torch.Tensor, executed_tokens: torch.Tensor, _old=old):
