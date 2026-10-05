@@ -1186,6 +1186,7 @@ def load_checkpoint_for_initialization(
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
         DINOV3_DEEP_REPAIR_V1_MIGRATION,
         S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
+        G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
     }:
         raise ValueError(
             "unknown model-initialization model migration "
