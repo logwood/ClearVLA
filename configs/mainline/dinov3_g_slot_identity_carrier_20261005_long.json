@@ -263,4 +263,4 @@
     "world_robot_condition_mode": "observed_state_views_v1",
     "world_supervision_mode": "matched_observed_sequence_v1"
   }
-}}\n
+}
