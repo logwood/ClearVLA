@@ -321,14 +321,11 @@ class ObjectFutureEffectReader(nn.Module):
         if self.target_value_mode not in {"none", "bounded_zero_start_v1"}:
             raise ValueError("unknown P2 target-value mode")
         if self.target_value_mode == "bounded_zero_start_v1":
-            # Keep this optional target-owned value lane bounded, but leave a
-            # small resident carrier at restore.  A strict zero start makes
-            # the only path from the action loss to the selected S target
-            # values pass through one scalar whose first updates are on the
-            # 1e-6 scale at the restored learning rate; the target distinction
-            # therefore remains absent for the useful part of a one-epoch run.
-            # The zero-gain bootstrap below is deliberately small so this
-            # lane cannot dominate the established semantic/geometry effects.
+            # Keep this optional target-owned value lane bounded while
+            # restoring a visible S-to-P2 carrier at checkpoint restore.  The
+            # existing K posterior still owns selection; this scalar only
+            # carries the selected S target value into the P2 semantic value.
+            # The carrier is bounded to [0, 1] and is not a second selector.
             self.target_value_gain = nn.Parameter(torch.zeros((), dtype=torch.float32))
         else:
             self.register_parameter("target_value_gain", None)
@@ -1177,11 +1174,13 @@ class ObjectFutureEffectReader(nn.Module):
         if self.target_value_gain is None:
             target_value_scale = action_query.new_zeros((), dtype=torch.float32)
         else:
-            # Bounded target value carrier: zero gain starts at 0.02 and
-            # remains within [0, 0.04].  This is enough to keep the selected
-            # S target identity live while staying below the established
-            # semantic/geometry carrier amplitudes.
-            target_value_scale = 0.02 + 0.02 * torch.tanh(
+            # Bounded target value carrier: the restored shared K identity
+            # starts at 0.50 and remains within [0, 1.00].  The earlier
+            # 0.02 bootstrap left the only S-to-P2 semantic carrier below
+            # one fiftieth of the W effect and made instruction differences
+            # invisible at the action boundary.  This is still a bounded
+            # value carrier after the existing K posterior, never a selector.
+            target_value_scale = 0.50 + 0.50 * torch.tanh(
                 self.target_value_gain.float()
             )
         target_value_source = (
@@ -1378,8 +1377,8 @@ class ObjectFutureEffectReader(nn.Module):
                 0.0
                 if self.target_value_gain is None
                 else float(
-                    0.02
-                    + 0.02 * torch.tanh(self.target_value_gain.detach()).item()
+                    0.50
+                    + 0.50 * torch.tanh(self.target_value_gain.detach()).item()
                 ),
                 dtype=torch.float32,
             ),

@@ -107,7 +107,7 @@ def scalar_metrics(mapping: Any) -> dict[str, float]:
     for key, value in mapping.items():
         if isinstance(value, torch.Tensor) and value.numel() == 1:
             name = str(key)
-            if name.startswith(("flow_jepa_", "p1_", "object_p2_", "object_p3_", "object_consequence_", "gradient_tensor_p1")):
+            if name.startswith(("flow_jepa_", "p1_", "object_p2_", "object_p3_", "object_consequence_", "gradient_tensor_p1", "bottom_")):
                 out[name] = float(value.detach().float().item())
     return out
 
@@ -176,7 +176,15 @@ def capture_effect(effect: Any, prefix: str) -> dict[str, np.ndarray]:
     return result
 
 
-def install_wrappers(model: torch.nn.Module, current: dict[str, Any], *, phase_zero: bool = False, binder_task_zero: bool = False) -> list[tuple[Any, str, Any]]:
+def install_wrappers(
+    model: torch.nn.Module,
+    current: dict[str, Any],
+    *,
+    phase_zero: bool = False,
+    binder_task_zero: bool = False,
+    p3_semantic_scale: float = 1.0,
+    bottom_temporal_scale: float = 1.0,
+) -> list[tuple[Any, str, Any]]:
     """Patch bound instance methods; return (owner, name, old) for restore."""
     saved: list[tuple[Any, str, Any]] = []
 
@@ -287,6 +295,46 @@ def install_wrappers(model: torch.nn.Module, current: dict[str, Any], *, phase_z
     patch(consequence, "forward", consequence_forward)
 
     planner = model.policy_compiler.plan_compiler
+    coordinator = getattr(planner, "coordinator", None)
+    if coordinator is not None:
+        from clearvla.mainline.model.horizon_coordination import P3HorizonContext
+        old = coordinator.forward
+        def coordinator_forward(inputs: P3HorizonContext, _old=old):
+            current["p3_coordinator_semantic_input"] = array(inputs.semantic_effect)
+            if p3_semantic_scale != 1.0:
+                inputs = replace(
+                    inputs,
+                    semantic_effect=inputs.semantic_effect * float(p3_semantic_scale),
+                )
+            out = _old(inputs)
+            current["p3_coordinator_temporal"] = array(out[0])
+            current["p3_coordinator_state_change"] = array(out[1])
+            current["p3_coordinator_private"] = array(out[2])
+            return out
+        patch(coordinator, "forward", coordinator_forward)
+
+    bottom_stage = getattr(model, "execution_bottom", None)
+    bottom = getattr(bottom_stage, "decoder", None)
+    if bottom is not None and hasattr(bottom, "_read_policy_delta_bank"):
+        old = bottom._read_policy_delta_bank
+        def policy_delta_forward(
+            action_query: torch.Tensor,
+            bank: Any,
+            *,
+            collect_diagnostics: bool = True,
+            _old=old,
+        ):
+            current["bottom_temporal_value"] = array(bank.values[:, 0])
+            if bottom_temporal_scale != 1.0:
+                values = bank.values.clone()
+                values[:, 0] = values[:, 0] * float(bottom_temporal_scale)
+                bank = replace(bank, values=values)
+            out = _old(action_query, bank, collect_diagnostics=collect_diagnostics)
+            current["bottom_policy_delta_update"] = array(out[0])
+            current["bottom_policy_precision_update"] = array(out[1])
+            return out
+        patch(bottom, "_read_policy_delta_bank", policy_delta_forward)
+
     old = planner.forward
     def planner_forward(*args: Any, _old=old, **kwargs: Any):
         bank, metrics = _old(*args, **kwargs)
@@ -316,7 +364,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     model = policy.bundle.model
     current: dict[str, Any] = {}
-    saved = install_wrappers(model, current, phase_zero=args.phase_zero, binder_task_zero=args.binder_task_zero)
+    saved = install_wrappers(
+        model,
+        current,
+        phase_zero=args.phase_zero,
+        binder_task_zero=args.binder_task_zero,
+        p3_semantic_scale=args.p3_semantic_scale,
+        bottom_temporal_scale=args.bottom_temporal_scale,
+    )
     records: list[dict[str, Any]] = []
     try:
         for layout in args.layouts:
@@ -387,7 +442,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "schema": "clearvla-g-slot-identity-node-trace-v1",
         "checkpoint": str(args.checkpoint),
         "source": "fixed checkpoint / latest branch inference; instrumentation only",
-        "interventions": {"phase_zero": bool(args.phase_zero), "binder_task_zero": bool(args.binder_task_zero)},
+        "interventions": {
+            "phase_zero": bool(args.phase_zero),
+            "binder_task_zero": bool(args.binder_task_zero),
+            "p3_semantic_scale": float(args.p3_semantic_scale),
+            "bottom_temporal_scale": float(args.bottom_temporal_scale),
+        },
         "layouts": records,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -406,6 +466,8 @@ def main() -> None:
     parser.add_argument("--instructions", nargs="+", default=list(DEFAULT_INSTRUCTIONS))
     parser.add_argument("--phase-zero", action="store_true")
     parser.add_argument("--binder-task-zero", action="store_true")
+    parser.add_argument("--p3-semantic-scale", type=float, default=1.0)
+    parser.add_argument("--bottom-temporal-scale", type=float, default=1.0)
     args = parser.parse_args()
     result = run(args)
     print(json.dumps({"output": str(args.output), "layouts": [x["layout"] for x in result["layouts"]]}, indent=2))

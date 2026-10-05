@@ -325,6 +325,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "p2_typed_semantic_key": model.policy_compiler.effect_reader.typed_intent_key[0],
         "p2_typed_geometry_key": model.policy_compiler.effect_reader.typed_intent_key[1],
         "p2_semantic_value": model.policy_compiler.effect_reader.semantic_value,
+        "p2_target_value_gain": model.policy_compiler.effect_reader.target_value_gain,
+        "p3_coordinator": model.policy_compiler.plan_compiler.coordinator,
+        "p3_semantic_source": model.policy_compiler.plan_compiler.coordinator.sources["semantic_effect"],
+        "p3_plan_output": model.policy_compiler.plan_compiler.coordinator.plan_output,
+        "p3_policy_delta_attnres": model.execution_bottom.decoder.policy_delta_attnres,
     }
     parameter_groups = {
         name: tuple(module.named_parameters())
@@ -336,6 +341,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "intent.organizer.typed_temperature_logit",
         modules["intent_typed_temperature"],
     ),)
+    if isinstance(modules["p2_target_value_gain"], nn.Parameter):
+        parameter_groups["p2_target_value_gain"] = ((
+            "policy_compiler.effect_reader.target_value_gain",
+            modules["p2_target_value_gain"],
+        ),)
 
     losses = {
         "action": ledger.groups["action"],

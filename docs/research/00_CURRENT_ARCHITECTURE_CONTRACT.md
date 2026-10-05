@@ -1,3 +1,23 @@
+## C10: restored S-to-P2 target carrier qualification (2026-10-05 candidate)
+
+The existing bounded_zero_start_v1 target-value lane now uses the bounded
+carrier 0.50 + 0.50*tanh(target_value_gain), hence [0, 1] at restore
+rather than the earlier [0, 0.04] bootstrap. The selected S target value is
+still read through the one shared K posterior and added inside the existing P2
+semantic value terminal; this changes amplitude only and creates no selector,
+raw-language bypass, extra K prior, or new state tensor. The metric reports the
+same effective scale as the forward path.
+
+On the fixed online-DINO checkpoint and standard observation, the P2 semantic
+instruction difference rose from 1.313% with the old carrier to 2.596% with the
+candidate. A P3 semantic-source zero intervention changed the coordinator
+temporal RMS from 0.33177 to 0.33142 while the physical velocity RMS changed
+below 1e-4, so the route is connected but the restored checkpoint has learned
+weak action sensitivity after P3. Formal batch-1 loss VJP confirms nonzero
+gradients through the P2 semantic effect, P3 coordinator/source, and policy
+delta reader. This is a source qualification; a fresh short run and matched
+closed-loop evidence are still required.
+
 ## C6: observed comparison state is independent of signed innovation (2026-10-04)
 
 `top.world_feedback_value_mode="innovation_and_status_v1"` preserves the existing
@@ -78,13 +98,13 @@ only the typed value, so the later P2 target-value reader could not see interval
 identity. The repair carries a centered public interval residual through the
 existing target-value tensor, without adding a selector or changing K binding.
 The opt-in reader keeps its serialized bounded_zero_start_v1 mode name for
-checkpoint ABI compatibility, but its effective scale is a small bounded
-bootstrap [0, 0.04] starting at 0.02; strict zero gain would leave this
-lane practically absent at the restored learning rate. A 5-batch diagnostic
-measured source interval-axis variation 0.280 and target-lane variation
-0.00559. A matched 50-batch carrier probe restored the closed-loop outer
-final action-delta mismatch to 0.0181, versus 0.094 for gain-only probes;
-this is a route qualification, not learned task acceptance.
+checkpoint ABI compatibility. The current candidate uses a bounded
+[0, 1] carrier starting at 0.50, so the selected S target value remains a
+visible P2 carrier at restore; it is still a value path after the shared K
+posterior, never a second selector. On the fixed standard observation this
+raises P2 semantic instruction variation to 2.596% from 1.313% under the
+earlier [0, 0.04] carrier. This is a route qualification, not learned task
+acceptance.
 
 The short validation panel completed with coverage 1. A fresh long run and
 closed-loop trajectory evidence are still required before deployment
@@ -110,13 +130,13 @@ training-only, and no second identity selector or physical tracker is added.
 
 The opt-in P2 bounded_zero_start_v1 carrier selects S typed target evidence
 with the existing K/view posterior and adds it only as a bounded hidden value
-residual. The scalar parameter is initialized at zero, but the effective carrier
-has a small bounded bootstrap [0, 0.04] starting at 0.02; therefore this
-mode is not an exact old-output parity mode. The selected S public interval
-carrier is retained in the existing target-value tensor so P2 can receive
-interval identity through the same posterior. It does not read raw language,
-create a selector, or change W's goal-free ownership. The existing S/P2
-common/residual identity and producer validity masks remain required.
+residual. The scalar parameter is initialized at zero, while the current
+candidate uses the bounded [0, 1] effective carrier starting at 0.50; this
+mode is therefore not an exact old-output parity mode. The selected S public
+interval carrier is retained in the existing target-value tensor so P2 can
+receive interval identity through the same posterior. It does not read raw
+language, create a selector, or change W's goal-free ownership. The existing
+S/P2 common/residual identity and producer validity masks remain required.
 
 For binary CALVIN, the existing command-transition objective is restricted to
 the declared `controlled_action_tokens` prefix and uses the same motion/event
