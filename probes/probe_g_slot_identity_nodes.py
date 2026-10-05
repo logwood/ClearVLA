@@ -107,7 +107,7 @@ def scalar_metrics(mapping: Any) -> dict[str, float]:
     for key, value in mapping.items():
         if isinstance(value, torch.Tensor) and value.numel() == 1:
             name = str(key)
-            if name.startswith(("flow_jepa_", "p1_", "object_p2_", "object_p3_", "object_consequence_", "gradient_tensor_p1", "bottom_")):
+            if name.startswith(("flow_jepa_", "p1_", "object_p2_", "object_p3_", "object_consequence_", "gradient_tensor_p1", "bottom_", "evidence_", "flow_step_", "execution_", "global_")):
                 out[name] = float(value.detach().float().item())
     return out
 
@@ -314,6 +314,16 @@ def install_wrappers(
         patch(coordinator, "forward", coordinator_forward)
 
     bottom_stage = getattr(model, "execution_bottom", None)
+    if bottom_stage is not None and hasattr(bottom_stage, "_intent_memory"):
+        old = bottom_stage._intent_memory
+        def intent_memory_forward(intent: Any, state_tokens: torch.Tensor, executed_tokens: torch.Tensor, _old=old):
+            memory = _old(intent, state_tokens, executed_tokens)
+            for name in ("task", "state", "executed"):
+                value = memory.get(name)
+                if isinstance(value, torch.Tensor):
+                    current["bottom_intent_" + name] = array(value)
+            return memory
+        patch(bottom_stage, "_intent_memory", intent_memory_forward)
     bottom = getattr(bottom_stage, "decoder", None)
     if bottom is not None and hasattr(bottom, "_read_policy_delta_bank"):
         old = bottom._read_policy_delta_bank
