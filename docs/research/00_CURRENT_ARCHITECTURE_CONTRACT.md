@@ -2986,3 +2986,24 @@ to about 0.0263/0.0259, and a real BS8 16-batch validation measured
 finite at about 7.18 s/batch and 23.26 GiB peak process estimate. These are
 source-path qualifications; a long run and closed-loop task success remain
 separate acceptance gates.
+
+
+## C8: match the G slot identity carrier to the dynamic update (2026-10-05 candidate)
+
+The first G transition remains a shared GRU/FFN and remains permutation-equivariant
+in K. Its centered, FP32-normalized seed is a role carrier, not a fixed object
+label and not a second candidate/value path. The carrier is now multiplied by
+`0.50 * ||next_slots + ffn||_2` per slot, with the scale detached before the
+addition. This preserves gradients through the dynamic update while preventing
+its growing norm from numerically diluting the carrier. No state-dict parameter,
+K axis, candidate support, or G3 parent-posterior law changes.
+
+The fixed-checkpoint short audit (four layouts, four language rows, online DINO,
+no cache) changed the final K2/K4 slot cosine from about 0.981 to 0.509 and the
+candidate-assignment cosine from 0.9987 to 0.9821. All G shapes, object-to-chart
+row sums, null mass, reconstruction, S/P1/P2 tensors, P2 support and 24x18 action
+velocity stayed finite; action velocity RMS remained 0.6669 versus 0.6669 in the
+unmodified source. A separate gradient read reached 209 G/S parameters with no
+nonfinite gradients. Object content remains highly correlated (0.99998 to
+0.99971), so this closes the first-transition identity dilution but leaves the
+second-plan content/assignment attenuation audit open.

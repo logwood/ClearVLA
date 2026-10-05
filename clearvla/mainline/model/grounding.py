@@ -551,15 +551,22 @@ class DenseObjectGrounder(nn.Module):
             # first content read and the final object slots become near
             # duplicates.  Keep the carrier centered across K so it cannot add
             # a common object value, and normalize it in FP32 before the
-            # bounded residual.  This is a fixed identity axis, not a second
-            # candidate/value path.
+            # bounded residual.  Match its L2 scale to the dynamic update so
+            # the identity axis is not diluted by the shared GRU/FFN.  The
+            # detached scale preserves the dynamic path's gradient and does
+            # not introduce a second candidate/value path.
             with torch.autocast(device_type=slots.device.type, enabled=False):
                 slot_identity = self.slot_seed.to(
                     device=slots.device, dtype=torch.float32
                 )
                 slot_identity = slot_identity - slot_identity.mean(dim=1, keepdim=True)
                 slot_identity = F.normalize(slot_identity, dim=-1, eps=1.0e-6)
-            slots = next_slots + ffn + 1.00 * slot_identity.to(dtype=next_slots.dtype)
+                dynamic_update = (next_slots + ffn).float()
+                identity_scale = torch.linalg.vector_norm(
+                    dynamic_update, dim=-1, keepdim=True
+                ).detach().clamp_min(1.0e-6)
+                identity_carrier = 0.50 * identity_scale * slot_identity
+            slots = next_slots + ffn + identity_carrier.to(dtype=next_slots.dtype)
         # The final GRU/FFN update changes the slot queries.  Reusing the
         # pre-update posterior here would combine a stale G2 assignment with
         # a new G3 slot state.  Recompute the parent posterior once so the
