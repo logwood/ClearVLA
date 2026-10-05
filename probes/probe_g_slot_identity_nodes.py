@@ -426,6 +426,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                             collect_diagnostics=True,
                         )
                 current["physical_velocity"] = array(output.bottom.physical_velocity)
+                decoder_tensors = getattr(output.bottom, "decoder_tensors", {})
+                for name in (
+                    "pred_velocity",
+                    "evidence_mmd_it_prefix_pred_velocity",
+                    "evidence_mmd_it_action_update",
+                    "evidence_mmd_it_attention_update",
+                    "evidence_mmd_it_ffn_update",
+                    "evidence_mmd_it_self_update",
+                    "evidence_mmd_it_evidence_update",
+                ):
+                    value = decoder_tensors.get(name) if isinstance(decoder_tensors, dict) else None
+                    if isinstance(value, torch.Tensor):
+                        current["decoder_" + name] = array(value)
                 current["velocity_metrics"] = scalar_metrics(output.metrics)
                 # The organizer wrapper runs during encode_online.  P1/P2/P3
                 # wrappers run during velocity.  A missing key is a hard probe
