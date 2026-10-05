@@ -226,21 +226,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     ],
                     "instruction_differences": layout_diff,
                 })
-        # One gradient-only read from the last cache; this checks backward
-        # finiteness without changing any checkpoint or optimizer state.
+        # Build a fresh graph outside the no-grad rollout loop. Reusing the
+        # cached deployment tensors here would silently make the gradient
+        # report empty because that cache was created under torch.no_grad().
         grad_report: dict[str, Any] = {}
         policy.bundle.model.zero_grad(set_to_none=True)
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            grad_output = policy.bundle.model.velocity(
-                cache,
-                noisy_action_field=noise,
-                time=torch.full((1,), 0.4, device=device),
-                collect_diagnostics=True,
-            )
-            grad_loss = grad_output.bottom.physical_velocity.float().square().mean()
-        grad_loss.backward()
+        with torch.enable_grad():
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                grad_cache, _, _ = policy.bundle.model.encode_online(
+                    online,
+                    training_mask=False,
+                    geometry_supervision=False,
+                    collect_diagnostics=True,
+                )
+                grad_noise = torch.randn(
+                    1,
+                    policy.bundle.config.dimensions.action_horizon,
+                    policy.bundle.model.outlet_adapter.physical_dim,
+                    device=device,
+                    dtype=torch.float32,
+                    generator=torch.Generator(device=device).manual_seed(12345),
+                )
+                grad_output = policy.bundle.model.velocity(
+                    grad_cache,
+                    noisy_action_field=grad_noise,
+                    time=torch.full((1,), 0.4, device=device),
+                    collect_diagnostics=True,
+                )
+                grad_loss = grad_output.bottom.physical_velocity.float().square().mean()
+            grad_loss.backward()
         for name, parameter in policy.bundle.model.named_parameters():
-            if any(token in name for token in ("grounder.slot_seed", "grounder.gru", "grounder.update_ffn", "intent.")):
+            if any(token in name for token in ("progressive_grounding_address", "grounding.", ".intent.", "intent.")):
                 if parameter.grad is not None:
                     grad_report[name] = {
                         "rms": float(parameter.grad.detach().float().square().mean().sqrt().item()),
