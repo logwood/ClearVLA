@@ -124,6 +124,7 @@ def binding_fields(state: Any) -> dict[str, np.ndarray]:
 
 def intent_fields(state: Any) -> dict[str, np.ndarray]:
     names = (
+        "protected_goal_set",
         "public_interval_carrier",
         "policy_interval_context",
         "object_tokens",
@@ -209,6 +210,7 @@ def install_wrappers(model: torch.nn.Module, current: dict[str, Any], *, phase_z
         object_score = self.score(read * torch.tanh(self.compatibility(obj)))[..., 0]
         task_context = task_value.mean(1)[:, None].expand(-1, obj.shape[1], -1)
         task_object_score = self.task_object_score(torch.cat((obj * task_context, obj * torch.tanh(task_context)), dim=-1))[..., 0]
+        current["binder_task"] = array(task)
         current["binder_object_score"] = array(object_score)
         current["binder_task_object_score"] = array(task_object_score)
         current["binder_task_context"] = array(task_context)
@@ -411,6 +413,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
 
 
 
