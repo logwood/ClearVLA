@@ -193,6 +193,17 @@ S_INTERVAL_VALUE_REPAIR_V1_SOURCE_PATHS = frozenset(
         "clearvla/mainline/train.py",
     }
 )
+G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION = (
+    "g_slot_identity_source_repair_v1"
+)
+G_SLOT_IDENTITY_SOURCE_REPAIR_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/mainline/model/grounding.py",
+        "clearvla/mainline/model/intent.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/train.py",
+    }
+)
 P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
     "intent.organizer.target_object_address.weight"
 )
@@ -1380,6 +1391,17 @@ def load_checkpoint_for_initialization(
             raise ValueError(
                 "S interval-value repair migration requires identical dataset identity"
             )
+    elif selected_model_migration == G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION:
+        if _initialization_config_view(saved_config) != _initialization_config_view(
+            config
+        ):
+            raise ValueError(
+                "G-slot identity source repair differs outside source-only changes"
+            )
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError(
+                "G-slot identity source repair requires identical dataset identity"
+            )
     elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION:
         if (
             saved_config.data.data_profile != "calvin_relative_7d_v1"
@@ -1581,6 +1603,8 @@ def load_checkpoint_for_initialization(
         )
     elif selected_model_migration == S_INTERVAL_VALUE_REPAIR_V1_MIGRATION:
         allowed_source_paths = S_INTERVAL_VALUE_REPAIR_V1_SOURCE_PATHS
+    elif selected_model_migration == G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION:
+        allowed_source_paths = G_SLOT_IDENTITY_SOURCE_REPAIR_V1_SOURCE_PATHS
     else:
         allowed_source_paths = (
             INITIALIZATION_SOURCE_PATHS
@@ -1714,6 +1738,13 @@ def load_checkpoint_for_initialization(
             )
         mapped_model = dict(mapped_model)
         mapped_model[new_condition_key] = new_condition.detach().clone()
+    elif selected_model_migration == G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION:
+        missing = set(current_model) - set(mapped_model)
+        unexpected = set(mapped_model) - set(current_model)
+        if missing or unexpected:
+            raise ValueError(
+                "G-slot identity source repair must preserve the exact model tensor ABI"
+            )
     elif selected_model_migration == DINOV3_DEEP_REPAIR_V1_MIGRATION:
         missing = set(current_model) - set(mapped_model)
         unexpected = set(mapped_model) - set(current_model)
@@ -1984,6 +2015,8 @@ __all__ = [
     "DINOV3_DEEP_REPAIR_V1_SOURCE_PATHS",
     "S_INTERVAL_VALUE_REPAIR_V1_MIGRATION",
     "S_INTERVAL_VALUE_REPAIR_V1_SOURCE_PATHS",
+    "G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION",
+    "G_SLOT_IDENTITY_SOURCE_REPAIR_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION",
     "P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS",
     "P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION",
