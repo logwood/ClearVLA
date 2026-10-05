@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from dataclasses import replace
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -23,12 +24,19 @@ from torch import Tensor, nn
 
 from clearvla.mainline.config import load_config
 from clearvla.mainline.data.loading import load_mainline_data, to_training_batch
+from clearvla.mainline.endpoint_supervision import (
+    CLEAN_ENDPOINT_SUPERVISION,
+    EndpointHeadSupervision,
+    clean_endpoint_field,
+    endpoint_condition,
+)
 from clearvla.mainline.runtime.numerics import resolve_compute_dtype
 from clearvla.mainline.runtime.sampling import deployment_cache
 from clearvla.mainline.runtime.deployment import deployment_graph_config
 from clearvla.mainline.runtime.identity import v120_normalizer_fingerprint
 from clearvla.mainline.training.losses import compose_losses, sample_flow_matching
 from clearvla.simulation.checkpoint import load_deployment_checkpoint
+from clearvla.vision.online_pipeline import OnlineVisionPipeline
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -43,6 +51,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--t5-condition", type=Path)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--batch-offset", type=int, default=0)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--seed", type=int, default=20260911)
@@ -157,6 +166,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if deployment_graph_config(config) != deployment_graph_config(bundle.config):
         raise ValueError("formal data config graph differs from checkpoint graph")
     data = load_mainline_data(config)
+    # Deployment ABI intentionally canonicalizes the data boundary to a
+    # complete-window contract.  Use that same model-owned contract for the
+    # diagnostic batch so a training-only tail-support field cannot be passed
+    # into the deployment graph as an unowned tensor.
+    batch_config = replace(
+        config,
+        data=replace(
+            config.data,
+            window_boundary_contract=bundle.config.data.window_boundary_contract,
+        ),
+    )
+    visual_encoder = None
+    if config.data.visual_feature_mode == "dinov3_online_v1":
+        # The formal training batch must use the same resident DINOv3 ingress
+        # as training; no RGB feature cache is admitted on this probe.
+        visual_encoder = OnlineVisionPipeline.from_config(config, device)
     if v120_normalizer_fingerprint(data.action_normalizer) != v120_normalizer_fingerprint(
         bundle.action_normalizer
     ):
@@ -167,7 +192,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("formal CALVIN state normalizer differs from checkpoint")
     loader = data.loader(
         "train",
-        batch_size=int(config.optimizer.batch_size),
+        batch_size=int(args.batch_size),
         workers=int(args.workers),
         device=device,
         generator=torch.Generator().manual_seed(int(config.data.seed) + 101),
@@ -178,7 +203,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     raw = None
     for _ in range(int(args.batch_offset) + 1):
         raw = next(iterator)
-    batch = to_training_batch(raw, goal=data.goal, config=config, device=device)
+    batch = to_training_batch(
+        raw, goal=data.goal, config=batch_config, device=device,
+        visual_encoder=visual_encoder,
+    )
 
     model = bundle.model.to(device)
     model.train()
@@ -202,9 +230,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         )
         flow = sample_flow_matching(
             batch.action_target.normalized,
+            row_valid=batch.action_target.row_valid,
             action_state=batch.online.history.action_state,
             codec_gripper_boundary=batch.online.history.codec_gripper_boundary,
-            codec=model.outlet_adapter,
+            codec=model.outlet_adapter.codec,
             distribution=config.bottom.flow_time_distribution,
             generator=flow_generator,
         )
@@ -215,16 +244,44 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             require_execution_supervision=True,
             collect_diagnostics=False,
         )
+        endpoint_supervision = None
+        if config.bottom.endpoint_supervision_mode == CLEAN_ENDPOINT_SUPERVISION:
+            endpoint_field = clean_endpoint_field(
+                flow, arm_dim=model.outlet_adapter.arm_dim
+            )
+            endpoint_time, endpoint_context = endpoint_condition(
+                endpoint_field,
+                context_enabled=flow.flow_step_context is not None,
+            )
+            endpoint_output = model.velocity(
+                cache,
+                noisy_action_field=endpoint_field,
+                time=endpoint_time,
+                flow_step_context=endpoint_context,
+                require_execution_supervision=False,
+                collect_diagnostics=False,
+            )
+            endpoint_supervision = EndpointHeadSupervision(
+                endpoint_output, endpoint_time, endpoint_context
+            )
         ledger = compose_losses(
             config,
             policy_output=output,
+            endpoint_supervision=endpoint_supervision,
             action_target=batch.action_target,
             history=batch.online.history,
             flow_state=flow,
             observation=training_state.observation,
             top_targets=targets,
             predicted_dynamics=cache.top.predicted_dynamics,
-            action_codec=model.outlet_adapter,
+            action_codec=(
+                model.outlet_adapter
+                if (
+                    model.outlet_adapter.is_binary_command
+                    or getattr(model.outlet_adapter, "is_relative_command", False)
+                )
+                else model.outlet_adapter.codec
+            ),
             collect_diagnostics=False,
         )
 
@@ -236,6 +293,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "typed_interval_residual_value": intent.typed_interval_residual_value,
         "typed_policy_components": intent.typed_policy_components,
         "object_tokens": intent.object_tokens,
+        "target_binding_mass": intent.target_binding.mass,
+        "target_binding_log_probability": intent.target_binding.log_probability,
         "coarse_action_prediction": training_state.top.coarse_action.action_prediction,
         "w_semantic_delta": cache.top.predicted_dynamics.semantic_delta,
         "p2_semantic_effect": output.compiled.effect.semantic,
@@ -251,6 +310,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "intent_object_semantic": model.intent.organizer.object_semantic,
         "intent_object_appearance": model.intent.organizer.object_appearance,
         "intent_object_geometry": model.intent.organizer.object_geometry,
+        "shared_target_binder": model.intent.organizer.shared_binder,
+        "binder_objects": model.intent.organizer.shared_binder.objects,
+        "binder_history_query": model.intent.organizer.shared_binder.history_query,
+        "binder_task_value": model.intent.organizer.shared_binder.task_value,
+        "binder_task_read": model.intent.organizer.shared_binder.task_read,
+        "binder_compatibility": model.intent.organizer.shared_binder.compatibility,
+        "binder_score": model.intent.organizer.shared_binder.score,
+        "binder_task_object_score": model.intent.organizer.shared_binder.task_object_score,
+        "binder_null": model.intent.organizer.shared_binder.null,
         "coarse_object_read": model.intent.coarse_action.object_read,
         # P2 retains only semantic and geometry typed keys.  Appearance is
         # intentionally an S-side route and has no direct P2 key owner.
