@@ -256,7 +256,7 @@ v11 在同一观测、同一噪声和同一 checkpoint 上覆盖四条颜色/方
 
 ### 14.4 六个来源的目标交换贡献
 
-以四条指令的同观测 target-swap 为例，按真实 bottom route 的 `beta*lambda` 逐源重算（数值为 action-space update RMSE，不能线性相加成“贡献百分比”）：
+以四条指令的同观测 target-swap 为例，按真实 bottom route 的 `beta*lambda` 逐源重算（数值为底层动作 hidden 更新的 RMSE，不是 6 维原生命令或 TCP 位移，不能线性相加成“贡献百分比”）：
 
 | 来源 | RMSE 范围 |
 |---|---:|
@@ -267,4 +267,83 @@ v11 在同一观测、同一噪声和同一 checkpoint 上覆盖四条颜色/方
 | P2 semantic interaction | `.00577–.00622` |
 | P2 geometry interaction | `.00070–.00075` |
 
-P1 target 与 P2 semantic 是当前 protected-detail 目标差异的主要两条来源；factual lattice 几乎不随这组颜色/方向交换变化。P2 geometry 和 interaction 仍有可测的下游读出，但量级较小。由于这些向量会相互抵消，RMSE 仅用于定位来源，不能把它们当作独立百分比。该结果把后续检查范围收窄到 `target_read → factual_base → consequence semantic` 的真实梯度与目标条件消费；仍不支持直接改 bottom bridge 或公共载体。
+P1 target 与 P2 semantic 是当前 protected-detail 目标差异的主要两条来源；factual lattice 几乎不随这组颜色/方向交换变化。P2 geometry 和 interaction 仍有可测的下游读出，但量级较小。由于这些向量会相互抵消，RMSE 仅用于定位来源，不能把它们当作独立百分比。P1 target/factual 与 W、S 形成的 semantic 在 consequence 汇合，P1 还影响查询和交互；二者不是同一信号的连续测点，不能把其 RMSE 比值称为串联放大率。下一节区分实际生产值变化、bottom 读取系数变化和 P2 内部来源；仍不支持直接改 bottom bridge 或公共载体。
+
+## 15. 2026-10-06：八源双状态分解、W 重读与单项 baseline 钳制
+
+本节是在源码 `785627e9b1d875bb50b7e751f23ce479afe39845` 上新增评估探针的结果，生产网络没有修改。输入仍为 `short-bs8-gpu3-r1/checkpoints/best.pt`（step 64）、同一 standard 观测、四条蓝右/红右/粉右/蓝左指令和固定噪声 12345。交换的是有支持的 K 权重；继承探针的坐标选择不构成真实颜色物块的身份认证。每条重复两次 baseline，记录 proposal/refined 的调用 0、5；调用 5 是终点 head，不是额外积分步。
+
+### 15.1 计量契约
+
+`probes/probe_source_delta_consumer.py` 从真实 producer/reader 返回帧获取 W 读取、S 目标补充、W×S 调制、原始共同 P2 contract、实际 bottom probability/value scale 和 reader 输出。semantic 三项共用原始 semantic+geometry contract；八个来源共用完整 carrier 的实际 bottom 系数。新观察器不另算 softmax，不给每个来源单独收缩。
+
+`probes/source_delta_ledger.py` 离线以 float64 计算 `D_j=sum_q(beta*lambda*X_j)` 的对称双状态恒等式：
+
+```text
+delta D_j = sum(mean(beta*lambda)*delta X_j)
+          + sum(mean(lambda)*delta beta*mean(X_j))
+          + sum(mean(beta)*delta lambda*mean(X_j))
+```
+
+它是数值分账，不能解释成独立因果贡献百分比。NPZ 保存 source/checkpoint/input/probe 身份及 stage、integration/call、dtype、轴；不从 JSON 摘要反推张量。实际 reader 与 float64 分账的数值残差，以及残差在两状态间的变化，单独保存。
+
+### 15.2 四指令、16 对节点的结果
+
+| 项目 | RMSE 范围（bottom hidden 更新） |
+|---|---:|
+| 实际 reader 的目标交换差异 | `.04339–.04740` |
+| 源值变化项之和 | `.04359–.04755` |
+| basis 概率变化项之和 | `2.37e-7–3.86e-7` |
+| value 收缩变化项之和 | `.000329–.000366` |
+| 两状态数值残差之差 | `.000934–.001018` |
+| W 读取项的路由后差异 | `.03170–.03482` |
+| S 目标补充的路由后差异 | `.01817–.01986` |
+| W×S 调制的路由后差异 | `.0000380–.0000413` |
+
+包含独立数值残差后，float64 代数闭合最大绝对误差 `8.19e-16`；这不表示生产 bf16 的残差为零。P2 semantic 三项的转型/加法残差约 `.000122–.000207`。上述实际窗口以源值变化为主，不能把报告中的合成路由案例直接当作本 checkpoint 的主因。
+
+重复性也不是全部严格为零：蓝右/蓝左 baseline 重复一致，红右/粉右的 7 维命令重复 RMSE 分别为 `.000841/.000676`，reader 重复差异最高 `.000549`。因此不能把邻近此量级的小项当成确定机制。
+
+### 15.3 W 预测变化和读取上下文的区分
+
+局部 P2 进行 W0/W1 与 read-context0/1 的 2×2 配对。每份 candidate world 始终携带自己的原 action condition 并通过原身份验证；不重新标记 cache。read-context 同时包含 P1 query 和 S，这一步尚未拆开两者。
+
+W semantic 原值差异 `.03189–.03502` 中，对称 read-context 项为 `.03189–.03492`，candidate-world 项为 `.000430–.000485`。固定 baseline W、仅换读取上下文，差异仍为 `.03187–.03492`，方向与真实差异 cosine 至少 `.99985`。这些是 **P2 共同 contract 前的 hidden 值**，与 15.2 的 bottom 单位不同。候选 W 变化项接近重复数值底噪；不能据此宣称 W 没用或未来预测正确。
+
+### 15.4 只钳制定位到的 W 读取项
+
+蓝右完整 proposal→W rebuild→refined 评估中，在全部 12 个对应节点把 raw W 读取项换回该节点 baseline 值。S 补充、调制、geometry、joint contract 及全部后续消费者正常重算；没有整条 lane 置零。
+
+| 原生命令差异，相对 baseline | 正常 binding swap | swap + W 读取钳制 |
+|---|---:|---:|
+| arm 全 24 行 RMSE | `.06237` | `.03637` |
+| arm 实际执行前 8 行 RMSE | `.03422` | `.02090` |
+| gripper RMSE | `0` | `0` |
+
+该干预确认 W 读取值确实影响最终 arm；不能把非线性差异的下降率称为独立贡献比例，也不证明命令方向正确。
+
+### 15.5 自然语言选择仍未验收
+
+同一观测下，相对蓝右，红右/粉右的自然 binding RMSE 仅 `.000809/.000253`，arm 前 8 行差异 `.001499/.001121`；蓝左的 binding RMSE `.007583`、arm 前 8 行差异 `.003075`。而人工 binding swap 的 arm 前 8 行为 `.03212–.03438`。自然颜色响应明显更弱，部分读数接近重复底噪；不能用人工交换有效替代自然目标选择正确，也不能从 step 64 宣判训练完成后的能力。
+
+下一步使用同分支最终 checkpoint 复测相同分解和单项钳制，并与固定 18 例、6 任务×3、seed 0、max_steps 360、execute_rows 8 的闭环逐阶段对齐。若自然颜色重新指向仍弱，先核对真实物块覆盖、binder 的相对排名和读取内容，再判断是上游选择还是下游执行；当前没有依据扩大 gain、添加差异 loss 或改 P3/固定 bridge。
+
+### 15.6 复现与保存位置
+
+结果根目录为 `/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes/`：`source-delta-short-all4-world-v1` 保存 16 对 NPZ、完整原生命令及 summary；`source-delta-short-clamp-w-v1` 保存单项钳制；`source-delta-short-combined-check-v1` 用于组合选项回归。初次 wrapper 识别失败的 `source-delta-short-v1` 保留为失败记录。
+
+在当前 checkout，使用模型环境 Python、`PYTHONPATH` 指向 checkout、`CUDA_VISIBLE_DEVICES=3`、HF/Transformers 离线模式运行：
+
+```bash
+python -B probes/probe_source_delta_consumer.py \
+  --checkpoint /data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/short-bs8-gpu3-r1/checkpoints/best.pt \
+  --t5-condition /data/senwang/data/calvin/language/abc_d_full_t5_xxl_bank.pt \
+  --observation-dir /data/senwang/clearvla/experiments/dinov3-online-task-global-optimized-20261002/probes/standard-observations-20261003 \
+  --output-dir /absolute/new/result-directory --repeats 2 \
+  --cross-world --clamp-source e_semantic_w
+python -B probes/source_delta_ledger.py baseline.npz swapped.npz --output paired_result.json
+```
+
+输出目录必须不存在，禁止覆盖历史结果。离线固定源/换 beta、固定 beta/换源、同号/反号残差的代数检查通过；实际 16 对输入通过轴、有限性和身份对齐检查。文件 hash 写在各 NPZ 的 metadata 中。仓库只保存探针和决策统计，不提交 checkpoint 或 NPZ。
+
+最终权重的独立接续脚本为 `/home/sen.wang/mysh/clearvla-gslot-source-delta-final-20261006.sh PROBE_COMMIT`，只接受本次长跑的 epoch 1 / step 11012 / source `a2d597d...`。它检查生产及探针源码未漂移，等待 GPU3 空余至少 16 GB，再执行上述四指令、重复性、W/read-context 配对与 W 单项钳制。任务状态与脚本快照保存在 `probes/source-delta-formal-final-20261006-r1-job/`；与已有 GPU4 的 R8 闭环接续任务相互独立，不重启训练。
