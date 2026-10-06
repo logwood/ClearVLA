@@ -10,15 +10,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 import clearvla.mainline.runtime.sampling as sampling_runtime
 from clearvla.mainline.model.task_execution import TaskConditionedTargetBinder
+from clearvla.mainline.v120_core.role_delta_attnres import (
+    smooth_rms_contract,
+    variance_floored_centered_norm,
+)
 from clearvla.simulation.clearvla_policy import ClearVLACheckpointPolicy
 from probes.probe_g_slot_identity_nodes import (
     array, compare, history_with_world, intent_fields, install_wrappers,
@@ -51,6 +57,69 @@ def _scalar_metrics(mapping: Any) -> dict[str, float]:
 def _record(current: dict[str, Any], name: str, value: Any) -> None:
     if isinstance(value, torch.Tensor):
         current[name] = array(value)
+
+
+def _role_route_terms(
+    reader: torch.nn.Module,
+    query: torch.Tensor,
+    delta_values: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Recompute the reader's exact source weights and value contraction.
+
+    This mirrors RoleDeltaAttnRes.forward only for measurement.  It does not
+    call the reader a second time and therefore cannot alter the sampled path.
+    """
+    source_count = int(delta_values.shape[-2])
+    max_value_rms = getattr(reader, "max_value_rms", None)
+    if max_value_rms is None:
+        routed_values = delta_values
+        value_scale = delta_values.new_ones(
+            (*delta_values.shape[:-1], 1), dtype=torch.float32
+        )
+    else:
+        routed_values, value_scale = smooth_rms_contract(
+            delta_values, float(max_value_rms)
+        )
+    normalization_floor = getattr(reader, "normalization_floor", None)
+    hidden_size = int(getattr(reader, "hidden_size"))
+    if normalization_floor is None:
+        query_unit = F.layer_norm(query.float(), (hidden_size,)).to(
+            dtype=query.dtype
+        )
+        value_unit = F.layer_norm(routed_values.float(), (hidden_size,)).to(
+            dtype=routed_values.dtype
+        )
+    else:
+        query_unit, _ = variance_floored_centered_norm(
+            query, float(normalization_floor)
+        )
+        value_unit, _ = variance_floored_centered_norm(
+            routed_values, float(normalization_floor)
+        )
+    route_query = reader.query_proj(query_unit)
+    route_keys = reader.key_proj(value_unit)
+    identity = reader.source_key[:source_count].to(
+        device=route_keys.device, dtype=route_keys.dtype
+    )
+    identity_shape = (1,) * (route_keys.ndim - 2) + tuple(identity.shape)
+    route_keys = route_keys + identity.reshape(identity_shape)
+    route_dim = int(getattr(reader, "route_dim"))
+    logits = torch.einsum(
+        "...r,...sr->...s", route_query.float(), route_keys.float()
+    ) / math.sqrt(float(route_dim))
+    if bool(getattr(reader, "include_null")):
+        null_key = reader.null_key.to(
+            device=route_query.device, dtype=route_query.dtype
+        )
+        null_logits = torch.einsum(
+            "...r,kr->...k", route_query.float(), null_key.float()
+        ) / math.sqrt(float(route_dim))
+        probabilities = torch.softmax(
+            torch.cat((logits, null_logits), dim=-1), dim=-1
+        )
+    else:
+        probabilities = torch.softmax(logits, dim=-1)
+    return probabilities[..., :source_count].to(dtype=routed_values.dtype), value_scale
 
 
 def _node_arrays(current: dict[str, Any]) -> dict[str, np.ndarray]:
@@ -94,9 +163,30 @@ _EVENT_NODE_NAMES = (
 )
 
 
-def _final_nodes(current: dict[str, Any], sampled: Any) -> dict[str, np.ndarray]:
+def _final_nodes(
+    current: dict[str, Any],
+    sampled: Any,
+    *,
+    arm_dim: int,
+) -> dict[str, np.ndarray]:
     nodes = _node_arrays(current)
-    nodes["final_native_action"] = sampled.action[0].detach().float().cpu().numpy()
+    native_action = sampled.action[0].detach().float().cpu().numpy()
+    arm_dim = max(0, min(int(arm_dim), int(native_action.shape[-1])))
+    nodes["final_native_action"] = native_action
+    nodes["final_native_action_arm"] = native_action[:, :arm_dim]
+    nodes["final_native_action_gripper"] = native_action[:, arm_dim:]
+    for prefix in (1, 4, 8, int(native_action.shape[0])):
+        prefix = min(prefix, int(native_action.shape[0]))
+        nodes[f"final_native_action_arm_prefix{prefix}"] = native_action[
+            :prefix, :arm_dim
+        ]
+        nodes[f"final_native_action_gripper_prefix{prefix}"] = native_action[
+            :prefix, arm_dim:
+        ]
+    if native_action.shape[0] > 1 and native_action.shape[1] > arm_dim:
+        nodes["final_native_action_gripper_switches"] = (
+            np.abs(np.diff(native_action[:, arm_dim:], axis=0)) > 0.25
+        ).astype(np.float32)
     nodes["final_physical_field"] = (
         sampled.physical_field[0].detach().float().cpu().numpy()
     )
@@ -261,6 +351,115 @@ def install_deep_wrappers(
         return _old(*args, **kwargs)
 
     patch(planner, "forward", planner_forward)
+
+    # Keep the six actual protected-detail producers on the same sampled
+    # execution.  The P1 reader itself is not re-run: these wrappers only
+    # retain tensors produced by the original calls.
+    p1 = getattr(model, "p1", None)
+    if p1 is not None:
+        factual_reader = getattr(p1, "factual_reader", None)
+        if factual_reader is not None and hasattr(factual_reader, "forward"):
+            old = factual_reader.forward
+
+            def factual_reader_forward(*args: Any, _old=old, **kwargs: Any):
+                out = _old(*args, **kwargs)
+                value = out[0] if isinstance(out, tuple) else out
+                if isinstance(value, torch.Tensor):
+                    current["_p1_factual_reader_updated"] = value
+                return out
+
+            patch(factual_reader, "forward", factual_reader_forward)
+        target_reader = getattr(p1, "target_read", None)
+        if target_reader is not None and hasattr(target_reader, "forward"):
+            old = target_reader.forward
+
+            def target_reader_forward(*args: Any, _old=old, **kwargs: Any):
+                out = _old(*args, **kwargs)
+                if isinstance(out, torch.Tensor):
+                    current["_p1_target_detail_tensor"] = out
+                return out
+
+            patch(target_reader, "forward", target_reader_forward)
+        old = p1.build_static
+
+        def p1_build_static(*args: Any, _old=old, **kwargs: Any):
+            clean = kwargs.get(
+                "clean_trajectory", args[0] if args else None
+            )
+            if isinstance(clean, torch.Tensor):
+                current["_p1_clean_trajectory"] = clean
+            state, metrics = _old(*args, **kwargs)
+            updated = current.get("_p1_factual_reader_updated")
+            target = current.get("_p1_target_detail_tensor")
+            if (
+                isinstance(updated, torch.Tensor)
+                and isinstance(clean, torch.Tensor)
+                and hasattr(state, "protected_detail")
+            ):
+                shape = tuple(state.protected_detail.shape)
+                lattice = (updated - clean).reshape(shape)
+                current["ledger_f_lattice"] = array(lattice)
+                if isinstance(target, torch.Tensor):
+                    target_value = target.reshape(shape)
+                    current["ledger_f_target"] = array(target_value)
+                    factual_map = current.setdefault(
+                        "_factual_ledger_by_ptr", {}
+                    )
+                    factual_map[int(state.protected_detail.data_ptr())] = {
+                        "f_lattice": lattice,
+                        "f_target": target_value,
+                    }
+                    current["ledger_factual_closure"] = array(
+                        state.protected_detail - lattice - target_value
+                    )
+            return state, metrics
+
+        patch(p1, "build_static", p1_build_static)
+
+    consequence = getattr(getattr(model, "policy_compiler", None), "consequence", None)
+    if consequence is not None and hasattr(consequence, "forward"):
+        old = consequence.forward
+
+        def consequence_forward(*args: Any, _old=old, **kwargs: Any):
+            state, metrics = _old(*args, **kwargs)
+            _record(current, "ledger_e_semantic", state.effect.semantic)
+            _record(current, "ledger_e_geometry", state.effect.geometry)
+            _record(current, "ledger_i_semantic", state.interaction.semantic)
+            _record(current, "ledger_i_geometry", state.interaction.geometry)
+            _record(current, "ledger_protected_total", state.protected_consequence)
+            consequence_effect = state.effect.semantic + state.effect.geometry
+            consequence_interaction = (
+                state.interaction.semantic + state.interaction.geometry
+            )
+            consequence_expected = (
+                state.factual_base + consequence_effect + consequence_interaction
+            )
+            factual_map = current.get("_factual_ledger_by_ptr", {})
+            factual_sources = factual_map.get(
+                int(state.factual_base.data_ptr()), {}
+            )
+            source_map = current.setdefault("_protected_ledger_by_ptr", {})
+            source_map[int(state.protected_consequence.data_ptr())] = {
+                "f_lattice": factual_sources.get(
+                    "f_lattice", state.factual_base
+                ),
+                "f_target": factual_sources.get(
+                    "f_target", torch.zeros_like(state.factual_base)
+                ),
+                "e_semantic": state.effect.semantic,
+                "e_geometry": state.effect.geometry,
+                "i_semantic": state.interaction.semantic,
+                "i_geometry": state.interaction.geometry,
+            }
+            _record(
+                current,
+                "ledger_consequence_closure",
+                state.protected_consequence - consequence_expected,
+            )
+            return state, metrics
+
+        patch(consequence, "forward", consequence_forward)
+
     stage = getattr(model, "execution_bottom", None)
     decoder = getattr(stage, "decoder", None) if stage is not None else None
     if decoder is None:
@@ -320,15 +519,52 @@ def install_deep_wrappers(
     if detail_reader is not None:
 
         def detail_forward(*args: Any, _old=old_detail_forward, **kwargs: Any):
+            is_precision = bool(route_state["precision_pending"])
             out = _old(*args, **kwargs)
             name = (
                 "bottom_p1_precision_read"
-                if route_state["precision_pending"]
+                if is_precision
                 else "bottom_protected_detail_read"
             )
             route_state["precision_pending"] = False
             route_state["detail_call"] = int(route_state["detail_call"]) + 1
             _record(current, name, out[0])
+            query = args[0] if args else kwargs.get("query")
+            values = args[1] if len(args) > 1 else kwargs.get("delta_values")
+            if isinstance(query, torch.Tensor) and isinstance(values, torch.Tensor):
+                values = values.to(device=query.device, dtype=query.dtype)
+                probabilities, value_scale = _role_route_terms(
+                    detail_reader, query, values
+                )
+                prefix = (
+                    "bottom_p1_precision"
+                    if is_precision else "bottom_protected_detail"
+                )
+                _record(current, prefix + "_route_probability", probabilities)
+                _record(current, prefix + "_value_scale", value_scale)
+                if not is_precision:
+                    current["_bottom_protected_detail_route_probability_tensor"] = (
+                        probabilities
+                    )
+                    current["_bottom_protected_detail_value_scale_tensor"] = (
+                        value_scale
+                    )
+                    # Keep the exact carrier presented to RoleDeltaAttnRes.
+                    # P1/P2 ledger tensors can be bf16 while the reader casts
+                    # their already-summed carrier to the action-query dtype;
+                    # the two orders differ by a small, measurable rounding
+                    # residual.
+                    current["_bottom_protected_detail_values_tensor"] = values
+                    reconstructed = torch.einsum(
+                        "...s,...sh->...h",
+                        probabilities,
+                        values * value_scale.to(dtype=values.dtype),
+                    )
+                    _record(
+                        current,
+                        "bottom_protected_detail_route_recompute",
+                        reconstructed,
+                    )
             return out
 
         patch(detail_reader, "forward", detail_forward)
@@ -348,7 +584,24 @@ def install_deep_wrappers(
                     current, "bottom_role_value_" + str(name),
                     bank.values[:, index],
                 )
-        _record(current, "bottom_role_protected_detail", bank.protected_detail)
+        raw_protected_detail = bank.protected_detail
+        _record(current, "bottom_role_protected_detail", raw_protected_detail)
+        source_map = current.get("_protected_ledger_by_ptr", {})
+        protected_sources = (
+            source_map.get(int(raw_protected_detail.data_ptr()), {})
+            if isinstance(raw_protected_detail, torch.Tensor)
+            else {}
+        )
+        current["bottom_ledger_map_hit"] = np.asarray(
+            [float(bool(protected_sources))], dtype=np.float32
+        )
+        for name in (
+            "f_lattice", "f_target", "e_semantic", "e_geometry",
+            "i_semantic", "i_geometry",
+        ):
+            value = protected_sources.get(name)
+            if isinstance(value, torch.Tensor):
+                _record(current, "ledger_" + name, value)
         _record(
             current, "bottom_role_protected_precision",
             bank.protected_policy_precision,
@@ -400,6 +653,168 @@ def install_deep_wrappers(
         )
         _record(current, "bottom_policy_bridge_combined_update", out[0])
         _record(current, "bottom_protected_detail_update", out[1])
+        if isinstance(raw_protected_detail, torch.Tensor):
+            recomputed = current.get("bottom_protected_detail_route_recompute")
+            if isinstance(recomputed, np.ndarray):
+                current["bottom_protected_detail_route_recompute_error"] = (
+                    recomputed - np.asarray(array(out[1]))
+                )
+        route_probability = current.get(
+            "bottom_protected_detail_route_probability"
+        )
+        value_scale = current.get("bottom_protected_detail_value_scale")
+        ledger_names = (
+            "f_lattice", "f_target", "e_semantic", "e_geometry",
+            "i_semantic", "i_geometry",
+        )
+        if (
+            isinstance(route_probability, np.ndarray)
+            and isinstance(value_scale, np.ndarray)
+        ):
+            factor = route_probability[..., None] * value_scale
+            contributions: list[np.ndarray] = []
+            for name in ledger_names:
+                source = current.get("ledger_" + name)
+                if not isinstance(source, np.ndarray):
+                    contributions = []
+                    break
+                source_array = np.asarray(source)
+                if source_array.ndim != factor.ndim:
+                    contributions = []
+                    break
+                contribution = (source_array * factor).sum(axis=-2)
+                current["bottom_protected_detail_ledger_raw_" + name] = (
+                    contribution
+                )
+                contributions.append(contribution)
+            if contributions:
+                ledger_sum = (
+                    contributions[0]
+                    + contributions[1]
+                    + contributions[2]
+                    + contributions[3]
+                    + contributions[4]
+                    + contributions[5]
+                )
+                current["bottom_protected_detail_ledger_raw_sum"] = ledger_sum
+                read_array = np.asarray(array(out[1]))
+                current["bottom_protected_detail_ledger_closure_error"] = (
+                    ledger_sum - read_array
+                )
+                if isinstance(raw_protected_detail, torch.Tensor):
+                    route_probability_tensor = current.get(
+                        "_bottom_protected_detail_route_probability_tensor"
+                    )
+                    value_scale_tensor = current.get(
+                        "_bottom_protected_detail_value_scale_tensor"
+                    )
+                    if (
+                        isinstance(route_probability_tensor, torch.Tensor)
+                        and isinstance(value_scale_tensor, torch.Tensor)
+                    ):
+                        source_tensors = [
+                            protected_sources.get(name)
+                            for name in ledger_names
+                        ]
+                        if all(isinstance(value, torch.Tensor) for value in source_tensors):
+                            factor_tensor = (
+                                route_probability_tensor.unsqueeze(-1)
+                                * value_scale_tensor.to(
+                                    dtype=route_probability_tensor.dtype
+                                )
+                            )
+                            ledger_tensors = []
+                            cast_sources = []
+                            for name, source_tensor in zip(
+                                ledger_names, source_tensors
+                            ):
+                                # _read_policy_delta_bank casts the complete
+                                # protected carrier to the action-query dtype
+                                # before RoleDeltaAttnRes sees it.  The ledger
+                                # sources come from P1/P2 and may still be
+                                # bf16, so cast each source at the same
+                                # boundary before applying the measured
+                                # beta*lambda terms.  Otherwise the ledger
+                                # would include a dtype-rounding error and
+                                # falsely report a broken production path.
+                                source_tensor = source_tensor.to(
+                                    device=factor_tensor.device,
+                                    dtype=factor_tensor.dtype,
+                                )
+                                cast_sources.append(source_tensor)
+                                contribution_tensor = (
+                                    source_tensor * factor_tensor
+                                ).sum(dim=-2)
+                                _record(
+                                    current,
+                                    "bottom_protected_detail_ledger_raw_" + name,
+                                    contribution_tensor,
+                                )
+                                ledger_tensors.append(contribution_tensor)
+                            exact_ledger_sum = (
+                                ledger_tensors[0]
+                                + ledger_tensors[1]
+                                + ledger_tensors[2]
+                                + ledger_tensors[3]
+                                + ledger_tensors[4]
+                                + ledger_tensors[5]
+                            )
+                            reader_values = current.get(
+                                "_bottom_protected_detail_values_tensor"
+                            )
+                            if isinstance(reader_values, torch.Tensor):
+                                cast_source_sum = (
+                                    cast_sources[0]
+                                    + cast_sources[1]
+                                    + cast_sources[2]
+                                    + cast_sources[3]
+                                    + cast_sources[4]
+                                    + cast_sources[5]
+                                )
+                                cast_residual = reader_values - cast_source_sum
+                                cast_residual_update = (
+                                    cast_residual * factor_tensor
+                                ).sum(dim=-2)
+                                _record(
+                                    current,
+                                    "bottom_protected_detail_ledger_cast_residual",
+                                    cast_residual,
+                                )
+                                _record(
+                                    current,
+                                    "bottom_protected_detail_ledger_cast_residual_update",
+                                    cast_residual_update,
+                                )
+                                exact_ledger_sum = (
+                                    exact_ledger_sum + cast_residual_update
+                                )
+                            _record(
+                                current,
+                                "bottom_protected_detail_ledger_raw_sum",
+                                exact_ledger_sum,
+                            )
+                            _record(
+                                current,
+                                "bottom_protected_detail_ledger_closure_error",
+                                exact_ledger_sum - out[1],
+                            )
+                            factual_sum_tensor = (
+                                source_tensors[0] + source_tensors[1]
+                            )
+                            effect_sum_tensor = (
+                                source_tensors[2] + source_tensors[3]
+                            )
+                            interaction_sum_tensor = (
+                                source_tensors[4] + source_tensors[5]
+                            )
+                            expected_tensor = (
+                                factual_sum_tensor
+                                + effect_sum_tensor
+                                + interaction_sum_tensor
+                            )
+                            current["bottom_protected_detail_source_closure"] = array(
+                                raw_protected_detail - expected_tensor
+                            )
         return out
 
     patch(decoder, "_read_policy_delta_bank", policy_delta_forward)
@@ -564,11 +979,19 @@ def _run_one(
     # discard its trace and start a fresh event scope for the explicit cache
     # and sampler calls below.
     trace_events.clear()
+    event_snapshots.clear()
     current.clear()
     current["_trace_events"] = trace_events
     current["_event_snapshots"] = event_snapshots
     current["_sampling_integration_count"] = 0
     config = policy.bundle.config
+    arm_dim = int(
+        getattr(
+            getattr(model, "outlet_adapter", None),
+            "arm_dim",
+            max(0, int(model.outlet_adapter.physical_dim) - 1),
+        )
+    )
     with torch.no_grad():
         current["_sampling_stage"] = "encode_online"
         cache, _ = sampling_runtime.deployment_cache(
@@ -605,7 +1028,7 @@ def _run_one(
             )
             paths["fixed_w_refined"] = {
                 "event_start": start, "event_end": len(trace_events),
-                "nodes": _final_nodes(current, fixed),
+                "nodes": _final_nodes(current, fixed, arm_dim=arm_dim),
                 "metrics": _scalar_metrics(fixed.metrics),
             }
         if mode in {"full", "both"}:
@@ -620,7 +1043,7 @@ def _run_one(
             )
             paths["full_proposal_w_refined"] = {
                 "event_start": start, "event_end": len(trace_events),
-                "nodes": _final_nodes(current, full),
+                "nodes": _final_nodes(current, full, arm_dim=arm_dim),
                 "metrics": _scalar_metrics(full.metrics),
                 "refined_cache_rebuilt": refined_cache is not cache,
             }

@@ -230,3 +230,26 @@ protected detail 置零会使最终目标差异显著下降，而 P3 置零只�
 ### 13.3 正式长跑状态与下一门槛
 
 正式长跑仍使用启动时锁定的源码 `a2d597d27e001d3bbc901f133d25d6ca5a4cf6a6`，没有被上述探针提交改写；截至 batch `6300/11012`，运行约 `6.41 s/batch`，P2 target interval variation `.1642`、source variation `.3327`、P3 temporal RMS `.3393`、P3 routed update `.4.236`、fixed bridge scale `.25`、null mass `.0015`、source effective count `3.98`、capacity `.9995`、execution gate `1.0`。日志审计仍为 JSON/traceback 完整，只有预期的 capacity-saturated warning。正式最终 checkpoint 和同 branch target-swap 尚未产生；完成前不据此改生产网络。
+
+## 14. 2026-10-06：protected-detail 实际生产者六源账本
+
+本节承接 13 节的短 checkpoint 复核。报告中的关键修正已落实到探针：`protected-detail` 不是纯视觉细节，而是 P1 当前 factual lattice、P1 target read、P2 semantic effect、P2 geometry effect、P2 semantic interaction、P2 geometry interaction 六项在 P1/P2 边界合成后的 carrier。探针只读包裹真实 forward，不改变生产模型、梯度或正式长跑。
+
+### 14.1 生产路径和闭合
+
+- P1 `build_static` 的 factual carrier 按真实调用顺序拆为 `(updated-clean)` 与 `target_detail`；四条指令 target-swap 的 factual 闭合误差为 `1.38–1.92e-9`。
+- P2 consequence 使用源码中的分组顺序 `factual_base + (semantic+geometry) + (interaction.semantic+interaction.geometry)`；闭合误差为 `0`。
+- bottom `protected_detail_basis_attnres` 的 route probability 与 value contract 从同一次 reader 输入重算；重算与真实 reader 输出误差为 `0`。
+- 六个来源在进入 reader 前的 carrier 重组误差为 `0`，因此没有发现来源截断、错配或漏分配。
+
+reader 输入是先把已经合成的 carrier 转成 action-query dtype，再进入 bf16 路由归约。若把六个上游张量分别转型后再相加，会出现可重复的 dtype/归约残差：carrier RMS 约 `2.0e-4`，路由后的 residual update RMS 约 `1.9e-4`，六源账本与真实输出的未校正差约 `0.9e-3`。这属于转换和归约顺序的数值误差，不是网络路径丢失；探针已单独记录 `ledger_cast_residual`，不能把它归因给 P3 或 bridge。
+
+### 14.2 目标交换的当前读数
+
+v11 在同一观测、同一噪声和同一 checkpoint 上覆盖四条颜色/方向指令；每条 baseline/swap 的事件轨迹均已写入。最终 native action 的 arm RMSE 为 `.0580–.0621`，gripper RMSE 为 `0`。这些仍来自 `global_step=64` 的短 checkpoint，只说明链路可测和下游消费存在，不能代替完整训练闭环。
+
+### 14.3 正式长跑状态
+
+正式训练仍锁定启动提交 `a2d597d27e001d3bbc901f133d25d6ca5a4cf6a6`，探针提交没有改写它。最新日志到 batch `8000/11012`，最近窗口约 `6.16 s/batch`；loss、ledger gap（约 `1e-8`）、梯度和数值项均有限，没有 traceback、OOM、NaN 或异常梯度尖峰。P2 target interval variation `.1717`、P3 temporal RMS `.3429`、P3 state-change RMS `.2852`、bottom capacity `.9997`，仍属于运行中的健康窗口；最终 checkpoint 尚未生成。
+
+下一步是在同一分支的最终 checkpoint 上重跑这组六源账本，并把 arm/gripper、P3 optional、protected carrier 三条消费链分别与完整闭环结果对齐。当前证据不足以修改 bridge scale 或 P3 拓扑。
