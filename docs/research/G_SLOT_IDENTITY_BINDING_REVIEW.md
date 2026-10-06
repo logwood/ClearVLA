@@ -359,3 +359,24 @@ step 64、同一 standard 观测的逐相机复测：坐标与实际分布重新
 当前主线 Teacher 是 `training_targets.teacher: ObjectFutureTeacher`，其 `semantic_content_key`、`appearance_content_key` 均为冻结的 `[64,768]` 正交初始化投影，实际 current-reference mode 为 `g_assignment_v1`。`observation_association.py:76–88` 冻结参数，`:342–389` 仍用当前 G 坐标构建几何匹配先验；冻结参数不代表标签独立于 G。`training/engine.py:1187–1194` 没有 EMA 更新。旧 observation encoder 虽仍实例化 decay `.995` 的 Teacher-G 投影，但其更新只位于旧 `teacher_interval_targets` 路径，从当前 adapter 调用的 encoder 方法不可达；`teacher_supports` 只调用冻结 DINO 内容变换。
 
 指数移动平均 Teacher/权重与 Efficient Multi-Scale Attention 是不同方案，需分清用户含义。前者可作为训练目标/权重稳定性的候选，无法凭平均生成正确的对象定位或语言标签；直接平滑 K 坐标还需先解决跨时 K 身份和相机运动。后者是视觉特征注意力，需要另行定位特征分辨率/可分性不足的证据，不能由现有 EMA Teacher 代码推断效果。本次只检查源码和短 checkpoint，没有改网络、监督或现有长跑/接续探针。
+
+## 17. 2026-10-06：完整权重复测已接续，尚未得到长跑结果
+
+截至 12:48 UTC，`train-bs8-gpu0-r1` 的最近日志为 batch 10300/11012，窗口耗时 6.351 s/batch；最终 checkpoint 目录仍为空。这里不把 step 64 探针结果写成完整训练结论。
+
+补齐 K 的物体覆盖测量：复用 `scripts/export_calvin_probe_observations.py:state_for_initial_condition` 的原观测生成方式，四种布局的 top/wrist RGB 均与已保存 NPZ **逐像素完全一致**。直接导出模拟器 body segmentation，按真实物块 UID 取得红/蓝/粉可见区域。粉色块在这四种布局中均不可见，不能把零可见覆盖判作定位失败。最初按官方初始状态函数重放的图像不匹配，v2 结果被拒绝；只使用精确匹配的 v3 masks。
+
+新测量从真实 G producer 的 `camera_read` 与 `CurrentImageSupport` 读取完整 M/N 分布，在实际采样坐标上双线性读取物块 mask，再按生产相机条件概率积分。没有用 8×8 热图格心或 K 重心估算物体覆盖。standard / step 64 的脚本校验通过：完整位置支持重算中心与生产 K 坐标最大误差 `3.84e-7`，每相机概率预算误差小于 `3e-7`。它仍只是测量校验，不代表最终权重的定位结果；此计量评估的是可见图像读质量，并非 3-D 误差或跨时身份。
+
+新增一次性接续任务：
+
+- helper：`/home/sen.wang/mysh/clearvla-gslot-final-k-p3-20261006.sh PROBE_COMMIT COORDINATE_PROBE_SHA256`；
+- job：`/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes/final-k-p3-20261006-r1-job/`；
+- 固定探针源码 `6fdb2eb63935c3244635ee6e0f71c7fb8c775e8a`，coordinate probe SHA-256 `7ccf1e9faaec96233bdec875ed3d9dd7cc2af8f9f7cfdf3c2091aed1ec246484`；
+- 只接受 epoch 1 / step 11012 / training source `a2d597d27e001d3bbc901f133d25d6ca5a4cf6a6`，保存 checkpoint hash；等待既有 source-delta job 结束及 GPU3 至少 16 GB 空闲；
+- 四布局逐相机 K/物块覆盖，然后四指令、重复 2 次、完整 proposal→W rebuild→refined 的 baseline、P3 semantic zero、bottom P3 zero、protected-detail zero；
+- 保留 15.6 的八源/W 单项钳制和 GPU4 上既有的标准闭环（18 例、6 任务×3、seed 0、max_steps 360、execute_rows 8）。
+
+helper 的 shell/嵌入 Python 语法、当前源码 guard 和短 checkpoint 的实际测量均已验证；任务已启动等待最终权重，尚未完成这些 full-checkpoint 测试。每阶段失败独立记账，不能因部分成功宣告全部通过。标准闭环与探针结果要结合分析：优先核对自然语言选择、arm 前 8 行、gripper 和重复底噪。人工 K 权重交换尚无真实物体身份保证；整条 lane 置零是上下文依赖的非线性干预，不据此计算独立贡献百分比或直接修改 P3/bridge。
+
+外部测量源码、helper 快照和结果保存在上述实验的 `probes/` 中；不修改已被两个接续任务锁定的生产/探针源码。分割原始数据与图像不纳入仓库文档。
