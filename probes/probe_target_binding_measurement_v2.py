@@ -72,6 +72,28 @@ def _trace_summary(current: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+_EVENT_NODE_NAMES = (
+    "p3_coord_temporal_deep",
+    "p3_coord_state_change_deep",
+    "bottom_p3_lane_0_read",
+    "bottom_p3_lane_1_read",
+    "bottom_p1_precision_read",
+    "bottom_policy_bridge_combined_update",
+    "bottom_protected_detail_update",
+    "evidence_condition",
+    "evidence_global_condition",
+    "evidence_latent",
+    "decoder_pred_velocity",
+    "decoder_evidence_mmd_it_prefix_pred_velocity",
+    "decoder_evidence_mmd_it_action_update",
+    "decoder_evidence_mmd_it_attention_update",
+    "decoder_evidence_mmd_it_ffn_update",
+    "decoder_evidence_mmd_it_self_update",
+    "decoder_evidence_mmd_it_evidence_update",
+    "physical_velocity",
+)
+
+
 def _final_nodes(current: dict[str, Any], sampled: Any) -> dict[str, np.ndarray]:
     nodes = _node_arrays(current)
     nodes["final_native_action"] = sampled.action[0].detach().float().cpu().numpy()
@@ -163,6 +185,21 @@ def install_sampling_trace(model: torch.nn.Module, current: dict[str, Any]):
                 "node_summaries": _trace_summary(current),
                 "metrics": dict(current.get("velocity_metrics", {})),
             })
+        snapshots = current.get("_event_snapshots")
+        if isinstance(snapshots, list):
+            snapshots.append({
+                "stage": stage,
+                "integration_index": int(
+                    current.get("_sampling_integration_index", -1)
+                ),
+                "integration_call_index": call_index,
+                "time": current.get("_sampling_time"),
+                "nodes": {
+                    name: np.array(current[name], copy=True)
+                    for name in _EVENT_NODE_NAMES
+                    if isinstance(current.get(name), np.ndarray)
+                },
+            })
         return output
 
     patch(model, "velocity", velocity_wrapper)
@@ -174,6 +211,8 @@ def install_deep_wrappers(
     current: dict[str, Any],
     *,
     original_decoder_read: Any,
+    p3_semantic_scale: float = 1.0,
+    bottom_p3_scale: float = 1.0,
 ):
     saved: list[tuple[Any, str, Any]] = []
 
@@ -199,6 +238,10 @@ def install_deep_wrappers(
                         current, "p3_projected_" + name,
                         coord_obj.sources[name](value),
                     )
+            if float(p3_semantic_scale) != 1.0:
+                scaled_semantic = inputs.semantic_effect * float(p3_semantic_scale)
+                current["p3_input_semantic_effect_used"] = array(scaled_semantic)
+                inputs = replace(inputs, semantic_effect=scaled_semantic)
             out = _old(inputs)
             _record(current, "p3_coord_temporal_deep", out[0])
             _record(current, "p3_coord_state_change_deep", out[1])
@@ -296,7 +339,8 @@ def install_deep_wrappers(
         _old=original_decoder_read,
     ):
         _record(current, "bottom_role_value_all", bank.values)
-        for index, name in enumerate(tuple(getattr(bank, "source_names", ()))):
+        source_names = tuple(getattr(bank, "source_names", ()))
+        for index, name in enumerate(source_names):
             if index < int(bank.values.shape[1]):
                 _record(
                     current, "bottom_role_value_" + str(name),
@@ -312,6 +356,26 @@ def install_deep_wrappers(
         route_state["precision_pending"] = (
             bank.protected_policy_precision is not None
         )
+        if float(bottom_p3_scale) != 1.0:
+            values = bank.values.clone()
+            scaled_indices: list[int] = []
+            for index, name in enumerate(source_names):
+                if index >= int(values.shape[1]):
+                    continue
+                if str(name).startswith("p3_"):
+                    values[:, index] = values[:, index] * float(bottom_p3_scale)
+                    scaled_indices.append(index)
+            if scaled_indices:
+                bank = replace(bank, values=values)
+                current["bottom_p3_scaled_indices"] = np.asarray(
+                    scaled_indices, dtype=np.int64
+                )
+                for index in scaled_indices:
+                    _record(
+                        current,
+                        "bottom_role_value_used_" + str(source_names[index]),
+                        values[:, index],
+                    )
         out = _old(
             action_query, bank, collect_diagnostics=collect_diagnostics
         )
@@ -472,6 +536,8 @@ def _run_one(
     current.clear()
     trace_events: list[dict[str, Any]] = []
     current["_trace_events"] = trace_events
+    event_snapshots: list[dict[str, Any]] = []
+    current["_event_snapshots"] = event_snapshots
     TaskConditionedTargetBinder.forward = binder_forward
     _, online = policy.act_with_input(history, instruction)
     # act_with_input performs the policy's ordinary deployment sample before
@@ -481,6 +547,7 @@ def _run_one(
     trace_events.clear()
     current.clear()
     current["_trace_events"] = trace_events
+    current["_event_snapshots"] = event_snapshots
     current["_sampling_integration_count"] = 0
     config = policy.bundle.config
     with torch.no_grad():
@@ -566,6 +633,7 @@ def _run_one(
         },
         "static_summaries": static_summaries,
         "trace_events": trace_events,
+        "event_snapshots": event_snapshots,
         "metrics": selected["metrics"],
     }
 
@@ -578,6 +646,38 @@ def _compare_path_actions(left: dict[str, Any], right: dict[str, Any]):
         )
         for name in sorted(set(left["path_nodes"]) & set(right["path_nodes"]))
     }
+
+
+def _compare_event_snapshots(
+    left: list[dict[str, Any]], right: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Compare target-swap nodes at each actual velocity call."""
+    def key(event: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            event.get("stage"),
+            event.get("integration_index"),
+            event.get("integration_call_index"),
+        )
+
+    right_by_key = {key(event): event for event in right}
+    result: list[dict[str, Any]] = []
+    for event in left:
+        other = right_by_key.get(key(event))
+        if other is None:
+            continue
+        left_nodes = event.get("nodes", {})
+        right_nodes = other.get("nodes", {})
+        result.append({
+            "stage": event.get("stage"),
+            "integration_index": event.get("integration_index"),
+            "integration_call_index": event.get("integration_call_index"),
+            "time": event.get("time"),
+            "nodes": {
+                name: compare(right_nodes[name], left_nodes[name])
+                for name in sorted(set(left_nodes).intersection(right_nodes))
+            },
+        })
+    return result
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -593,7 +693,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if name == "_read_policy_delta_bank"
     )
     deep_saved = install_deep_wrappers(
-        model, current, original_decoder_read=base_read
+        model,
+        current,
+        original_decoder_read=base_read,
+        p3_semantic_scale=args.p3_semantic_scale,
+        bottom_p3_scale=args.bottom_p3_scale,
     )
     sampling_saved = install_sampling_trace(model, current)
     installed_binder_forward = TaskConditionedTargetBinder.forward
@@ -655,6 +759,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         "repeats": int(args.repeats),
                         "trace_event_count_baseline": len(baseline["trace_events"]),
                         "trace_event_count_swapped": len(swapped["trace_events"]),
+                        "event_snapshot_count_baseline": len(
+                            baseline["event_snapshots"]
+                        ),
+                        "event_snapshot_count_swapped": len(
+                            swapped["event_snapshots"]
+                        ),
                     },
                     "binding_invariants": {
                         "real_mass_sum_before": float(before.sum()),
@@ -706,6 +816,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         "trace_events": swapped["trace_events"],
                     },
                     "repeat_checks": repeats,
+                    "event_node_differences": _compare_event_snapshots(
+                        baseline["event_snapshots"], swapped["event_snapshots"]
+                    ),
                     "node_differences": {
                         name: compare(swapped["nodes"][name], baseline["nodes"][name])
                         for name in names
@@ -738,6 +851,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "null_mass_changed": False,
             "real_mass_multiset_changed": False,
             "operation": "swap_farthest_supported_physical_coordinate_pair",
+            "p3_semantic_scale": float(args.p3_semantic_scale),
+            "bottom_p3_scale": float(args.bottom_p3_scale),
         },
         "records": records,
     }
@@ -760,6 +875,8 @@ def main() -> None:
     parser.add_argument("--mode", choices=("fixed", "full", "both"), default="both")
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--min-coordinate-separation", type=float, default=0.15)
+    parser.add_argument("--p3-semantic-scale", type=float, default=1.0)
+    parser.add_argument("--bottom-p3-scale", type=float, default=1.0)
     args = parser.parse_args()
     result = run(args)
     print(json.dumps({"output": str(args.output), "records": len(result["records"])}, indent=2))
