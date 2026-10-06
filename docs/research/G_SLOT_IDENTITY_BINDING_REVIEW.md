@@ -205,3 +205,28 @@ S common/residual精确重组时common节点梯度可抵消，应监控分解前
 | S07 | `clearvla/mainline/model/policy.py::_replay_executed_world`、`clearvla/mainline/runtime/sampling.py::deployment_cache`、`scripts/probe_calvin_internal_layers_npz.py::_history`；当前/过去与无梯度边界。 |
 
 本次完成：分支/父提交/变更核对，完整grounding blob核验，继承报告与当前源码对照，三种合成batch组合的真实竞争方法检查，以及文档检查。未完成也未宣称：R9/正式checkpoint重放、GPU训练、整网梯度/闭环或全仓库测试。此文档只提交决策统计、来源和验收要求，不复制权重、tensor cache、原始大日志或服务器数据。
+
+## 13. 2026-10-05：完整目标交换的下游因果复核
+
+本节记录的是当前分支短 checkpoint 的只读测量，不是生产修改或正式训练验收。测量使用 `probes/probe_target_binding_measurement_v2.py`，固定同一观测、同一噪声，并交换最远的两个有物理支持的 K 槽位；null 质量、真实质量多重集和支持均保持不变。新增提交 `1ea28eaf` 记录 proposal/refined 每次 velocity 调用，`8c092dbd` 增加受控的 P3、底层 P3、protected detail、P1 precision 缩放。短 checkpoint 身份为 `short-bs8-gpu3-r1/checkpoints/best.pt`，`global_step=64`，因此下列数值不能外推为训练完成结果。
+
+### 13.1 轨迹复核结果
+
+四条指令的 full proposal→W rebuild→refined 目标交换，平均末端差异为：P3 temporal `.0328`、底层 P3 lane 0 `.0235`、lane 1 `.0061`、P3 bridge `.0166`、protected detail `.0464`、最终 native action `.0567`。逐次 ODE 调用中，P3/bridge 的差异随时间从约 `.0045` 增长到 `.0166`，而 protected detail 一直约 `.0465`；这表示 P3 路径确实被消费，但当前短 checkpoint 的最终目标差异主要由并行的 protected-detail 载体提供。
+
+### 13.2 受控缩放的因果证据
+
+| 只读干预 | P3 temporal 交换差异 | P3 bridge 交换差异 | 最终 action 交换差异 |
+|---|---:|---:|---:|
+| baseline | `.0324` | `.0165` | `.0564` |
+| coordinator semantic 输入置零 | `.0249` | `.0147` | `.0550` |
+| 底层 P3 两个 lane 置零 | `.0293` | `.0105` | `.0578` |
+| protected detail 置零 | `.0243` | `.0115` | `.0126` |
+
+protected detail 置零会使最终目标差异显著下降，而 P3 置零只改变其中一小部分；这不是“P3断路”的证据，反而说明继续只放大公共 P3 载体会掩盖真正的并行消费关系。`p1-precision=0` 的最终差异会上升到约 `.138`，属于移除相消路径后的非线性重排，不能当作“precision贡献为负”的线性分解。
+
+源码对应关系是：P1 `build_static` 将 target detail 加入 factual protected detail；P2 consequence 在此基础上加入 typed effect/interaction；P3 另外生成 temporal/state-change 两个可选 lane；bottom 在 `_read_policy_delta_bank` 中把可选 P3 与两个 protected carrier 分开读取。因此，下一步应先在同一完整 checkpoint 上复测这条分叉，而不是修改 bridge 固定缩放。
+
+### 13.3 正式长跑状态与下一门槛
+
+正式长跑仍使用启动时锁定的源码 `a2d597d27e001d3bbc901f133d25d6ca5a4cf6a6`，没有被上述探针提交改写；截至 batch `6300/11012`，运行约 `6.41 s/batch`，P2 target interval variation `.1642`、source variation `.3327`、P3 temporal RMS `.3393`、P3 routed update `.4.236`、fixed bridge scale `.25`、null mass `.0015`、source effective count `3.98`、capacity `.9995`、execution gate `1.0`。日志审计仍为 JSON/traceback 完整，只有预期的 capacity-saturated warning。正式最终 checkpoint 和同 branch target-swap 尚未产生；完成前不据此改生产网络。
