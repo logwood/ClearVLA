@@ -31,6 +31,13 @@ from probes.probe_g_slot_identity_nodes import (
     restore_wrappers, summary,
 )
 
+ACTION_MEASUREMENT_UNITS = {
+    "final_native_action": "checkpoint action_normalizer.decode; binary gripper overwritten by command; before simulator clipping",
+    "final_sampled_action_chart": "sampler fitted action chart, before normalizer decode",
+    "final_physical_field": "model physical field, not simulator TCP displacement",
+}
+
+
 DEFAULT_INSTRUCTIONS = (
     "go push the blue block right",
     "go push the red block right",
@@ -168,9 +175,19 @@ def _final_nodes(
     sampled: Any,
     *,
     arm_dim: int,
+    action_normalizer: Any,
 ) -> dict[str, np.ndarray]:
     nodes = _node_arrays(current)
-    native_action = sampled.action[0].detach().float().cpu().numpy()
+    sampled_chart = sampled.action[0].detach().float().cpu().numpy()
+    # Match ClearVLACheckpointPolicy.act_with_input: SamplingResult.action is
+    # still in the fitted action chart. Binary command state bypasses decode.
+    native_action = action_normalizer.decode(sampled_chart).astype(np.float32)
+    if sampled.gripper_command is not None:
+        command = sampled.gripper_command[0].detach().float().cpu().numpy()
+        if command.shape != native_action.shape[:-1] or not np.isin(command, (-1.0, 1.0)).all():
+            raise ValueError("probe binary gripper command must be finite [H] +/-1")
+        native_action[:, -1] = command
+    nodes["final_sampled_action_chart"] = sampled_chart
     arm_dim = max(0, min(int(arm_dim), int(native_action.shape[-1])))
     nodes["final_native_action"] = native_action
     nodes["final_native_action_arm"] = native_action[:, :arm_dim]
@@ -1028,7 +1045,10 @@ def _run_one(
             )
             paths["fixed_w_refined"] = {
                 "event_start": start, "event_end": len(trace_events),
-                "nodes": _final_nodes(current, fixed, arm_dim=arm_dim),
+                "nodes": _final_nodes(
+                    current, fixed, arm_dim=arm_dim,
+                    action_normalizer=policy.bundle.action_normalizer,
+                ),
                 "metrics": _scalar_metrics(fixed.metrics),
             }
         if mode in {"full", "both"}:
@@ -1043,7 +1063,10 @@ def _run_one(
             )
             paths["full_proposal_w_refined"] = {
                 "event_start": start, "event_end": len(trace_events),
-                "nodes": _final_nodes(current, full, arm_dim=arm_dim),
+                "nodes": _final_nodes(
+                    current, full, arm_dim=arm_dim,
+                    action_normalizer=policy.bundle.action_normalizer,
+                ),
                 "metrics": _scalar_metrics(full.metrics),
                 "refined_cache_rebuilt": refined_cache is not cache,
             }
@@ -1283,7 +1306,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             setattr(owner, name, old)
         restore_wrappers(base_saved)
     result = {
-        "schema": "clearvla-target-binding-measurement-v2",
+        "schema": "clearvla-target-binding-measurement-v3",
+        "action_units": ACTION_MEASUREMENT_UNITS,
         "checkpoint": str(args.checkpoint),
         "observation_dir": str(args.observation_dir),
         "layouts": list(args.layouts),

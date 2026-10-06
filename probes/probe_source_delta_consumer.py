@@ -329,6 +329,7 @@ def run(args):
         "source_commit": commit,
         "probe_sha256": file_sha(__file__),
         "noise_seed": 12345,
+        "action_units": base.ACTION_MEASUREMENT_UNITS,
         "limitations": "synthetic supported-K binding swap; per-camera semantic object identity is not established",
     }
     base_saved = base.install_wrappers(model, current)

@@ -1,5 +1,7 @@
 # G 槽位身份、内容与共享绑定：审核注意点
 
+> 2026-10-06更新：最终完整评估见第19–24节；旧探针的native动作命名与指令参考口径由第20节修正。
+
 > 2026-10-05。此文件是持续维护的审核与验收清单，不是新架构、不替代 `00_CURRENT_ARCHITECTURE_CONTRACT.md`。本次提交只新增本文件；不修改模型、配置、loss、探针、checkpoint、工作流或训练进程。文中的“应检查/应修”均为待办，不表示已经实现或通过。
 
 ## 1. 固定来源与结论边界
@@ -403,3 +405,129 @@ d931fe01 的 top 像素重心依次为 (88.5,120.8)、(53.5,116.5)、(37.9,106.2
 同一蓝右指令下，4f0a5b9b/eb9e62fb 的 S real mass 给 K3 约 99.80/99.99%；d931fe01 为 K1–K4 19.39/13.70/42.52/10.12%（余量为 null）。只有一条指令，不能由此宣称所有指令均选 K3。单画面也没有验证跨视角语义身份或跨时间跟踪。
 
 证据根目录：`/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes/historical-k-slots-20261006-v1/`。manifest.json 固定 checkpoint/source，probe.py 为测量快照，六个提交目录各含 summary/分布 NPZ/图，comparison.json 为紧凑比较，training-audit.json 已核对六个完整 epoch 记录。复现参数保存为各提交.command.json；应在 manifest 中对应源码目录、GPU5、PYTHONPATH=该目录执行，输出必须使用新目录。仓库只存本节统计，不保存源码快照、模型或图像。
+
+## 19. 2026-10-06：最终权重、完整验证与标准闭环
+
+最终训练身份为 `a2d597d27e001d3bbc901f133d25d6ca5a4cf6a6`，`train-bs8-gpu0-r1/checkpoints/best.pt`，epoch 1 / step 11012。文件 2,468,580,588 bytes，完整反序列化通过，SHA-256 `5ca168e3f4f33772dd01aca26adcc1b00dfc029b526a950f3b534d5428d19d15`；配置 digest `bfb2257904a6d07f3e66760f667b46f33ec6b827d76980495355fc70b386ee86`。评估 checkout 的生产文件逐项匹配 checkpoint source identity；训练完成后新增的代码为评估探针。DINO 在线冻结、bs8、无 RGB/特征缓存，初始化来自本分支 step64，正式 optimizer/schedule/RNG 重新开始。
+
+原 watcher 使用 simulator NumPy1 环境读取 NumPy2 checkpoint，因 `numpy._core` 导入失败退出。接续修复使用 model Python 验证权重，并消除预建 case 目录与 evaluator 的冲突。失败目录保留；完成结果为：
+
+`/data/senwang/clearvla/experiments/calvin/dinov3-gslot-identity-carrier-20261005-train-bs8-gpu0-r1-closed-loop-replan8-r2`
+
+固定 **18 例、6 任务各3、seed0、max_steps360、execute_rows8**，完成18例、成功11例（61.11%）、错误0。实际 chunk adapter 每次执行前8行；bridge health 中的单行 ABI 字段不能当成重规划周期。仅为本固定面板的成功率。
+
+| 任务 | trial1 / trial2 / trial3；括号为执行步数 | 成功数 |
+|---|---|---:|
+| 蓝左 | 成功195 / 失败360 / 成功348 | 2/3 |
+| 蓝右 | 成功62 / 失败360 / 成功61 | 2/3 |
+| 红左 | 成功60 / 成功60 / 失败360 | 2/3 |
+| 红右 | 失败360 / 失败360 / 成功56 | 1/3 |
+| 粉左 | 成功61 / 失败360 / 成功352 | 2/3 |
+| 粉右 | 成功57 / 失败360 / 成功58 | 2/3 |
+
+上一份相同初始状态 manifest 的正式结果为 d931fe01、8/18：本次新增成功01/03/07/08/13，退步02/09。旧 summary 的 source_commit=4f0a5b9b 是过期派生字段；其 launcher 与 bridge checkpoint health 均确认 d931fe01，权重 SHA-256 为 `ef10a6c1da2030362e4be03ba11497198eca7142234b5c648c4df98fb7499011`。
+
+训练审计覆盖完整 epoch、221个日志窗口；无 traceback/fatal，loss 首/尾窗口中位数 .78202→.45201，physical flow .66701→.39408。完整离线验证 **256批、2046样本、每任务341样本**，对比使用相同 action normalizer：
+
+| 完整验证 / 运行指标 | 本次 a2d597d | 上次 d931fe01 |
+|---|---:|---:|
+| 全24行 source-native action RMSE | .262813 | .268038 |
+| 前8行 source-native action RMSE | .232714 | .230691 |
+| 全24行 arm native RMSE | .132131 | .133958 |
+| gripper event F1 | .330204 | .347098 |
+| step耗时中位数，s/batch | 6.22875 | 6.11251 |
+
+8批 execution-ablation 子集的 .314071/.322129 不属于上述全量指标。显存峰值 allocated 21.53 GiB / reserved 22.34 GiB。尾段实际预算 action/execution/representation 为92.34/4.74/2.91%；账本闭合。W connectivity 220窗口均为1，delta/transport/covariance 动作损失 VJP 尾值约1.33e-4/7.32e-5/5.96e-6；P3/bridge raw gradient L2 约 .16086/.004677。模块梯度存在不认证目标语义正确。
+
+S semantic/geometry interval variation 尾值约 .04081/.04032，公共区间载体 .12227；G content cosine 降至 .6245。这些健康度改善须与下文的自然目标选择分开验收。gripper-command-transition 的实际权重为0；配置中存在 gripper-trajectory 权重也不代表当前 binary 路径使用它，实际该项损失为0。不可把历史已实现的监督项写成本次已启用。
+
+## 20. 三项计量修正：交换幅度、指令参考和动作单位
+
+1. 原“最远坐标”规则在最终 checkpoint 选中 K2/K4，binding 仅 .029589/.040128，交换幅度 RMSE=.007453；短权重的交换幅度不同。两次动作差异不能直接解释为消费能力随训练降低。standard 六对全枚举后，真正反归一化的 arm前8行 RMSE 为 .000379–.014333；其中 K2/K4 接近重复底噪。强交换仍是人工 K 置换，保留总 real mass、null、熵及集中度，尚无真实物块身份保证。
+2. 轨迹探针现在先以该例 state0 建立 instruction-start reference，再输入实际 t 时刻的 causal history。原 v3 在 t 重新建参考，故其下游值只能视为另一上下文；原始文件保留。最终采用 `measurement-trajectory-anchor0-20261006`、strong W/fork 的 `anchor0` 结果。probe noise固定12345，与正式 rollout 的随机序列不同。G参考不变性另验02的24/216：content/semantic/appearance/geometry/binding差异为0，坐标最大差3.58e-7，支持保留既有 goal-free K 轨迹测量。
+3. **旧 `probe_target_binding_measurement_v2._final_nodes` 将 `sampled.action` 命名为 native，实际它仍是 normalizer chart。** 生产 `clearvla/simulation/clearvla_policy.py:386–405` 还会 `action_normalizer.decode`，再用 binary command 覆盖 gripper。第12–15节引用该探针的 arm 数字应重新标记为归一化 chart；正式训练 native 验证和本次实际执行 telemetry 不受此命名错误影响。本次已用保存的完整动作张量离线重算，normalizer SHA-256 为 `7e1b3c4d179c0151c6764c10caaca846291594c83547dfd71bb4dd4db4e93b2b`。下文命令数值全部使用反归一化后的 CALVIN relative_7d 原生控制量，不能称为米或真实 TCP 位移。
+
+探针现要求显式传入 checkpoint normalizer，保留 `final_sampled_action_chart`，正确生成 `final_native_action`，输出 schema v3 和 units 元数据。两个 CPU 回归分别验证 arm affine decode+binary覆盖、continuous gripper decode，均通过；model环境无pytest，直接调用同一测试函数并保存结果。已完成的旧NPZ不覆盖，修正值另存 `native-command-correction-20261006.json`。
+
+## 21. 18条轨迹的阶段证据
+
+目标初始 world-x≈.05 的8例全部在56–62步成功；目标 x≈.23 的10例只有01/03/15成功，分别耗时195/348/352步。state24 时，所有左推任务TCP-x落在 .0345–.0473，所有右推落在 -.0373–-.0299。轨迹和图像显示稳定的近处操作区域偏向，部分例中该处甚至没有目标物块。
+
+| 窗口 | 实际过程与分离位置 |
+|---|---|
+| 01、15早期24–40 | 01先接触粉块30–58；15先接触蓝块30–35。目标仍在较远处，错误在首次接近阶段已经形成。 |
+| 04/06/07/08/12/13/16/18 | 目标恰位于近处，原有接近/推动序列能完成任务。16没有控制步末采样到物块接触，仍被官方oracle判成功，说明“未采样到接触”不能当成从未接触。 |
+| 02的80–112；09的64–80 | 碰到固定桌体/按钮机构，控制器内部target继续积累、实际TCP受阻；最大分离分别15.92cm/11.70cm。解除接触后恢复跟随。错误接近先于此阻滞；不是仅由推理耗时解释。 |
+| 01的160–195与02的208–232 | 01重新靠近并于174–194持续接触蓝块，176–192完成约10.6cm左移。02仅217–219短暂触蓝，整体最大左移1.87mm，随后再次离开；回到物体附近不等于重新完成任务。 |
+| 05/10/11与17撤回 | 05先触红、11先触粉；目标最大右移6.38/2.52/5.25cm后停滞。17在128–136推动粉块约4.28cm，136窗口原生命令开始抬升/反向、140松爪，剩余目标未完成。 |
+| 14与15的328–352 | 两者均终于到粉块附近。14在336–344先向错误方向推约3.46cm，之后内部target继续下压；354的TCP误差7.38cm且有强物块接触，最终净左移未达标。15在336–352左移约10.64cm、352成功。夹爪在接触时的状态与姿态不同，不能只看接近距离。 |
+
+原生请求、controller target、实际TCP和关节、已执行chunk行号均保存。源码 `calvin_env/robot/robot.py:228–236` 在 `use_target_pose` 下累加内部target，解释受阻时“请求继续、实体不动”的位置；其是否被 W/恢复策略准确预测仍未认证。
+
+按执行长度归一化，本次成功/失败组夹爪切换为 **3.14/2.78次每100步**；前8行与24行均值向量反向比例为 **8.52%/7.62%**。因此不能沿用“失败组更频繁切换、更多前缀反向”的旧版本结论来解释本次全部失败。逐例早退和夹爪异常仍可定位；大多数命令没有裁剪饱和。
+
+## 22. G/K到S：空间分离改善，物体选择仍弱
+
+standard最终权重的 top/wrist K两两平均重叠为19.05%/42.56%（d931为41.73%/58.85%）。但 top 的K2/K4仍主要位于图像边缘/背景；K1/K3重叠65.10%，空间标准差很宽。可见红蓝物块上的 top 读质量每K仅约 .000004–.000218。这里衡量采样位置对可见mask的质量；DINO上下文特征可能携带位置之外的物体信息，故此量不等于语义信息占比。
+
+01/02/04的多阶段RGB经执行命令重放，双相机逐像素匹配后导出真实body mask。以02 state24蓝块为例：top可见面积 .005775，**G竞争前 producer-prior 的蓝块读质量已仅2.14e-5**；故不能把全部物体缺失归因于最后一次K竞争。wrist中K4蓝块读质量 .0670，高于K3的 .0187，但S给K4/K3的质量约 .0189/.5159。恢复时K3通常仍占主导，并未形成已认证的物体身份切换。跨相机、跨时间“一槽一物”目前仍没有通过证据。
+
+自然指令探针直接截取生产S/binder内部张量。02 state24，蓝左改红左/粉左，与蓝左改蓝右的对照如下；相对量为差分RMSE除以基线RMS，**不作为信息保留百分比**：
+
+| 节点 | 红左 | 粉左 | 蓝右 |
+|---|---:|---:|---:|
+| raw T5 relative Δ | .4333 | .3858 | .4609 |
+| S goal_input relative Δ | .1930 | .1681 | .8243 |
+| goal_read relative Δ | .04757 | .03672 | 1.1475 |
+| protected goal relative Δ | .05246 | .03940 | 1.1537 |
+| interval_goal创新 relative Δ | .008738 | .004404 | 1.7504 |
+| shared binding绝对RMSE | .000221 | .001176 | .037399 |
+| 原生arm前8行RMSE | .000500 | .000277 | .067081 |
+
+该窗arm重复底噪 .000232–.000301。红色变化的绝对goal值差分 .02092→.02221→.02346，并未在这三步归零；主要可见的是方向强选择性、颜色相对共同量很弱，随后binder相对logit/排名几乎不变。不能仅由relative RMS降低断言不可逆信息截断。
+
+02 state216/320、01恢复160，以及04成功32的原指令家族均复核了颜色响应弱。04蓝右改红右/粉右的原生arm前8差异 .000217/.000255，改蓝左 .083824。物理场景、goal输入和普通执行路径保持相同；微小颜色下游值接近重复底噪，不能据此给P3计算可靠衰减比。
+
+源码定位：`intent.py:793–803`（masked T5→投影→4个goal queries→goal_self），`:911–922`（protected goal与pooled G object facts进入共享binder），`:971–973`（interval_goal再次读取）；`task_execution.py:532–606`包含真实 task/object 交互评分。当前没有恢复旧的可分离评分错误，但压缩后的语言、对象值及相对评分已经不产生有效颜色重指向。数据/监督偏向与该汇总接口各自的因果程度还需窄范围干预区分。
+
+## 23. W、protected-detail、P3与最终命令
+
+在02 state216，保留state0参考、同一噪声，交换支持K3/K2的质量 .562025/.011484。八源账本实际reader差分 .12027–.12122，源值项之和 .12034–.12127；basis变化仅7.0e-7–1.1e-6，contract项3.6e-5–7.4e-5，双状态数值残差约 .000913–.001032。含残差的float64闭合最大误差6.67e-16。本组未发现来源截断、错配或漏分配。
+
+W raw semantic差分 .11598–.11720；2×2分解中的read-context项 .11600–.11729，candidate-world项 .000459–.001082。该干预主要改变P1 query/S如何读取W；不能据此认证W未来预测准确，或断言W不需要。全12个采样节点仅把W raw读取项钳回baseline后，原生arm前8差异 **.009926→.006394**，全24行 **.017658→.013304**；gripper保持相同。向量重排存在，不转换成独立贡献百分比。
+
+相同strong交换的四路分叉如下。左列衡量删除lane本身对原baseline动作的影响，右列是在该lane条件内再交换binding的响应，均为原生arm前8行RMSE：
+
+| 条件 | 删除lane对原动作的改变 | lane内目标交换响应 |
+|---|---:|---:|
+| baseline | 0 | .009863 |
+| P3 semantic输入置零 | .002184 | .009606 |
+| bottom P3两可选lane置零 | .040191 | .009959 |
+| protected-detail置零 | .071189 | .002394 |
+
+重复底噪 .000254–.000294。P3在参与动作生成；本组人工目标交换主要依赖已经融合P1/P2的protected-detail，P3不是这一响应的主要必经通路。完整权重已有消费能力，现有证据不足以把问题归为“P3断路”“固定0.25缩放导致全部失败”，也不足以由单个窗口外推所有任务。
+
+## 24. 证据排序、下一步验收与复现
+
+下一轮按以下顺序处理；本次完成评估和探针单位修复，尚未训练新网络。
+
+1. **优先验证S的目标选择接口。** 在同一共享binder中检验目标相关的逐token语言值能否在全局汇总前与对象事实交互；保留单一K+null绑定、S所有权和普通梯度契约。先做局部producer/consumer替换与梯度核验，再决定结构或监督修复。验收要求同一图像换颜色确实换到对应物体并改变正确方向的原生命令；共同RMS变大不算验收。
+2. **并行约束对象证据的真实性。** 以已匹配的逐相机mask和时间序列作评估标尺，追 producer-prior、上下文内容及G分工；当前分离更大仍可能只是背景分工。正式输入契约保持不引入模拟器真值。EMA可另测稳定性，其本身不能生成正确物体/语言标签；当前g_assignment Teacher仍依赖G先验。
+3. **处理接触后任务维持与恢复。** 优先17的128–144、02的208–232、14/15的328–352，将剩余关系、实际执行前8行、gripper、W预测/已执行创新一并对齐。只有确认哪一消费边界对正确接触证据不响应，才修改那一边界。现有证据保留P3与protected-detail的不同作用，不先整体放大bridge。
+4. 下一候选同时通过普通action-loss反向、source账本、原生命令与重复底噪检查，再跑同manifest的18例。全量验证前8行和gripper事件已有退步，须纳入验收，不能仅以24行平均误差或槽位健康度放行。
+
+证据根目录统一为 `/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes`。紧凑总账 `final-evaluation-audit-20261006.json`；训练 `formal-final-training-audit-20261006.json`；全部阶段 `closed-loop-stage-audit-20261006`；K时间证据 `trajectory-k-20261006-v2` 及 `trajectory-k-anchor0-invariance-20261006.json`；自然指令 `measurement-trajectory-anchor0-20261006`；强W `source-delta-case02-state216-maxcontrast-anchor0-20261006`；分叉 `fork-trajectory-strong-anchor0-20261006`。原始图像、NPZ、checkpoint和失败记录保留在实验目录。
+
+复现当前已保存结果的统计与单位修正（不启动训练或闭环）：
+
+```bash
+cd /data/senwang/clearvla/checkouts/dinov3-g-slot-logit-scale-20261005
+export PYTHONPATH="$PWD"
+clearvla_probe_root=/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes
+/data/senwang/envs/clearvla-sim/bin/python -B "$clearvla_probe_root/decode_saved_probe_commands_20261006.py"
+/data/senwang/envs/clearvla-sim/bin/python -B "$clearvla_probe_root/audit_closed_loop_trajectory_20261006.py" \
+  --root /data/senwang/clearvla/experiments/calvin/dinov3-gslot-identity-carrier-20261005-train-bs8-gpu0-r1-closed-loop-replan8-r2 \
+  --output "$clearvla_probe_root/closed-loop-stage-audit-20261006"
+```
+
+采样时源码为fd89fb71，外部wrapper hash与输入身份保存在结果中，队列脚本/command.json保存精确参数。重采样使用新输出目录；新v3读出直接产生正确native单位，离线修正脚本只用于上述保留的旧chart张量。标准闭环、两个原接续任务、anchor0补测及最终审计均已完成。
