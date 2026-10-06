@@ -633,3 +633,105 @@ python probes/probe_binding_interface.py --plan PLAN --checkpoint CHECKPOINT --o
 ```
 
 上述大写占位符的本次精确实参在证据目录的 `identity-probes-command.json`、`identity-addon-command.json`、`replay-jobs.json`；mask每次必须使用新目录。补测即使第一个选中状态晚于0，也先以state0建立instruction reference，并显式断言。主测使用的原始探针文件已按hash保留；之后仅补了这个晚起点计划的保护。汇总为 `summary/`、物理干预为 `contact_intervention_summary.json`，失败重放和原始大文件仍留在实验目录。
+
+## 28. 2026-10-06 根因追查：两处可复现的接入问题
+
+继续使用 epoch1/step11012 的完整 checkpoint（SHA `5ca168e3...d19d15`），未改生产源码、权重或正式评估配置。证据目录：`/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes/failure-root-cause-20261006-v2`。以下生产源码经 `git diff a2d597d... -- clearvla/...` 确认与训练时一致。§27 的候选判断以本节新增证据为准。
+
+### 28.1 终点目标监督实际全程缺席：原始标注编号漏传
+
+这是已闭合的源码—数据—日志链，不是“终点头可能训练不足”：
+
+1. 旧 HDF5 缺少 `source_annotation_index`。`virtualize_calvin_cached_prefix` 已用 raw reader 严格核验 split、指令、task、source/context bounds、真实前缀长度，但 `clearvla/benchmarks/calvin_raw.py:974–986` 的 `replace` 漏传了已有的 `raw.annotation.index`。
+2. `clearvla/data/annotation_endpoint.py:23–36` 因任一 provenance 字段为空而返回 `unknown-provenance`。这里拒绝凭空编造标签的保护是正确的，问题在已核验来源没有接进来。
+3. `clearvla/mainline/data/dataset.py:728–750` 将 declared/state-observed 设为 false；端点视觉也按该声明屏蔽。训练2165、验证280、测试154个 episode 全部 unknown，labeled windows 均为0。
+4. 配置虽为 `annotation_goal_mode=annotated_endpoint_relation_v1`、权重0.01，221个训练日志采样点的 scene/relation/robot/total、两项coverage及weighted contribution 全为0；完整离线验证亦为0。这个分支仍可通过动作损失间接学习，不能称所有参数“从未更新”，但没有获得设计中的直接终点监督。
+5. 独立探针用**现有生产 loader、overlay 和 resolver** 加载全部2599个 episode；只在探针 dataclass 中填入严格匹配的 `raw.annotation.index`，全部恢复为 `annotated-end-observation`，且 endpoint 均在真实缓存前缀内。RGB、state、action、split、窗口和checkpoint均未修改。恢复的是有来源的末帧观测，**不是成功标签**。
+
+直接修复边界已经具体：在 overlay 接入准确 annotation index，已有编号若与 raw 不一致必须报错；在正式训练 admission 增加“启用监督但整份训练集标签覆盖为0”的报错。不能靠取消 provenance 检查、从文件名猜编号、放宽label mask解决。
+
+### 28.2 训练动作与部署控制器采用不同的相对起点
+
+原始 CALVIN `utils/utils.py:160–171`：`rel_xyz = clip(abs_target_xyz - measured_tcp_xyz, ±0.02) / 0.02`。跨51个训练片段抽查153帧，和原始 `rel_actions[:3]` 的最大差为 **0**。
+
+当前环境 `robot/robot.py:228–242`、实际 `use_target_pose=True`：`stored_target_next = stored_target_previous + 0.02 * rel_xyz`。18条完整轨迹的控制器目标递推最大误差均为 **0**。接触受阻后两种起点分离，旧目标误差会继续被积累；模型在线观测只有实际proprioception和命令历史，不含这个控制器目标。
+
+四个窗口各做一对新进程物理重放，事实前缀双相机RGB逐像素相同；保留全部原手臂/夹爪命令，只将干预后的起点切到实际TCP：
+
+| 窗口 | stored-target 最大目标/TCP差 | measured-TCP 最大差 | 额外物理结果 |
+|---|---:|---:|---|
+| 02，32–120 | 15.92cm | 0.675cm | 两者都未接触蓝块；漂移减少不等于目标选对 |
+| 09，240–280 | 1.044cm | 0.476cm | 目标最低z由0.4174恢复0.4600；1091N异常接触消失，但没有推动 |
+| 14，328–360 | 7.381cm | 0.621cm | 965N异常接触消失，但没有推动 |
+| 17，136–168 | 1.158cm | 0.700cm | 最终右移由4.413cm变5.211cm，仍未完成 |
+
+这是明确的动作参考点不一致，以及它对漂移/异常接触的因果证据；**不是新策略的18例成功率**。CALVIN所带环境本身默认该累积方式，因此后续适配必须显式记录执行语义变化，在相同18例/replan8下单独复测，不能把两种执行配置混算。也不能只改 anchor 就宣称解决颜色选择或撤回。
+
+## 29. G/S：相机分工的直接来源与训练数据中的捷径
+
+02/state24 候选 `content_key` 的相机均值差 RMS=1.112，视角内变化RMS=0.358；完整candidate归一化后分别0.648/0.348。同一当前G输入下，仅消去投影content的相机均值差，K3腕部质量从0.9991降至0.8455；消去全部candidate的相机均值差降至0.6150。17/state136分别0.9971→0.7376→0.5859。context/history/coordinate单项同类干预影响很小。此处诊断干预保留视角内候选变化，未当作正式修复。
+
+G的唯一直接目标仍是全图重建（`grounding.py:1029–1030`）；当前权重下，全部相机均值消去使重建误差02从0.2496升到0.3381、17从0.2648升到0.3417。说明现有重建表示确实利用了相机差异；它没有提供“跨视角同一实体”的直接验收。K分散与低cosine仍不能替代真实物体身份。
+
+以上干预后，S在三种自然颜色指令下仍主要选择K3。故不能用简单去均值/相机平均冒充颜色绑定修复。§25的135个真实mask窗口、11个自然指令窗口、05/11错物体碰撞链仍成立。这里已定位到实际candidate-content和共享binding接口；尚未通过一次训练干预证明“某一种新身份损失就是充分修复”。
+
+训练原始几何审计覆盖 train2165/val280/test154：训练片段起始手—目标平面距离中位数5.44cm；按每8帧采样，**90.54%**窗口目标就是离手最近物体，接近代理窗口中为94.97%。全部训练片段的正确目标净推进至少10.04cm，没有发现本轮六任务原始片段未完成推动的证据。近物捷径有明确的数据基础，但这些频率本身不是“训练因果已经证明”的替代物。
+
+审计特别处理了ABC物体次序：A为pink/blue/red，B为red/blue/pink，C为blue/red/pink，D为red/blue/pink；由源frame范围 `scene_info.npy` 和对应scene YAML确定，不能用合并包的D `.hydra`解释ABC。首版统计因这个审计索引错误已标记REJECTED，使用 `training-geometry-r2`。生产模型没有读这些审计物体标签，训练数据未因此改写。
+
+## 30. 撤回：实际命令复现与历史条件的因果定位
+
+这轮按正式rollout的每个8步重规划推进同一私有噪声生成器。14个定位状态原生arm前8行重现RMSE为约1.5e-4–4.5e-4，二值夹爪逐行一致；paired repeat作为数值底噪。之前只固定局部噪声的自然语言对照仍可用，但不能用它逐行替代原始动作。
+
+17/state128 的coarse前8行x已从正转负（-0.037），z升至+0.106；实际执行前8行此时仍x≈+0.249。state136最终变为x≈-0.201、z≈+0.384，并在第5行开始开爪。故提前撤回已在上游出现，不能只归给P3输出缩放。
+
+保持state136当前画面、真实G/S目标来源与采样噪声，在命名消费边界替换为state120已有特征。下表x/z是原生相对动作的无量纲命令值，不是米：
+
+| 干预 | 最终前8行平均x | 平均z | 夹爪 |
+|---|---:|---:|---|
+| factual/repeat | -0.201 | +0.384 | 中途打开 |
+| 仅bottom executed-history | -0.026 | +0.186 | 全闭合 |
+| bottom三类proprio/history | +0.017 | +0.149 | 全闭合 |
+| S robot/history与bottom三类history | +0.263 | +0.030 | 全闭合 |
+
+S层单独替换robot/history时coarse恢复x≈+0.090，但最终仍x≈-0.104/z≈+0.354；只替换coarse预测几乎不改变最终命令。因此退出趋势经S与底层的多个历史入口产生，coarse不是唯一控制入口。仅把instruction reference重置到当前帧，最终仍x≈-0.185/z≈+0.367，不能解释成只是“旧参考太久”。这些是定点因果定位，不是冻结历史作为正式策略；冻结会丢掉真实控制反馈。
+
+第10例追加4个状态复核（56/72/120/136），原动作前8行arm RMSE为1.95e-4–5.27e-4。state72尚未接触目标，事实命令x=-0.051/z=+0.265；仅将bottom executed-history替成state56，恢复x=+0.203/z=+0.015，均保持闭爪。state136接触后的第二次撤回，事实x=-0.121/z=+0.325、末3行开爪；只替executed-history得到x=+0.007/z=+0.184，而S robot/history与bottom一起替为state120后为x=+0.315/z=+0.020、全闭爪。重置指令参考仍然撤回。这样在两条失败轨迹、接触前后均定位到了历史消费入口，而不是仅有一个窗口的偶然响应；仍不能由这些特征钳制推导真实闭环恢复成功。
+
+## 31. 终点预测与夹爪：实测边界
+
+在3个相同初始参考画面分别测试红/蓝/粉×左/右六条自然指令：FP32下换颜色的预测终点TCP差仅 **0.010–0.070mm**，换方向约 **0.400–0.429mm**；protected goal的方向差RMS仍约0.547，说明方向语言并未在此前完全丢失。预测场景的颜色差RMS仅3.07e-6–6.60e-6。BF16舍入会进一步掩盖差异，但FP32也极弱，不能归因于半精度一种因素。
+
+该目标头没有直接终点监督的原因已在§28.1闭合。预测的机器人终点不能当作目标物位置或完成判据；仍需恢复有来源的终点监督后检验目标场景/关系，以及是否真正改善10/17任务维持。注意 `reference_observation_law` 是固定、完整原生chart的label metric，不能泛称本版本所有Teacher都由G自己生成。
+
+14/state336：开爪概率前7行约0.959–0.999；绕过private gripper gate仍约0.733–0.964，仍选择开爪。仅把过去夹爪命令诊断性改成闭合、同时同步world/robot/sparse history中的重复命令，输出开合行数基本不变。因而不是简单的符号反转、private gate单独错误或纯粘连上一条夹爪命令。§26.1的同手臂闭爪物理反事实仍证明接触配合错误有实质影响；当前来源失配与缺少恢复状态监督应在重新评价这个分支之前优先处理。
+
+## 32. 修复顺序、验收与复现
+
+7个失败的行为证据与根因边界：
+
+| 失败例 | 已确认的阶段机制 | 已闭合/未闭合 |
+|---|---|---|
+| 02 | 先朝近处区域，随后控制目标与实际TCP严重分离；很晚才短暂接触蓝块 | 累积起点对漂移的作用已闭合；正确目标选择尚未恢复 |
+| 05、11 | 先推动错误物体，再由物体间碰撞间接推动指令目标 | 真实物体身份/碰撞链已核验；G相机分工和S弱颜色重指向已定位，具体身份训练修复仍待验证 |
+| 09 | 迟到的接触伴随异常向下挤压 | anchor物理干预去掉异常接触，但未产生合格推动 |
+| 10、17 | 接触前或未推动足够距离就撤回/开爪 | S与bottom历史消费的定点因果作用已定位；缺失终点监督是实在的训练接入缺陷，其行为收益需修复后训练验证 |
+| 14 | 开爪与向下动作共同形成异常接触/停滞 | 同arm闭爪物理反事实可完成目标；不是简单符号/private gate错误，策略开爪依据的充分修复仍待验证 |
+
+1. **先闭合硬接口**：raw overlay补全严格核验的annotation index，并对“选中终点监督而整训练集0覆盖”报错；明确训练relative-action与执行器基点契约。生产修改后分别验证真实终点label、普通梯度、训练/部署一步与多步目标一致性，不能更改split或成功阈值来掩盖问题。
+2. **同完整checkpoint重新评估执行适配影响**：相同18例、6任务各3例、seed0、360步、replan8，记录新的动作执行语义。局部physics replay不计入成功率。终点监督缺失无法通过只重跑旧checkpoint恢复，应在修好数据接入后训练并重新评估。
+3. **继续保留身份与任务维持验收**：实际物体mask/跨视角身份、自然颜色重指向、G→S→P1/P2→原生命令、未完成时保持推进、受阻恢复与gripper接触；不能删history、固定闭爪或统一放大P3来代替修复。G目标选择捷径的具体训练修复仍需这些验收，不能称现已解决所有7个失败。
+
+本轮仅新增/修改探针与研究文档。旧训练、权重、正式18例结果及生产行为均未改。大文件留在实验目录；本地只交付摘要和文档。失败尝试保留：`boundaries-r1`因故意换原始S state触发源身份保护；`drivers-r1`因诊断命令未同步所有重复源触发一致性保护。修正探针在投影/消费边界干预或同步完整命令来源，未关闭保护。
+
+工作目录：`/data/senwang/clearvla/checkouts/dinov3-g-slot-logit-scale-20261005`；模型Python `/data/senwang/envs/clearvla-sim/bin/python`，物理回放Python `/home/sen.wang/.venvs/clearvla-calvin/bin/python`。所有输出目录必须新建；完整实参和有效/拒绝输出见本轮 `completion.json`。
+
+```bash
+python -m probes.audit_training_geometry --manifest MANIFEST --rollout ROLLOUT --output NEW_GEOMETRY
+python -m probes.probe_annotation_provenance --manifest MANIFEST --output NEW_PROVENANCE
+python -m probes.probe_rootcause_boundaries --plan PLAN --checkpoint CHECKPOINT --output NEW_BOUNDARIES
+python -m probes.probe_failure_drivers --plan PLAN --checkpoint CHECKPOINT --output NEW_DRIVERS
+python -m probes.probe_failure_drivers --plan PLAN --checkpoint CHECKPOINT --output NEW_CASE10 --case-ids 10
+python -m probes.probe_endpoint_conditioning --plan PLAN --checkpoint CHECKPOINT --output NEW_ENDPOINT
+python -m probes.audit_controller_anchor --audit AUDIT_WITH_GEOMETRY_R2 --rollout ROLLOUT
+```
