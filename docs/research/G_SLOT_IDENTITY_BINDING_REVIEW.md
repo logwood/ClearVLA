@@ -380,3 +380,26 @@ step 64、同一 standard 观测的逐相机复测：坐标与实际分布重新
 helper 的 shell/嵌入 Python 语法、当前源码 guard 和短 checkpoint 的实际测量均已验证；任务已启动等待最终权重，尚未完成这些 full-checkpoint 测试。每阶段失败独立记账，不能因部分成功宣告全部通过。标准闭环与探针结果要结合分析：优先核对自然语言选择、arm 前 8 行、gripper 和重复底噪。人工 K 权重交换尚无真实物体身份保证；整条 lane 置零是上下文依赖的非线性干预，不据此计算独立贡献百分比或直接修改 P3/bridge。
 
 外部测量源码、helper 快照和结果保存在上述实验的 `probes/` 中；不修改已被两个接续任务锁定的生产/探针源码。分割原始数据与图像不纳入仓库文档。
+
+## 18. 2026-10-06：六份历史正式 checkpoint 的 K 空间读取
+
+用户澄清要看历史版本，而非 step 64 短跑。本次补测六份已完成正式训练的 best.pt，均保存 epoch 1 / step 11012；训练 batch size、初始化和配置不同，因此只作行为描述，不是受控的修复收益实验。为避免用新网络解释旧权重，每份 checkpoint 使用其 git commit 的独立源码快照，逐文件 SHA-256 与 checkpoint.identity.source.files 全部核验通过。
+
+输入统一为已保存的 standard NPZ、蓝块向右指令、与既有探针一致的重复帧/四步 executed-world history。调用各版本自身的 act_with_input，截获采样前输入，再执行原 deployment_cache；G producer 和 per-camera 条件读取均来自该版本原函数。没有在最新生产 checkout 中切换源码，也没有改权重。物块 mask 沿用第 17 节逐像素匹配的模拟器分割。
+
+| checkpoint source | 历史阶段 | 上方相机 K 两两平均重叠 | 手腕相机 K 两两平均重叠 |
+|---|---|---:|---:|
+| 617fc567 | 初期优化 bs8 | 95.17% | 93.19% |
+| 18750208 | bs4 r1 | 62.81% | 53.05% |
+| f405c877 | W/global 合并修复 | 92.26% | 94.20% |
+| 4f0a5b9b | identity/trajectory 修复 | 95.04% | 86.51% |
+| eb9e62fb | deep-repair r2 | 84.59% | 85.19% |
+| d931fe01 | S-interval repair 正式长跑 | 41.73% | 58.85% |
+
+重叠定义为每相机六对 K 的 sum(min(p_i,p_j)) 均值，100% 表示同一空间读分布；它不是语义向量 cosine、对象识别率或独立实体数。早期多份权重存在强空间重复；d931fe01 分布分离增大，仍不能据此认定一槽一物。
+
+d931fe01 的 top 像素重心依次为 (88.5,120.8)、(53.5,116.5)、(37.9,106.2)、(104.0,21.6)，wrist 为 (50.3,25.8)、(41.9,22.4)、(42.9,51.0)、(57.9,50.4)。K1 读较宽桌面操作带，K2/K3 的 top 读分布重叠 79.11%，K4 偏上方背板边缘；腕部 K3/K4 有大量下方背景质量。实际可见红/蓝物块上的读质量：top 各 K 为 0.564/0.352/0.136/0.911%，wrist 为 5.748/5.245/1.580/2.526%。此结果是采样位置对可见 mask 的概率质量；上下文视觉特征仍可能携带区域外物体信息，不能把该量直接称为语义信息占比或定位准确率。
+
+同一蓝右指令下，4f0a5b9b/eb9e62fb 的 S real mass 给 K3 约 99.80/99.99%；d931fe01 为 K1–K4 19.39/13.70/42.52/10.12%（余量为 null）。只有一条指令，不能由此宣称所有指令均选 K3。单画面也没有验证跨视角语义身份或跨时间跟踪。
+
+证据根目录：`/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes/historical-k-slots-20261006-v1/`。manifest.json 固定 checkpoint/source，probe.py 为测量快照，六个提交目录各含 summary/分布 NPZ/图，comparison.json 为紧凑比较，training-audit.json 已核对六个完整 epoch 记录。复现参数保存为各提交.command.json；应在 manifest 中对应源码目录、GPU5、PYTHONPATH=该目录执行，输出必须使用新目录。仓库只存本节统计，不保存源码快照、模型或图像。
