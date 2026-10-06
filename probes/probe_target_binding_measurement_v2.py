@@ -213,6 +213,8 @@ def install_deep_wrappers(
     original_decoder_read: Any,
     p3_semantic_scale: float = 1.0,
     bottom_p3_scale: float = 1.0,
+    protected_detail_scale: float = 1.0,
+    p1_precision_scale: float = 1.0,
 ):
     saved: list[tuple[Any, str, Any]] = []
 
@@ -356,6 +358,23 @@ def install_deep_wrappers(
         route_state["precision_pending"] = (
             bank.protected_policy_precision is not None
         )
+        if float(protected_detail_scale) != 1.0 and bank.protected_detail is not None:
+            bank = replace(
+                bank,
+                protected_detail=(
+                    bank.protected_detail * float(protected_detail_scale)
+                ),
+            )
+        if (
+            float(p1_precision_scale) != 1.0
+            and bank.protected_policy_precision is not None
+        ):
+            bank = replace(
+                bank,
+                protected_policy_precision=(
+                    bank.protected_policy_precision * float(p1_precision_scale)
+                ),
+            )
         if float(bottom_p3_scale) != 1.0:
             values = bank.values.clone()
             scaled_indices: list[int] = []
@@ -698,6 +717,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         original_decoder_read=base_read,
         p3_semantic_scale=args.p3_semantic_scale,
         bottom_p3_scale=args.bottom_p3_scale,
+        protected_detail_scale=args.protected_detail_scale,
+        p1_precision_scale=args.p1_precision_scale,
     )
     sampling_saved = install_sampling_trace(model, current)
     installed_binder_forward = TaskConditionedTargetBinder.forward
@@ -853,6 +874,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "operation": "swap_farthest_supported_physical_coordinate_pair",
             "p3_semantic_scale": float(args.p3_semantic_scale),
             "bottom_p3_scale": float(args.bottom_p3_scale),
+            "protected_detail_scale": float(args.protected_detail_scale),
+            "p1_precision_scale": float(args.p1_precision_scale),
         },
         "records": records,
     }
@@ -877,6 +900,8 @@ def main() -> None:
     parser.add_argument("--min-coordinate-separation", type=float, default=0.15)
     parser.add_argument("--p3-semantic-scale", type=float, default=1.0)
     parser.add_argument("--bottom-p3-scale", type=float, default=1.0)
+    parser.add_argument("--protected-detail-scale", type=float, default=1.0)
+    parser.add_argument("--p1-precision-scale", type=float, default=1.0)
     args = parser.parse_args()
     result = run(args)
     print(json.dumps({"output": str(args.output), "records": len(result["records"])}, indent=2))
