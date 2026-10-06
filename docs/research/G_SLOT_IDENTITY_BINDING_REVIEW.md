@@ -347,3 +347,15 @@ python -B probes/source_delta_ledger.py baseline.npz swapped.npz --output paired
 输出目录必须不存在，禁止覆盖历史结果。离线固定源/换 beta、固定 beta/换源、同号/反号残差的代数检查通过；实际 16 对输入通过轴、有限性和身份对齐检查。文件 hash 写在各 NPZ 的 metadata 中。仓库只保存探针和决策统计，不提交 checkpoint 或 NPZ。
 
 最终权重的独立接续脚本为 `/home/sen.wang/mysh/clearvla-gslot-source-delta-final-20261006.sh PROBE_COMMIT`，只接受本次长跑的 epoch 1 / step 11012 / source `a2d597d...`。它检查生产及探针源码未漂移，等待 GPU3 空余至少 16 GB，再执行上述四指令、重复性、W/read-context 配对与 W 单项钳制。任务状态与脚本快照保存在 `probes/source-delta-formal-final-20261006-r1-job/`；与已有 GPU4 的 R8 闭环接续任务相互独立，不重启训练。
+
+## 16. 2026-10-06：K 坐标含义与 EMA 的实际状态
+
+当前配置为 `entity_chart_mode=current_image_support_v1`。`grounding.py:929–935` 将完整候选位置分布推到当前相机图像，`vision/entity_chart.py:215–220` 在每个相机内归一化后求二维一阶矩，输出 `[B,K,C,2]` 的 normalized xy，`align_corners` 对应 RGB 两端像素中心。它是读分布重心，不是经标定的 3-D 位置、语义物体标签或跨时跟踪的身份保证。生产保留 C 轴；旧探针 `_select_physical_pair` 对双相机 xy 加权平均仅能定义其人工交换，不能作为真实物块间距证据。
+
+step 64、同一 standard 观测的逐相机复测：坐标与实际分布重新求矩的最大误差为 `0`。但 200×200 上方相机内 K1 中心约 `(104,117)`、空间标准差约 `(61,36)` px；K2/K4 中心约 `(92,7)/(101,6)`，主要读背板上沿；K3 中心约 `(27,183)`，主要读桌腿/地板附近。K2/K4 的条件分布重叠质量 `sum(min(p,q))` 在上方/手腕相机为 `.9095/.8435`。因此本样本有明显背景和重复区域读取，不能把“求矩正确”当作“物块定位正确”，也不能据此外推正式最终权重。没有物体分割/标定真值，本次不报告伪精确的物块定位误差。
+
+复测目录：`/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes/k-coordinate-ema-short-20261006-v1/`。`summary.json` 保存 checkpoint/input/source hash 和统计；`per_camera_k_coordinates_aligned.png` 的热图节点与 RGB align-corners 端点对齐；初稿热图使用普通 imshow cell extent，最终分析只使用 corrected aligned 图。每幅热图独立缩放，不按颜色亮度比较不同 K 的总质量。
+
+当前主线 Teacher 是 `training_targets.teacher: ObjectFutureTeacher`，其 `semantic_content_key`、`appearance_content_key` 均为冻结的 `[64,768]` 正交初始化投影，实际 current-reference mode 为 `g_assignment_v1`。`observation_association.py:76–88` 冻结参数，`:342–389` 仍用当前 G 坐标构建几何匹配先验；冻结参数不代表标签独立于 G。`training/engine.py:1187–1194` 没有 EMA 更新。旧 observation encoder 虽仍实例化 decay `.995` 的 Teacher-G 投影，但其更新只位于旧 `teacher_interval_targets` 路径，从当前 adapter 调用的 encoder 方法不可达；`teacher_supports` 只调用冻结 DINO 内容变换。
+
+指数移动平均 Teacher/权重与 Efficient Multi-Scale Attention 是不同方案，需分清用户含义。前者可作为训练目标/权重稳定性的候选，无法凭平均生成正确的对象定位或语言标签；直接平滑 K 坐标还需先解决跨时 K 身份和相机运动。后者是视觉特征注意力，需要另行定位特征分辨率/可分性不足的证据，不能由现有 EMA Teacher 代码推断效果。本次只检查源码和短 checkpoint，没有改网络、监督或现有长跑/接续探针。
