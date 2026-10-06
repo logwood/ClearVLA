@@ -68,6 +68,7 @@ def _trace_summary(current: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if isinstance(value, np.ndarray)
         and not name.startswith("_")
         and name.startswith(prefixes)
+        and "_call_" not in name
     }
 
 
