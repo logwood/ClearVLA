@@ -543,12 +543,23 @@ def _run_one(
         if "full_proposal_w_refined" in paths else "fixed_w_refined"
     )
     selected = paths[selected_path]
+    path_comparisons: dict[str, Any] = {}
+    if "fixed_w_refined" in paths and "full_proposal_w_refined" in paths:
+        path_comparisons["fixed_vs_full_action"] = compare(
+            paths["fixed_w_refined"]["nodes"]["final_native_action"],
+            paths["full_proposal_w_refined"]["nodes"]["final_native_action"],
+        )
+        path_comparisons["fixed_vs_full_physical_field"] = compare(
+            paths["fixed_w_refined"]["nodes"]["final_physical_field"],
+            paths["full_proposal_w_refined"]["nodes"]["final_physical_field"],
+        )
     return {
         "swap": bool(swap),
         "pair_info": pair_info,
         "selected_path": selected_path,
         "nodes": selected["nodes"],
         "path_nodes": paths,
+        "path_comparisons": path_comparisons,
         "paths": {
             name: {key: value for key, value in path.items() if key != "nodes"}
             for name, path in paths.items()
@@ -683,12 +694,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "baseline": {
                         "selected_path": baseline["selected_path"],
                         "path_measurements": baseline["paths"],
+                        "path_comparisons": baseline["path_comparisons"],
                         "static_summaries": baseline["static_summaries"],
                         "trace_events": baseline["trace_events"],
                     },
                     "swapped": {
                         "selected_path": swapped["selected_path"],
                         "path_measurements": swapped["paths"],
+                        "path_comparisons": swapped["path_comparisons"],
                         "static_summaries": swapped["static_summaries"],
                         "trace_events": swapped["trace_events"],
                     },
