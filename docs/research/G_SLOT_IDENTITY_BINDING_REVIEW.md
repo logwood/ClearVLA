@@ -3053,10 +3053,10 @@ stays in the experiment directory; no internal tensor archive is downloaded.
 At 22:28 UTC the panel has nine completed cases: six successes, failures
 02/03/09. This is not a final panel score. Case03 regresses relative to both
 A and B-v1; case09 regresses relative to B-v1. All compared initial robot and
-scene arrays are exactly equal. Case03 first contacts the correct blue block
+scene arrays are exactly equal. Case03 first records contact with the blue block
 at state195, reaches only 4.370cm displacement at state287 and finishes at
 2.790cm. Goal/TCP gap at its progress peak is 2.05mm (whole-trial max 2.09cm).
-Case09 first contacts red at 127, peaks at 4.235cm at 137 with a 4.40mm gap.
+Case09 first records red contact at 127, peaks at 4.235cm at 137 with a 4.40mm gap.
 These observations require contact/post-contact maintenance analysis; they do
 not attribute the regression uniquely to the identity-loss change or a
 controller mechanism. B-nullv2-short-r1-promotion-block.json prevents formal
@@ -3072,10 +3072,104 @@ snapshot; B-nullv2-partial-panel-snapshot.json records the panel comparison.
 
 An additional read-only v2 audit now uses these own completed trajectories:
 success01 at112/120/128; regression03 at184/192/200 and272/280/288;
-regression09 at112/120/128/136/144. These are actual first-correct-contact
+regression09 at112/120/128/136/144. These are actual sampled target-contact
 and peak-progress replans, not reused A/B-v1 timestamps. The existing
 outcome/goal consumer removals and exact producer ledger run together under
 pinned b2485755/T2, deterministic paired controls, unchanged binding and
 parameters. Receipt B-nullv2-outcome-regressions-fresh-r1.receipt.json records
 the selection and script/plan hashes; job status has the -job directory suffix.
 It does not replace the full v2 fresh physical-mask/natural-command audit.
+
+#### 34.33.13 Completed v2 behavior and unresolved physical grouping (2026-10-07)
+
+**V2 is not promoted.** The standard stored-target/R8 panel finishes at 12/18,
+versus A 13/18, B-v1 17/18 and mature 11/18. Failures are 02/03/09/10/14/15;
+03/15 regress versus A, and 03/09/10/14/15 versus B-v1. All 18 NPZs are intact
+(212035263 bytes), finite, length checked and individually hashed. Initial
+robot/scene arrays and both RGB images exactly match the earlier panels;
+there are no infrastructure errors. Artifact:
+B-nullv2-short-closed-loop-final-audit.json. Neither formal training has begun.
+
+All six failures record correct-target contact, but that is not a pushing
+alignment or maintenance certificate. Maximum requested-direction progress is
+3.735/4.370/4.235/7.675/5.226/2.550 cm respectively. Recorded contact is sampled
+after env.step, not every physics substep: success01 already moves the target
+before its first nonzero sampled contact at 127. Earlier "first contact"
+wording means first recorded contact, not proof of absent earlier interaction.
+Keep the controller, finger configuration and loss of task maintenance separate
+from upstream identity defects. Phase evidence is in B-nullv2-fresh-phase-short-r1.
+
+**The low-null repair retains single-K concentration on real objects.** All
+qualification stages have completed, including own RGB-exact mask replay and
+130 own windows. Unsupported objects are excluded below; ownership null is
+reported separately from the real-K conditional distribution.
+
+| Supported-object audit | Old 60 top / wrist | Own 130 top / wrist |
+| --- | ---: | ---: |
+| Object observations | 124 / 56 | 268 / 139 |
+| Dominant K3 observations | 117 / 56 | 250 / 133 |
+| Object pairs sharing argmax | 67/78 / 9/9 | 143/166 / 23/26 |
+| Median between-object real-K TV | .0548 / .0653 | .0627 / .0502 |
+| Median canonical-atom ownership null | .00598 / .00192 | .00664 / .00229 |
+
+Same-image measurement is zero in both sets. All 120 old and 260 own
+same-instruction repeats are exact; own natural-color arm RMS difference has
+median .000428 and maximum .002332. This establishes a reproducible response,
+not correct color grounding. Four deterministic old-window probes retain a
+source-read bottleneck: blue-versus-red in05 and red-versus-pink in11 have
+actual target read share .03861/.01328. Under fixed G, any nonnegative K
+mixture is bounded by .04538/.02313 (area-normalized .1012/.0572). These are
+source-read convex bounds, not whole-model or semantic-information bounds.
+Artifacts: B-nullv2-{matched,fresh}-factual-short-r1/decision-summary.json,
+B-nullv2-deterministic-target-r1/source-read-ceilings.json.
+
+Four actual source-prediction loss decompositions assign only 4.14-6.70% to
+visible blocks. Their object source ownership null is now .0020-.0357, while
+whole other-episode source replacement still has small object prediction
+effects (one window improves). Low null does not repair background-dominated
+supervision or enforce different physical groups. Final BS8 ordinary VJP
+connects all23 new consumer parameters finitely; W identity/view-content L2
+is .00702/.00662, S identity .00388, outcome output .01533. Outcome image/view
+remain tiny nonzero at 2.96e-8/8.13e-9, not dead paths or proven effectiveness.
+Artifacts: B-nullv2-object-source-final-r1 and B-nullv2-module-vjp-short-r1.
+
+**The own-regression ledger preserves the earlier measurement defect.** All14
+windows complete with repeat/binding/parameter assertions and exact producer
+reproduction. Median native first8 arm change is .000360 for removing the
+observed outcome, .000382 for visual goal and .005584 for robot goal. None
+flips the original mean X/Z direction. Current-to-start correspondence real
+mass remains .00295-.01688; image contrast .0738-.1287 becomes
+.000161-.000339 after transport. These are fixed-input sensitivities and a
+shared preparation defect, not independent contribution percentages or a
+unique cause of the retreat. Artifact: B-nullv2-outcome-regressions-fresh-r1.
+
+**Candidate groups and chained flow also need admission.** Sensor-only RGB-D
+plane/connectivity proposals (PCL-style, probes/sensor_surface_groups.py)
+first select the floor in two old views; the explicit under-observed-TCP
+support-footprint rule corrects that ambiguity without a known table height.
+It covers 3875/4300 old and 8378/9303 fresh visible block pixels with pure
+groups in these samples, but splits one pink block in fresh01/112 and many
+robot/cabinet surfaces. Different groups therefore cannot directly label
+different physical objects. Oracle bodies only score proposals. Receipts:
+rgbd-surface-groups-pilot-r1 and rgbd-surface-groups-workspace-r2, pinned
+186e2815/93c588bf; this is probe code only.
+
+RGB-only DIS composition across four-step pairs does not close long-gap
+tracking. On older16/fresh-v2-14, both strict-chain and endpoint-only gates
+accept zero of516/225 moving wrist points. Zero-on-rejection EPE is
+21.796/30.863 px. Endpoint-only top accepts31/69 and8/33 moving points, but
+also4/7 geometrically occluded fresh points. Preserve missed motion and
+occlusion errors; do not just relax the gate. Receipt:
+rgb-reference-chain-qualification-r1, pinned2df3bc7f, probe_rgb_motion_chain.py.
+
+Next qualify an independent whole-instance prior and sensor-supported
+cross-view/time grouping before proposing different-group constraints; then
+revisit task-relative visual measurement with valid support. No segmentation
+teacher, matcher replacement, controller change or slot-balance rule has been
+admitted to production. Official SAM2.1-tiny weights were obtained only for an
+isolated proposal audit (revision de431c4043854a71d8101e17995dfe596bf101a5,
+model SHA256 48c14467e5cf9e51870511feb72c89688e82dd74523142c0538b663e193ac2a7).
+The official LFS digest matches; installed Transformers4.57.6 is unchanged.
+Reference: [Meta SAM2](https://github.com/facebookresearch/sam2). Prompts must
+be automatic RGB/sensor proposals, never oracle points/boxes. No raw tensor
+archive or feature cache is introduced. All large evidence stays outside Git.

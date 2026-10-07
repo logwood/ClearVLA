@@ -1723,14 +1723,18 @@ standard panels: A 13/18, B-v1 17/18, mature baseline 11/18. All old successes
 remain, but cases 05/11 include pushing another block into the target; the
 scores do not certify correct identity selection. The equally exposed v2
 short completed 1024 BS8 updates and 256 offline batches at step 12036;
-its standard panel and physical-object qualification are running. Other-episode
+its standard panel is complete at 12/18, and physical-object qualification is
+complete on 60 matched old and 130 own new windows. Other-episode
 source replacement still raises prediction MSE only 0.56-4.01%, despite low
 offline ownership null. Neither fact proves learned physical identity.
-The partial v2 panel already regresses case03 versus A/B-v1 at identical
-initial states; B-nullv2-short-r1-promotion-block.json keeps formal promotion
-blocked while the full panel/probes continue. Correct-object contact alone
-does not certify post-contact progress or task maintenance.
-No formal A/B experiment is promoted. See 34.33.6-34.33.12
+V2 fails 02/03/09/10/14/15 and regresses 03/15 versus A at exactly matched
+initial robot/scene/RGB states. All six failures record target contact;
+telemetry samples are not every physics substep. The promotion block remains.
+The 130 own windows have exact same-instruction repeats, but supported top/
+wrist object observations choose K3 in 250/268 and 133/139 cases. Low null
+has not restored physical separation. Independent mask proposals and sensor
+groups are research candidates only; groups can split one physical body.
+No formal A/B experiment is promoted. See 34.33.6-34.33.13
 and pinned external receipts for current evidence and pending qualifications.
 
 The immutable BS8 short-run source is 3a84399926d50831470518e1b7f105131d3f1056.
@@ -1778,6 +1782,10 @@ visibility, long-gap, K/view support and ordinary-gradient gates.
 Renderer OpenCV 4.11 and training OpenCV 5.0 differ at a few temporal photo-gate
 boundaries. State the runtime when claiming exact sensor-label reproduction;
 do not generalize renderer admission to identical training support.
+Composing short RGB matches to the task start also fails: no moving wrist
+points pass the final gate in either the older 16 or independent v2 14 windows.
+Abstention and occlusion errors must remain in the ledger; relaxing unknown
+or forcing distinct slot occupancy is not an admitted repair.
 
 
 ### Current CALVIN audit constraint (2026-10-07)
