@@ -984,3 +984,12 @@ derivatives, not full counterfactual losses or evidence that a particular color
 was physically selected. G/action L2=0.0410 and binder/action L2=0.0292.
 The full model parameters receive finite gradients; enormous virtual tangents
 at zeroed language inputs are not admissible instruction perturbations.
+
+Natural wording scope was expanded with probe_language_template_geometry.py:
+20 complete templates cover all six color/direction tasks (120 matched color
+pairs, 60 direction pairs). On original full weights in FP32 CPU, average raw T5
+mean difference is 0.01610 (color) versus 0.01478 (direction); protected goal_self
+difference is 0.03613 versus 0.54798. The learned direction preference therefore
+extends beyond the panel's canonical wording. This pure language diagnostic
+does not assign real objects or demonstrate a policy benefit. Output/command:
+v4/all-language-templates-r1.json and its command receipt.
