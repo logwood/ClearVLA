@@ -10,6 +10,7 @@ import hashlib
 import itertools
 import json
 import time
+from importlib.metadata import version
 
 import numpy as np
 import torch
@@ -102,12 +103,18 @@ def main():
     torch.set_num_threads(4)
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.benchmark = False
-    model = Sam2Model.from_pretrained(args.weights, local_files_only=True).eval().cuda()
+    model, loading = Sam2Model.from_pretrained(args.weights, local_files_only=True,
+                                             output_loading_info=True)
+    if loading.get('missing_keys') or loading.get('mismatched_keys') or loading.get('error_msgs'):
+        raise ValueError('Frozen image model has uninitialized or mismatched weights: '+str(loading))
+    model = model.eval().cuda()
     model.requires_grad_(False)
     processor = Sam2Processor.from_pretrained(args.weights, local_files_only=True)
     generator = pipeline('mask-generation', model=model, image_processor=processor.image_processor, device=0)
     identity = dict(script_sha256=sha(__file__), plan_sha256=sha(args.plan),
                     weights=receipt, settings=SETTINGS, input='raw RGB only',
+                    loading=loading,
+                    runtime={name: version(name) for name in ('torch', 'torchvision', 'transformers')},
                     mask_role='independent scorer only', production_changed=False,
                     shared_image_features='one generator call only; no persistent RGB/feature cache')
     report = dict(identity=identity, records=[], complete=False)
@@ -147,6 +154,8 @@ def main():
                 record['audit'] = score_proposals(masks, labels, names)
                 saved['masks_'+record['camera']] = masks
             target = args.output/('case_%02d_state_%03d.npz'%(row['case_id'], step))
+            if target.exists():
+                raise ValueError('duplicate case/step output; use separate audit sets')
             # Includes only binary proposals, never image embeddings.
             np.savez_compressed(target, **saved)
             report['records'].append(dict(case=str(case), case_id=row['case_id'], step=step,
