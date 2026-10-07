@@ -351,3 +351,32 @@ class ObjectImageReadSource:
             self.log_measure[:, index], self.supported[:, index], self.spatial,
             self.ordinary_coordinate_gradients,
         )
+
+
+@dataclass(frozen=True)
+class CanonicalImageReadSource:
+    """Authoritative J[k,c,u]=m[c,u] q[k|c,u] on a declared endpoint chart.
+
+    ``spatial`` records the actual G1/G2 producer provenance. It is not used to
+    reconstruct J from local marginals. Re-discretization transports this image
+    measure directly, preserving the original camera and K axes.
+    """
+    log_measure: Tensor  # [B,K,C,Y,X], unnormalized canonical joint mass
+    supported: Tensor
+    spatial: CurrentImageSupport
+
+    def on_image(self, *, rows: int, columns: int) -> ImageLogMeasure:
+        b,k,c,h,w=self.log_measure.shape
+        if (rows,columns)==(h,w):
+            return ImageLogMeasure(self.log_measure,self.supported)
+        observed=self.supported.any(1)
+        xy=current_image_grid(h,w,device=self.log_measure.device)
+        # A canonical cell is one point mass, not a reconstructed local query.
+        xy=xy[None,None,:,:,None,None].expand(b,c,h,w,1,1,2)
+        valid=observed[...,None,None]
+        chart=CurrentImageSupport(xy,valid.float(),valid,torch.zeros_like(valid,dtype=torch.float32))
+        return pushforward_log_to_current_image(self.log_measure[...,None],self.supported[...,None],chart,
+            rows=rows,columns=columns,ordinary_coordinate_gradients=True)
+
+    def permute(self,index: Tensor) -> "CanonicalImageReadSource":
+        return CanonicalImageReadSource(self.log_measure[:,index],self.supported[:,index],self.spatial)

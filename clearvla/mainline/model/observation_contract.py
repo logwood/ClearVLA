@@ -108,6 +108,7 @@ class GroundingObservationBank:
     visual_memory_observed: Tensor | None = None
     latest_flow_steps: Tensor | None = None
     observed_history: ObservedEntityHistory | None = None
+    current_observed_content: Tensor | None = None
 
     def validate(self) -> None:
         if self.observed_history is not None:

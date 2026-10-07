@@ -399,6 +399,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,
             entity_transport_gradient_mode=top.entity_transport_gradient_mode,
+            entity_ownership_mode=top.entity_ownership_mode,
             entity_history_mode=top.entity_history_mode,
             entity_motion_mode=top.entity_motion_mode,
             p2_target_value_mode=top.p2_target_value_mode,

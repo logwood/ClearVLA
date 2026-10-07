@@ -435,6 +435,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         robot_condition_mode: str = NO_ROBOT_WORLD,
         state_dim: int | None = None,
         state_feature_mode: str = "native_affine_v1",
+        entity_ownership_mode: str = "local_mixture_v1",
     ) -> None:
         super().__init__()
         self.time_grid = resolve_future_time(future_time_grid_mode)
@@ -472,6 +473,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 "sequence_prefix_v1"
             )
         self.object_content = nn.Linear(content_dim, hidden, bias=False)
+        self.object_identity = nn.Linear(hidden,hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
+        self.observed_view_content = nn.Linear(content_dim,hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
+        self.observed_view_role = nn.Linear(len(camera_names),hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
         self.object_semantic = nn.Linear(route_dim, hidden, bias=False)
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
         self.object_geometry = nn.Linear(route_dim, hidden, bias=False)
@@ -757,6 +761,18 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         validity = self._safe_object_validity(facts).to(device=facts.content.device)
         safe_content = self._supported_object_values(facts.content, validity)
         objects = self.object_content(safe_content)
+        if self.object_identity is not None:
+            if facts.identity_state is None or facts.camera_content is None or facts.view_mass is None:
+                raise ValueError("canonical W lost compact identity/view evidence")
+            view_valid=(facts.camera_validity[...,0]>0)&(validity[...,0,None]>0)
+            view=self.observed_view_content(torch.where(view_valid[...,None],facts.camera_content,0.).to(objects))
+            ordered=sorted(self.camera_names)
+            role=torch.eye(len(ordered),device=objects.device,dtype=objects.dtype)[[ordered.index(n) for n in self.camera_names]]
+            view=view*(1+torch.tanh(self.observed_view_role(role))[None,None])
+            mass=torch.where(view_valid,facts.view_mass,0.)
+            mass=mass/torch.where(mass.sum(-1,keepdim=True)>0,mass.sum(-1,keepdim=True),1.)
+            identity=torch.where(validity>0,facts.identity_state,0.)
+            objects=objects+self.object_identity(identity.to(objects))+(view*mass[...,None].to(view)).sum(2)
         if self.robot_relation_encoder is not None:
             relation = self._robot_relation(facts) if robot_relation is None else robot_relation
             assert relation is not None and isinstance(facts, ObjectWorldBelief)
@@ -1085,6 +1101,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             dim=-1,
         )
         context = projection(condition_input)
+        if self.observed_view_content is not None:
+            if facts.camera_content is None:
+                raise ValueError("W camera projection lost observed view values")
+            observed_view = torch.where(object_camera_support, facts.camera_content, 0.0)
+            context = context + self.observed_view_content(observed_view.to(dtype))
         return torch.where(
             object_camera_support,
             context,
@@ -1181,7 +1202,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         )
 
         current_reference = self._supported_object_values(
-            facts.content,
+            facts.content if facts.observed_content is None else facts.observed_content,
             validity,
         ).detach().to(dtype=semantic_delta.dtype)
         base_camera_availability = self._safe_camera_validity(

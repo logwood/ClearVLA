@@ -341,6 +341,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         object_view_mode: str = "pooled_v1",
         target_binding_input_mode: str = "protected_pooled_v1",
         observed_outcome_mode: str = "none",
+        entity_ownership_mode: str = "local_mixture_v1",
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
         super().__init__()
@@ -519,6 +520,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         elif annotation_goal_mode != "none":
             raise ValueError("unknown endpoint goal mode")
 
+        self.object_identity = nn.Linear(hidden,hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
         from .observed_outcome import ObservedOutcomeRead
         self.observed_outcome = ObservedOutcomeRead(hidden, content_dim, camera_names) if observed_outcome_mode == "before_proposal_v1" else None
 
@@ -926,6 +928,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
                     joint, _ = measure.normalized((2, 3, 4))
                     view_mass = joint.sum((-2, -1))
                     view_objects = view_attribute_tokens[..., 0, :] + view_attribute_tokens[..., 1:, :].sum(-2) / (3.0 ** .5)
+                    if self.object_identity is not None:
+                        if facts.identity_state is None or facts.view_mass is None:
+                            raise ValueError("canonical target binding lost identity/view allocation")
+                        view_objects = view_objects + self.object_identity(facts.identity_state.to(view_objects))[:,:,None]
+                        view_mass = facts.view_mass
                     target_binding = self.shared_binder(
                         goal_memory, view_objects, object_validity, history=history_context,
                         task_mask=goal_mask.bool(), view_support=camera_valid, view_mass=view_mass,

@@ -543,6 +543,7 @@ class TopConfig:
     entity_context_mode: str = "candidate_only_v1"
     entity_chart_mode: str = "query_lattice_v1"
     entity_transport_gradient_mode: str = "positive_corners_v1"
+    entity_ownership_mode: str = "local_mixture_v1"
     entity_history_mode: str = "current_only_v1"
     entity_motion_mode: str = "query_anchor_v1"
     target_binding_mode: str = "reader_local_v1"
@@ -711,6 +712,10 @@ class TopConfig:
             raise ValueError("unknown top entity_motion_mode")
         if self.entity_history_mode not in {"current_only_v1", "flow_pulled_history_v1"}:
             raise ValueError("unknown top entity_history_mode")
+        if self.entity_ownership_mode not in {"local_mixture_v1", "canonical_image_v1"}:
+            raise ValueError("unknown global entity ownership law")
+        if self.entity_ownership_mode == "canonical_image_v1" and (self.entity_chart_mode != "current_image_support_v1" or self.entity_context_mode != "completed_g3_v1" or self.object_view_mode != "per_camera_values_v1" or self.target_binding_input_mode != "full_tokens_views_v1" or self.observation_measurement_mode != "source_consistent_v1"):
+            raise ValueError("canonical identity requires complete source/view/binder/measurement migration")
         if self.entity_transport_gradient_mode not in {"positive_corners_v1", "ordinary_bilinear_v1"}:
             raise ValueError("unknown entity transport gradient contract")
         if self.entity_transport_gradient_mode != "positive_corners_v1" and self.entity_chart_mode != "current_image_support_v1":
@@ -1545,6 +1550,8 @@ class ExperimentConfig:
             cast(dict[str, object], payload["top"]).pop("entity_motion_mode")
         if self.top.entity_history_mode == "current_only_v1":
             cast(dict[str, object], payload["top"]).pop("entity_history_mode")
+        if self.top.entity_ownership_mode == "local_mixture_v1":
+            cast(dict[str, object], payload["top"]).pop("entity_ownership_mode")
         if self.top.entity_transport_gradient_mode == "positive_corners_v1":
             cast(dict[str, object], payload["top"]).pop("entity_transport_gradient_mode")
         if self.top.entity_chart_mode == "query_lattice_v1":

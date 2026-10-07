@@ -275,7 +275,13 @@ class RestoredV120ObservationCompiler(nn.Module):
                 confidence=pack.flow_confidence, occlusion=pack.flow_occlusion,
             )
             observed_history.validate()
+        full_current = None
+        if self.config.top.entity_ownership_mode == "canonical_image_v1":
+            with torch.autocast(device_type=observation.dino_history.device.type, enabled=False):
+                full_current = self.encoder.teacher_norm(observation.dino_history[:, -1].float()).reshape(
+                    observation.dino_history.shape[0], observation.dino_history.shape[2], native_side, native_side, -1)
         grounding = GroundingObservationBank(
+            current_observed_content=full_current,
             observed_history=observed_history,
             address_bank=bank,
             late_detail=detail,
@@ -423,6 +429,7 @@ class RestoredV120ObservationCompiler(nn.Module):
                 torch.where(valid, state.fine_log_probability.float(), 0.0)
             )
         local = LocalFactSet(
+            current_observed_content=bank.current_observed_content,
             public_scene_base=grounded.public_scene_base,
             target_dino_content=target.detach(),
             cell_observed=(~bank.context_mask)[..., None],

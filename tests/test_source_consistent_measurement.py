@@ -9,13 +9,13 @@ from clearvla.mainline.task_execution import JOINT_TASK_EXECUTION
 from clearvla.mainline.runtime.qualification import synthetic_batch
 
 
-@pytest.fixture(scope='module')
-def production():
+@pytest.fixture(scope='module',params=['local_mixture_v1','canonical_image_v1'])
+def production(request):
     torch.manual_seed(7113)
     c=base_config()
     c=replace(c,top=replace(c.top,entity_transport_gradient_mode='ordinary_bilinear_v1',observation_measurement_mode='source_consistent_v1',
         object_view_mode='per_camera_values_v1',target_binding_input_mode='full_tokens_views_v1',observed_outcome_mode='before_proposal_v1',
-        task_execution_mode=JOINT_TASK_EXECUTION,entity_context_mode='completed_g3_v1'))
+        task_execution_mode=JOINT_TASK_EXECUTION,entity_context_mode='completed_g3_v1',entity_ownership_mode=request.param))
     c.validate();m,e=_model_engine(c)
     b,n=synthetic_batch(c,count=1,raw_side=32,device=torch.device('cpu'));m.configure_action_normalizer(n)
     m.eval()

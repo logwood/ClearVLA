@@ -16,6 +16,7 @@ from clearvla.vision.entity_chart import (
     CurrentImageSupport,
     ImageLogMeasure,
     ObjectImageReadSource,
+    CanonicalImageReadSource,
 )
 from clearvla.vision.entity_history import ObservedEntityHistory
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
@@ -309,6 +310,7 @@ class LocalFactSet:
     context_slots: Tensor | None = None  # completed current G3 at the same support [B,C,Y,X,M,H]
     current_image_support: CurrentImageSupport | None = None
     observed_history: ObservedEntityHistory | None = None
+    current_observed_content: Tensor | None = None  # actual full-RGB endpoint chart, never 8-to-16 interpolation
 
     @property
     def batch(self) -> int:
@@ -535,27 +537,30 @@ class ObjectFactSet:
     validity: Tensor  # [B,K,1]
     log_validity: Tensor  # producer-owned finite FP32 [B,K,1]
     object_to_chart: Tensor  # read posterior [B,K,C,Y,X]
-    candidate_assignment: Tensor  # joint local-prior competition mass [B,K,C,Y,X,M]
+    candidate_assignment: Tensor | None  # joint local-prior competition mass [B,K,C,Y,X,M]
     # One physical K+null assignment owns object identity.  These three
     # posteriors are bounded verification reads inside that physical support;
     # they may refine which evidence explains an object but cannot create a
     # second object identity or move mass to null.
-    semantic_candidate_assignment: Tensor  # [B,K,C,Y,X,M]
-    appearance_candidate_assignment: Tensor  # [B,K,C,Y,X,M]
-    geometry_candidate_assignment: Tensor  # [B,K,C,Y,X,M]
-    null_assignment: Tensor  # joint local-prior null mass [B,C,Y,X,M]
+    semantic_candidate_assignment: Tensor | None  # [B,K,C,Y,X,M]
+    appearance_candidate_assignment: Tensor | None  # [B,K,C,Y,X,M]
+    geometry_candidate_assignment: Tensor | None  # [B,K,C,Y,X,M]
+    null_assignment: Tensor | None  # joint local-prior null mass [B,C,Y,X,M]
     reconstructed_dino: Tensor  # [B,C,Y,X,D]
     reconstruction_error: Tensor  # scalar, not weighted here
     latest_flow_steps: Tensor | None = None  # [B], producer time, not model confidence
     object_chart_mode: str = QUERY_CHART
     current_image_measure: ImageLogMeasure | None = None
-    current_image_source: ObjectImageReadSource | None = None
+    current_image_source: ObjectImageReadSource | CanonicalImageReadSource | None = None
     # Observed values reduced WITHIN each camera, never pooled values expanded
     # over C. Optional only for unchanged historical graphs.
     camera_content: Tensor | None = None
     camera_semantic: Tensor | None = None
     camera_appearance: Tensor | None = None
     camera_geometry: Tensor | None = None
+    identity_state: Tensor | None = None  # shared learned K state, not raw DINO
+    observed_content: Tensor | None = None  # source-consistent W measurement reference
+    view_mass: Tensor | None = None  # joint allocation B,K,C, distinct from validity
 
     @property
     def batch(self) -> int:
@@ -599,6 +604,8 @@ class ObjectFactSet:
         if self.latest_flow_steps is not None:
             validate_reference_steps(self.latest_flow_steps, batch=self.batch, device=self.content.device)
         self.dense_chart.validate()
+        if self.observed_content is not None and self.observed_content.shape != self.content.shape:
+            raise ValueError("observed reference and object descriptor axes differ")
         if self.content.ndim != 3:
             raise ValueError("object content must be [B,K,D]")
         batch, objects = self.content.shape[:2]
@@ -660,25 +667,33 @@ class ObjectFactSet:
             src=self.current_image_source
             if src.spatial is not self.dense_chart.current_image_support or self.current_image_measure is None:
                 raise ValueError("G3 image source lost the actual spatial owner")
-            if src.log_measure.shape != self.candidate_assignment.shape or src.supported.shape != src.log_measure.shape:
+            if src.supported.shape != src.log_measure.shape:
+                raise ValueError("G3 image source support axes differ")
+            if isinstance(src, ObjectImageReadSource) and src.log_measure.shape != self.candidate_assignment.shape:
                 raise ValueError("G3 image source lost actual local candidate axes")
-        candidates = self.dense_chart.candidate_content
-        _shape(
-            self.candidate_assignment,
-            (batch, objects, *candidates.shape[1:5]),
-            "candidate assignment",
-        )
-        for name in (
-            "semantic_candidate_assignment",
-            "appearance_candidate_assignment",
-            "geometry_candidate_assignment",
-        ):
+            if isinstance(src, CanonicalImageReadSource) and (src.log_measure.ndim != 5 or src.log_measure.shape[:3] != (batch,objects,cameras)):
+                raise ValueError("canonical image source lost K/view axes")
+        if isinstance(self.current_image_source, CanonicalImageReadSource):
+            if any(value is not None for value in (self.candidate_assignment,self.semantic_candidate_assignment,self.appearance_candidate_assignment,self.geometry_candidate_assignment,self.null_assignment)):
+                raise ValueError("canonical graph must not manufacture independent local K assignments")
+        else:
+            candidates = self.dense_chart.candidate_content
             _shape(
-                getattr(self, name),
+                self.candidate_assignment,
                 (batch, objects, *candidates.shape[1:5]),
-                name.replace("_", " "),
+                "candidate assignment",
             )
-        _shape(self.null_assignment, tuple(candidates.shape[:5]), "null assignment")
+            for name in (
+                "semantic_candidate_assignment",
+                "appearance_candidate_assignment",
+                "geometry_candidate_assignment",
+            ):
+                _shape(
+                    getattr(self, name),
+                    (batch, objects, *candidates.shape[1:5]),
+                    name.replace("_", " "),
+                )
+            _shape(self.null_assignment, tuple(candidates.shape[:5]), "null assignment")
         view_values = [self.camera_content, self.camera_semantic, self.camera_appearance, self.camera_geometry]
         if any(v is not None for v in view_values):
             if any(v is None for v in view_values):
@@ -702,6 +717,9 @@ class ObjectFactSet:
             camera_semantic=None if self.camera_semantic is None else self.camera_semantic[:, index],
             camera_appearance=None if self.camera_appearance is None else self.camera_appearance[:, index],
             camera_geometry=None if self.camera_geometry is None else self.camera_geometry[:, index],
+            identity_state=None if self.identity_state is None else self.identity_state[:,index],
+            observed_content=None if self.observed_content is None else self.observed_content[:,index],
+            view_mass=None if self.view_mass is None else self.view_mass[:,index],
             object_chart_mode=self.object_chart_mode,
             current_image_measure=(
                 self.current_image_measure.permute(index)
@@ -722,10 +740,10 @@ class ObjectFactSet:
             validity=self.validity[:, index],
             log_validity=self.log_validity[:, index],
             object_to_chart=self.object_to_chart[:, index],
-            candidate_assignment=self.candidate_assignment[:, index],
-            semantic_candidate_assignment=(self.semantic_candidate_assignment[:, index]),
-            appearance_candidate_assignment=(self.appearance_candidate_assignment[:, index]),
-            geometry_candidate_assignment=(self.geometry_candidate_assignment[:, index]),
+            candidate_assignment=None if self.candidate_assignment is None else self.candidate_assignment[:, index],
+            semantic_candidate_assignment=None if self.semantic_candidate_assignment is None else self.semantic_candidate_assignment[:, index],
+            appearance_candidate_assignment=None if self.appearance_candidate_assignment is None else self.appearance_candidate_assignment[:, index],
+            geometry_candidate_assignment=None if self.geometry_candidate_assignment is None else self.geometry_candidate_assignment[:, index],
             null_assignment=self.null_assignment,
             reconstructed_dino=self.reconstructed_dino,
             reconstruction_error=self.reconstruction_error,
@@ -742,6 +760,7 @@ class ObjectFactSet:
 
         self.validate()
         return ObjectWorldBelief(
+            identity_state=self.identity_state,observed_content=self.observed_content,view_mass=self.view_mass,camera_content=self.camera_content,
             robot_observation=robot_observation,
             content=self.content,
             semantic=self.semantic,
@@ -780,6 +799,10 @@ class ObjectWorldBelief:
     log_validity: Tensor  # [B,K,1]
     latest_flow_steps: Tensor | None = None
     robot_observation: RobotWorldObservation | None = None
+    identity_state: Tensor | None = None
+    observed_content: Tensor | None = None
+    view_mass: Tensor | None = None
+    camera_content: Tensor | None = None
 
     @property
     def batch(self) -> int:
@@ -812,6 +835,8 @@ class ObjectWorldBelief:
             self.robot_observation.validate(batch=self.batch, device=self.content.device)
         if self.latest_flow_steps is not None:
             validate_reference_steps(self.latest_flow_steps, batch=self.batch, device=self.content.device)
+        if self.observed_content is not None and self.observed_content.shape != self.content.shape:
+            raise ValueError("W observed reference axes differ")
         if self.content.ndim != 3:
             raise ValueError("world belief content must be [B,K,D]")
         batch, objects = self.content.shape[:2]
@@ -852,6 +877,10 @@ class ObjectWorldBelief:
             raise ValueError("world-belief permutation must contain every object")
         index = permutation.to(device=self.content.device, dtype=torch.long)
         return ObjectWorldBelief(
+            identity_state=None if self.identity_state is None else self.identity_state[:,index],
+            observed_content=None if self.observed_content is None else self.observed_content[:,index],
+            view_mass=None if self.view_mass is None else self.view_mass[:,index],
+            camera_content=None if self.camera_content is None else self.camera_content[:,index],
             robot_observation=self.robot_observation,
             content=self.content[:, index],
             semantic=self.semantic[:, index],

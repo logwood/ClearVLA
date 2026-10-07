@@ -247,6 +247,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = "query_lattice_v1",
         entity_transport_gradient_mode: str = "positive_corners_v1",
+        entity_ownership_mode: str = "local_mixture_v1",
         entity_history_mode: str = "current_only_v1",
         entity_motion_mode: str = "query_anchor_v1",
         p2_target_value_mode: str = "none",
@@ -295,6 +296,9 @@ class ObjectIntentDynamicsTop(nn.Module):
             entity_context_mode=entity_context_mode,
             entity_chart_mode=entity_chart_mode,
             entity_transport_gradient_mode=entity_transport_gradient_mode,
+            entity_ownership_mode=entity_ownership_mode,
+            observation_measurement_mode=observation_measurement_mode,
+            camera_names=camera_names,
             entity_history_mode=entity_history_mode,
             entity_motion_mode=entity_motion_mode,
             retain_image_source=(instruction_change_mode == POSTERIOR_REFERENCE_CHANGE or task_execution_mode in JOINT_TASK_EXECUTION_MODES),
@@ -319,6 +323,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             instruction_change_mode=instruction_change_mode,
             observation_measurement_mode=observation_measurement_mode,
             target_binding_input_mode=target_binding_input_mode,
+            entity_ownership_mode=entity_ownership_mode,
             observed_outcome_mode=observed_outcome_mode,
             object_view_mode=object_view_mode,
             camera_names=camera_names,
@@ -351,6 +356,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             robot_condition_mode=world_robot_condition_mode,
             state_dim=state_dim,
             state_feature_mode=state_feature_mode,
+            entity_ownership_mode=entity_ownership_mode,
         )
         self.teacher = ObjectFutureTeacher(
             camera_names=tuple(camera_names) if operation_intent_mode == OBJECT_OUTCOME_INTENT else (),

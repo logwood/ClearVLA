@@ -238,6 +238,9 @@ class DenseObjectGrounder(nn.Module):
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = QUERY_CHART,
         entity_transport_gradient_mode: str = "positive_corners_v1",
+        entity_ownership_mode: str = "local_mixture_v1",
+        observation_measurement_mode: str = "legacy_v1",
+        camera_names: tuple[str,...] = (),
         entity_history_mode: str = NO_ENTITY_HISTORY,
         entity_motion_mode: str = QUERY_ANCHOR_MOTION,
         retain_image_source: bool = False,
@@ -246,6 +249,9 @@ class DenseObjectGrounder(nn.Module):
         super().__init__()
         self.ordinary_coordinate_gradients = entity_transport_gradient_mode == "ordinary_bilinear_v1"
         self.retain_image_source = retain_image_source
+        self.entity_ownership_mode = entity_ownership_mode
+        self.observation_measurement_mode = observation_measurement_mode
+        self.camera_names = tuple(camera_names)
         self.per_camera_values = object_view_mode == "per_camera_values_v1"
         if self.per_camera_values and entity_chart_mode != CURRENT_IMAGE_CHART:
             raise ValueError("per-camera values require the source-supported current-image law")
@@ -330,6 +336,13 @@ class DenseObjectGrounder(nn.Module):
             nn.Linear(route_dim, hidden, bias=False)
             if entity_history_mode == CAUSAL_ENTITY_HISTORY else None
         )
+
+        if entity_ownership_mode == "canonical_image_v1":
+            from .canonical_grounding import SharedIdentityViewDecoder
+            self.canonical_decoder = SharedIdentityViewDecoder(hidden,content_dim,camera_names)
+            self.decode_content_residual = None
+        else:
+            self.canonical_decoder = None
 
     def _candidate_tokens(self, chart: DenseFactChart, history_context: Tensor | None = None) -> Tensor:
         """Return the exact shared V120 key/value candidate representation."""
@@ -509,6 +522,9 @@ class DenseObjectGrounder(nn.Module):
             history_context = self.history_evidence(local_facts.observed_history, local_facts.current_image_support)
         elif local_facts.observed_history is not None:
             raise ValueError("current-only binding rejects undeclared observed history")
+        if self.entity_ownership_mode == "canonical_image_v1":
+            from .canonical_grounding import canonical_grounding
+            return canonical_grounding(self,local_facts,chart,history_context,collect_diagnostics=collect_diagnostics)
         candidates_structured = self._candidate_tokens(chart, history_context)
         batch = int(candidates_structured.shape[0])
         candidate_shape = candidates_structured.shape[1:-1]
@@ -997,7 +1013,14 @@ class DenseObjectGrounder(nn.Module):
             for name in ("content", "semantic", "appearance", "geometry"):
                 value = camera_aggregate(getattr(chart, "candidate_"+name), camera_read)
                 view_values["camera_"+name] = torch.where(camera_validity > 0, value, 0.0)
+        observed_content = None
+        if self.observation_measurement_mode == "source_consistent_v1":
+            if image_measure is None:
+                raise ValueError("observed reference requires actual G image measure")
+            reference_law, _ = image_measure.normalized((2,3,4))
+            observed_content = torch.einsum("bkcyx,bcyxd->bkd", reference_law, chart.dino_content.float())
         facts = ObjectFactSet(
+            observed_content=observed_content,
             **view_values,
             latest_flow_steps=local_facts.latest_flow_steps,
             dense_chart=chart,
