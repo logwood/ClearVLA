@@ -59,7 +59,15 @@ def controls(model, online, facts, labels):
     conditional = torch.softmax(log_owner[..., :k].float(), -1).reshape(b, times, cameras, side, side, k).permute(0, 1, 2, 5, 3, 4)
     target = observed[:, -1].reshape(b, cameras, side, side, width).permute(0, 1, 4, 2, 3)
     full = facts.image_ownership
-    perm = torch.cat((torch.arange(k, device=raw.device).roll(1), torch.tensor([k], device=raw.device)))
+    conditional_mode = model.config.top.identity_supervision_mode == 'rgbd_temporal_conditional_v2'
+    comparison_source = conditional if conditional_mode else law
+    if conditional_mode:
+        source = facts.current_image_source
+        comparison_target, full_support = production.conditional_real_law(source.log_measure, source.supported)
+        perm = torch.arange(k, device=raw.device).roll(1)
+    else:
+        comparison_target = full
+        perm = torch.cat((torch.arange(k, device=raw.device).roll(1), torch.tensor([k], device=raw.device)))
     records = []
     sample = production.sample
     js = production.js_divergence
@@ -71,14 +79,21 @@ def controls(model, online, facts, labels):
             target_xy = torch.where(valid[..., None], getattr(labels, kind + '_target')[:, camera], 0.)
             count = valid.sum()
 
-            def mean(value):
-                return torch.where(valid, value, 0.).sum() / count.clamp_min(1)
+            def mean(value, admitted=valid):
+                return torch.where(admitted, value, 0.).sum() / admitted.sum().clamp_min(1)
 
-            source_law = sample(law[:, source_time, camera], source_xy)
-            target_law = sample(full[:, :, destination], target_xy)
+            joint_source = sample(law[:, source_time, camera], source_xy)
+            joint_target = sample(full[:, :, destination], target_xy)
+            source_law = sample(comparison_source[:, source_time, camera], source_xy)
+            target_law = sample(comparison_target[:, :, destination], target_xy)
+            identity_valid = valid
+            if conditional_mode:
+                identity_valid = identity_valid & (sample(full_support[:, :, destination].float(), target_xy)[..., 0] > 1 - 1e-6)
             divergence = js(source_law, target_law)
             if kind == 'cross':
-                divergence = (divergence + js(sample(full[:, :, camera], source_xy), target_law)) / 2
+                divergence = (divergence + js(sample(comparison_target[:, :, camera], source_xy), target_law)) / 2
+                if conditional_mode:
+                    identity_valid = identity_valid & (sample(full_support[:, :, camera].float(), source_xy)[..., 0] > 1 - 1e-6)
             q = sample(conditional[:, source_time, camera], source_xy)
             latent = state[:, source_time, camera]
             value, background = module.canonical_decoder(latent)
@@ -102,16 +117,17 @@ def controls(model, online, facts, labels):
             }
             errors = {name: float(mean((v.float() - truth).square().mean(-1))) for name, v in variants.items()}
             permutation_error = float((prediction - variants['common_K_permutation']).abs().max())
-            base_js = mean(js(source_law, target_law))
-            permuted_js = mean(js(source_law[..., perm], target_law[..., perm]))
+            base_js = mean(js(source_law, target_law), identity_valid)
+            permuted_js = mean(js(source_law[..., perm], target_law[..., perm]), identity_valid)
             if permutation_error > 2e-2 or float((base_js - permuted_js).abs()) > 1e-5:
                 raise ValueError('common K relabeling failed: intervention does not preserve identity algebra')
             records.append(dict(
                 kind=kind, source_camera=camera, target_camera=destination, admitted_pairs=int(count),
-                production_divergence=float(mean(divergence)), source_target_js=float(base_js),
-                target_K_permuted_js=float(mean(js(source_law, target_law[..., perm]))),
-                other_episode_source_js=float(mean(js(sample(law[:, source_time, camera].roll(1, 0), source_xy), target_law))),
-                source_null_mass=float(mean(source_law[..., -1])), target_null_mass=float(mean(target_law[..., -1])),
+                identity_supported_pairs=int(identity_valid.sum()),
+                production_divergence=float(mean(divergence, identity_valid)), source_target_js=float(base_js),
+                target_K_permuted_js=float(mean(js(source_law, target_law[..., perm]), identity_valid)),
+                other_episode_source_js=float(mean(js(sample(comparison_source[:, source_time, camera].roll(1, 0), source_xy), target_law), identity_valid)),
+                source_null_mass=float(mean(joint_source[..., -1])), target_null_mass=float(mean(joint_target[..., -1])),
                 source_real_entropy=float(mean(-(q * q.clamp_min(1e-12).log()).sum(-1))),
                 mse=errors, common_K_prediction_max_error=permutation_error,
                 common_K_js_max_error=float((base_js - permuted_js).abs()),
@@ -124,7 +140,8 @@ def controls(model, online, facts, labels):
     gaps = {name: abs(value - float(actual[name])) for name, value in reproduced.items()}
     if max(gaps.values()) > 2e-5:
         raise ValueError('probe did not reproduce actual production objective: ' + str(gaps))
-    return dict(production={k: float(v) for k, v in actual.items()}, reproduction_gaps=gaps, pairs=records)
+    return dict(identity_supervision_mode=model.config.top.identity_supervision_mode,
+                production={k: float(v) for k, v in actual.items()}, reproduction_gaps=gaps, pairs=records)
 
 
 def main():
@@ -146,7 +163,7 @@ def main():
     device = torch.device('cuda:0')
     payload = torch.load(args.checkpoint, map_location='meta', weights_only=False)
     config = config_from_mapping(payload['config'])
-    if config.top.identity_supervision_mode != 'rgbd_temporal_v1':
+    if config.top.identity_supervision_mode not in {'rgbd_temporal_v1', 'rgbd_temporal_conditional_v2'}:
         raise ValueError('probe requires the trained B objective')
     deployment = load_deployment_checkpoint(args.checkpoint, device=device, t5_condition=config.data.t5_condition)
     model = deployment.model.eval()
@@ -172,7 +189,8 @@ def main():
         runtime_source=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
         split='val', episode_indices=chosen, sample_indices=indices,
         scope='held observed source dependence; no physical-object labels, no optimizer updates',
-        caveat='uniform or all-null ownership can satisfy consistency; physical-object audits remain required',
+        identity_supervision_mode=config.top.identity_supervision_mode,
+        caveat='v1 joint consistency admits null collapse; v2 conditional consistency still admits uniform/single-K collapse; physical-object audits remain required',
     )
     records = []
     dump(args.output / 'identity.json', identity)
