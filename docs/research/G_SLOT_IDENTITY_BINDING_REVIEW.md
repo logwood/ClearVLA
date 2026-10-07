@@ -2571,3 +2571,139 @@ B-nullv2-module-vjp-short-r1 is queued on GPU2 after v2's own standard panel.
 These complement the existing GPU4 physical/source/trajectory audits. Formal
 promotion still requires their actual final results plus full behavior; the
 mechanical initial gradients cannot substitute for those checks.
+
+
+#### 34.33.7 Completed short panels, physical mechanisms and source-object loss
+
+Both original short checkpoints are epoch 1 / step 12036, source 3a843999.
+Each 256-batch offline panel contains 2046 samples and all six tasks.
+A/B total validation losses are 0.439531 / 0.444806; native action RMSE
+0.264833 / 0.264902. Saved identities, full hashes and metrics are in
+A-short-final-audit.json and B-short-final-audit.json, verified against payloads.
+
+The complete standard panels (18, seed 0, max 360, R8, stored_target) score
+A 13/18 and B-v1 17/18, versus the mature source's 11/18. All original 11
+positives remain positive; A adds 05/11, B adds 05/09/10/11/14/17.
+Initial states match case by case, errors are empty and every NPZ is present.
+These are short-run behavioral results, not either requested formal experiment.
+
+The contact records limit their interpretation. In B case 05 the robot first
+contacts red at 43; red contacts the requested blue block and blue reaches
++0.1012 m without recorded direct robot-blue contact. Case 11 first contacts
+pink at 55; pink contacts the requested red block, which reaches +0.1022 m
+without recorded direct robot-red contact. A's two added positives have the
+same indirect-contact pattern. Contact telemetry is sampled at control states,
+not every physics substep. Preserve the official successes; they do not certify
+correct color binding. B's remaining failure 02 reaches 0.0940 m at state 200,
+then withdraws with TCP-goal gap only 0.00684 m; the largest 0.141 m controller
+gap appears later at 295. Accumulation cannot explain that earlier departure.
+Full fresh-mask/32-node trajectory qualification remains running.
+
+B-v1's 12-episode / 24-window source controls reproduce the production
+objective to <=4.48e-8. Replacing the complete source with another episode
+raises pooled prediction MSE only 1.88%, 1.69%, 4.49%, 1.05% for cross top,
+cross wrist, temporal top, temporal wrist. Permuting values against fixed K
+weights raises it 35.2%, 25.1%, 45.8%, 8.42%; common K relabeling preserves the
+prediction exactly. Donors share scene structure; these are neither independent
+physical-object controls nor a proof of source independence.
+
+The old RGB-D audit's all_accepted_pixels was DEPTH admission before RGB
+filtering; accepted_object_pixels was after RGB filtering. Do not divide these
+legacy fields. probe_rgbd_object_admission.py now retains that field explicitly
+and adds matched denominators plus the actual IdentityLabelProducer._sample.
+Across 18 exact historical replays / 63 windows, accepted source-object counts
+are 151/6209 (top cross), 1459/35853 (wrist cross), 777/57981 (top temporal4),
+1576/42163 (wrist temporal4). All sampled object endpoints preserve body identity.
+Counts are 1.34-4.07% of admitted pairs in the four production directions.
+This is a correlated historical observation panel, not the training distribution
+or a loss/gradient attribution. Artifacts: identity-label-balance-r1.
+
+A new objective audit exports only small correspondence/body-label arrays from
+four exact replays (01/24,05/24,11/24,17/136). It reuses the production source
+encoding and partitions already-computed losses; body labels never enter the
+model, match construction or optimizer. The object/nonobject ledger closes;
+true-object endpoints account for 4.37%, 4.01%, 5.15%, 6.37% of source-prediction
+loss in these windows. B-v1 source-only joint null at these endpoints is
+0.99438-0.99992; sampled online target joint null is 0.85689-0.99917.
+This is direct endpoint evidence beyond a global null average, but not a
+statement about every visible object's pixels or a parameter-gradient share.
+
+Useful predictions and high null can coexist: training/identity.py's prediction
+weights and canonical_grounding.py's reconstruction condition on real K, whereas
+v1's correspondence compares joint K+null. The confirmed v1 shortcut remains
+real despite 17 successes; do not describe the whole checkpoint as behaviorally
+collapsed. Conditional-v2 starts anew from the original mature checkpoint and
+has now begun its matched 1024-update BS8 short run. Its production source 0e861f56
+and all original evaluations remain immutable. Neither formal run is promoted.
+
+Reproduce with probe_rgbd_object_admission.py --export-labels and
+probe_identity_object_source.py --checkpoint ... --plan candidate-factual-plan.json
+--labels identity-object-source-labels-r1 --output <new-dir>, using each checkpoint's
+own PYTHONPATH. Pinned probe 5d1dc772; B-r1-object-source-factual-r1 is complete.
+The v2 two-update mechanical counterpart also closes the actual objective and
+partition to <=8.95e-8; it proves instrumentation, not learning. Its final
+short-checkpoint counterpart is queued after v2's full panel/module VJP.
+
+#### 34.33.8 Final ordinary VJPs and natural-response repeat controls
+
+The final short A/B full training-entry VJPs (true BS8, training_mask=True,
+clock 12036, zero updates) connect all selected 15/23 consumer parameters with
+finite total-loss gradients. B S/W identity L2 are 0.00247 / 0.00644, W view
+content 0.00610. A/B observed-outcome output L2 are 0.01642 / 0.01449; image
+weights receive only 3.69e-8 / 2.25e-8, and view weights 1.46e-8 / 5.37e-9.
+These are small nonzero gradients, not disconnected paths; scales/inputs differ.
+World/identity losses do not train the goal-owning S binder directly, consistent
+with the declared ownership. Artifacts: A-module-vjp-short-r1, B-module-vjp-short-r1.
+
+A's complete 60-window old-observation audit passes same-image measurement
+exactly, but 42 windows have nonzero paired same-instruction action variation:
+median 0.000204, maximum 0.000590 native arm RMS. Color-response median is
+0.000471, so uncorrected downstream differences cannot all be called target
+transmission. Binding TV itself has median 0.01262; a larger binding change does
+not establish the correct object's selection.
+
+Four deterministic-operator controls (01/24,08/40,09/40,14/40) eliminate paired
+repeat action differences exactly, while retaining nonzero color responses.
+This localizes a numerical confound to the operator execution path; it does
+not identify a single CUDA kernel. The control uses CUBLAS_WORKSPACE_CONFIG=:4096:8
+before process start plus torch deterministic algorithms, without changing the
+trained graph or the official panel runtime. Do not silently apply this audit
+setting to a production comparison. Script ca84108f adds an explicit
+--deterministic option; unsupported operators fail rather than being ignored.
+A-deterministic-repeat-control-r1 is the complete four-window control.
+
+AB-deterministic-target-r1 now checks the four critical physical windows under
+this repeatable audit setting on GPU0, then exits. The matched v2 final target
+control is queued after its object-source final audit. Original broad source,
+old/fresh physical and new-mask qualifications remain running unchanged.
+Promotion still requires their physical choice, consumer chain and behavior
+review; standard successes, small reconstruction loss and connected gradients
+alone do not close the identity/target-maintenance questions.
+
+
+The completed deterministic critical-window A/B supplement has zero paired
+same-instruction action difference in all eight reads. Color-dependent motion
+is nonzero but small (A 0.000413-0.000960, B 0.000280-0.000556 native arm RMS).
+At 05/24 B's blue request places only 0.00326 of its blue-versus-red source
+read mass on blue; at 11/24 the red request places 0.00183 of red-versus-pink
+mass on red. Natural color changes do not reverse these source-read rankings.
+
+At these fixed G facts, even an arbitrary nonnegative binding over K cannot
+raise B's corresponding target source-read fractions above 0.0534 / 0.0269:
+every K has that same competing-object preference. Normalizing read density
+by visible body pixel counts still gives maxima below 0.5 (see exact values
+in deterministic-source-read-ceilings.json). This is a convex-mixture bound at
+the binding-weighted source READ interface, not a bound on semantic feature
+information or the complete P1/action network. Native target body support is
+small but nonzero (about one canonical atom in these two top-camera masks).
+Keep body area, camera mass, source support and feature receptive fields explicit.
+
+Thus changing S binding amplitude alone cannot reverse those two source-read
+preferences without changing its G evidence. V2 must be checked on this same
+interface after meaningful training. If conditional-v2 retains the defect, the
+next candidate must address object separation as well as matched-pair agreement:
+uniform/single-K laws still minimize positive consistency. Independently observed
+RGB-D/temporal foreground grouping and independently validated different-group
+constraints are candidates to audit before adding any such objective; simulator
+body IDs remain evaluation-only. Do not infer an approved negative-label scheme
+from this proposal, or change P3/common carriers based on these scalar bounds.
