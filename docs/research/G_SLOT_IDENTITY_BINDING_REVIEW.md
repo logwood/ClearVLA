@@ -1102,3 +1102,174 @@ finding is weak learned color sensitivity under this complete objective, despite
 finite ordinary gradients and available early hard examples.
 
 Artifacts: v4/matched-instruction-loss-r4-fp32.json, config and command receipt.
+
+
+### 34.12 Two further narrow hypotheses rejected on measured histories
+
+The existing conditioning producer was used to drop all executed-command
+history while retaining language (same strict-restored weights and deterministic
+FP32 diagnostic). Its timing masks and executed-world/robot-step sources follow
+the production dropout contract. In the same four early training windows, correct
+action-flow losses rise from 0.405/0.442/0.426 to 0.422/0.443/0.479 across the
+three noise seeds; the median color perturbation remains only 3.18e-5, with
+12/24 positive margins and exact repeats. Command-history removal alone does
+not restore learned color sensitivity. This is an intervention on the trained
+model, not evidence that retraining with different dropout cannot help.
+Data: v4/matched-instruction-loss-r5-nohistory.json.
+
+A second paired probe consistently removes prepared robot endpoint values,
+visual endpoint values (content/image/joint), or all four components from BOTH
+existing S and P3 goal readers. At old and repair 10/state72, 10/state136 and
+17/state136 the backward/upward command persists in every variant. For example,
+repair17/state136 x/z remains -0.230/+0.373 with robot values zero and
+-0.242/+0.376 with all goal values zero. Thus a misleading robot endpoint does
+not explain these withdrawal windows by itself. These removals are not
+independent contribution percentages and must not be deployed as a patch.
+Source: annotation_goal.py::AnnotatedGoalValueRead.prepare/forward and
+probe_goal_remaining_consumption.py. Data: v4/goal-components-original-r1 and
+dinov3-causal-repair-20261006/short-mature-bs8-r1-goal-components.
+
+### 34.13 Completed fresh panel rejects the combined 512-update candidate
+
+The standard original-controller panel completed at 7/18 versus original11/18.
+Initial RGB pairs match in all18; seed0, max_steps360 and execute_rows8 are
+unchanged. Original successes01/03/08/13 are lost; none of the original seven
+failures is recovered. Do not promote checkpoint11524 or attribute this joint
+fine-tune regression to one objective without isolating it.
+
+Fresh trajectory auditing is complete: 140 selected states across all18, each
+admitted by exact replay of both camera images; 11 natural-instruction windows.
+Matched original replan noise gives median first8 arm replay RMSE0.000235,
+maximum0.000664 and zero gripper mismatches. Binding argmax is K3 in140/140.
+Median color arm difference0.000333 remains near repeat0.000203, while direction
+difference0.05907 is much larger. This is weak color dependence on fresh failed
+and successful histories, not a claim of bitwise color invariance.
+
+05 first contacts red at45;11 first contacts pink at46; neither directly contacts
+its requested target. In contrast,08/13 first contact the correct target at20/21,
+then achieve only13.48/0.01mm signed progress;17 contacts pink at132 and reaches
+20.36mm. These latter cases require a persistence/command explanation in addition
+to target availability. Original01/03 successes were late recoveries rather
+than reliable initial object selection.
+
+At fresh05/state24 the largest target-pixel probability among all8 fixed K/view
+read distributions is0.000186, and both other blocks dominate it in every basis.
+At11/state24 the target maximum is0.0000357, dominated by pink in every basis.
+No convex K/view reweighting of those FIXED spatial distributions reverses the
+corresponding ordering. This bound does not cover P1's query-dependent spatial
+reselection or all semantic information in a DINO feature. At17/state128 the
+target maximum is0.897, confirming a distinct later failure with available target
+pixels. Tiny absolute support with a large conditional object share is not
+physical identity certification.
+
+Decision artifact:
+dinov3-causal-repair-20261006/short-mature-bs8-r1-fresh-audit-decision-summary.json.
+Raw phase, masks, identity and natural-instruction evidence remain under
+short-mature-bs8-r1-fresh-trajectory-audit; simulator truth remains audit-only.
+
+### 34.14 Executed-history semantics and flow-time alternatives
+
+The full original checkpoint was replayed on six actual10/17 windows. A causal
+diagnostic replaces XYZ in ALL duplicated past action sources by observed
+TCP displacement/0.02, clipped in the original native chart; orientations and
+gripper remain recorded. Sparse history, action_state, four-step commands and
+one-step robot commands are synchronized. It reads no observation after the
+current state and does not relabel production confirmed commands.
+
+At17/state136 mean x/z changes from-0.200/+0.384 to-0.144/+0.373; at10/state72
+from-0.051/+0.266 to-0.0055/+0.210. Withdrawal is reduced but remains. The command/
+realized-motion mismatch is thus not sufficient to explain these windows.
+Exact old arm replay differs only at the measured BF16 repeat floor.
+Source/probe: probe_realized_translation_history.py; v4/realized-translation-
+history-r1. This does not establish a physically closed-loop replacement.
+
+Strict-FP32 complete-loss diagnostics were also evaluated at explicit flow times
+0.05/0.5/0.95 with the same noise seed, rebuilding the actual Q5 flow-step context
+and leaving unknown-label rows as source noise. Median color loss changes remain
+2.33e-5/2.25e-5/1.74e-5 with exact repeats. Weak color dependence is already present
+near source noise; it is not explained solely by clean-target leakage at large t.
+Source training/losses.py::sample_flow_matching owns the correctly mirrored
+noise-to-data clock; no time-direction defect was found. Artifact:
+v4/matched-instruction-loss-r6-times.json.
+
+The spatial coordinate alternative was checked in actual source:
+online_vision rasterizes native DINO patch centers once into the declared
+full_rgb_endpoint_v1 chart; subsequent endpoint resizes preserve its alignment.
+No evidence supports silently reinterpreted native patch centers or a current
+flow-pixel/DINO-cell unit mismatch. Do not change these charts speculatively.
+
+
+### 34.15 Camera pooling alone does not restore learned color selection
+
+Four paired source-boundary variants were evaluated on original11012 and
+repair11524 at the same original01/05/11/state24 and17/state136: remove the global
+slot-content residual; supply the existing per-camera conditional values to the
+already implemented single K+null binder; retain that residual with per-view
+values; or average supported camera values before the same binder. All S/W/P1/
+P2/P3/bottom consumers are recomputed; no mask or physical identity enters input.
+
+Binding spreads over more K under per-view input, but color-native differences
+remain around0.00022–0.00069. This does not establish a beneficial camera-pooling
+repair. The K-common residual and early camera pooling are not sufficient
+explanations for the learned color insensitivity on these weights. No production
+switch was made. Source: intent.py:854–924; task_execution.py:561–606.
+Artifacts: v4/binder-view-source-original-r1 and
+short-mature-bs8-r1-binder-view-source-r1. Each contains six natural color/direction
+instructions per source variant, exact matched noise and original-weight repeats.
+
+### 34.16 The new08/13 failures begin in approach geometry, not simply opening
+
+Across all18 identical initial states, repair first8 native X shifts left by
+0.0302–0.0530, median-0.04346; Y/Z median shifts are+0.01594/-0.02393.
+At08/state16, TCP is32.8mm left of the target versus18.7mm originally.
+At13/state16 these distances are26.1mm versus11.7mm. Before closing, contact then
+moves the blocks sideways in Y; both descend about40mm bystate32. The unchanged
+later arm sequence proceeds without carrying the target.
+
+Fresh simulator interventions retain the actual recorded arm sequence and force
+only the gripper closed from16 or24 through64. None recovers the required left
+motion. For08, signed progress at64 is13.31mm factual, -2.88mm when closed from16,
+15.21mm from24. For13 it is-9.40/-15.97/-7.97mm. Thus these cases must not be
+described as an isolated early-opening bug or solved by forcing contact.
+The original successful motion also raises the objects while moving left;
+oracle task success alone does not characterize the contact mechanism.
+
+Reversible parameter-group interventions on identical initial inputs localize
+the *new training drift*. Restoring all old state reproduces original first8
+arm within0.00016–0.00030 RMS. At08/13, restoring bottom alone changes mean native
+X by+0.03755/+0.03893; restoring P1 alone gives+0.00901/+0.00928. Restoring coarse
+or language alone has much smaller effects. These hybrid sensitivity tests
+neither assign additive causal percentages nor qualify a hybrid for deployment.
+No hybrid checkpoint is saved.
+
+Artifacts: *-gripper-contact-replay, *-initial-action-drift.json,
+*-parameter-reversion-r1, *-parameter-reversion-summary.json and
+*-regression-mechanics.png under dinov3-causal-repair-20261006.
+
+### 34.17 Explicit named AdamW continuation for the parameter-preserving repair
+
+On one actual bs8 production forward/backward atstep11012, the optimizer step
+was intercepted before live mutation. Identical clipped gradients and current LR
+were applied to two CPU AdamW copies. Fresh moments produce bottom updates
+3.16–4.81 times larger in L2 than carrying the checkpoint moments; P1 is3.91,
+grounder5.03, observation5.03. This establishes an initialization sensitivity,
+not proof that moment reset alone explains512-update behavior or old failures.
+Artifact: short-mature-bs8-r1-optimizer-restart-r1.json.
+
+Training now offers the explicit flag --init-optimizer-state checkpoint, only
+with --init-training-clock checkpoint and the parameter-preserving
+calvin_endpoint_trajectory_repair_v1 initialization. Default initialization still
+uses fresh moments. After the existing strict source/config/inventory/normalizer
+admission, it verifies the same live weights, checkpoint source and step, exact
+named group ordering, AdamW hyperparameters, finite correctly shaped moments,
+nonnegative variances, owned IDs and legal per-parameter update counts.
+All validation precedes optimizer mutation. The current retained schedule owns
+LR; old schedule, RNG and loader position are not restored. This is declared
+fine-tuning, not exact resume. Run context records actual optimizer loading.
+
+Sixteen focused tests pass, including exact next-AdamW-update parity after a new
+gradient and rejection of reordered names, wrong weights/source, hyperparameters,
+bad shapes, nonfinite moments, negative variance, illegal steps and wrong clocks.
+A real bs8 continuation pilot and behavioral validation remain required before
+claiming a repair to training drift. The target-selection and persistence
+investigations remain open; this option does not solve them by definition.

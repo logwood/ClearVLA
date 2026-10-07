@@ -59,6 +59,7 @@ def main():
     ap.add_argument("--first-window-only", action="store_true")
     ap.add_argument("--reconstruction-chain", action="store_true")
     ap.add_argument("--native-value", action="store_true")
+    ap.add_argument("--binder-view-source", action="store_true")
     args=ap.parse_args();args.output.mkdir(exist_ok=False);torch.set_num_threads(4)
     coverage=load_coverage(args.coverage_script)
     policy=ClearVLACheckpointPolicy(args.checkpoint,device=torch.device("cuda:0"),
@@ -83,6 +84,36 @@ def main():
             language_trace[name]=arr(value)
         return save
     def bind(*a,**kw):
+        if args.binder_view_source and variant != "baseline":
+            from clearvla.mainline.model.routing import smooth_rms_contract
+            if not gs:
+                raise RuntimeError("binder diagnostic requires the actual current G producer")
+            facts, source = gs[0]
+            original_objects = a[1]
+            if original_objects.shape != facts.content.shape[:2] + (organizer.hidden,):
+                raise RuntimeError("current G / binding K ownership differs")
+            supported = a[2]
+            legal = (facts.camera_validity[..., 0] > 0) & supported[..., None]
+            residual = source["slot_content_residual"]
+            if variant == "global_without_slot_residual":
+                replacement = original_objects - organizer.object_content(residual)
+                a = (a[0], torch.where(supported[...,None], replacement, 0.0), *a[2:])
+            else:
+                content = facts.camera_content
+                if variant in ("per_view_plus_slot_residual", "balanced_views_plus_slot_residual"):
+                    content = content + residual[:, :, None]
+                typed = (organizer.object_semantic(facts.camera_semantic)
+                         + organizer.object_appearance(facts.camera_appearance)
+                         + organizer.object_geometry(facts.camera_geometry)) / math.sqrt(3.0)
+                typed, _ = smooth_rms_contract(typed, 0.35)
+                views = organizer.object_content(content) + typed
+                views = torch.where(legal[..., None], views, 0.0)
+                if variant == "balanced_views_plus_slot_residual":
+                    replacement = views.sum(2) / legal.sum(2).clamp_min(1)[...,None]
+                else:
+                    replacement = views
+                    kw = dict(kw, view_support=legal)
+                a = (a[0], replacement, *a[2:])
         out,local=observe_return(original_bind,a,kw)
         language_trace.update({name:arr(local[name]) for name in ["obj","task_value","read","object_score","task_object_score","score"]})
         return out
@@ -160,6 +191,7 @@ def main():
     def gh(*a,**kw):
         out,local=observe_return(original_g,a,kw)
         source={k:local[k] for k in ["chart","camera_read","structured_read","candidate_prior","validity","candidate_shape"]}
+        source["slot_content_residual"] = grounder.decode_content_residual(local["slots"])
         if args.reconstruction_chain:
             owner=local["reconstruction_owner"]
             value=local["aggregated_content"]
@@ -209,6 +241,11 @@ def main():
                 if args.language_chain or args.reconstruction_chain: variants=["baseline"]
                 if args.frozen_bank: variants=["baseline","bank_frozen_dino"]
                 if args.native_value: variants=["baseline","native_value_only","bank_frozen_and_native"]
+                if args.binder_view_source:
+                    if not args.language_chain:
+                        raise ValueError("--binder-view-source requires --language-chain for paired natural-instruction diagnostics")
+                    variants = ["baseline", "global_without_slot_residual", "per_view_conditional",
+                                "per_view_plus_slot_residual", "balanced_views_plus_slot_residual"]
                 for variant in variants:
                     clear()
                     with torch.no_grad():out=sample_action(model,online,policy.bundle.config,initial_physical_noise=seed)
@@ -264,7 +301,7 @@ def main():
                     parts=captured["bank_parts"]
                     record["bank_parameters"]={k:{"min":float(parts[k].min()),"mean":float(parts[k].mean()),"max":float(parts[k].max())} for k in ["sigma","content_scale","confidence_grid","uncertainty_dino","occlusion_grid"]}
                     record["bank_centered_score_rms"]={k:rms(arr(parts[k]-parts[k].mean(-1,keepdim=True))) for k in ["content_logits","floor_flow_bias","adaptive_flow_bias"]}
-                    if not args.reconstruction_chain and variant in ["baseline","neutral_parent","parent_half","bank_content_zero","bank_content_half","bank_spatial_zero","bank_frozen_dino","native_value_only","bank_frozen_and_native"]:
+                    if not args.reconstruction_chain and (args.binder_view_source or variant in ["baseline","neutral_parent","parent_half","bank_content_zero","bank_content_half","bank_spatial_zero","bank_frozen_dino","native_value_only","bank_frozen_and_native"]):
                         record["natural_colors"]=[]
                         natural_conditions=([(color,direction) for color in ["red","blue","pink"] for direction in ["left","right"]]
                             if args.language_chain else [(color,row["instruction"].split()[-1]) for color in ["red","blue","pink"]])
@@ -319,7 +356,7 @@ def main():
                     print(json.dumps({"case":cid,"state":t,"variant":variant,"arm_delta":record["native_vs_baseline_arm_rmse"]}),flush=True)
                 rows.append(entry);variant="baseline"
         dump(args.output/"complete.json",{"complete":True,"windows":len(rows),"checkpoint_sha256":policy.bundle.checkpoint_sha256,
-          "scope":"current online local producer only; coherent recomputation; masks never enter model; no closed-loop efficacy claim",
+          "scope":"source-only local/binder interventions; full downstream recomputation; masks never enter model; no closed-loop efficacy claim",
           "script_sha256":SCRIPT_SHA256})
     finally:
         for hook in language_hooks:hook.remove()

@@ -167,7 +167,13 @@ def _parser() -> argparse.ArgumentParser:
         "--init-training-clock", choices=("fresh", "checkpoint"), default="fresh",
         help=("For the parameter-preserving CALVIN endpoint/trajectory repair only, "
               "explicitly retain completed model updates and mature execution phase. "
-              "Optimizer/RNG remain fresh; this is not exact resume."),
+              "Optimizer moments are separately opt-in; RNG remains fresh. Not exact resume."),
+    )
+    parser.add_argument(
+        "--init-optimizer-state", choices=("fresh", "checkpoint"), default="fresh",
+        help=("For the parameter-preserving CALVIN repair with retained training clock, "
+              "optionally retain verified named AdamW moments. Current schedule and "
+              "fresh RNG/loader are retained; this is not exact resume."),
     )
     parser.add_argument("--validate-checkpoint", type=Path)
     parser.add_argument(
@@ -430,6 +436,12 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         or args.init_model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION
     ):
         raise ValueError("checkpoint training clock requires the parameter-preserving CALVIN endpoint/trajectory migration")
+    if getattr(args, "init_optimizer_state", "fresh") == "checkpoint" and (
+        args.init_checkpoint is None
+        or args.init_model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION
+        or args.init_training_clock != "checkpoint"
+    ):
+        raise ValueError("checkpoint optimizer moments require the parameter-preserving CALVIN migration and retained training clock")
     return result
 
 
@@ -461,6 +473,116 @@ def _initialize_training_clock(
     schedule.load_state_dict(state)
     engine.global_step = step
     engine.model.set_training_step(step)
+
+
+def _initialize_optimizer_moments(
+    engine: MainlineTrainingEngine, initialization: InitializationState,
+    checkpoint: Path, *, mode: str,
+) -> dict[str, object]:
+    """Retain AdamW history only after parameter-preserving model admission.
+
+    Validate the complete named ordering, live weight identity, hyperparameters
+    and finite moment state before mutating the optimizer. The *current* retained
+    schedule still owns LR; this does not restore the old schedule, loader or RNG.
+    """
+    if mode == "fresh":
+        return {"mode": mode, "loaded": False, "state_tensors": 0}
+    if (
+        mode != "checkpoint"
+        or initialization.model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION
+        or engine.global_step != initialization.global_step
+        or engine.schedule.step_index != initialization.global_step
+    ):
+        raise ValueError("optimizer continuation requires the admitted parameter-preserving migration and retained clock")
+    optimizer = engine.optimizer
+    if not isinstance(optimizer, torch.optim.AdamW) or optimizer.state:
+        raise ValueError("optimizer continuation requires fresh AdamW state")
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    if (
+        payload["global_step"] != initialization.global_step
+        or payload["identity"]["source"]["digest"] != initialization.saved_source_digest
+    ):
+        raise ValueError("optimizer checkpoint differs from the admitted model source/clock")
+    live = engine.model.state_dict()
+    stored = payload["model"]
+    if live.keys() != stored.keys() or any(
+        value.shape != stored[name].shape
+        or value.dtype != stored[name].dtype
+        or not torch.equal(value.detach().cpu(), stored[name])
+        for name, value in live.items()
+    ):
+        raise ValueError("optimizer checkpoint weights differ from the admitted live model")
+    saved = payload["optimizer"]
+    current = optimizer.state_dict()
+    if len(saved["param_groups"]) != len(current["param_groups"]):
+        raise ValueError("optimizer group inventory differs")
+    allowed_ids: set[int] = set()
+    groups: list[dict[str, object]] = []
+    for old, new, runtime in zip(
+        saved["param_groups"], current["param_groups"], optimizer.param_groups, strict=True
+    ):
+        old_names = tuple(old.get("parameter_names", ()))
+        new_names = tuple(new.get("parameter_names", ()))
+        if (
+            old.get("name") != new.get("name")
+            or not old_names or old_names != new_names
+            or len(old_names) != len(old["params"])
+            or len(set(old_names)) != len(old_names)
+            or len(old["params"]) != len(new["params"])
+        ):
+            raise ValueError("optimizer named parameter ordering differs")
+        # LR belongs to the newly declared schedule. All other AdamW settings
+        # must retain their declared semantics, including optional backend flags.
+        for key in set(old) | set(new):
+            if key not in {"params", "parameter_names", "lr"} and old.get(key) != new.get(key):
+                raise ValueError("optimizer hyperparameter differs: " + key)
+        for index, parameter in zip(old["params"], runtime["params"], strict=True):
+            if index in allowed_ids:
+                raise ValueError("optimizer checkpoint repeats a parameter id")
+            allowed_ids.add(index)
+            state = saved["state"].get(index)
+            if state is None:
+                continue  # Parameters without a prior gradient have no Adam state.
+            expected = {"step", "exp_avg", "exp_avg_sq"}
+            if new["amsgrad"]:
+                expected.add("max_exp_avg_sq")
+            if set(state) != expected:
+                raise ValueError("optimizer checkpoint has an unknown state schema")
+            step = state["step"]
+            if (
+                not isinstance(step, torch.Tensor) or step.ndim != 0
+                or not bool(torch.isfinite(step))
+                or float(step) < 0 or float(step) > initialization.global_step
+                or float(step) != int(float(step))
+            ):
+                raise ValueError("optimizer moment step is not a valid completed-update count")
+            for name in expected - {"step"}:
+                value = state[name]
+                if (
+                    not isinstance(value, torch.Tensor)
+                    or value.shape != parameter.shape or value.dtype != parameter.dtype
+                    or not bool(torch.isfinite(value).all())
+                    or (name.endswith("sq") and bool((value < 0).any()))
+                ):
+                    raise ValueError("optimizer moment tensor is invalid: " + name)
+        groups.append({**old, "lr": new["lr"]})
+    if not set(saved["state"]) <= allowed_ids or (
+        initialization.global_step > 0 and not saved["state"]
+    ):
+        raise ValueError("optimizer checkpoint has missing or unowned state")
+    # Own copies protect the admitted checkpoint payload from future in-place
+    # updates even when initialization and training occur on CPU.
+    owned = {
+        index: {name: value.detach().clone() for name, value in state.items()}
+        for index, state in saved["state"].items()
+    }
+    optimizer.load_state_dict({"state": owned, "param_groups": groups})
+    return {
+        "mode": mode, "loaded": True, "state_tensors": len(owned),
+        "source_global_step": initialization.global_step,
+        "lr_owner": "current retained schedule",
+        "parameter_mapping": "exact named group ordering",
+    }
 
 
 def _validation_sampling_config(
@@ -2416,6 +2538,7 @@ def main() -> None:
     best_metric: float | None = None
     validation_state = None
     initialization_state: InitializationState | None = None
+    optimizer_initialization: dict[str, object] = {"mode": "fresh", "loaded": False}
     if args.resume is not None:
         restored = load_checkpoint_exact(
             args.resume,
@@ -2453,10 +2576,15 @@ def main() -> None:
             verified_source_dataset=verified_source_dataset,
         )
         initialization_checkpoint_resolved = str(Path(args.init_checkpoint).resolve())
-        # Optimizer/RNG/loader remain fresh. Only this explicit, strictly
-        # parameter-preserving migration may retain the completed model clock.
+        # Only this explicitly parameter-preserving migration may retain the
+        # completed clock and optionally the verified named optimizer moments.
+        # RNG and loader still restart; this is not exact resume.
         _initialize_training_clock(
             engine, schedule, initialization_state, mode=args.init_training_clock
+        )
+        optimizer_initialization = _initialize_optimizer_moments(
+            engine, initialization_state, Path(args.init_checkpoint),
+            mode=args.init_optimizer_state,
         )
         best_metric = None
         print(
@@ -2466,7 +2594,7 @@ def main() -> None:
             f"checkpoint_step={initialization_state.global_step} "
             f"model_migration={initialization_state.model_contract_migration} "
             f"training_clock={args.init_training_clock} initial_step={engine.global_step} "
-            "optimizer_load=disabled schedule_load=disabled rng_load=disabled",
+            f"optimizer_load={args.init_optimizer_state} schedule_load=disabled rng_load=disabled",
             flush=True,
         )
     elif validation_checkpoint is not None:
@@ -2586,7 +2714,8 @@ def main() -> None:
             "normalizer_identity_equal": (
                 initialization_state.normalizer_identity_equal
             ),
-            "optimizer_loaded": False,
+            "optimizer_loaded": bool(optimizer_initialization["loaded"]),
+            "optimizer_initialization": optimizer_initialization,
             "schedule_loaded": False,
             "rng_loaded": False,
             "data_loader_state_loaded": False,
