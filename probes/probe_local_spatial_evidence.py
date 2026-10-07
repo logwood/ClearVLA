@@ -52,6 +52,7 @@ def mask_measure(prob, xy, masks):
 def main():
     ap=argparse.ArgumentParser()
     for name in ["checkpoint","plan","masks","coverage-script","output"]:ap.add_argument("--"+name,type=Path,required=True)
+    ap.add_argument("--bank-source", action="store_true")
     args=ap.parse_args();args.output.mkdir(exist_ok=False);torch.set_num_threads(4)
     coverage=load_coverage(args.coverage_script)
     policy=ClearVLACheckpointPolicy(args.checkpoint,device=torch.device("cuda:0"),
@@ -60,14 +61,38 @@ def main():
     model=policy.bundle.model;grounder=model.grounding.grounder;enc=model.observation.compiler.encoder
     original_update=enc.update_progressive_grounding_address;original_law=flow.couple_local_observation
     original_g=grounder.forward;original_encode=model.encode_online
+    banks=[m for m in enc.modules() if isinstance(m,flow._SoftMultiResolutionAddressCompiler)]
+    assert len(banks)==1
+    bank_module=banks[0];original_bank=bank_module.forward;bank_records={}
     import clearvla.simulation.clearvla_policy as frontend
     original_sample=frontend.sample_action
     captured={};gs=[];caches=[];samples=[];variant="baseline";group=0
+    def bank_forward(*a,**kw):
+        hook=None;floor=bank_module.flow_prior_floor;prior=bank_module.flow_prior_log_scale.detach().clone()
+        if group==0 and args.bank_source:
+            if variant in ["bank_content_zero","bank_content_half"]:
+                factor=0.0 if variant=="bank_content_zero" else .5
+                hook=bank_module.query_norm.register_forward_hook(lambda m,i,o:o*factor)
+            elif variant=="bank_spatial_zero":
+                bank_module.flow_prior_floor=0.0
+                with torch.no_grad():bank_module.flow_prior_log_scale.fill_(-100)
+        try:
+            out,local=observe_return(original_bank,a,kw)
+            bank_records[id(local["bank"])]={k:local[k] for k in [
+                "content_logits","floor_flow_bias","adaptive_flow_bias","sigma",
+                "content_scale","confidence_grid","uncertainty_dino","occlusion_grid",
+                "flow_center_dino","source_high"]}
+            return out
+        finally:
+            if hook is not None:hook.remove()
+            bank_module.flow_prior_floor=floor
+            with torch.no_grad():bank_module.flow_prior_log_scale.copy_(prior)
     def update(state,rollout,**kw):
         nonlocal group
         if kw["stage"]==1:group+=1
         out=original_update(state,rollout,**kw)
         if group==1 and kw["stage"]==1:
+            captured["bank_parts"]=bank_records[id(state.bank)]
             captured["coarse_base"]=state.bank.coarse_base_logits
             captured["coarse_logits"]=out.coarse_logits
             captured["coarse_probability"]=out.coarse_probability
@@ -93,9 +118,10 @@ def main():
         out=original_sample(*a,**kw);samples[:]=[out];return out
     def clear():
         nonlocal group
-        group=0;captured.clear();gs.clear();caches.clear();samples.clear()
+        group=0;captured.clear();gs.clear();caches.clear();samples.clear();bank_records.clear()
     def native(sample):
         x=policy.bundle.action_normalizer.decode(arr(sample.action)[0]);x[:,-1]=arr(sample.gripper_command)[0];return x
+    bank_module.forward=bank_forward
     enc.update_progressive_grounding_address=update;flow.couple_local_observation=law
     grounder.forward=gh;model.encode_online=encode;frontend.sample_action=sample
     rows=[];plan=json.loads(args.plan.read_text())
@@ -118,7 +144,8 @@ def main():
                 maskpath=args.masks/case.name/f"state_{t:03d}.npz"
                 with np.load(maskpath) as z:masks=[z[k+"_masks"].copy() for k in ["top","wrist"]];names=z["object_names"].tolist()
                 entry={"case_id":cid,"state":t,"object_names":names,"recorded_arm_rmse":rms(baseline[:8,:6]-data["raw_chunks"][t//8,:8,:6]),"variants":[]}
-                for variant in ["baseline","neutral_parent","parent_half","parent_only","neutral_semantic","neutral_appearance","neutral_geometry"]:
+                variants=(["baseline","bank_content_zero","bank_content_half","bank_spatial_zero"] if args.bank_source else ["baseline","neutral_parent","parent_half","parent_only","neutral_semantic","neutral_appearance","neutral_geometry"])
+                for variant in variants:
                     clear()
                     with torch.no_grad():out=sample_action(model,online,policy.bundle.config,initial_physical_noise=seed)
                     cache=caches[0];match=[(i,f,s) for i,(f,s) in enumerate(gs) if f.camera_coordinates is cache.top.belief.camera_coordinates]
@@ -132,6 +159,10 @@ def main():
                         stages["uniform_coarse"]=mask_measure(torch.full_like(captured["coarse_probability"],1/captured["coarse_probability"].shape[-1]),xy,masks)
                         stages["pre_G1"]=mask_measure(captured["coarse_base"].float().softmax(-1),xy,masks)
                         stages["G1"]=mask_measure(captured["coarse_probability"],xy,masks)
+                        for name in ["content_logits","floor_flow_bias","adaptive_flow_bias"]:
+                            stages["bank_"+name]=mask_measure(captured["bank_parts"][name].float().softmax(-1),xy,masks)
+                        parts=captured["bank_parts"]
+                        stages["bank_spatial_only"]=mask_measure((parts["floor_flow_bias"]+parts["adaptive_flow_bias"]).float().softmax(-1),xy,masks)
                         stages["G2_parent"]=mask_measure(captured["original_parent"].float().softmax(-1),spatial.coordinates,masks)
                         typed=sum(captured["typed"].values())/math.sqrt(3)
                         stages["G2_typed_only"]=mask_measure(typed.float().softmax(-1),spatial.coordinates,masks)
@@ -145,7 +176,10 @@ def main():
                        "g_reconstruction_error":float(facts.reconstruction_error)}
                     if variant=="baseline":
                         record["within_candidate_score_rms"]={k:rms(arr(v-v.mean(-1,keepdim=True))) for k,v in {**captured["typed"],"parent":captured["original_parent"],"G1_base":captured["coarse_base"],"G1_delta":captured["coarse_logits"]-captured["coarse_base"]}.items()}
-                    if variant in ["baseline","neutral_parent","parent_half"]:
+                    parts=captured["bank_parts"]
+                    record["bank_parameters"]={k:{"min":float(parts[k].min()),"mean":float(parts[k].mean()),"max":float(parts[k].max())} for k in ["sigma","content_scale","confidence_grid","uncertainty_dino","occlusion_grid"]}
+                    record["bank_centered_score_rms"]={k:rms(arr(parts[k]-parts[k].mean(-1,keepdim=True))) for k in ["content_logits","floor_flow_bias","adaptive_flow_bias"]}
+                    if variant in ["baseline","neutral_parent","parent_half","bank_content_zero","bank_content_half","bank_spatial_zero"]:
                         record["natural_colors"]=[]
                         for color in ["red","blue","pink"]:
                             instruction="go push the "+color+" block "+row["instruction"].split()[-1]
@@ -163,6 +197,7 @@ def main():
           "scope":"current online local producer only; coherent recomputation; masks never enter model; no closed-loop efficacy claim",
           "script_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
     finally:
+        bank_module.forward=original_bank
         enc.update_progressive_grounding_address=original_update;flow.couple_local_observation=original_law
         grounder.forward=original_g;model.encode_online=original_encode;frontend.sample_action=original_sample
 if __name__=="__main__":main()

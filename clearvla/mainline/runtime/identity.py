@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from dataclasses import replace
 
 import numpy as np
 
@@ -195,6 +196,38 @@ def dataset_identity(
         decoded_cache_identity=decoded_identity,
         dino_cache_identity=dino_identity,
     )
+
+
+
+def calvin_endpoint_source_dataset_identity(
+    bundle: MainlineDataBundle, config: ExperimentConfig
+) -> DatasetIdentity:
+    """Recompute the pre-repair identity from immutable HDF5 metadata.
+
+    Only the annotation index is restored to its stored value. Actual file
+    inventory, splits, bounds, arrays, normalizers and visual identity remain
+    current, so any unrelated drift still differs from the source checkpoint.
+    """
+    import h5py
+
+    if config.data.data_profile != "calvin_relative_7d_v1" or not config.data.calvin_raw_source:
+        raise ValueError("endpoint provenance migration requires the CALVIN raw overlay")
+    if config.top.annotation_goal_mode != "annotated_endpoint_relation_v1":
+        raise ValueError("endpoint provenance migration requires annotated endpoint identity")
+    episodes = []
+    for episode in bundle.episodes:
+        with h5py.File(episode.path, "r") as source:
+            stored = source.attrs.get("source_annotation_index")
+        if stored is not None:
+            if isinstance(stored, (bool, np.bool_)) or not isinstance(stored, (int, np.integer)) or stored < 0:
+                raise ValueError("invalid stored CALVIN annotation index")
+            stored = int(stored)
+            if stored != episode.source_annotation_index:
+                raise ValueError("overlay contradicts an existing source annotation index")
+        if episode.source_annotation_index is None or episode.cache_frame_count is None:
+            raise ValueError("endpoint provenance migration requires a verified overlaid episode")
+        episodes.append(replace(episode, source_annotation_index=stored))
+    return dataset_identity(replace(bundle, episodes=episodes), config)
 
 
 def language_identity(

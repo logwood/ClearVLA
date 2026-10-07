@@ -2398,6 +2398,10 @@ def main() -> None:
             checkpoint_step=restored.global_step,
         )
     elif args.init_checkpoint is not None:
+        verified_source_dataset = None
+        if args.init_model_contract_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+            from .runtime.identity import calvin_endpoint_source_dataset_identity
+            verified_source_dataset = calvin_endpoint_source_dataset_identity(bundle, config)
         initialization_state = load_checkpoint_for_initialization(
             args.init_checkpoint,
             model=model,
@@ -2405,6 +2409,7 @@ def main() -> None:
             identity=identity,
             data_contract_migration=args.init_data_contract_migration,
             model_contract_migration=args.init_model_contract_migration,
+            verified_source_dataset=verified_source_dataset,
         )
         initialization_checkpoint_resolved = str(Path(args.init_checkpoint).resolve())
         # A model-only initialization intentionally starts all continuation

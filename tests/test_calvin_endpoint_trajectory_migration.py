@@ -60,3 +60,17 @@ def test_endpoint_trajectory_initialization_preserves_all_weights_and_rejects_dr
     with pytest.raises(ValueError,match="allow-list"):
         load_checkpoint_for_initialization(path,model=target,config=target_config,
             identity=other,model_contract_migration=MIGRATION)
+
+    repaired_dataset = replace(current_id.dataset, inventory_sha256=hashlib.sha256(b"verified repaired metadata").hexdigest())
+    repaired_id = replace(current_id, dataset=repaired_dataset)
+    with pytest.raises(ValueError, match="exact source inventory proof"):
+        load_checkpoint_for_initialization(path,model=target,config=target_config,
+            identity=repaired_id,model_contract_migration=MIGRATION)
+    load_checkpoint_for_initialization(path,model=target,config=target_config,
+        identity=repaired_id,model_contract_migration=MIGRATION,
+        verified_source_dataset=saved_id.dataset)
+    bad_dataset=replace(repaired_dataset,action_normalizer_sha256=hashlib.sha256(b"changed normalization").hexdigest())
+    with pytest.raises(ValueError):
+        load_checkpoint_for_initialization(path,model=target,config=target_config,
+            identity=replace(current_id,dataset=bad_dataset),model_contract_migration=MIGRATION,
+            verified_source_dataset=saved_id.dataset)

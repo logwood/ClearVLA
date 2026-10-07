@@ -16,6 +16,7 @@ from torch import Tensor, nn
 
 from ..checkpoint import (
     CheckpointIdentity,
+    DatasetIdentity,
     checkpoint_identity_from_mapping,
     compare_checkpoint_identity,
 )
@@ -55,6 +56,7 @@ CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS = frozenset({
     "clearvla/mainline/data/loading.py",
     "clearvla/mainline/train.py",
     "clearvla/mainline/runtime/checkpoints.py",
+    "clearvla/mainline/runtime/identity.py",
 })
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
@@ -1120,6 +1122,7 @@ def load_checkpoint_for_initialization(
     identity: CheckpointIdentity,
     data_contract_migration: str | None = None,
     model_contract_migration: str | None = None,
+    verified_source_dataset: DatasetIdentity | None = None,
 ) -> InitializationState:
     """Load only model parameters as the start of a fresh training run.
 
@@ -1207,7 +1210,9 @@ def load_checkpoint_for_initialization(
         "config identity differs",
         "source identity differs",
     }
-    if selected_migration is not None:
+    if verified_source_dataset is not None and selected_model_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+        raise ValueError("verified source dataset is only valid for endpoint provenance repair")
+    if selected_migration is not None or selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
         admitted_identity_reasons.add("dataset identity differs")
     rejected_reasons = tuple(
         reason
@@ -1428,7 +1433,12 @@ def load_checkpoint_for_initialization(
         if _joint_task_object_binding_trajectory_migration_config_view(saved_config) != _joint_task_object_binding_trajectory_migration_config_view(config):
             raise ValueError("endpoint/trajectory repair differs outside its six trajectory-supervision selectors")
         if saved_identity.dataset != identity.dataset:
-            raise ValueError("endpoint/trajectory repair requires identical dataset identity")
+            from dataclasses import replace
+            if (
+                verified_source_dataset != saved_identity.dataset
+                or replace(identity.dataset, inventory_sha256=saved_identity.dataset.inventory_sha256) != saved_identity.dataset
+            ):
+                raise ValueError("endpoint/trajectory repair requires exact source inventory proof; only annotation inventory may differ")
     elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION:
         if (
             saved_config.data.data_profile != "calvin_relative_7d_v1"
