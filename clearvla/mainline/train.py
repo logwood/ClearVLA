@@ -2301,6 +2301,11 @@ def main() -> None:
     output_dir = Path(config.data.output_dir)
     _prepare_output_directory(output_dir, exact_resume=args.resume is not None)
     bundle = load_mainline_data(config, allow_null_goal=bool(args.allow_null_goal))
+    if validation_checkpoint is None:
+        from .data.loading import require_annotation_goal_training_coverage
+        require_annotation_goal_training_coverage(
+            config, bundle.datasets["train"].boundary_summary()
+        )
     if config.data.visual_feature_mode == "dinov3_online_v1":
         from clearvla.vision.online_pipeline import OnlineVisionPipeline
         bundle = replace(bundle, visual_encoder=OnlineVisionPipeline.from_config(config, device))

@@ -14,6 +14,7 @@ from clearvla.benchmarks.calvin_raw import (
     CalvinRawReader,
     virtualize_calvin_cached_prefix,
 )
+from clearvla.data.annotation_endpoint import resolve_annotation_endpoint
 from clearvla.data.hdf5_episode import load_episode
 
 
@@ -241,8 +242,10 @@ def test_raw_reader_rejects_short_prefix_before_virtual_episode_creation(tmp_pat
     assert sum(len(reader.episodes(split)) for split in ("train", "val", "test")) == 4
 
 
+@pytest.mark.parametrize("legacy_missing_annotation", [False, True])
 def test_cached_prefix_overlay_restores_terminal_truth_without_copying_visual_rows(
     tmp_path: Path,
+    legacy_missing_annotation: bool,
 ) -> None:
     source = tmp_path / "task_ABC_D"
     _raw_source_split(source / "training", trajectories=3)
@@ -273,6 +276,7 @@ def test_cached_prefix_overlay_restores_terminal_truth_without_copying_visual_ro
                 actions_raw=full.actions_raw[: terminal + 1].copy(),
                 states_raw=full.states_raw[: terminal + 1].copy(),
                 action_states_raw=full.action_states_raw[: terminal + 1].copy(),
+                source_annotation_index=None if legacy_missing_annotation else full.source_annotation_index,
                 terminal_state_index=None,
                 terminal_padding_mode="",
                 valid_center_end=None,
@@ -311,3 +315,21 @@ def test_cached_prefix_overlay_restores_terminal_truth_without_copying_visual_ro
         np.asarray([terminal - 1, terminal, terminal, terminal]),
     )
     assert report["cached_prefix_visual_reuse"] == "real_rows_plus_terminal_repeat_only"
+
+    raw = {ep.episode_id: ep for split in ("train", "val", "test") for ep in reader.episodes(split)}
+    for prefix, episode in zip(prefixes, overlaid):
+        source_episode = raw[raw_episode_map.get(prefix.episode_id, prefix.episode_id)]
+        assert episode.source_annotation_index == source_episode.annotation.index
+        endpoint = resolve_annotation_endpoint(episode)
+        assert endpoint.status == "annotated-end-observation"
+        assert endpoint.index == episode.terminal_state_index < episode.cache_frame_count
+        # Missing provenance is repaired only on the returned overlay.
+        if legacy_missing_annotation:
+            assert prefix.source_annotation_index is None
+    for bad in (True, 0.5, first.source_annotation_index + 1000):
+        contradictory = [replace(prefixes[0], source_annotation_index=bad), *prefixes[1:]]
+        with pytest.raises(ValueError, match="source_annotation_index"):
+            virtualize_calvin_cached_prefix(
+                contradictory, reader, expected_splits=expected_splits,
+                raw_episode_map=raw_episode_map,
+            )

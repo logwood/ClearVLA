@@ -219,3 +219,18 @@ def test_legacy_HDF5_without_annotation_id_still_loads(tmp_path):
     ep = _load(path)
     assert ep.source_annotation_index is None
     assert resolve_annotation_endpoint(ep).index is None
+
+def test_enabled_endpoint_objective_cannot_train_without_any_label_windows():
+    from clearvla.mainline.data.loading import require_annotation_goal_training_coverage
+    cfg = _config()
+    assert cfg.objectives.annotated_goal > 0
+    require_annotation_goal_training_coverage(cfg, _goal_dataset().boundary_summary())
+    with pytest.raises(ValueError, match="zero provenance-verified"):
+        require_annotation_goal_training_coverage(cfg, _goal_dataset(annotation=None).boundary_summary())
+    disabled = replace(cfg, objectives=replace(cfg.objectives, annotated_goal=0.0))
+    require_annotation_goal_training_coverage(disabled, _goal_dataset(annotation=None).boundary_summary())
+    # Partly unknown data is admitted when real labels exist; no row is fabricated.
+    require_annotation_goal_training_coverage(cfg, {
+        "annotation_endpoint_labeled_windows": 1,
+        "annotation_endpoint_episode_statuses": {"unknown-provenance": 100, "annotated-end-observation": 1},
+    })

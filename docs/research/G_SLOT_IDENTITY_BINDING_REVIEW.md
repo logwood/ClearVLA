@@ -799,3 +799,23 @@ python -m probes.audit_controller_anchor --audit AUDIT_WITH_GEOMETRY_R2 --rollou
 证据目录：`/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes/controller-contract-review-20261006-v3`。`observer-r1/summary.json`含各例统计与20个关键状态，`transitions.json`保留3890个节点读数；不下载大张量。实际checkpoint SHA仍为`5ca168e3f4f33772dd01aca26adcc1b00dfc029b526a950f3b534d5428d19d15`。
 
 新增仓库探针`probes/probe_controller_state_semantics.py`；实际实参保存在`launch.json`，使用模型Python、GPU0、`--checkpoint`/`--rollout`/`--training-episodes`/`--raw-root`/`--output`。复跑必须使用新输出目录。源码边界为`calvin_eval.py:86–103`、`history.py:121–129,186–225`、`clearvla_policy.py:346–355`、`model/policy.py:741–747`、`model/robot_execution.py:31–66`。原始附件仅作待核验报告保存在实验目录；未收到其所列的9份脚本/结果附件，不把外部独立CPU复算声称为本线程已重复执行。
+
+## 34. 2026-10-06：独立修复分支与完整策略诊断（进行中）
+
+实现分支 `codex/causal-execution-object-repair-20261006` 从 `dd4a9763` 分出；原完整 checkpoint 与原闭环源保持独立。
+
+### 34.1 已修复的数据来源边界
+
+`benchmarks/calvin_raw.py::virtualize_calvin_cached_prefix` 在既有 split/task/text/source bounds/实帧长度核验之后补传 raw annotation index；已有非空编号不符或类型错误时拒绝。原 HDF5 和动作/视觉源不改写。训练入口在 endpoint objective > 0 且整个训练集合有零个可核验终点窗口时拒绝启动；部分未知来源仍按原合同保留 BC 窗口并掩蔽终点标签。
+
+实际 2599 条 inventory 通过：train2165/val280/test154 经生产 overlay 后已经全部是 `annotated-end-observation`。81 项针对性回归通过（raw reader、真实 HDF5 endpoint、future/online 隔离和 endpoint 梯度合同）。这闭合来源漏传，不证明行为失败已解决。证据：`/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes/causal-repair-20261006-v4` 的 `provenance_tests_r3.log` 和 `provenance_full_inventory`；旧 probe 的 after 是重复赋同值，决定统计使用生产 overlay 后的 before。
+
+### 34.2 同权重完整策略控制诊断
+
+`probes/probe_controller_policy_closed_loop.py` 显式区分 stored_target 与 measured_tcp。保持 final checkpoint、seed0、18例、360步、execute_rows8；每个新观测仍完整重新规划，输出含实际提交后的绝对目标。新增遥测以原第04例核验：初始RGB完全相同、首8行arm RMSE0.0002593，旧62步/复现63步均成功；不得称为逐位相同轨迹。
+
+完整 measured_tcp 面板在 `/data/senwang/clearvla/experiments/calvin/gslot-final-measured-tcp-replan8-20261006-r1`。它是显式改变后端控制语义的诊断；不并入原11/18，不提前作为生产修复。
+
+### 34.3 未遗漏的并行研究项
+
+原长跑配置确实将 `gripper_command_transition=0`、`calvin_frame_weight_mode=uniform`；早期 trajectory repair 代码已合入但本次未启用。后续候选需明确合并/验收这两项，而非默认为已使用。同时继续追查进入全局K以前的真实物块采样质量、共享对象选择、以及10/17接触前后历史消费与剩余目标判断。

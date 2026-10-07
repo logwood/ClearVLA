@@ -931,6 +931,18 @@ def virtualize_calvin_cached_prefix(
                 raise ValueError(
                     f"{episode.episode_id}: cached {name}={cached} differs from raw {source}"
                 )
+        # Legacy converted prefixes may omit this field. The raw annotation is
+        # authoritative only after split/task/text/frame bounds matched above.
+        annotation_index = episode.source_annotation_index
+        if annotation_index is not None and (
+            isinstance(annotation_index, (bool, np.bool_))
+            or not isinstance(annotation_index, (int, np.integer))
+            or int(annotation_index) != int(raw.annotation.index)
+        ):
+            raise ValueError(
+                f"{episode.episode_id}: cached source_annotation_index="
+                f"{annotation_index!r} differs from raw {raw.annotation.index}"
+            )
         actions = np.asarray(episode.actions_raw, dtype=np.float32).copy()
         states_value = episode.states_raw
         if states_value is None:
@@ -983,6 +995,7 @@ def virtualize_calvin_cached_prefix(
                 terminal_padding_mode=RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING,
                 cache_frame_count=physical_length,
                 source_trajectory_id=raw.source_trajectory_id,
+                source_annotation_index=int(raw.annotation.index),
             )
         )
         task_counts[expected_split][raw.task] += 1

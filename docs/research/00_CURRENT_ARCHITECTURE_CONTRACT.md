@@ -1668,6 +1668,17 @@ semantics. New parameters are instantiated only in the selected mode and are
 owned by the real grounder. Current-only controls have no placeholder parameters
 or changed constructor RNG/order. No old-checkpoint or optimizer migration.
 
+## Endpoint data admission repair (2026-10-06)
+
+The isolated causal repair branch preserves the selected model topology and
+native action field. CALVIN cached-prefix overlay now restores a missing raw
+annotation index only after split/task/text/frame-bound checks; a contradictory
+existing index is rejected. An enabled annotated-goal training objective must
+have at least one provenance-verified training label window. Individual unknown
+or censored endpoints remain masked BC rows. This is observed endpoint truth,
+not a success flag and not an online feature. Historical checkpoints retain
+their recorded source coverage; changing the loader does not relabel old results.
+
 ## Agent quick contract
 
 The historical default and the accumulated structural candidate are different

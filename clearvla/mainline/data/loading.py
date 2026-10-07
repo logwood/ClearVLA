@@ -125,6 +125,25 @@ def _configure_worker_tensor_sharing(workers: int) -> None:
         ) from exc
 
 
+
+def require_annotation_goal_training_coverage(
+    config: ExperimentConfig, summary: Mapping[str, object]
+) -> None:
+    """Reject a fully inactive configured objective before model allocation.
+
+    Individual unknown/censored endpoints remain valid BC windows with masked
+    endpoint labels. This check never invents labels or reads future data online.
+    """
+    if config.top.annotation_goal_mode == "none" or config.objectives.annotated_goal <= 0:
+        return
+    if int(summary.get("annotation_endpoint_labeled_windows", 0)) <= 0:
+        statuses = summary.get("annotation_endpoint_episode_statuses", {})
+        raise ValueError(
+            "annotated_goal is enabled but training has zero provenance-verified "
+            f"endpoint label windows; endpoint statuses={statuses}"
+        )
+
+
 @dataclass(frozen=True)
 class GoalTemplate:
     tokens: Tensor  # CPU float32 [N,L,D]
