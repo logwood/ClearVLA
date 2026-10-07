@@ -24,7 +24,8 @@ def main():
    recurrence=float(np.max(np.abs(targets[1:]-expected)));gaps=np.linalg.norm(targets-tcp,axis=-1)
    recurrences.append({'case_id':cid,'steps':len(command),'stored_target_recurrence_max_abs_error':recurrence,
       'max_target_tcp_gap':float(gaps.max()),'p95_target_tcp_gap':float(np.quantile(gaps,.95)),'peak_state':int(gaps.argmax())})
- identity={'training_formula':'rel_xyz = clip(absolute_target_xyz - measured_tcp_xyz, -.02, .02)/.02',
+ identity={'training_formula':'rel_xyz = clip(raw_action_label_xyz - measured_tcp_xyz, -.02, .02)/.02',
+   'raw_label_scope':'Renderer labels use later observed TCP pose; not verified demonstrator controller held setpoint',
    'deployed_formula':'stored_target_next = stored_target_previous + .02 * rel_xyz',
    'raw_training_checks':checks,'raw_training_max_abs_error':max(r['max_abs_error'] for r in checks),'rollout_recurrences':recurrences,
    'training_source':'calvin_env/utils/utils.py:160-171','deployment_source':'calvin_env/robot/robot.py:228-242',

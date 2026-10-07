@@ -652,7 +652,7 @@ python probes/probe_binding_interface.py --plan PLAN --checkpoint CHECKPOINT --o
 
 ### 28.2 训练动作与部署控制器采用不同的相对起点
 
-原始 CALVIN `utils/utils.py:160–171`：`rel_xyz = clip(abs_target_xyz - measured_tcp_xyz, ±0.02) / 0.02`。跨51个训练片段抽查153帧，和原始 `rel_actions[:3]` 的最大差为 **0**。
+原始 CALVIN `utils/utils.py:160–171`：`rel_xyz = clip(raw_actions_xyz - measured_tcp_xyz, ±0.02) / 0.02`。跨51个训练片段抽查153帧，和原始 `rel_actions[:3]` 的最大差为 **0**。这里的raw动作标签不能直接等同示教控制器内部held setpoint；其renderer来源与本轮补查见§33.1。
 
 当前环境 `robot/robot.py:228–242`、实际 `use_target_pose=True`：`stored_target_next = stored_target_previous + 0.02 * rel_xyz`。18条完整轨迹的控制器目标递推最大误差均为 **0**。接触受阻后两种起点分离，旧目标误差会继续被积累；模型在线观测只有实际proprioception和命令历史，不含这个控制器目标。
 
@@ -708,6 +708,8 @@ S层单独替换robot/history时coarse恢复x≈+0.090，但最终仍x≈-0.104/
 
 ## 32. 修复顺序、验收与复现
 
+后续报告复核已调整优先级，当前执行顺序以§33.4为准：控制器状态/动作契约优先；终点标签作为独立修复，不再作为其他问题的前置条件。
+
 7个失败的行为证据与根因边界：
 
 | 失败例 | 已确认的阶段机制 | 已闭合/未闭合 |
@@ -735,3 +737,65 @@ python -m probes.probe_failure_drivers --plan PLAN --checkpoint CHECKPOINT --out
 python -m probes.probe_endpoint_conditioning --plan PLAN --checkpoint CHECKPOINT --output NEW_ENDPOINT
 python -m probes.audit_controller_anchor --audit AUDIT_WITH_GEOMETRY_R2 --rollout ROLLOUT
 ```
+
+## 33. 2026-10-06：外部轨迹报告复核与优先级调整
+
+用户要求同时处理三件事：重估终点监督的重要性、优先核验累计控制目标问题、吸收报告并继续原定的身份选择/任务维持工作。本节修订§32的处理顺序；没有修改正式模型、执行器或18例评估配置。
+
+### 33.1 终点监督缺席属实，但尚不是已证明的主要失败原因
+
+§28.1的零覆盖来自本次 **a2d597d / step11012** 自己的run_context、221个训练采样点及完整验证，不是旧9eed日志。外部报告提醒不能跨版本推断是正确的；它没有否定我们已补做的本版本核验。
+
+但“没有直接终点监督”不能直接推出“七例失败主要因此发生”。该分支仍获动作损失的间接梯度，§31的弱目标差异也没有给出恢复标签后的行为收益。将它列为独立、边界明确的数据接入修复，暂不作为身份/控制问题的前置条件，也不靠扩大这个辅助损失推动整个方案。
+
+对§28.2的措辞也作重要限定：`raw.actions`不能直接叫作示教控制器内部的held setpoint。当前上游 `calvin_env/datarenderer.py:138–146,258–284` 从`robot_info`取实测TCP，并明确将后续一帧姿态写为当前帧动作标签；`utils/utils.py:160–171` 再计算该标签相对当前实测TCP的截断差。
+
+跨51个训练片段153帧补查，145帧的`actions[:6]`与下一帧实测姿态一致；其余8帧位置最大差1.534mm、Euler最大差0.005331rad，来源尚未继续追到原始pickle。不能声称153帧全部等于下一状态，也不能据这些标签恢复遥操作控制器的真实累计状态。上轮153帧`rel_actions[:3] == clip(actions[:3]-robot_obs[:3])/0.02`的最大误差0仍成立。
+
+因此已经成立的是**训练标签、实际执行器状态和策略可读状态之间的语义缺口**。仅凭该差别，不能把切换`use_target_pose=False`自动提升为正式修复；§28.2的同命令物理重放只证明切换会改变漂移与接触，没有证明任务成功。
+
+### 33.2 报告最有价值的新增定位：累计误差没有被现有反馈表示
+
+使用本分支实际源码重新验证：
+
+1. 18例各取一个观测，改变scene、模拟器接触、成功、累计目标及不准入的关节字段后，`calvin_policy_observation`输出完全一致。真实接触/物体ID仍只作诊断真值。
+2. 复现有限历史的接口反例：32步中仅第2条命令相差+0.5X，之后观测和命令相同；当前`CausalHistory.snapshot()`的所有字段逐位相同，但按已验证控制器递推，累计目标相差10mm。这是**接口不可辨识性反例**，不是两段物理上同像素轨迹的声明。
+3. `RobotExecutionObserver.observe`确实计算“观测feature变化减预测feature变化”；其`read`不是累计目标误差。仅在诊断副本中将response设为正确的零位移预测器，非零命令/实测不动得到loss=0、innovation=0、read=0；正对照有非零read。原权重未修改。
+4. 补上外部报告未取得的完整checkpoint读数：按真实前一状态、已登记命令、当前状态，以及生产的normalizer/state-feature编码，逐个batch1、BF16执行实际observer，覆盖全部 **3890个一步转移**。这是实际节点输出，不是新闭环，也没有把任意query的read当成P3最终贡献。
+
+| 09号状态 | 累计控制目标到TCP误差范数 | 当前一步预测残差的XYZ范数 |
+|---|---:|---:|
+| 56 | 33.75mm | 5.67mm |
+| 64 | 73.41mm | 4.63mm |
+| 72 | 116.71mm | 4.09mm |
+
+02/09/14全程累计误差最大分别159.20/117.01/73.81mm。实际observer并非没有响应，但其响应没有编码仍欠下多少控制位移。不能把两个不同语义的范数相除，称为反馈保留率；也不能说这些真实窗口innovation为零。当前模型还缺少对累计误差的显式、可追溯输入。
+
+10/17在state136的累计误差仅6.47/4.94mm，一步残差0.81/1.24mm；两条撤回路径仍应按§30追查S/底层历史与剩余任务，不能把所有失败都归到累计误差。
+
+### 33.3 对报告各条建议的取舍
+
+| 报告内容 | 复核结论与作用 |
+|---|---|
+| 物理step136不是训练warmup136 | 源码确认；checkpoint同步step11012，排除错用时钟解释 |
+| 每8步重规划但逐步收观测；8个动作历史点是稀疏时刻 | 与本版本接口一致；不要再用“历史没更新”代替消费问题 |
+| 当前观测变化、预测创新、预测终点差是三种量 | 采纳；独立记录来源与物理时钟，不能以P3总RMS代替它们 |
+| 选目标与判断该目标进度共用G/binding | 源码确认；首次旁物接触前后必须联查选择与进度，不能只测K是否分散 |
+| 内部K/P1/binding值尚未取得 | 是外部报告的边界；本线程已有§25、§29、§30完整权重探针，需要合并证据，不必从静态猜测重做 |
+| 显式表示控制器状态，预测残差保持独立 | 作为当前第一优先修复边界；必须处理真实reset、控制器跨指令持续状态、执行确认和训练来源 |
+| 直接重置累计目标/外部接触停机 | 不作为当前已通过的修复；此前TCP起点实验保留为明确标注的诊断 |
+
+### 33.4 未丢弃的下一步：具体输入、消费者和验收
+
+1. **执行契约优先。** 将模型动作标签、提交给控制器的命令、确认后的命令、held setpoint、实测TCP分别命名和记录。可读控制器目标须来自实际设备报告，或从已知物理reset及确认命令连续重建；只更换任务指令不能把同一控制器累计状态清零。控制目标误差与预测创新保持不同类型、单位、时间戳及validity。缺少训练控制器真值时标unknown，不能把`raw.actions`冒充它，也不能把未知填0。若选择改变动作执行语义，则以单独的ABI/配置和相同18例重新评价，不与原11/18混算。
+2. **真实目标选择继续推进。** 保留01/05/11/15首次旁物接触前后的窗口，以及同观测自然颜色替换。沿`G逐相机物块覆盖 → shared_binder → TargetEvidence/task_relation → P1 target_read/factual_base → protected消费者/前8行动作`定位。分别判定“没有形成目标对象”“选对但读取错”“读对但动作不跟随”；没有权重/真实物体mask支持的节点不先改拓扑。
+3. **任务维持继续推进。** 10/17的72作为无目标接触对照，128/136/144作为推动/撤回窗口。共同追踪所选物体的真实位移、绑定后的instruction progress、预测终点差、四步world残差、一步robot创新、S/底层历史消费，检查是否把机器人自身移动解释成任务完成。保留§30已获得的因果钳制；不以冻结history、强制闭爪或加大P3增益替代修复。
+4. **终点provenance单独闭合。** 严格补传已核验的annotation index并增加0覆盖验收；记录梯度和行为效果，但不把它升级为上述三条已证实的共同根因。
+
+当前完成第1项的输入缺口、实际反馈与来源核验；生产接口设计/实现和新的正式闭环仍待后续执行。用户本轮要求的报告审查与优先级调整已完成，没有把它记成网络修复已经成功。
+
+### 33.5 证据与复现
+
+证据目录：`/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/probes/controller-contract-review-20261006-v3`。`observer-r1/summary.json`含各例统计与20个关键状态，`transitions.json`保留3890个节点读数；不下载大张量。实际checkpoint SHA仍为`5ca168e3f4f33772dd01aca26adcc1b00dfc029b526a950f3b534d5428d19d15`。
+
+新增仓库探针`probes/probe_controller_state_semantics.py`；实际实参保存在`launch.json`，使用模型Python、GPU0、`--checkpoint`/`--rollout`/`--training-episodes`/`--raw-root`/`--output`。复跑必须使用新输出目录。源码边界为`calvin_eval.py:86–103`、`history.py:121–129,186–225`、`clearvla_policy.py:346–355`、`model/policy.py:741–747`、`model/robot_execution.py:31–66`。原始附件仅作待核验报告保存在实验目录；未收到其所列的9份脚本/结果附件，不把外部独立CPU复算声称为本线程已重复执行。
