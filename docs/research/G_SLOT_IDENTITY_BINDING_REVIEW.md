@@ -2912,3 +2912,16 @@ correspondences, not world-space object velocities.
 Full oracle extension observed-match-rigid-full63-r1 is queued with its own
 receipt and immutable 434ad3b2 probe, runtime T1. The small audit_rigid_*
 arrays are prohibited as production sensor labels or policy inputs.
+
+
+Original B-v1 fresh qualification is now complete: 123 own-panel windows,
+same-image measurement zero and all 246 same-instruction repeats exactly zero.
+Natural color action RMS median is 0.000454 (max 0.001882); this magnitude
+does not certify correct physical selection. The separate four-window
+canonical atom/body supplement also completes: 15 supported body/view entries
+have joint ownership null 0.8415-0.999365. Unsupported bodies are excluded;
+real-K-normalized identity remains a different quantity. Artifacts:
+B-fresh-factual-short-r1/decision-summary.json and
+B-r1-null-object-factual-r1/decision-summary.json. Original broad qualification
+and its B-null supplement have exited; the v2 qualification has advanced to
+waiting_training_and_offline. All formal promotion gates remain active.
