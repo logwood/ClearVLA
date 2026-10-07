@@ -2891,3 +2891,24 @@ preserving static zero, occlusion unknown, K/view support and ordinary
 consumer gradients. Check fresh trajectories and longer instruction-start
 gaps separately. Identity separation, natural target choice and arm/gripper
 remain independent gates for the two formal experiments.
+
+
+The rigid pilot is complete (probe 434ad3b2). Camera roundtrip error is
+<=4.74e-11 pixels, all pre-existing sensor label arrays are exactly unchanged,
+and production null/transport reproduce exactly. It retains 49 top and 133
+wrist visible interior points. This is oracle instrumentation admission.
+On common visible points, RGB-flow mean error versus rigid geometry is
+0.024-0.954 px top and 0.483-0.696 px wrist; it can reach 4.11 px in one top
+point. In case01 the admitted top rigid points are essentially stationary,
+despite nonzero RGB-flow estimates. Do not call all accepted flow motion
+physical ground truth, or use the same flow generator as a new estimator's
+sole judge. Same-body agreement alone cannot certify point displacement.
+
+The actual DINO law still fails some geometry-verified moving cases:
+case17 top motion >1px averages 3.682 px, production error 3.929 px;
+case05 wrist averages 2.504 px, production error 2.575 px.
+Wrist image motion includes camera ego-motion. These are image-plane
+correspondences, not world-space object velocities.
+Full oracle extension observed-match-rigid-full63-r1 is queued with its own
+receipt and immutable 434ad3b2 probe, runtime T1. The small audit_rigid_*
+arrays are prohibited as production sensor labels or policy inputs.
