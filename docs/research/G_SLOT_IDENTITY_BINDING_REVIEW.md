@@ -1928,3 +1928,151 @@ under Q's runtime, original checkpoint, identity-v1/probe_plan.json and masks-r2
 Artifacts remain in causal-repair-20261006-v4/reconstruction-joint-gradient-r1
 and r2, with sibling *-job.json receipts, exact .source.py snapshots and logs.
 reconstruction-joint-gradient-decision.json is the compact combined ledger.
+
+### 34.31 Trace the actual producer, competition and identity consumers (2026-10-07)
+
+The same full original checkpoint and four factual windows as 34.30 are used;
+no short continuation supplies these conclusions. The active producer is
+RestoredV120ObservationCompiler, with coupled_observation_v1 and the complete
+256-atom support. The probe follows that implementation, rather than the
+alternative observation.py reader. Original 336x336 resize has no crop.
+
+**Exact source chain and the two expectations.** Let j=(camera,y,x,M), p[j,n]
+be the actual G2 spatial law, F the current DINO chart, and r[k,j] the final
+global-K read. Before global K competition, restored_observation.py:395–429 and
+flow_dino_evidence.py:6098–6104 form:
+
+    u[j] = sum_n p[j,n] * F(x[j,n])
+    h[j] = candidate_norm(content_key(u[j]) + typed + coordinates + context + history)
+    q[k,j] = softmax_over_K_and_null(slot[k] dot h[j] / sqrt(H) + identity_logit)
+    r[k,j] = q[k,j] * candidate_prior[j] / sum_j(q[k,j] * candidate_prior[j])
+    C[k] = sum_j r[k,j] * u[j] + slot_content_residual[k]
+
+Here p is the actual coupled semantic/appearance/geometry posterior
+(local_ownership.py:66–101), not a separately normalized geometry branch.
+Recomputing u with sample_candidate_expectation and the captured support
+reproduces content_slots with RMS exactly zero in all four windows; the matching
+context_slots recomputation also gives zero. Shapes are [1,2,8,8,4,768] and
+[1,2,8,8,4,256,2] for content and support coordinates. This seam has no demonstrated
+camera/axis swap or mean-coordinate resampling bug.
+
+The equations locate a structural limitation: K assignment scores a mixture
+u[j], then applies the same r[k,j] to every constituent of that mixture. Within
+this content path it cannot assign different K owners to two distinct objects
+inside one p[j,:]. Full current-image support and native detail remain available
+elsewhere, including P1; this is not proof that the whole model has irreversibly
+lost the pixels. The identity path and the late-detail path have different access.
+
+**Do not misdiagnose the upstream correspondence law.** G1 base logits are
+learned source/target content matching plus floor/adaptive flow priors
+(flow_dino_evidence.py:3652–3765); G1 adds a clean-query correction at 5000–5014.
+G2 keeps all 256 atoms, adds typed evidence to scaled parent log probability,
+and normalizes their coupled law (5191–5296). Exact base-term recomposition is
+zero-error. Current learned content scale is 3.9988; floor/adaptive coefficients
+are 0.25/0.7390. Content/floor/adaptive candidate-contrast RMS is respectively
+3.54–3.82 / 2.17 / 8.16–8.41; these are not independent effect percentages.
+
+All 15 visible block/view regions still have an atom at a raw mask-covered
+location. Probability allocation, not removal of those coordinates, is the
+issue to inspect. For all ten visible top-view block/window regions, deleting
+both geometric priors reduces best-query coverage on the 8x8 area-mask proxy.
+Removing the parent prior from the actual coupled G2 law also lowers that proxy
+in all ten. Thus neither deletion is an evidenced repair. At 01/24, blue/pink
+best coverage is 0.03335/0.02514 at G1 base and 0.03488/0.02639 at final G2.
+DINO receptive fields and differing region weights forbid interpreting these
+numbers as fractions of semantic information lost, or treating a correspondence
+module as a supervised object detector.
+
+**Camera roles already exist before the first current GRU.** Each actual G
+competition is captured, including the learned-seed read and all three updates:
+
+| Window | Seed source camera/K MI | After update 1 | After update 2 | After update 3 |
+|---|---:|---:|---:|---:|
+| 01/24 | 0.59651 | 0.35567 | 0.43119 | 0.45906 |
+| 05/24 | 0.46002 | 0.23829 | 0.28915 | 0.30748 |
+| 11/24 | 0.50527 | 0.25813 | 0.31726 | 0.33715 |
+| 17/136 | 0.65032 | 0.40757 | 0.49857 | 0.53790 |
+
+This MI uses the source candidate/owner joint distribution; it is not the
+reconstruction-destination MI of 34.30. Seed K3 already allocates 99.427–99.9998%
+to the wrist. The first update reduces camera specialization in all windows,
+then later updates partly restore it. The older checkpoint's first-GRU collapse
+story cannot be imported as this checkpoint's origin. G restarts from learned
+seeds at each observation (grounding.py:531); causal history in candidate keys
+is not a persistent cross-time K tracker.
+
+On an isolated G copy, remove only the between-camera mean difference from
+content_key output, retaining its within-camera residuals and common mean.
+Final source camera MI changes 0.4591/0.3075/0.3371/0.5379 to
+0.1050/0.0855/0.0883/0.1002. Centering context alone does not reproduce this.
+Raw reconstruction rises from 0.2453/0.2680/0.2779/0.2646 to
+0.3073/0.3158/0.3382/0.3313. Together with 34.30's parameter VJP, this links the
+learned content-key camera route to a locally reinforcing reconstruction
+objective. Activation centering is diagnostic, not an identity repair or proof
+of the unique historical training cause.
+
+**Competition does not guarantee instances; current K2/K4 are not duplicates.**
+For q[k,j]=alpha[k], per-K normalization cancels alpha and every K reads the
+same normalized candidate prior. The actual _competition function reproduces
+this counterexample: owner means can differ by orders of magnitude while
+K-read maximum difference is only 1.164e-9. Its former class comment claiming
+that competition prevents copying was too strong; the comment is corrected,
+with executable AST unchanged.
+
+Conversely, the current checkpoint's K2/K4 reads really differ: after pushing
+the exact support onto the native 16x16 image chart, global total variation is
+0.99895, 0.95906, 0.93746, 0.98801 across the four windows. Distinct background
+or image-region reads are not distinct physical-object identities. Neither
+nearby centroids nor the normalization counterexample establishes current
+duplication; physical block coverage and cross-view/time association remain
+the required identity tests.
+
+**Actual downstream use retains the early pooling boundary.**
+intent.py:834–874 builds pooled content plus bounded pooled typed context.
+Even with per-camera values enabled, 915–922 binds from [B,K,512] objects first;
+the captured TaskConditionedTargetBinder has per_view=False in all four cases.
+Per-view values/coordinates enter TargetEvidence only after that decision
+(925–944). This is the actual selected branch, not just an available method.
+Both online W1 calls receive the identical current G.content tensor through
+ObjectWorldBelief; that type has no camera_content (types.py:762–783;
+dynamics.py:757–770). The past W call remains separately owned. Consequently,
+late per-view evidence does not itself repair an already ambiguous K selection.
+
+**Repair boundary, not promotion.** The identity group now has three linked
+boundaries: mixture-before-assignment; a shared reconstruction value that rewards
+camera appearance; pooled identity selection before view evidence. The larger B
+candidate should evaluate physical current-image evidence before the G2 value
+expectation, retain producer-owned K/view allocation through the single S
+binding, and carry appropriate view-conditioned values into reconstruction/W.
+Scoring a shared native chart could reuse its 2x16x16=512 locations rather than
+repeat scoring for every G2 atom; equality to the old 2x8x8x4 token count is not
+a runtime or memory guarantee. Transport between the native image and local
+support must be explicit and differentiable, with correct multiplicities and
+ordinary producer gradients. View/background appearance needs an explicit value
+contract; merely using camera_content failed the identity test in 34.30.
+
+No independent language-to-K selector, camera-specific K identities, ground
+truth masks in inputs, support pruning, or erased observed reconstruction is
+authorized by these findings. Retain the separate measurement, outcome/phase,
+arm/gripper, controller and update-regression repairs of 34.29. A/B promotion
+still requires genuine object association and instruction redirection, then the
+fixed offline and full 18-case replan-8 evaluation. No production math, optimizer
+or live experiment changed in this audit.
+
+Reproduce with probes/probe_grounding_identity_provenance.py in N, importing Q,
+using the original full checkpoint and identity-v1 plan/masks-r2:
+
+    cd "$RUNTIME_REPO"
+    PYTHONPATH="$RUNTIME_REPO" CUDA_VISIBLE_DEVICES=0 /data/senwang/envs/clearvla-sim/bin/python \
+      "$AUDIT_REPO/probes/probe_grounding_identity_provenance.py" \
+      --checkpoint "$CHECKPOINT" --plan "$PLAN" --masks "$MASKS" --output "$NEW_OUTPUT"
+
+Artifacts are causal-repair-20261006-v4/grounding-identity-provenance-r1..r4,
+with sibling job receipts, exact source snapshots and logs; the compact ledger
+is grounding-identity-provenance-decision.json. r4 completes four windows with
+script SHA 1574b32d72f162428420ed27c2bce971da7a72904f2a0bd0cb3ec544b7804a45.
+First-eight native arm replay RMSE <=3.90e-4; isolated FP32 content RMS deviation
+<=4.85e-4. r2's exploratory no-parent control used an inactive two-source law;
+r3/r4 correct it to the actual three-source coupled law. No conclusion here uses
+that r2 alternative. A transient SSH timeout occurred before r4 launch; absence
+of a job receipt/output was verified before retry, and only one r4 job ran.

@@ -221,8 +221,9 @@ class DenseObjectGrounder(nn.Module):
     Local ``M`` hypotheses are candidates; global ``K`` objects are the first
     identity-bearing representation.  Candidate competition is normalized
     across objects plus a null owner before each object's read posterior is
-    normalized across candidates.  Consequently the same dense fact cannot be
-    copied independently into all objects.
+    normalized across candidates.  Competition conserves candidate ownership
+    mass, but the subsequent per-K normalization can still produce identical
+    reads.  Neither normalization alone establishes physical object identity.
     """
 
     def __init__(
