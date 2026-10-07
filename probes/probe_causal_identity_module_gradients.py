@@ -22,6 +22,11 @@ def main():
     args, remaining = parser.parse_known_args()
     if args.report.exists():
         raise FileExistsError(args.report)
+    if '--init-checkpoint' not in remaining:
+        raise ValueError('read-only VJP requires an explicit initialization checkpoint')
+    checkpoint = Path(remaining[remaining.index('--init-checkpoint') + 1])
+    position = torch.load(checkpoint, map_location='meta', weights_only=False)
+    checkpoint_step = int(position['global_step'])
     original = MainlineTrainingEngine.train_step
 
     def inspect(self, batch, **unused):
@@ -29,6 +34,9 @@ def main():
             raise ValueError('the declared full-loss probe requires BS8')
         model = self.model
         model.train()
+        # No optimizer step occurs. Restore the exact saved execution clock for
+        # this read-only forward; do not request an unrelated training migration.
+        self.global_step = checkpoint_step
         model.set_training_step(self.global_step)
         versions = {n: p._version for n, p in model.named_parameters()}
         prefixes = ('intent.organizer.observed_outcome.', 'intent.organizer.shared_binder.',
@@ -60,6 +68,8 @@ def main():
         if self.optimizer.state or any(p.grad is not None or p._version != versions[n] for n, p in model.named_parameters()):
             raise RuntimeError('VJP probe changed model or optimizer state')
         report = dict(complete=True, records=[results], global_step=self.global_step, batch_size=8,
+                      checkpoint=str(checkpoint), checkpoint_source=position['identity']['git_commit'],
+                      probe_execution_clock_restored=True, training_migration_requested=False,
                       runtime_source=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                       script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                       sample_index=batch.audit.sample_index.cpu().tolist(),
