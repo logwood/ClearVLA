@@ -38,6 +38,26 @@ def dump(path, value):
     tmp.replace(path)
 
 
+def localization_controls(law):
+    """Change only real-match spread, preserving each row's unknown mass.
+
+    These diagnostic laws never enter policy inference and are not calibrated
+    alternatives. They isolate averaging of candidate positions from abstention.
+    """
+    real = law[..., :-1]
+    mass = real.sum(-1, keepdim=True)
+    controls = {}
+    for count in (1, 5):
+        values, indices = real.topk(min(count, real.shape[-1]), dim=-1)
+        selected = torch.zeros_like(real).scatter(-1, indices, values)
+        selected = selected / selected.sum(-1, keepdim=True).clamp_min(1e-30) * mass
+        candidate = torch.cat((selected, law[..., -1:]), -1)
+        torch.testing.assert_close(candidate[..., -1], law[..., -1], rtol=0., atol=0.)
+        torch.testing.assert_close(candidate.sum(-1), law.sum(-1), rtol=0., atol=2e-6)
+        controls['top'+str(count)+'_same_null'] = candidate
+    return controls
+
+
 def score_camera(law, h, w, camera, labels, image_shape):
     device = law.device
     xy = torch.from_numpy(labels['temporal_source'][camera]).to(device)
@@ -76,6 +96,7 @@ def main():
     for key in ('checkpoint', 'plan', 'labels', 'output'):
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--native-control', action='store_true', help='Also audit a native-token kernel; never replace the production measurement')
+    parser.add_argument('--localization-controls', action='store_true', help='Measure top1/top5 spreading controls at identical row null; never feed them to policy')
     args = parser.parse_args()
     args.output.mkdir(exist_ok=False)
     if os.environ.get('CUBLAS_WORKSPACE_CONFIG') != ':4096:8':
@@ -170,6 +191,11 @@ def main():
                     production_null_reproduction_max=float((reproduced-produced.null_probability[:,0,:,0]).abs().max()),cameras=[])
                 for camera,rgb_key in enumerate(('rgb_static','rgb_gripper')):
                     record['cameras'].append(score_camera(law,h,w,camera,labels_now,data[rgb_key].shape[1:3]))
+                if args.localization_controls:
+                    record['localization_controls'] = {name: [
+                        score_camera(candidate,h,w,camera,labels_now,data[key].shape[1:3])
+                        for camera,key in enumerate(('rgb_static','rgb_gripper'))]
+                        for name,candidate in localization_controls(law).items()}
                 if args.native_control:
                     if not torch.all(source_mask):
                         raise ValueError('native diagnostic requires complete observed camera charts')
@@ -183,6 +209,11 @@ def main():
                     record['native_token_control'] = dict(chart=[side,side],scope='alternate measurement only, never fed to the policy',cameras=[
                         score_camera(native_law,side,side,camera,labels_now,data[key].shape[1:3])
                         for camera,key in enumerate(('rgb_static','rgb_gripper'))])
+                    if args.localization_controls:
+                        record['native_token_control']['localization_controls'] = {name: [
+                            score_camera(candidate,side,side,camera,labels_now,data[key].shape[1:3])
+                            for camera,key in enumerate(('rgb_static','rgb_gripper'))]
+                            for name,candidate in localization_controls(native_law).items()}
                 report['records'].append(record)
                 dump(args.output/'results.json',report)
                 print('OBSERVED_MATCH_CALIBRATION',case.name,t,flush=True)
