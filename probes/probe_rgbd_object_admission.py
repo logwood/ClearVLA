@@ -104,12 +104,19 @@ def rigid_audit_points(source_depth, target_depth, source_view, target_view,
     inside=(target_xy[:,0]>=0)&(target_xy[:,0]<=w-1)&(target_xy[:,1]>=0)&(target_xy[:,1]<=h-1)
     valid=valid_depth&finite&inside&interior&(target_z>0)&(target_body==body)
     valid&=np.isfinite(observed_depth)&(observed_depth>0)&(depth_error<.003)
-    return dict(xy=target_xy,valid=valid,target_body=target_body,roundtrip_max=roundtrip_error)
+    source_interior=valid_depth&interior&(body>=0)
+    visible_depth=np.isfinite(observed_depth)&(observed_depth>0)
+    occluded=source_interior&finite&inside&(target_z>0)&visible_depth&(observed_depth<target_z-.003)
+    return dict(xy=target_xy,valid=valid,target_body=target_body,roundtrip_max=roundtrip_error,
+        source_interior=source_interior,occluded=occluded,
+        out_of_view=source_interior&finite&~inside)
 
 
-def export_labels(path, step, data, snapshots, depth_snapshots, calibration, names, oracle_snapshots=None):
+def export_labels(path, step, data, snapshots, depth_snapshots, calibration, names, oracle_snapshots=None,
+                  pair_mode='past4_current'):
     """Small correspondence/audit arrays; no model activations or RGB cache."""
-    previous=max(step-4,0)
+    if pair_mode not in {'past4_current','current_start'}:raise ValueError('unknown observed pair mode')
+    previous,following=(max(step-4,0),step) if pair_mode=='past4_current' else (step,0)
     depths=depth_snapshots[step]
     rgbs=[data['rgb_static'][step],data['rgb_gripper'][step]]
     views=camera_views(data['robot_obs'][step],calibration)
@@ -118,7 +125,9 @@ def export_labels(path, step, data, snapshots, depth_snapshots, calibration, nam
         'cross_source_body','cross_target_body','temporal_source_body','temporal_target_body')}
     if oracle_snapshots is not None:
         fields.update({key:[] for key in ('audit_rigid_temporal_target','audit_rigid_temporal_valid',
-            'audit_rigid_temporal_target_body','audit_rigid_roundtrip_max')})
+            'audit_rigid_temporal_target_body','audit_rigid_roundtrip_max',
+            'audit_rigid_source_interior','audit_rigid_occluded','audit_rigid_out_of_view')})
+    body_maps={}
 
     def body_at(mask,y,x):
         chosen=mask[:,y,x]
@@ -135,8 +144,8 @@ def export_labels(path, step, data, snapshots, depth_snapshots, calibration, nam
         fields['cross_valid'].append(valid)
         fields['cross_source_body'].append(body_at(snapshots[step][camera],y,x))
         fields['cross_target_body'].append(body_at(snapshots[step][1-camera],cross['v'][index],cross['u'][index]))
-        flow=observed_rgb_flow(data['rgb_'+key][previous],data['rgb_'+key][step])
-        valid=flow['accepted'][y,x]&(step>previous)
+        flow=observed_rgb_flow(data['rgb_'+key][previous],data['rgb_'+key][following])
+        valid=flow['accepted'][y,x]&(following!=previous)
         raw_target=flow['xy'][y,x]
         target=_labels.IdentityLabelProducer._endpoint(raw_target,shape)
         fields['temporal_source'].append(_labels.IdentityLabelProducer._endpoint(xy,shape))
@@ -145,20 +154,25 @@ def export_labels(path, step, data, snapshots, depth_snapshots, calibration, nam
         fields['temporal_source_body'].append(body_at(snapshots[previous][camera],y,x))
         u=np.rint(np.clip(raw_target[:,0],0,shape[1]-1)).astype(int)
         v=np.rint(np.clip(raw_target[:,1],0,shape[0]-1)).astype(int)
-        fields['temporal_target_body'].append(body_at(snapshots[step][camera],v,u))
+        fields['temporal_target_body'].append(body_at(snapshots[following][camera],v,u))
         if oracle_snapshots is not None:
-            before,after=oracle_snapshots[previous],oracle_snapshots[step]
-            rigid=rigid_audit_points(depth_snapshots[previous][camera],depths[camera],
+            before,after=oracle_snapshots[previous],oracle_snapshots[following]
+            rigid=rigid_audit_points(depth_snapshots[previous][camera],depth_snapshots[following][camera],
                 before['views'][camera],after['views'][camera],after['projections'][camera],
-                before['poses'],after['poses'],snapshots[previous][camera],snapshots[step][camera],y,x)
-            admitted=rigid['valid']&(step>previous)
+                before['poses'],after['poses'],snapshots[previous][camera],snapshots[following][camera],y,x)
+            admitted=rigid['valid']&(following!=previous)
             target=_labels.IdentityLabelProducer._endpoint(rigid['xy'],shape)
             fields['audit_rigid_temporal_target'].append(np.where(admitted[:,None],target,0.))
             fields['audit_rigid_temporal_valid'].append(admitted)
             fields['audit_rigid_temporal_target_body'].append(rigid['target_body'])
             fields['audit_rigid_roundtrip_max'].append(np.asarray(rigid['roundtrip_max']))
+            for key in ('source_interior','occluded','out_of_view'):
+                fields['audit_rigid_'+key].append(rigid[key])
+            target_masks=snapshots[following][camera]
+            body_maps['audit_rigid_target_body_map_'+str(camera)]=np.where(
+                target_masks.any(0),target_masks.argmax(0),-1).astype(np.int16)
     np.savez_compressed(path,**{key:np.stack(value) for key,value in fields.items()},
-        source_frames=np.array([previous,step],np.int64),object_names=np.asarray(names))
+        **body_maps,source_frames=np.array([previous,following],np.int64),object_names=np.asarray(names))
 
 
 def audit(depth, views, projections, masks, rgbs, names):
@@ -191,6 +205,8 @@ def main():
     q.add_argument('--output',type=Path,required=True);q.add_argument('--index',type=int)
     q.add_argument('--export-labels',action='store_true',help='Save production-grid past4/current pair labels and report-only body identities')
     q.add_argument('--rigid-audit',action='store_true',help='Export separate simulation-geometry oracle for audit only; never training labels')
+    q.add_argument('--pair-mode',choices=('past4_current','current_start'),default='past4_current',
+        help='Audit observed past4->current or current->instruction-start; never a future policy input')
     a=q.parse_args()
     if a.rigid_audit and not a.export_labels:q.error('--rigid-audit requires --export-labels')
     a.output.mkdir(exist_ok=False);plan=json.loads(a.plan.read_text())
@@ -199,7 +215,7 @@ def main():
         for index,row in enumerate(plan):
             out=a.output/('worker_%02d'%index)
             with (a.output/('worker_%02d.log'%index)).open('w') as log:
-                done=subprocess.run([sys.executable,'-u',__file__,'--plan',str(a.plan),'--output',str(out),'--index',str(index)]+(['--export-labels'] if a.export_labels else [])+(['--rigid-audit'] if a.rigid_audit else []),stdout=log,stderr=subprocess.STDOUT)
+                done=subprocess.run([sys.executable,'-u',__file__,'--plan',str(a.plan),'--output',str(out),'--index',str(index),'--pair-mode',a.pair_mode]+(['--export-labels'] if a.export_labels else [])+(['--rigid-audit'] if a.rigid_audit else []),stdout=log,stderr=subprocess.STDOUT)
             if done.returncode:raise RuntimeError('replay failed; see '+str(out)+'.log')
             results.extend(json.loads((out/'results.json').read_text()))
             (a.output/'results.json').write_text(json.dumps(results,indent=2)+'\n')
@@ -207,6 +223,7 @@ def main():
             script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             production_label_source_sha256=hashlib.sha256(_label_file.read_bytes()).hexdigest(),
             rigid_simulation_oracle_audit_only=a.rigid_audit,
+            pair_mode=a.pair_mode,
             scope='exact RGB replay; production 32x32 sensor label counts, before model training-mask support; not loss or gradient attribution',
             legacy_all_accepted_pixels='depth acceptance before photometric filtering')))
         return
@@ -222,6 +239,7 @@ def main():
         snapshots={};depth_snapshots={};oracle_snapshots={}
         required=sorted(set(row['steps']) | {step+offset for step in row['steps'] for offset in (4,8) if step+offset<len(d['rgb_static'])})
         if a.export_labels:required=sorted(set(required)|{max(step-4,0) for step in row['steps']})
+        if a.export_labels and a.pair_mode=='current_start':required=sorted(set(required)|{0})
         for step in range(max(required)+1):
             if step:obs,*_=env.step(d['executed'][step-1].copy())
             if step not in required:continue
@@ -259,7 +277,7 @@ def main():
             if a.export_labels:
                 label_path=a.output/('labels_%03d.npz'%step)
                 export_labels(label_path,step,d,snapshots,depth_snapshots,calibration,list(objects),
-                    oracle_snapshots if a.rigid_audit else None)
+                    oracle_snapshots if a.rigid_audit else None,pair_mode=a.pair_mode)
                 result['production_labels']=str(label_path)
                 result['production_labels_sha256']=hashlib.sha256(label_path.read_bytes()).hexdigest()
             for delta in (4,8):
