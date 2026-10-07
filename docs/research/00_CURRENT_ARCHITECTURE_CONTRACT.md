@@ -1697,7 +1697,7 @@ execution adaptation from being accidentally disabled by a short repair test.
 ### Current CALVIN audit constraint (2026-10-07)
 
 For causal-repair decisions, use G_SLOT_IDENTITY_BINDING_REVIEW.md sections
-34.26–34.31 alongside the admitted source/config. Full a2d597d2 behavior is
+34.26–34.32 alongside the admitted source/config. Full a2d597d2 behavior is
 11/18; the 512-update repair is 7/18 and retained-Adam 64-update diagnostics are
 9/18. Sixty-four updates do not establish convergence or promote a graph.
 
@@ -1733,6 +1733,16 @@ must address assignment before value mixing, view/background reconstruction,
 and single-binding consumption together. Do not delete G1 geometry/G2 parent
 priors from small-mask coverage alone or call preserved native detail a recovered
 identity. These are tested audit constraints, not an implemented replacement.
+
+Section 34.32 distinguishes atom ownership from canonical image ownership and
+requires a source type that preserves their actual joint measure. Canonical
+per-pixel K normalization cancels common source mass; audit surviving producer
+gradients explicitly. The current 16x16 input is a derived full-RGB endpoint
+chart, not native patch centers. Full-token binding must carry language masks
+through attention and both task/null reductions. Kernel audit found incorrect
+coordinate VJPs at exact knots in log image transport; current final-checkpoint
+edge Jacobians suppress the tested error, while an isolated zero-correction
+16x16 reference fails. No numerical repair or new graph has been promoted.
 
 The historical default and the accumulated structural candidate are different
 explicit graphs. Do not read legacy scalar constants below as overriding a

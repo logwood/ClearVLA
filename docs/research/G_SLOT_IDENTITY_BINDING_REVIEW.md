@@ -2020,7 +2020,7 @@ that competition prevents copying was too strong; the comment is corrected,
 with executable AST unchanged.
 
 Conversely, the current checkpoint's K2/K4 reads really differ: after pushing
-the exact support onto the native 16x16 image chart, global total variation is
+the exact support onto the full-RGB endpoint 16x16 image chart, global total variation is
 0.99895, 0.95906, 0.93746, 0.98801 across the four windows. Distinct background
 or image-region reads are not distinct physical-object identities. Neither
 nearby centroids nor the normalization counterexample establishes current
@@ -2044,9 +2044,9 @@ camera appearance; pooled identity selection before view evidence. The larger B
 candidate should evaluate physical current-image evidence before the G2 value
 expectation, retain producer-owned K/view allocation through the single S
 binding, and carry appropriate view-conditioned values into reconstruction/W.
-Scoring a shared native chart could reuse its 2x16x16=512 locations rather than
+Scoring a shared full-RGB endpoint chart could reuse its 2x16x16=512 locations rather than
 repeat scoring for every G2 atom; equality to the old 2x8x8x4 token count is not
-a runtime or memory guarantee. Transport between the native image and local
+a runtime or memory guarantee. Transport between the full-RGB endpoint image and local
 support must be explicit and differentiable, with correct multiplicities and
 ordinary producer gradients. View/background appearance needs an explicit value
 contract; merely using camera_content failed the identity test in 34.30.
@@ -2076,3 +2076,149 @@ First-eight native arm replay RMSE <=3.90e-4; isolated FP32 content RMS deviatio
 r3/r4 correct it to the actual three-source coupled law. No conclusion here uses
 that r2 alternative. A transient SSH timeout occurred before r4 launch; absence
 of a job receipt/output was verified before retry, and only one r4 job ran.
+
+### 34.32 Review the patch plan against transport and consumer contracts (2026-10-07)
+
+Input: REVIEW_AND_PATCH_PLAN_zh.md, SHA-256
+a17e889f6636f57873e20e49d057bb2004c42a3f409201b6e314d93faee77514,
+reviewing 8df3169f. Treat it as a design review, not an implemented patch or an
+independent rerun of 34.30/31. Its central identity-before-pooling, restricted
+view-conditioned reconstruction and single-binding/W migration are useful
+requirements. The following checks add implementation constraints before B.
+
+**Chart terminology correction.** online_pipeline.py:21–39,84–90 explicitly
+rasterizes native patch-center output once to full_rgb_endpoint_v1, 16x16.
+The earlier probe's native_dino/native_image_* labels actually refer to this
+derived endpoint chart. Their measured numbers are retained, with this scope
+correction. G's old target is a separately resized/normalized 8x8 chart
+(flow_dino_evidence.py:11917–11930), not the source of recovered 16x16 detail.
+Value schema must record resolution AND normalization order; matching width768
+does not establish interchangeable observation units or optimizer semantics.
+
+**Choose one ownership law and upgrade its source type.**
+
+- Atom law: J[k,j,n] = mu[j,n] q[k|j,n], then push to an image.
+- Canonical image law: m[u] = sum_jn mu[j,n] T[j,n,u],
+  J[k,u] = m[u] q[k|u].
+- Interpolating logits then softmax and interpolating probabilities are also
+  different laws. No implementation may quietly switch between them.
+
+A float64 reference closes independent dense tent-basis forward and coordinate/
+mass VJP checks within 1.12e-16; split-duplicate atoms, K/tensor-camera permutation
+and all-invalid-NaN quarantine pass. A two-pixel canonical joint with one atom
+changes by total variation 0.35 after marginalizing to the atom and resplatting.
+Its original K/pixel coupling is lost even though total mass stays correct.
+A mixed-two-value example reads [0.5,0.5] with old local ownership and [0.1,0.9]
+with atom ownership. This establishes representational capacity, not learned
+object identity or complete-policy equivariance.
+
+The existing ObjectImageReadSource (entity_chart.py:311–325) can encode only
+r[k,j] p[j,n], with the same p for all K. It cannot losslessly hold the new
+atom-K correlation. S's instruction/reference reads, intent relation reads and
+executed-world reader call its on_image; all must migrate together. The legacy
+Teacher path at observation_association.py:263–270 also combines K/local
+marginals with already pooled candidate content and must not silently recreate
+the old mixture when new atom ownership is selected. A canonical source must
+retain canonical authority rather than an image/local/image round trip.
+
+**Canonical ownership also changes source-gradient paths.** At fixed q,
+normalizing real K at a supported pixel cancels the common m:
+
+    a[k,u] = m[u] q[k,u] / sum_realK(m[u] q[k,u])
+           = q[k,u] / sum_realK(q[k,u])
+
+In an overlapping two-atom reference, the assignment-only source-mass VJP norm
+is 2.94e-16 for canonical ownership versus 0.08639 for atom ownership. Nonoverlap
+can cancel both, so that reference is not evidence of disconnection. Canonical
+ownership is a legitimate new graph, but must demonstrate the remaining
+ordinary producer gradients through observed values, typed/history construction
+and task consumption. A requires_grad flag is not that demonstration.
+
+Four factual supports were also compared under the SAME fixed content-only
+seed discriminator; this omits the complete typed/context/history G and is not
+a repaired policy. Canonical/atom joint TV is 0.00062–0.00536. Unweighted real-K
+per-view value RMS differences are 0.0158–0.1114, but allocation-mass-weighted
+differences are only 0.00080–0.00363. Small-mass conditional views magnify
+differences; neither statistic alone certifies a harmless approximation or
+object-identity improvement. Preserve absolute view mass beside conditional
+values, without treating allocation as physical visibility.
+
+**New confirmed numerical defect: log transport at exact grid knots.**
+entity_chart.py:281 filters zero bilinear coefficients before log accumulation.
+Although their present mass is zero, their coordinate derivative need not be.
+For an affine spatial read, ordinary bilinear and log-space forward outputs
+agree within 2.99e-8, but at an interior grid knot the expected x/y derivatives
+[+0.04077,+0.20385] become [-0.48924,-0.48924]. One-sided finite differences agree
+with the ordinary bilinear result. The interior off-knot control agrees.
+
+Trace this through the actual source map before assigning behavioral cause:
+posterior_candidate_support uses x = base + (1-base^2)*correction
+(candidate_support.py:109–115). In the four final-checkpoint windows, detected 16x16 coordinate-knot source
+mass matches edge source mass (14.67–26.89%). At those edges the source factor
+blocks coordinate error in the corresponding correction axis; the measured
+correction/parameter VJPs below delimit the remaining error.
+
+| Coordinate-transport branch | Current four windows | Zero-correction reference at 16x16 |
+|---|---:|---:|
+| G2 correction VJP relative error | <8.1e-7 | 2.75–3.11 |
+| Actual rectifier parameter VJP relative error | <=2.18e-5 | 0.756–1.176 |
+| Rectifier parameter VJP cosine | approximately 1 | 0.074–0.740 |
+
+Parameter replay preserves the original BF16 inputs/parameter dtypes and
+reproduces rectifier output with RMS exactly zero. The zero-correction reference
+zeros the isolated copied rectifier's last Linear; original source weights and
+all other pathways remain fixed. It is not a replay of historical training.
+At 8x8 the same zero-correction reference has no interior alignment failure;
+small parameter differences there are at BF16 rounding scale.
+
+This is a real kernel/initialization acceptance defect, not evidence that the
+current seven failures originate from this boundary. It must be repaired before
+qualifying new ownership transport. A naive probability-only replacement would
+lose the existing low-mass log-space contract; retain supported tiny-mass,
+empty-source, edge, grid-knot, ordinary gradient and exact-forward checks.
+The kernel itself has NOT been changed by this audit.
+
+**Consumer details missing from a simple wiring patch.**
+TaskConditionedTargetBinder.forward (task_execution.py:561–606) has no language
+padding-mask argument; its task_read, task_context mean and null mean all need
+the valid-token contract if complete goal_memory is introduced. Merely appending
+nine zero padding tokens changes real-K mass by 0.006737 in a synthetic current
+binder call. This is a counterexample for the proposed extension, not a padding
+bug in the current fixed four protected tokens. Keep one K+null selector and
+account for view allocation inside it; the existing per-view branch averages
+available views without their allocation mass.
+
+view_observed must mean producer-observed source support, not a ground-truth
+claim that a hypothesized physical object is visible. Keep that separate from
+predicted object visibility. W receives compact identity/conditional observation
+fields with explicit units and no goal; Teacher must migrate to the same
+observation schema rather than subtracting learned identity residuals from raw
+DINO. Existing P1 protected detail and the shared P2 binding remain required.
+
+**Revised implementation sequence.** First qualify the transport/type reference,
+including the discovered backward boundary; then build atom ownership as the
+correctness reference, treating shared-chart ownership as a separately declared
+candidate. Connect restricted view/background decoding, the one token/view-aware
+binding, W and Teacher before judging B. Shared conditional decoding alone still
+does not establish cross-camera physical correspondence. Admit correspondence
+sources separately: S matcher's failure does not prove the raw-flow producer
+failed. Same-view augmentation/cycle consistency can pass collapsed solutions.
+
+Retain A as the declared measurement/outcome/condition-interface control, with
+its unresolved G limitation explicit. B adds the complete identity chain.
+Neither bypasses the independent arm/gripper/controller/update-regression work
+of 34.29, nor earns promotion from 64 updates or representation gauges. Use the
+same declared training exposure, 256-batch offline and 18-case replan-8 behavior
+protocol; no formal training was launched or changed during this review.
+
+Evidence: probes/probe_ownership_transport_contract.py. CPU reference-only mode
+requires --reference-only --output NEW_DIR. The factual command uses the same
+checkpoint/plan/masks as 34.31 and Q's runtime; its sibling receipt records the
+exact invocation. Artifacts are ownership-transport-reference-r1/r2 and
+ownership-transport-factual-r1..r4 under causal-repair-20261006-v4, with source
+snapshots/logs. ownership-transport-decision.json is the compact ledger. Final
+factual driver SHA is e1a3f9b4edf25ffc2897d0d5365c90a4f71c3030a803dcd28a6ce7d2e1b10348;
+dependency driver SHA is 1574b32d72f162428420ed27c2bce971da7a72904f2a0bd0cb3ec544b7804a45.
+Four-window first-eight arm replay RMSE <=3.22e-4. r1 failed on a probe-only
+prior singleton-axis mismatch; its failure is retained. r3's parameter panel
+used converted FP32 input and is superseded by r4's exact dtype-preserving replay.

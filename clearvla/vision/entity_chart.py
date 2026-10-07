@@ -312,8 +312,8 @@ def pushforward_log_to_current_image(
 class ObjectImageReadSource:
     """The actual G3 log read and its spatial chart, before image discretization.
 
-    Reprojecting this measure to a native DINO chart does not upsample a
-    barycenter or treat query indices as image coordinates. No exp/log roundtrip.
+    Discretizing this measure on a full-image endpoint chart does not upsample
+    a barycenter or treat query indices as image coordinates. No exp/log roundtrip.
     """
     log_measure: Tensor             # [B,K,C,Yq,Xq,M]
     supported: Tensor               # Boolean same axes
