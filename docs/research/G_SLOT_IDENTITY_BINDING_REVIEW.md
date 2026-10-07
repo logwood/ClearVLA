@@ -1004,3 +1004,101 @@ the owned noise once at every skipped replan; the original default remains
 explicitly unmatched for historical compatibility. On original case04 states
 0/24/40, replay arm RMSE is 0.000273/0.000147/0.000135 with zero gripper mismatches
 (v4/matched-rng-case04-r1). These finite BF16 discrepancies remain the repeat floor.
+
+
+### 34.9 Actual sampling does not further suppress early non-nearest targets
+
+The original final checkpoint stopped at the configured 11,012 batches
+(88,096 samples); the uncapped sampler iterator contains 17,236 batches.
+Calling that run a complete dataset pass would be inaccurate.
+
+Join the unchanged information/task-balanced sampler at epoch1 with the audited
+physical training geometry only at exact ages 0/8/.../56. Do not interpolate
+unmeasured object identity or compare different denominators:
+
+| Same audited age support | Nearest target | Age <16 | Early non-nearest | Distance >0.15m and non-nearest |
+|---|---:|---:|---:|---:|
+| Uniform source windows (17,236 admitted) | 90.54% | 25.12% | 4.73% | 2.46% |
+| Actual first11,012 sampler batches (11,126 admitted draws) | 88.52% | 32.66% | 7.57% | 4.28% |
+| Repair first512 sampler batches (517 admitted draws) | 88.97% | 31.33% | 6.77% | 3.09% |
+
+Thus the tested sampler dilution hypothesis is contradicted: event/motion
+sampling increases these early/hard fractions on the common support. Source
+windows are still mostly nearest-target examples; this remaining correlation
+alone neither proves causality nor warrants a geometry-oracle sampler repair.
+The endpoint provenance repair leaves sampler scores, task balance, physical
+center mapping and sampler seed unchanged. Source: data/loading.py::loader and
+train.py epoch-owned set_epoch. Probe: audit_effective_training_coverage.py,
+v4/effective-training-geometry-r2.json and command receipt. The first r1 full-
+iterator row must not be relabeled as the original capped run.
+
+
+### 34.10 Repair step11524: completed offline validation and fixed-history rejection
+
+The 512-update candidate finished at epoch1/step11524, immutable production
+source 1b5c302de530494746b63dadf14ff25b696ae73e; best.pt SHA-256 is
+a61886f80317e96719965e250871e0b79e4062cc3118d422f78f4cfaab9d610b.
+The normalizer fingerprint remains unchanged. Actual bs8 training averaged
+6.237 s/batch without nonfinite errors, and the weighted loss ledger closes.
+All 256 validation batches cover the same 2,046 samples/6 tasks.
+
+| Same-panel native metric | Original step11012 | Repair step11524 |
+|---|---:|---:|
+| Full24 action RMSE | 0.26281 | 0.26631 |
+| First8 action RMSE | 0.23271 | 0.23506 |
+| Arm RMSE | 0.13213 | 0.13305 |
+| Decoded gripper event precision | 0.28585 | 0.28309 |
+| Decoded gripper event recall | 0.39085 | 0.40261 |
+| Decoded gripper event F1 | 0.33020 | 0.33243 |
+
+Endpoint supervision coverage is now 1.0, with validation weighted contribution
+0.00647. Its previous zero was missing-label coverage, not superior prediction.
+This proves the data/objective repair executes, not that physical behavior is
+repaired. Full action error slightly worsens; do not promote the candidate.
+
+Fixed-original-history probes completed. On all20 natural wording templates,
+protected goal_self color delta changes only 0.03613 -> 0.03662, while direction
+delta remains 0.54798 -> 0.55238. At 01/state24, top-camera red/blue/pink
+reconstruction still belongs chiefly to K1: 0.9856/0.9991/0.9962. These remain
+conditional reconstruction assignments, not object identities or global view mass.
+At 10/state72 the first8 mean x/z is -0.0566/+0.2541; at 17/state136 it is
+-0.2300/+0.3750. The old premature withdrawal persists on the same histories.
+Earlier S/bottom history substitutions still reverse the withdrawal; they are
+source diagnostics, not coherent alternate physical trajectories or a freezing
+prescription.
+
+Artifacts under dinov3-causal-repair-20261006:
+short-mature-bs8-r1-log-audit.json, *-audit-decision-summary.json,
+*-all-language-templates.json and *-fixed-observation-probes.
+The original-controller standard18 fresh panel and its independent exact-RGB
+mask/identity audit are running; fixed-history findings do not replace those.
+
+### 34.11 Complete wrong-instruction loss sensitivity, with numeric admission
+
+probe_matched_instruction_loss.py performs the complete production weighted
+loss on the four real early/non-nearest training windows from §34.8. Change
+exactly one row's natural color or direction instruction; keep its actual
+images/history/recorded future and the owned flow seed fixed. No optimization,
+new labels or architecture modification occurs. This is sensitivity to a wrong
+instruction given one recorded future, not a valid expert action demonstration
+for that wrong instruction.
+
+Production BF16/TF32 repeats (r1/r2) differ by up to 2.9e-4 and cannot resolve
+small color margins. Restoring global RNG alone does not eliminate this floor;
+the eval forward consumes no global CUDA RNG. Strict deterministic FP32 policy
+execution after the original strict initialization (r4-fp32) gives exact repeats
+for all three flow seeds. The online DINO observations remain the same.
+The failed r3 attempted a configuration precision change; the strict migration
+correctly rejected it and its failure record is retained. No migration allow-list
+was weakened for this diagnostic.
+
+On accepted r4, median absolute batch-mean action-flow loss change is 2.31e-5
+for 24 color replacements, versus 7.96e-3 for 12 direction replacements.
+Color loss increases in 14/24 cases, with mean change -1.01e-5; correct color is
+not consistently favored. Three direction replacements on the fourth early
+approach example also reduce error, so this is not proof that every
+wrong-direction motion should be worse at every approach step. The robust
+finding is weak learned color sensitivity under this complete objective, despite
+finite ordinary gradients and available early hard examples.
+
+Artifacts: v4/matched-instruction-loss-r4-fp32.json, config and command receipt.
