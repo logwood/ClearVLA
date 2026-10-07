@@ -1697,7 +1697,7 @@ execution adaptation from being accidentally disabled by a short repair test.
 ### Current CALVIN audit constraint (2026-10-07)
 
 For causal-repair decisions, use G_SLOT_IDENTITY_BINDING_REVIEW.md sections
-34.26–34.29 alongside the admitted source/config. Full a2d597d2 behavior is
+34.26–34.30 alongside the admitted source/config. Full a2d597d2 behavior is
 11/18; the 512-update repair is 7/18 and retained-Adam 64-update diagnostics are
 9/18. Sixty-four updates do not establish convergence or promote a graph.
 
@@ -1713,6 +1713,15 @@ This is a repair constraint, not an already implemented or trained replacement.
 The six-group audit also retains identity/selection, arm/gripper compatibility,
 native controller state and update-induced regression as separate open repairs.
 
+The G reconstruction issue is independent of those measurement defects:
+34.30 differentiates the full grounder loss, including content and ownership,
+and finds camera specialization reinforced in four factual windows. The shared
+cross-view prototype and shared position decoder are not a physical-identity
+contract. Existing per-camera values reverse that camera-pressure direction,
+but reduce within-view physical-object separation in two windows; this simple
+replacement is not qualified. G repair must preserve shared K identity while
+accounting for view/background appearance, and pass real-object plus cross-view/
+time checks. Lower reconstruction or camera MI alone cannot promote it.
 
 The historical default and the accumulated structural candidate are different
 explicit graphs. Do not read legacy scalar constants below as overriding a

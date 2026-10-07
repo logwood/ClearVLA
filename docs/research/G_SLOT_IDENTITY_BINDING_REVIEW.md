@@ -1813,3 +1813,118 @@ PYTHONPATH="$RUNTIME_REPO" CUDA_VISIBLE_DEVICES=4 \
   "$AUDIT_REPO/probes/probe_teacher_static_identity.py" \
   --checkpoint "$CHECKPOINT" --plan "$PLAN" --output "$OUTPUT"
 ```
+
+### 34.30 G reconstruction actively reinforces camera roles (2026-10-07)
+
+This closes a gap in 34.18/34.29: the S correspondence, Teacher measurement and
+controller findings do not explain G's camera-oriented reconstruction by
+themselves. Use the original full a2d597d2 / step-11012 checkpoint identified in
+34.26, not either short continuation. New evidence includes BOTH assignment and
+content gradients, rather than holding the decoder values fixed.
+
+**Actual producer contract.** In grounding.py:675–705, the K read is normalized
+over candidates from all cameras. Lines 764–768 produce one shared value
+C_k = pooled_content_k + slot_residual_k. Lines 942–953 condition reconstruction
+ownership on real K, independent of association null; all observed destination
+cells contribute. Lines 954–967 reconstruct:
+
+    F_hat[c,x] = sum_k a[k,c,x] * C[k] + sum_k a[k,c,x] * P[x]
+
+C has no camera axis and P is the same position decoder/grid in both cameras.
+The existing camera_content values are exported at lines 988–994; they are not
+the values used above. The same corrected K competition also supplies physical
+reads and downstream ObjectFactSet identities (lines 995–1026). Thus this loss
+does not train an isolated decoder-only assignment.
+
+This is a feature-prototype objective without a guarantee that prototypes are
+physical objects. A view-dependent mean can be represented by specializing K to
+cameras. Different appearances of one physical object are forced through the
+same C_k, while large observed non-block areas must also be reconstructed by real
+K. The null-independent support prevents a loss-avoidance shortcut, but does not
+supply a separate explanation for background/view appearance. Simply allowing
+null to erase observed reconstruction is not an accepted repair.
+
+**Why each colour prefers the camera's K.** At fixed values, the regional
+single-K reconstruction ranking depends on distance between C_k and the region
+mean of (target - P). Decomposing its best-versus-runner-up MSE margin into the
+camera-mean term plus object-specific correction is algebraically exact. Across
+15 visible block/camera regions in 01/24, 05/24, 11/24 and 17/136:
+
+- Camera-mean margin: 0.2302–0.4703; object-specific correction: -0.0267–0.1625.
+- Camera term / total margin: median 0.9547 (range 0.6526–1.1078; values above one
+  mean object evidence opposes, but does not reverse, the camera preference).
+- Example 01/24 red/top: K1's margin is 0.363706 = 0.360641 camera term +
+  0.003065 object correction. Every visible top block prefers K1; every visible
+  wrist block prefers K3.
+- Actual globally pooled K3 reads put 97.45–99.96% of their mass in the wrist.
+  K2 reads put 99.79–100.00% in top. These are read distributions, not identities.
+
+The masks only partition reporting on the 8x8 feature grid. This is not a claim
+that DINO lacks colour information, that every soft K weight is identical, or
+that the single-K optimum equals the actual soft-mixture reconstruction.
+
+**Full grounder VJP.** Capture factual local facts, rerun the actual G in FP32 on
+an isolated copy, and differentiate its original reconstruction scalar through
+all G parameters. Splitting the output adjoint into assignment/content/position
+paths closes to the original gradient with maximum relative error 1.934e-7.
+Factual native first-eight arm replay RMSE is at most 3.737e-4; FP32 rerun owner
+and content RMS differences from the production capture are at most 2.327e-4
+and 4.844e-4. Upstream local-fact producers are held fixed.
+
+A two-sided isolated parameter ray of relative L2 radius 1e-5 confirms the
+descent direction. Camera/K mutual information increases as reconstruction
+decreases in ALL four windows:
+
+| Window | Raw G loss before -> along descent | Camera/K MI (nats) before -> along descent |
+|---|---:|---:|
+| 01/24 | 0.245297 -> 0.245076 | 0.482187 -> 0.483967 |
+| 05/24 | 0.267975 -> 0.267582 | 0.357698 -> 0.359287 |
+| 11/24 | 0.277926 -> 0.277567 | 0.374685 -> 0.376224 |
+| 17/136 | 0.264603 -> 0.264431 | 0.544981 -> 0.545301 |
+
+Both assignment-only and content-only parameter directions increase camera MI
+in all four windows. The infinitesimal MI directional derivatives agree with the
+finite rays within 1.16%. This establishes a current local reinforcing pressure
+from the complete G reconstruction path. It does not assign a fraction of the
+whole multitask update to this loss, reproduce Adam preconditioning, or prove
+that this was the unique historical cause of the seven rollout failures.
+
+**Narrow interface intervention.** In the same graph, diagnostically replace
+shared C_k by existing camera_content[k,c], keeping K ownership, target, support
+and P unchanged. Repeat with the existing shared slot residual added. No policy
+uses these alternate losses. Per-unit-parameter-descent camera MI rates are:
+
+| Window | Original shared value | Per-view values | Per-view + existing slot residual |
+|---|---:|---:|---:|
+| 01/24 | +3.1977 | -3.3714 | -2.2392 |
+| 05/24 | +2.8682 | -0.9881 | -0.4645 |
+| 11/24 | +2.7842 | -1.6145 | -0.9047 |
+| 17/136 | +0.5781 | -0.5089 | -0.8872 |
+
+The sign reversal localizes a repairable camera-pressure mechanism at this
+value interface; it is stronger evidence than a lower reconstruction scalar.
+However, both view-value alternatives REDUCE top-view physical-block owner
+separation in 05/24 and 11/24, while increasing it in 01/24 and 17/136. They are
+not accepted object-identity repairs. Removing camera specialization may still
+leave homogeneous or arbitrarily permuted objects within each camera.
+
+**Revision to repair planning.** G reconstruction/identity must be addressed
+explicitly alongside measurement, rather than expecting a Teacher/S repair or
+more training to remove this pressure. Candidate identity repairs must separate
+view/background appearance from shared object identity, preserve one K/binding
+and honest observed/null support, and demonstrate real object discrimination
+plus cross-view/time identity. Do not promote a per-camera pooling edit from
+loss reduction or camera-MI reduction alone. No production topology, objective,
+checkpoint, optimizer state, or live experiment was changed by this audit.
+
+Reproduce with probes/probe_reconstruction_joint_gradient.py in N, imported
+under Q's runtime, original checkpoint, identity-v1/probe_plan.json and masks-r2:
+
+    cd "$RUNTIME_REPO"
+    PYTHONPATH="$RUNTIME_REPO" CUDA_VISIBLE_DEVICES=0 /data/senwang/envs/clearvla-sim/bin/python \
+      "$AUDIT_REPO/probes/probe_reconstruction_joint_gradient.py" \
+      --checkpoint "$CHECKPOINT" --plan "$PLAN" --masks "$MASKS" --output "$NEW_OUTPUT"
+
+Artifacts remain in causal-repair-20261006-v4/reconstruction-joint-gradient-r1
+and r2, with sibling *-job.json receipts, exact .source.py snapshots and logs.
+reconstruction-joint-gradient-decision.json is the compact combined ledger.
