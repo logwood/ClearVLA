@@ -2846,3 +2846,48 @@ probes/probe_observed_match_calibration.py --checkpoint <best.pt>
 --output <new-dir> --native-control --localization-controls.
 Use probe_causal_outcome_maintenance.py --producer-ledger --ledger-only with
 the saved A/B-outcome-maintenance-fresh-plan.json for the actual goal ledger.
+
+
+#### 34.33.11 Full motion audit and separate rigid-geometry cross-check
+
+A-observed-match-full63-r1 completes all 18 old trajectories / 63 windows,
+with exact production null and pair-delta reproduction (both max errors zero).
+It scores 790 top and 1519 wrist admitted same-body past4 flow endpoints,
+with no source/target body mismatch. These are correlated accepted RGB-flow
+estimates; body agreement is not subpixel geometric ground truth.
+
+On the subset moving >1 pixel according to that independent flow, production
+pair-delta mean error is 3.528 px top / 3.133 px wrist. Predicting no motion
+gives 3.550 / 3.211 px. Conditionalizing the existing law gives errors
+5.301 / 12.589 px. Native16 alone gives 3.550 / 3.152 px with the actual
+unknown mass. The estimator is nearly unresponsive on this moving subset;
+raising confidence alone would often amplify mislocalized transport.
+
+Same-null top1 produces exactly zero motion in 24/29 top-camera moving
+windows and 11/38 wrist-camera moving windows. Its aggregate errors remain
+3.542 / 3.203 px. Native16 top1 has a lower conditional wrist error (2.430 px),
+but actual-confidence error is still 3.193 px; top accuracy also varies.
+This specifies separate localization, sub-grid displacement and unknown
+calibration problems. It does not establish a qualified replacement or a
+unique closed-loop cause. Summary and reproduction receipt:
+A-observed-match-full63-r1/decision-summary.json,
+observed-match-full63-r1.receipt.json (probe d9259156).
+
+The next independent audit uses exact replay depth, camera extrinsics and
+rigid-body poses to reproject source pixels through object motion. This is
+explicitly simulator-oracle EVALUATION ONLY, never a new training label,
+online measurement, body mask input or identity objective. Its optional
+audit_rigid_* arrays are stored beside unchanged production sensor labels.
+Source points are one pixel inside a movable body's mask; projected points
+must remain on that body and satisfy target depth visibility. Camera
+unproject/reproject identity is asserted at 1e-6 pixels. Compare sensor flow
+against this geometry as well as scoring the existing DINO law, to avoid
+validating a future RGB-flow repair solely against its own label generator.
+The initial four-window replay is a probe admission, not repair admission.
+
+The full63 RGB-flow result supports replacing an ineffective measurement,
+but the new estimator must recover independently verified movement while
+preserving static zero, occlusion unknown, K/view support and ordinary
+consumer gradients. Check fresh trajectories and longer instruction-start
+gaps separately. Identity separation, natural target choice and arm/gripper
+remain independent gates for the two formal experiments.

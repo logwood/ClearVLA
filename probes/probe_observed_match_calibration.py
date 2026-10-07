@@ -109,6 +109,8 @@ def main():
         parser.add_argument('--'+key, type=Path, required=True)
     parser.add_argument('--native-control', action='store_true', help='Also audit a native-token kernel; never replace the production measurement')
     parser.add_argument('--localization-controls', action='store_true', help='Measure top1/top5 spreading controls at identical row null; never feed them to policy')
+    parser.add_argument('--label-source', choices=('sensor','rigid_audit'), default='sensor',
+        help='Audit truth only; rigid_audit is simulator geometry and is prohibited as a training/online input')
     args = parser.parse_args()
     args.output.mkdir(exist_ok=False)
     if os.environ.get('CUBLAS_WORKSPACE_CONFIG') != ':4096:8':
@@ -140,6 +142,9 @@ def main():
         checkpoint_source=policy.bundle.identity.git_commit, measurement_mode=model.config.top.observation_measurement_mode,
         script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), scope=__doc__,
         label_complete=json.loads((args.labels/'complete.json').read_text())), records=[], complete=False)
+    report['identity']['label_source'] = args.label_source
+    if args.label_source == 'rigid_audit' and report['identity']['label_complete'].get('rigid_simulation_oracle_audit_only') is not True:
+        raise ValueError('rigid audit requires its explicit simulator-oracle receipt')
     try:
         for row in json.loads(args.plan.read_text()):
             case = Path(row['case'])
@@ -166,6 +171,23 @@ def main():
                     raise ValueError('independent label bytes differ from their exact-replay receipt')
                 with np.load(path, allow_pickle=False) as z:
                     labels_now = {key:z[key] for key in z.files}
+                sensor_comparison = []
+                if args.label_source == 'rigid_audit':
+                    for camera,key in enumerate(('rgb_static','rgb_gripper')):
+                        rigid_valid=labels_now['audit_rigid_temporal_valid'][camera]
+                        sensor_valid=labels_now['temporal_valid'][camera]
+                        common=rigid_valid&sensor_valid
+                        shape=data[key].shape[1:3]
+                        pixels=np.array([(shape[1]-1)/2,(shape[0]-1)/2])
+                        difference=(labels_now['temporal_target'][camera]-labels_now['audit_rigid_temporal_target'][camera])*pixels
+                        sensor_comparison.append(dict(camera=camera,rigid_visible_points=int(rigid_valid.sum()),
+                            common_sensor_points=int(common.sum()),
+                            sensor_endpoint_error_pixels=stats(np.linalg.norm(difference[common],axis=-1)),
+                            geometry_roundtrip_max=float(labels_now['audit_rigid_roundtrip_max'][camera])))
+                    labels_now=dict(labels_now,
+                        temporal_target=labels_now['audit_rigid_temporal_target'],
+                        temporal_valid=labels_now['audit_rigid_temporal_valid'],
+                        temporal_target_body=labels_now['audit_rigid_temporal_target_body'])
                 if labels_now['source_frames'].tolist() != [t-4,t]:
                     raise ValueError('independent temporal labels do not use the observed four-step window')
                 captured.clear()
@@ -207,6 +229,8 @@ def main():
                     actual_G_measurement_null=array(produced.null_probability[:,0,:,0])[0].tolist(),
                     production_pair_delta_reproduction_max=float((reproduced_delta-produced.transport_per_support[:,0]).abs().max()),
                     production_null_reproduction_max=float((reproduced-produced.null_probability[:,0,:,0]).abs().max()),cameras=[])
+                if args.label_source == 'rigid_audit':
+                    record['sensor_vs_rigid_audit'] = sensor_comparison
                 for camera,rgb_key in enumerate(('rgb_static','rgb_gripper')):
                     record['cameras'].append(score_camera(law,h,w,camera,labels_now,data[rgb_key].shape[1:3]))
                 if args.localization_controls:

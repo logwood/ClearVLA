@@ -1758,6 +1758,13 @@ displacement (before source aggregation), static behavior and unknown support
 separately before any matcher change; never simply promote null to real mass.
 The production v2 identity repair and all existing evaluations remain unchanged.
 
+The completed 18/63 motion audit (34.33.11) gives moving-object transport
+errors 3.528/3.133 px (top/wrist), versus zero-motion errors 3.550/3.211 px.
+A separate rigid-body geometry oracle is now being admitted strictly for
+evaluation, to validate RGB-flow labels independently. Simulator object poses
+or IDs must never enter training labels or policy inputs through this audit.
+
+
 ### Current CALVIN audit constraint (2026-10-07)
 
 For causal-repair decisions, use G_SLOT_IDENTITY_BINDING_REVIEW.md sections
