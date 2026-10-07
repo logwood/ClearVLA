@@ -132,6 +132,24 @@ def controls(model, online, facts, labels, *, prepared=None, donor=None, audit_r
                 'source_values_K_permuted': predict(q, value.roll(1, 1)),
                 'common_K_permutation': predict(q.roll(1, -1), value.roll(1, 1)),
             }
+            # Distinguish target-coordinate/template shortcuts from the zero-
+            # latent decoder's learned biases. These are fixed-input ablations,
+            # not independent contribution fractions or a recommendation to
+            # remove legitimate coordinate conditioning from reconstruction.
+            source_value = torch.einsum('bnk,bkd->bnd', q.to(value), value[:, :, destination])
+            background_value = background[destination][None, None].expand_as(prediction)
+            variants.update(
+                coordinate_and_background_only=position + background_value,
+                coordinate_only=position.expand_as(prediction),
+                background_only=background_value,
+                source_prototype_only=source_value,
+                without_coordinate=source_value + background_value,
+                without_background=source_value + position,
+            )
+            component_rms = {name: float(mean(component.float().square().mean(-1)).sqrt())
+                             for name, component in dict(source_value=source_value,
+                                 coordinate=position, background=background_value,
+                                 prediction=prediction, truth=truth).items()}
             errors = {name: float(mean((v.float() - truth).square().mean(-1))) for name, v in variants.items()}
             permutation_error = float((prediction - variants['common_K_permutation']).abs().max())
             base_js = mean(js(source_law, target_law), identity_valid)
@@ -146,7 +164,8 @@ def controls(model, online, facts, labels, *, prepared=None, donor=None, audit_r
                 other_episode_source_js=float(mean(js(sample((donor_conditional if conditional_mode else donor_joint)[:, source_time, camera], source_xy), target_law), identity_valid)),
                 source_null_mass=float(mean(joint_source[..., -1])), target_null_mass=float(mean(joint_target[..., -1])),
                 source_real_entropy=float(mean(-(q * q.clamp_min(1e-12).log()).sum(-1))),
-                mse=errors, common_K_prediction_max_error=permutation_error,
+                mse=errors, component_rms=component_rms,
+                common_K_prediction_max_error=permutation_error,
                 common_K_js_max_error=float((base_js - permuted_js).abs()),
             ))
             if audit_regions is not None:
