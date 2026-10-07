@@ -8,7 +8,7 @@ is accepted by this interface. Disconnected surfaces can still be one object;
 the caller must audit that failure before treating groups as negatives.
 """
 import numpy as np
-from scipy.spatial import cKDTree
+from scipy.spatial import cKDTree, ConvexHull, QhullError
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
@@ -36,8 +36,15 @@ def world_points(depth, view, projection):
     return xyz, valid
 
 
-def propose_groups(depths, rgbs, views, projections):
+def propose_groups(depths, rgbs, views, projections, *, support_mode='dominant_v1', workspace_point=None):
     settings = dict(SETTINGS)
+    settings['support_mode'] = support_mode
+    if support_mode not in ('dominant_v1', 'under_tcp_v2'):
+        raise ValueError('undeclared support plane rule')
+    if support_mode == 'under_tcp_v2':
+        workspace_point = np.asarray(workspace_point, np.float64)
+        if workspace_point.shape != (3,) or not np.isfinite(workspace_point).all():
+            raise ValueError('support plane selection needs the observed TCP only')
     if not (len(depths) == len(rgbs) == len(views) == len(projections) == 2):
         raise ValueError('two observed camera charts required')
     points, colors, valid, shapes = [], [], [], []
@@ -76,6 +83,34 @@ def propose_groups(depths, rgbs, views, projections):
     if counts[best] < settings['minimum_plane_fraction']*len(sample):
         split = np.prod(shapes[0])
         return [labels[:split].reshape(shapes[0]), labels[split:].reshape(shapes[1])], empty
+    candidates = []
+    if support_mode == 'under_tcp_v2':
+        # An image's largest horizontal plane may be the floor. Use the
+        # highest measured plane below the observed tool whose measured
+        # footprint contains the tool projection, never a known table height.
+        seen = []
+        for candidate in np.argsort(counts)[::-1]:
+            if counts[candidate] < settings['minimum_plane_fraction']*len(sample):
+                break
+            n = normals[candidate]; off = offsets[candidate]
+            z = -(n[:2]@workspace_point[:2]+off)/n[2]
+            if z >= workspace_point[2]-.002 or any(abs(z-old) < .006 for old in seen):
+                continue
+            selected_plane = sample[distances[:, candidate] < settings['plane_tolerance_m']]
+            try:
+                hull = ConvexHull(selected_plane[:, :2])
+            except QhullError:
+                continue
+            margin = float(np.max(hull.equations[:, :2]@workspace_point[:2]+hull.equations[:, 2]))
+            if margin > .01:
+                continue
+            candidates.append(dict(index=int(candidate), height_at_tcp=float(z), footprint_margin=margin,
+                                   sample_fraction=float(counts[candidate]/len(sample))))
+            seen.append(z)
+        if not candidates:
+            split = int(np.prod(shapes[0])); empty.update(status='no_observed_plane_below_tcp')
+            return [labels[:split].reshape(shapes[0]), labels[split:].reshape(shapes[1])], empty
+        best = max(candidates, key=lambda x:x['height_at_tcp'])['index']
     inside = distances[:, best] < settings['plane_tolerance_m']
     center = sample[inside].mean(0)
     _, _, vh = np.linalg.svd(sample[inside]-center, full_matrices=False)
@@ -108,6 +143,7 @@ def propose_groups(depths, rgbs, views, projections):
     metadata = dict(settings=settings, status='proposed_only', accepted_groups=len(groups),
                     valid_points=int(valid.sum()), foreground_points=len(selected),
                     plane_normal=normal.tolist(), plane_offset=offset,
+                    support_candidates=candidates,
                     plane_sample_fraction=float(inside.mean()), groups=groups,
                     rejected_components=len(rejected),
                     rejected_large=[x for x in rejected if x['points'] >= settings['minimum_group_points']])
