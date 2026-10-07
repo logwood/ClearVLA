@@ -54,6 +54,46 @@ def sampled_admission(accepted, current, other, shape, names):
         per_object=rows)
 
 
+def export_labels(path, step, data, snapshots, depth_snapshots, calibration, names):
+    """Small correspondence/audit arrays; no model activations or RGB cache."""
+    previous=max(step-4,0)
+    depths=depth_snapshots[step]
+    rgbs=[data['rgb_static'][step],data['rgb_gripper'][step]]
+    views=camera_views(data['robot_obs'][step],calibration)
+    fields={key:[] for key in ('cross_source','cross_target','cross_valid',
+        'temporal_source','temporal_target','temporal_valid',
+        'cross_source_body','cross_target_body','temporal_source_body','temporal_target_body')}
+
+    def body_at(mask,y,x):
+        chosen=mask[:,y,x]
+        return np.where(chosen.any(0),chosen.argmax(0),-1).astype(np.int64)
+
+    for camera,key in enumerate(('static','gripper')):
+        shape=depths[camera].shape;y,x=_labels.IdentityLabelProducer._sample(shape)
+        xy=np.stack((x,y),-1);index=y*shape[1]+x
+        cross=correspondence(depths,views,calibration['projection'],camera,1-camera)
+        valid=photometric_support(cross,rgbs[camera],rgbs[1-camera])[index]
+        target=_labels.IdentityLabelProducer._endpoint(cross['xy'][index],depths[1-camera].shape)
+        fields['cross_source'].append(_labels.IdentityLabelProducer._endpoint(xy,shape))
+        fields['cross_target'].append(np.where(valid[:,None],target,0.))
+        fields['cross_valid'].append(valid)
+        fields['cross_source_body'].append(body_at(snapshots[step][camera],y,x))
+        fields['cross_target_body'].append(body_at(snapshots[step][1-camera],cross['v'][index],cross['u'][index]))
+        flow=observed_rgb_flow(data['rgb_'+key][previous],data['rgb_'+key][step])
+        valid=flow['accepted'][y,x]&(step>previous)
+        raw_target=flow['xy'][y,x]
+        target=_labels.IdentityLabelProducer._endpoint(raw_target,shape)
+        fields['temporal_source'].append(_labels.IdentityLabelProducer._endpoint(xy,shape))
+        fields['temporal_target'].append(np.where(valid[:,None],target,0.))
+        fields['temporal_valid'].append(valid)
+        fields['temporal_source_body'].append(body_at(snapshots[previous][camera],y,x))
+        u=np.rint(np.clip(raw_target[:,0],0,shape[1]-1)).astype(int)
+        v=np.rint(np.clip(raw_target[:,1],0,shape[0]-1)).astype(int)
+        fields['temporal_target_body'].append(body_at(snapshots[step][camera],v,u))
+    np.savez_compressed(path,**{key:np.stack(value) for key,value in fields.items()},
+        source_frames=np.array([previous,step],np.int64),object_names=np.asarray(names))
+
+
 def audit(depth, views, projections, masks, rgbs, names):
     rows=[]
     for source,target in ((0,1),(1,0)):
@@ -82,13 +122,14 @@ def audit(depth, views, projections, masks, rgbs, names):
 def main():
     q=argparse.ArgumentParser();q.add_argument('--plan',type=Path,required=True)
     q.add_argument('--output',type=Path,required=True);q.add_argument('--index',type=int)
+    q.add_argument('--export-labels',action='store_true',help='Save production-grid past4/current pair labels and report-only body identities')
     a=q.parse_args();a.output.mkdir(exist_ok=False);plan=json.loads(a.plan.read_text())
     if a.index is None:
         results=[]
         for index,row in enumerate(plan):
             out=a.output/('worker_%02d'%index)
             with (a.output/('worker_%02d.log'%index)).open('w') as log:
-                done=subprocess.run([sys.executable,'-u',__file__,'--plan',str(a.plan),'--output',str(out),'--index',str(index)],stdout=log,stderr=subprocess.STDOUT)
+                done=subprocess.run([sys.executable,'-u',__file__,'--plan',str(a.plan),'--output',str(out),'--index',str(index)]+(['--export-labels'] if a.export_labels else []),stdout=log,stderr=subprocess.STDOUT)
             if done.returncode:raise RuntimeError('replay failed; see '+str(out)+'.log')
             results.extend(json.loads((out/'results.json').read_text()))
             (a.output/'results.json').write_text(json.dumps(results,indent=2)+'\n')
@@ -107,8 +148,9 @@ def main():
         robot,scene=official.get_env_state_for_initial_condition(result['initial_state'])
         env.reset(robot_obs=robot,scene_obs=scene);obs=env.get_obs()
         objects={o.name:int(o.uid) for o in env.scene.movable_objects}
-        snapshots={}
+        snapshots={};depth_snapshots={}
         required=sorted(set(row['steps']) | {step+offset for step in row['steps'] for offset in (4,8) if step+offset<len(d['rgb_static'])})
+        if a.export_labels:required=sorted(set(required)|{max(step-4,0) for step in row['steps']})
         for step in range(max(required)+1):
             if step:obs,*_=env.step(d['executed'][step-1].copy())
             if step not in required:continue
@@ -125,6 +167,7 @@ def main():
                 masks.append(np.stack([body==uid for uid in objects.values()]))
                 depths.append(depth);views.append(matrix(camera,'view'));projections.append(matrix(camera,'projection'))
             snapshots[step]=masks
+            if a.export_labels:depth_snapshots[step]=depths
             if step not in row['steps']:continue
             derived=camera_views(d['robot_obs'][step],calibration)
             error=max(float(np.max(np.abs(x-y))) for x,y in zip(derived,views))
@@ -135,6 +178,11 @@ def main():
             print(dict(case=case.name,step=step,production_view_max_abs_error=error),flush=True)
         for result in results:
             step=result['step'];temporal=[]
+            if a.export_labels:
+                label_path=a.output/('labels_%03d.npz'%step)
+                export_labels(label_path,step,d,snapshots,depth_snapshots,calibration,list(objects))
+                result['production_labels']=str(label_path)
+                result['production_labels_sha256']=hashlib.sha256(label_path.read_bytes()).hexdigest()
             for delta in (4,8):
                 if step+delta not in snapshots:continue
                 for camera,key in enumerate(('static','gripper')):

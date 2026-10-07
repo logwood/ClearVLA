@@ -30,8 +30,8 @@ def dump(path, value):
     temporary.replace(path)
 
 
-def controls(model, online, facts, labels):
-    module = model.grounding.grounder
+def capture_source(model, online, facts, labels):
+    """Capture the independent source encoding made by the actual objective."""
     capture = []
     original = production.encode_owners
 
@@ -47,16 +47,33 @@ def controls(model, online, facts, labels):
         production.encode_owners = original
     if len(capture) != 1:
         raise ValueError('production source-only encoder call count changed')
+    return actual, capture[0]
+
+
+def controls(model, online, facts, labels, *, prepared=None, donor=None, audit_regions=None):
+    module = model.grounding.grounder
+    actual, captured = prepared if prepared is not None else capture_source(model, online, facts, labels)
     raw = online.observation.dino_history[:, -2:].detach()
     b, times, cameras, cells, width = raw.shape
     side = math.isqrt(cells)
     k = module.objects
     with torch.autocast(device_type=raw.device.type, enabled=False):
         observed = model.observation.compiler.encoder.teacher_norm(raw.float())
-    state, log_owner = capture[0]
+    state, log_owner = captured
     state = state.reshape(b, times, cameras, k, module.hidden)
     law = log_owner.exp().reshape(b, times, cameras, side, side, k + 1).permute(0, 1, 2, 5, 3, 4)
     conditional = torch.softmax(log_owner[..., :k].float(), -1).reshape(b, times, cameras, side, side, k).permute(0, 1, 2, 5, 3, 4)
+    if donor is not None:
+        donor_state, donor_owner = donor[1]
+        if donor_state.shape != captured[0].shape or donor_owner.shape != log_owner.shape:
+            raise ValueError('independent donor source chart differs')
+        donor_state = donor_state.reshape_as(state)
+        donor_joint = donor_owner.exp().reshape(b, times, cameras, side, side, k + 1).permute(0, 1, 2, 5, 3, 4)
+        donor_conditional = torch.softmax(donor_owner[..., :k].float(), -1).reshape(b, times, cameras, side, side, k).permute(0, 1, 2, 5, 3, 4)
+    else:
+        donor_state = state.roll(1, 0)
+        donor_joint = law.roll(1, 0)
+        donor_conditional = conditional.roll(1, 0)
     target = observed[:, -1].reshape(b, cameras, side, side, width).permute(0, 1, 4, 2, 3)
     full = facts.image_ownership
     conditional_mode = model.config.top.identity_supervision_mode == 'rgbd_temporal_conditional_v2'
@@ -105,8 +122,8 @@ def controls(model, online, facts, labels):
 
             prediction = predict(q, value)
             zero_value, _ = module.canonical_decoder(torch.zeros_like(latent))
-            donor_value, _ = module.canonical_decoder(latent.roll(1, 0))
-            donor_q = sample(conditional[:, source_time, camera].roll(1, 0), source_xy)
+            donor_value, _ = module.canonical_decoder(donor_state[:, source_time, camera])
+            donor_q = sample(donor_conditional[:, source_time, camera], source_xy)
             variants = {
                 'actual': prediction,
                 'identity_value_zero_q_retained': predict(q, zero_value),
@@ -126,12 +143,40 @@ def controls(model, online, facts, labels):
                 identity_supported_pairs=int(identity_valid.sum()),
                 production_divergence=float(mean(divergence, identity_valid)), source_target_js=float(base_js),
                 target_K_permuted_js=float(mean(js(source_law, target_law[..., perm]), identity_valid)),
-                other_episode_source_js=float(mean(js(sample(comparison_source[:, source_time, camera].roll(1, 0), source_xy), target_law), identity_valid)),
+                other_episode_source_js=float(mean(js(sample((donor_conditional if conditional_mode else donor_joint)[:, source_time, camera], source_xy), target_law), identity_valid)),
                 source_null_mass=float(mean(joint_source[..., -1])), target_null_mass=float(mean(joint_target[..., -1])),
                 source_real_entropy=float(mean(-(q * q.clamp_min(1e-12).log()).sum(-1))),
                 mse=errors, common_K_prediction_max_error=permutation_error,
                 common_K_js_max_error=float((base_js - permuted_js).abs()),
             ))
+            if audit_regions is not None:
+                body = audit_regions[kind + '_source_body'][:, camera]
+                other_body = audit_regions[kind + '_target_body'][:, camera]
+                if body.shape != valid.shape or other_body.shape != valid.shape:
+                    raise ValueError('audit labels do not index the same admitted pairs')
+                regions = {'source_objects': body >= 0, 'source_nonobjects': body < 0}
+                regions.update({name: body == index for index, name in enumerate(audit_regions['object_names'])})
+                item = {}
+                for name, region in regions.items():
+                    admitted = valid & region
+                    supported = identity_valid & region
+                    n = int(admitted.sum())
+                    ns = int(supported.sum())
+                    error = (prediction.float() - truth).square().mean(-1)
+                    item[name] = dict(
+                        admitted_pairs=n, identity_supported_pairs=ns,
+                        same_body_pairs=int((admitted & (body >= 0) & (body == other_body)).sum()),
+                        mse={key: float(mean((value.float() - truth).square().mean(-1), admitted)) if n else None for key, value in variants.items()},
+                        source_prediction_group_contribution=float(torch.where(admitted, error, 0.).sum() / count.clamp_min(1)),
+                        identity_group_contribution=float(torch.where(supported, divergence, 0.).sum() / identity_valid.sum().clamp_min(1)),
+                        source_null_mass=float(mean(joint_source[..., -1], admitted)) if n else None,
+                        target_null_mass=float(mean(joint_target[..., -1], admitted)) if n else None,
+                        source_target_js=float(mean(js(source_law, target_law), supported)) if ns else None,
+                    )
+                for field, total in [('source_prediction_group_contribution', errors['actual']), ('identity_group_contribution', float(mean(divergence, identity_valid)))]:
+                    gap=abs(item['source_objects'][field]+item['source_nonobjects'][field]-total)
+                    if gap>2e-6:raise ValueError('object/nonobject loss partition failed')
+                records[-1]['audit_regions']=item
     reproduced = {
         'identity_correspondence': sum(x['production_divergence'] for x in records) / 4,
         'identity_source_prediction': sum(x['mse']['actual'] for x in records) / 4,
