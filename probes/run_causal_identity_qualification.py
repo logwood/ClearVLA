@@ -70,6 +70,8 @@ def main():
         env = dict(os.environ, PYTHONPATH=str(repo), CUDA_VISIBLE_DEVICES=receipt['gpu'],
                    EGL_VISIBLE_DEVICES=receipt['egl'], OMP_NUM_THREADS='4', OPENBLAS_NUM_THREADS='4',
                    HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
+        if receipt.get('deterministic_operator_control'):
+            env['CUBLAS_WORKSPACE_CONFIG']=':4096:8'
         for stage in receipt['stages']:
             panel_path = stage.get('wait_panel')
             if panel_path:

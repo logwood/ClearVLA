@@ -107,7 +107,7 @@ def score_existing_flow(flow, confidence, occlusion, labels, camera, image_shape
     """Score the already computed forward flow; no rerun or policy substitution."""
     h,w=flow.shape[-2:];ih,iw=image_shape
     query=torch.from_numpy(labels['temporal_source'][camera]).to(flow.device).float()[None,:,None]
-    scale=flow.new_tensor([(iw-1)/(w-1),(ih-1)/(h-1)])[None]
+    scale=torch.tensor([(iw-1)/(w-1),(ih-1)/(h-1)],device=flow.device,dtype=torch.float32)[None]
     def sample(value):
         return F.grid_sample(value.float(),query,mode='bilinear',padding_mode='border',align_corners=True)[0,:,:,0].T
     vector=sample(flow)*scale
