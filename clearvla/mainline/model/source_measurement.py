@@ -32,6 +32,8 @@ def source_consistent_measurement(module, facts, observations, offsets, observed
     real=kernel[...,:-1];real_sum=real.sum(-1)
     posterior=torch.einsum('bkcn,bfcnm->bfkcm',joint,real)
     null=torch.einsum('bkcn,bfcn->bfk',joint,kernel[...,-1])[...,None]
+    has_source=joint.flatten(2).sum(-1)>0
+    null=torch.where(has_source[:,None,:,None],null,1.)
     reference=torch.einsum('bkcn,bcnd->bkd',joint,current)
     per_source_delta=real@target-real_sum[...,None]*current[:,None]
     delta=torch.einsum('bkcn,bfcnd->bfkd',joint,per_source_delta)

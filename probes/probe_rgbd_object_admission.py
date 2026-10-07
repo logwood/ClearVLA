@@ -9,6 +9,7 @@ import numpy as np
 import pybullet as p
 from clearvla.benchmarks.calvin_eval import _environment, _official_task_assets
 from probe_rgbd_correspondence import correspondence, matrix
+from clearvla.vision.observed_flow import observed_rgb_flow
 
 
 def audit(depth, views, projections, masks):
@@ -54,9 +55,11 @@ def main():
         robot,scene=official.get_env_state_for_initial_condition(result['initial_state'])
         env.reset(robot_obs=robot,scene_obs=scene);obs=env.get_obs()
         objects={o.name:int(o.uid) for o in env.scene.movable_objects}
-        for step in range(max(row['steps'])+1):
+        snapshots={}
+        required=sorted(set(row['steps']) | {step+offset for step in row['steps'] for offset in (4,8) if step+offset<len(d['rgb_static'])})
+        for step in range(max(required)+1):
             if step:obs,*_=env.step(d['executed'][step-1].copy())
-            if step not in row['steps']:continue
+            if step not in required:continue
             depths=[];masks=[];views=[];projections=[]
             for camera,key in zip(env.cameras,('static','gripper')):
                 rgb=obs['rgb_obs']['rgb_'+key]
@@ -69,8 +72,22 @@ def main():
                 body=np.where(label<0,-1,label&((1<<24)-1))
                 masks.append(np.stack([body==uid for uid in objects.values()]))
                 depths.append(depth);views.append(matrix(camera,'view'));projections.append(matrix(camera,'projection'))
+            snapshots[step]=masks
+            if step not in row['steps']:continue
             results.append(dict(case=case.name,step=step,directions=audit(depths,views,projections,masks)))
             print(results[-1],flush=True)
+        for result in results:
+            step=result['step'];temporal=[]
+            for delta in (4,8):
+                if step+delta not in snapshots:continue
+                for camera,key in enumerate(('static','gripper')):
+                    flow=observed_rgb_flow(d['rgb_'+key][step],d['rgb_'+key][step+delta])
+                    masks=snapshots[step][camera];target=snapshots[step+delta][camera]
+                    h,w=flow['accepted'].shape
+                    xy=flow['xy'];x=np.rint(np.clip(xy[...,0],0,w-1)).astype(int);y=np.rint(np.clip(xy[...,1],0,h-1)).astype(int)
+                    other=target[:,y,x];obj=masks.any(0);keep=flow['accepted']&obj;same=(masks&other).any(0)
+                    temporal.append(dict(camera=camera,offset=delta,object_pixels=int(obj.sum()),accepted_object_pixels=int(keep.sum()),correct_object_pixels=int((keep&same).sum()),wrong_object_pixels=int((keep&other.any(0)&~same).sum()),background_pixels=int((keep&~other.any(0)).sum())))
+            result['temporal']=temporal
         (a.output/'results.json').write_text(json.dumps(results,indent=2)+'\n')
     finally:env.close()
 

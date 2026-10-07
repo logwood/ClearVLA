@@ -393,6 +393,8 @@ class ClearVLAMainlinePolicy(nn.Module):
             task_execution_mode=top.task_execution_mode,
             global_condition_mode=config.bottom.global_condition_mode,
             object_view_mode=top.object_view_mode,
+            target_binding_input_mode=top.target_binding_input_mode,
+            observed_outcome_mode=top.observed_outcome_mode,
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,
@@ -681,6 +683,12 @@ class ClearVLAMainlinePolicy(nn.Module):
         semantic=measured.successor_per_support[:,0]-measured.current_reference[:,0]-predicted.semantic.float()
         image=measured.transport_per_support[:,0]-predicted.image.float()
         feedback=ExecutedWorldFeedback(
+            **(dict(
+                observed_semantic=torch.where(views.any(-1)[...,None],measured.successor_per_support[:,0]-measured.current_reference[:,0],0.).float(),
+                observed_image=torch.where(views[...,None],measured.transport_per_support[:,0],0.).float(),
+                predicted_semantic=torch.where(views.any(-1)[...,None],predicted.semantic,0.).float(),
+                predicted_image=torch.where(views[...,None],predicted.image,0.).float(),
+            ) if self.config.top.observed_outcome_mode != "none" else {}),
             semantic=torch.where(views.any(-1)[...,None],semantic,0.).float(),
             image=torch.where(views[...,None],image,0.).float(),
             covariance=torch.where(views[...,None],measured.covariance_per_support[:,0]+predicted.covariance.float(),0.),
@@ -802,6 +810,11 @@ class ClearVLAMainlinePolicy(nn.Module):
             evidence.local_facts,
             collect_diagnostics=collect_diagnostics,
         )
+        feedback = None
+        if self.config.top.observed_outcome_mode != "none":
+            feedback = self._replay_executed_world(conditioned_policy_input, role_table)
+            if torch.is_grad_enabled():
+                torch.clear_autocast_cache()
         intent, intent_metrics = self.intent.organize(
             goal_tokens=conditioned_policy_input.goal.tokens,
             goal_mask=conditioned_policy_input.goal.mask,
@@ -811,6 +824,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             history_timing=conditioned_policy_input.history.timing,
             instruction_reference=conditioned_policy_input.instruction_reference,
             current_dino=conditioned_policy_input.observation.dino_history[:, -1],
+            executed_feedback=feedback,
             facts=facts,
             collect_diagnostics=collect_diagnostics,
         )
@@ -820,7 +834,8 @@ class ClearVLAMainlinePolicy(nn.Module):
         if reader is not None:
             if intent.target_binding is None:
                 raise ValueError("executed world feedback lost current target")
-            feedback=self._replay_executed_world(conditioned_policy_input,role_table)
+            if feedback is None:
+                feedback=self._replay_executed_world(conditioned_policy_input,role_table)
             # The replay is intentionally no-grad, but it invokes the same W
             # heads that the candidate and matched supervised passes must
             # differentiate. CUDA autocast caches cast weights by parameter

@@ -31,4 +31,11 @@ class ObservedCorrespondenceTests(unittest.TestCase):
         torch.testing.assert_close(p.flip(1),swapped)
         assert torch.isfinite(torch.autograd.grad(p[...,0].sum(),a)[0]).all()
 
+    def test_duplicate_descriptors_remain_unknown(self):
+        a=torch.ones(2,9,32)
+        mask=torch.ones(a.shape[:-1],dtype=torch.bool)
+        p=observed_feature_correspondence(a,a,mask,mask)
+        assert p[...,:-1].count_nonzero()==0
+        assert torch.equal(p[...,-1],torch.ones_like(p[...,-1]))
+
 if __name__=='__main__': unittest.main()

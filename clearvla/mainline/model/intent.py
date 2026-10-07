@@ -339,6 +339,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
         task_execution_mode: str = NO_TASK_EXECUTION,
         role_value_mode: str = ADDRESS_ONLY_ROLE,
         object_view_mode: str = "pooled_v1",
+        target_binding_input_mode: str = "protected_pooled_v1",
+        observed_outcome_mode: str = "none",
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
         super().__init__()
@@ -363,6 +365,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             raise ValueError("shared binding cannot duplicate the additive target address")
         self.target_binding_mode = target_binding_mode
         self.per_camera_values = object_view_mode == "per_camera_values_v1"
+        self.target_binding_input_mode = target_binding_input_mode
         self.camera_names = tuple(camera_names)
         self.target_object_address_mode = target_object_address_mode
         self.hidden = int(hidden)
@@ -515,6 +518,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
             self.endpoint_goal_output = nn.Linear(4 * hidden, hidden, bias=False)
         elif annotation_goal_mode != "none":
             raise ValueError("unknown endpoint goal mode")
+
+        from .observed_outcome import ObservedOutcomeRead
+        self.observed_outcome = ObservedOutcomeRead(hidden, content_dim, camera_names) if observed_outcome_mode == "before_proposal_v1" else None
 
     @staticmethod
     def _paired_history(
@@ -780,6 +786,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         history_timing: HistoryTiming | None = None,
         instruction_reference: InstructionReference | None = None,
         current_dino: Tensor | None = None,
+        executed_feedback=None,
     ) -> tuple[ObjectIntentState, dict[str, Tensor]]:
         if goal_tokens.ndim != 3 or goal_mask.ndim != 2:
             raise ValueError("intent organizer requires full T5 tokens and mask")
@@ -912,7 +919,18 @@ class StatelessObjectIntentOrganizer(nn.Module):
             safe_history = torch.where(history_support[..., None], history, torch.zeros_like(history))
             history_context = safe_history.sum(1) / history_support.sum(1, keepdim=True).clamp_min(1)
             if isinstance(self.shared_binder, TaskConditionedTargetBinder):
-                if view_attribute_tokens is None:
+                if self.target_binding_input_mode == "full_tokens_views_v1":
+                    if view_attribute_tokens is None or facts.current_image_measure is None:
+                        raise ValueError("full-token binding lost source-owned camera values")
+                    measure = facts.current_image_measure
+                    joint, _ = measure.normalized((2, 3, 4))
+                    view_mass = joint.sum((-2, -1))
+                    view_objects = view_attribute_tokens[..., 0, :] + view_attribute_tokens[..., 1:, :].sum(-2) / (3.0 ** .5)
+                    target_binding = self.shared_binder(
+                        goal_memory, view_objects, object_validity, history=history_context,
+                        task_mask=goal_mask.bool(), view_support=camera_valid, view_mass=view_mass,
+                    )
+                elif view_attribute_tokens is None:
                     target_binding = self.shared_binder(protected_goal, objects, object_validity, history=history_context)
                 else:
                     # Bind once from the pooled G object facts. Per-camera
@@ -1057,6 +1075,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
             )
         if progress is not None:
             interval_source = interval_source + progress[:, None]
+        if self.observed_outcome is not None:
+            if executed_feedback is None or target_binding is None:
+                raise ValueError("S outcome lost its observed replay or shared target")
+            observed_outcome = self.observed_outcome(executed_feedback, facts, target_binding)
+            interval_source = interval_source + observed_outcome[:, None].to(interval_source.dtype)
         public_intervals = self.interval_self(interval_source)
         if self.task_relation_encoder is not None:
             # Add the carrier after the interval self-read so its identity

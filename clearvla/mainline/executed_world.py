@@ -135,6 +135,10 @@ class ExecutedWorldFeedback:
     current_dino: Tensor
     camera_names: tuple[str, ...]
     measurement_shape: tuple[int, int]
+    observed_semantic: Tensor | None = None
+    observed_image: Tensor | None = None
+    predicted_semantic: Tensor | None = None
+    predicted_image: Tensor | None = None
 
     def validate(self, *, strict: bool = False) -> None:
         if self.semantic.ndim != 3 or self.current_dino.ndim != 5:
@@ -153,6 +157,18 @@ class ExecutedWorldFeedback:
             raise ValueError("executed W observation lost declared measurement support")
         if self.view_observed.shape != (b, k, c) or self.view_observed.dtype != torch.bool:
             raise ValueError("executed W source support must remain boolean")
+        outcomes = (self.observed_semantic, self.observed_image, self.predicted_semantic, self.predicted_image)
+        if any(v is not None for v in outcomes):
+            if any(v is None for v in outcomes):
+                raise ValueError("observed, predicted and innovation records must be complete")
+            for value, expected in zip(outcomes, (self.semantic, self.image, self.semantic, self.image)):
+                if value.shape != expected.shape or value.dtype != torch.float32 or value.device != expected.device or value.requires_grad:
+                    raise ValueError("outcome record lost detached observation units or source axes")
+            if strict:
+                if not all(bool(torch.isfinite(v).all()) for v in outcomes):
+                    raise ValueError("nonfinite outcome record")
+                if not torch.allclose(self.semantic, self.observed_semantic-self.predicted_semantic, atol=2e-6, rtol=1e-5) or not torch.allclose(self.image, self.observed_image-self.predicted_image, atol=2e-6, rtol=1e-5):
+                    raise ValueError("innovation is not observed minus predicted outcome")
         for t in (
             self.semantic,
             self.image,

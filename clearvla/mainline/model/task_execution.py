@@ -561,6 +561,8 @@ class TaskConditionedTargetBinder(nn.Module):
     def forward(
         self, task: Tensor, objects: Tensor, supported: Tensor, *, history: Tensor,
         view_support: Tensor | None = None,
+        task_mask: Tensor | None = None,
+        view_mass: Tensor | None = None,
     ) -> TargetBinding:
         if (
             task.ndim != 3
@@ -577,21 +579,38 @@ class TaskConditionedTargetBinder(nn.Module):
             raise ValueError("task-conditioned binding lost source support/history")
         per_view = objects.ndim == 4
         object_count = objects.shape[1]
+        if task_mask is not None:
+            if task_mask.shape != task.shape[:2] or task_mask.dtype != torch.bool:
+                raise ValueError("binding task mask must preserve the full language axis")
+            task = torch.where(task_mask[..., None], task, 0.0)
+            task_present = task_mask.any(-1)
+            # Attention requires one legal key even for an empty instruction.
+            # Its value is zero and its output is quarantined below.
+            attention_mask = task_mask.clone()
+            attention_mask[:, 0] |= ~task_present
+        else:
+            attention_mask = None
+            task_present = torch.ones(task.shape[0], dtype=torch.bool, device=task.device)
         if per_view:
             if view_support is None or view_support.shape != objects.shape[:3] or view_support.dtype != torch.bool:
                 raise ValueError("camera-conditioned binding requires producer view support")
             legal = view_support & supported[...,None]
             safe = torch.where(legal[...,None], objects, 0.0).flatten(1,2)
         else:
-            if view_support is not None:
+            if view_support is not None or view_mass is not None:
                 raise ValueError("pooled binder cannot acquire a fabricated camera axis")
             safe = torch.where(supported[..., None], objects, 0.0)
         obj = self.objects(safe)
         query = self.query_norm(obj + self.history_query(history)[:, None])
         task_value = self.task_value(task)
-        read, _ = self.task_read(query, self.task_norm(task_value), task_value, need_weights=False)
+        read, _ = self.task_read(query, self.task_norm(task_value), task_value,
+            key_padding_mask=None if attention_mask is None else ~attention_mask, need_weights=False)
+        read = torch.where(task_present[:, None, None], read, 0.0)
         object_score = self.score(read * torch.tanh(self.compatibility(obj)))[..., 0]
-        task_context = task_value.mean(1)[:, None].expand(-1, obj.shape[1], -1)
+        task_mean = task_value.mean(1) if task_mask is None else (
+            torch.where(task_mask[..., None], task_value, 0.0).sum(1)
+            / task_mask.sum(1, keepdim=True).clamp_min(1))
+        task_context = task_mean[:, None].expand(-1, obj.shape[1], -1)
         task_object_score = self.task_object_score(torch.cat(
             (obj * task_context, obj * torch.tanh(task_context)), dim=-1
         ))[..., 0]
@@ -600,7 +619,18 @@ class TaskConditionedTargetBinder(nn.Module):
             score = score.reshape(task.shape[0], object_count, -1).float()
             # Log-mean-exp is permutation equivariant and does not reward an
             # object solely for having more available cameras. No view quota.
-            score = torch.logsumexp(torch.where(legal, score, -1e9), -1) - legal.sum(-1).clamp_min(1).float().log()
+            if view_mass is None:
+                score = torch.logsumexp(torch.where(legal, score, -1e9), -1) - legal.sum(-1).clamp_min(1).float().log()
+            else:
+                if view_mass.shape != legal.shape:
+                    raise ValueError("view allocation must retain K and camera axes")
+                mass = torch.where(legal, view_mass.float(), 0.0)
+                if not bool(torch.isfinite(mass).all()) or bool((mass < 0).any()):
+                    raise ValueError("view allocation must be finite and nonnegative")
+                positive = mass > 0
+                safe_mass = torch.where(positive, mass, 1.0)
+                log_weight = safe_mass.log() - mass.sum(-1, keepdim=True).clamp_min(torch.finfo(mass.dtype).tiny).log()
+                score = torch.logsumexp(torch.where(legal & positive, score + log_weight, -1e9), -1)
             supported = supported & legal.any(-1)
             score = torch.where(supported, score, 0.0)
-        return TargetBinding.from_logits(score, self.null(task_value.mean(1)), supported)
+        return TargetBinding.from_logits(score, self.null(task_mean), supported & task_present[:, None])

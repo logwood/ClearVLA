@@ -549,8 +549,10 @@ class TopConfig:
     instruction_reference_mode: str = "none"
     instruction_change_mode: str = MIXED_REFERENCE_CHANGE
     observation_measurement_mode: str = "legacy_v1"
+    observed_outcome_mode: str = "none"
     operation_intent_mode: str = POSTERIOR_INTENT
     object_view_mode: str = "pooled_v1"
+    target_binding_input_mode: str = "protected_pooled_v1"
     task_execution_mode: str = NO_TASK_EXECUTION
     annotation_goal_mode: str = "none"
     # Bound the full-posterior P1 query work so batch-8 keeps a stable
@@ -618,6 +620,10 @@ class TopConfig:
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
         ):
             raise ValueError("object operation outcomes require shared target, aligned time and typed P3")
+        if self.observed_outcome_mode not in {"none", "before_proposal_v1"}:
+            raise ValueError("unknown observed outcome placement")
+        if self.observed_outcome_mode != "none" and (self.world_feedback_mode == "none" or self.observation_measurement_mode != "source_consistent_v1"):
+            raise ValueError("S outcome requires source-consistent existing executed replay")
         if self.observation_measurement_mode not in {"legacy_v1", "source_consistent_v1"}:
             raise ValueError("unknown observed measurement mode")
         if self.observation_measurement_mode != "legacy_v1" and self.instruction_change_mode != POSTERIOR_REFERENCE_CHANGE:
@@ -1223,6 +1229,10 @@ class ExperimentConfig:
             raise ValueError("future support count and time grid disagree")
         if self.observation.visual_chart_mode not in {"legacy_v1", "full_rgb_endpoint_v1"}:
             raise ValueError("unknown visual chart")
+        if self.top.target_binding_input_mode not in {"protected_pooled_v1", "full_tokens_views_v1"}:
+            raise ValueError("unknown target binding input contract")
+        if self.top.target_binding_input_mode == "full_tokens_views_v1" and (self.top.object_view_mode != "per_camera_values_v1" or self.top.target_binding_mode != "shared_operation_v1"):
+            raise ValueError("full-token view binding requires shared binding and observed view values")
         if self.top.object_view_mode not in {"pooled_v1", "per_camera_values_v1"}:
             raise ValueError("unknown object view content mode")
         online_visual = self.data.visual_feature_mode == "dinov3_online_v1"
@@ -1489,12 +1499,16 @@ class ExperimentConfig:
                 cast(dict[str, object], payload["data"]).pop(name)
         if self.observation.visual_chart_mode == "legacy_v1":
             cast(dict[str, object], payload["observation"]).pop("visual_chart_mode")
+        if self.top.target_binding_input_mode == "protected_pooled_v1":
+            cast(dict[str, object], payload["top"]).pop("target_binding_input_mode")
         if self.top.object_view_mode == "pooled_v1":
             cast(dict[str, object], payload["top"]).pop("object_view_mode")
         if self.top.task_execution_mode == NO_TASK_EXECUTION:
             cast(dict[str, object], payload["top"]).pop("task_execution_mode")
         if self.top.operation_intent_mode == POSTERIOR_INTENT:
             cast(dict[str, object], payload["top"]).pop("operation_intent_mode")
+        if self.top.observed_outcome_mode == "none":
+            cast(dict[str, object], payload["top"]).pop("observed_outcome_mode")
         if self.top.observation_measurement_mode == "legacy_v1":
             cast(dict[str, object], payload["top"]).pop("observation_measurement_mode")
         if self.top.instruction_change_mode == MIXED_REFERENCE_CHANGE:

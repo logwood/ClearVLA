@@ -18,8 +18,8 @@ def observed_feature_correspondence(source: Tensor, target: Tensor,
 
     Inverse squared descriptor distance uses a null reference at distance_scale.
     The real partition is averaged over observed candidates, so increasing chart
-    size cannot by itself suppress null. Exact duplicate descriptors share their
-    mass; this represents ambiguity instead of inventing a persistent identity.
+    size cannot by itself suppress null. Multiple exact matches stay unknown;
+    averaging their coordinates would invent a displacement for a static image.
     """
     if source.shape[:-2] != target.shape[:-2] or source.shape[-1] != target.shape[-1]:
         raise ValueError('correspondence requires matching batch/view/descriptor axes')
@@ -36,13 +36,15 @@ def observed_feature_correspondence(source: Tensor, target: Tensor,
         distance=(a.square().sum(-1)[...,None]+b.square().sum(-1)[...,None,:]-2*(a@b.transpose(-1,-2))).clamp_min(0.)
         legal=source_observed[...,None] & target_observed[...,None,:]
         exact=legal & (distance <= 1e-12)
-        has_exact=exact.any(-1,keepdim=True)
+        exact_count=exact.sum(-1,keepdim=True)
+        has_exact=exact_count>0
         safe_distance=torch.where(legal & ~exact,distance,1.)
         score=2*(torch.log(torch.tensor(distance_scale,dtype=distance.dtype,device=distance.device))-safe_distance.log())
         score=score-target_observed.sum(-1).clamp_min(1).double().log()[...,None,None]
         score=score.masked_fill(~legal,-torch.inf)
         null=torch.zeros_like(score[...,:1])
         law=torch.softmax(torch.cat((score,null),-1),-1)
-        exact_law=exact.double()/exact.sum(-1,keepdim=True).clamp_min(1)
-        law=torch.where(has_exact,torch.cat((exact_law,torch.zeros_like(null)),-1),law)
+        unique=exact_count==1
+        exact_law=exact.double()*unique
+        law=torch.where(has_exact,torch.cat((exact_law,(~unique).double()),-1),law)
         return law.float()
