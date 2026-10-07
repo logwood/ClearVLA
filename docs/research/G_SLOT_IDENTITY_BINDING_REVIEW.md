@@ -2707,3 +2707,49 @@ RGB-D/temporal foreground grouping and independently validated different-group
 constraints are candidates to audit before adding any such objective; simulator
 body IDs remain evaluation-only. Do not infer an approved negative-label scheme
 from this proposal, or change P3/common carriers based on these scalar bounds.
+
+
+#### 34.33.9 Fresh contact/withdrawal qualification
+
+B-v1's complete old-observation 60-window audit has exact same-image semantic,
+image and covariance zero and all 120 same-instruction comparisons are exact.
+Its natural color arm-RMS median is 0.000424, maximum 0.001457. The numerical
+repeat confound established in A must not be asserted for this B panel.
+Real-K conditional cross-view similarity still cannot certify identity when
+supported joint mass is tiny. Artifact: B-matched-factual-short-r1/decision-summary.json.
+
+A's fresh 18-case physical ledger and exact two-camera mask replay are complete;
+its consumer audit is running. All five failed cases touch the instructed
+physical body. Final signed displacements (02,09,10,14,17) are 0.01170,
+0.05005, 0.08142, -0.02137, 0.07848 m. Maximum stored-goal/TCP gaps are only
+0.0109-0.0187 m. These maxima do not identify the first cause, but no large
+controller accumulation is required for these failures. Contact alone does not
+establish deliberate selection, alignment or sustained pushing.
+
+The generic contact/closest/peak plan does not cover every withdrawal or
+recontact. Add targeted windows from these fresh trajectories, especially
+A10/128,136,144; A14/184,192,200; A17/224,232,240 and B02/184,192,200,208,
+with successful A04/48,56,64 as a context control. These are physical replan
+states, not historical case-number timestamps transplanted into new rollouts.
+The added probe reads measured outcome before proposal, predicted goal visual
+values and remaining native TCP separately, then removes one existing value
+on a fixed factual input. Record coarse, P3/bottom, native first-eight arm and
+gripper, paired deterministic repeats and recorded-runtime deviation. These
+are interface sensitivity controls, not coherent physical interventions or
+independent contribution percentages. They cannot alone qualify long training.
+
+The read-only outcome smoke r3 passes A10/136: exact repeated action/coarse,
+unchanged binding and parameters, and native TCP decoding verified against
+recorded proprioception. Removing the full observed outcome changes native
+arm RMS 0.00134; removing its image/semantic projected values changes 0.000226 /
+0.000354. Removing prepared visual goal values changes 0.000461; robot goal
+values 0.01148. The predicted remaining TCP is (-0.16083,0.00471,0.04438) m.
+This is one sensitivity window, not a cause percentage or evidence that the
+object goal has been met. Deterministic versus recorded-runtime arm RMS is
+0.000383 and is kept separate from exact same-runtime repeat error.
+
+Probe development failures are retained with source snapshots: smoke r1 used a
+7-D native normalizer on the 10-D rotation6d model state; r2 correctly rejected
+inconsistent modified observed/innovation data. The qualified r3 decodes only
+unchanged TCP channels and removes projected consumer values while preserving
+all factual feedback validation. Production training/evaluation was untouched.

@@ -1718,10 +1718,13 @@ The observed training-mask trigger is confirmed: masked canonical cells are
 null-only while the independent source is still visible; v1 compared them as
 identity labels. V2 never uses learned null/allocation to decide support.
 Its production source is 0e861f56; the real BS8 mechanical check passed.
-A/B-r1 reached short step 12036, but offline/behavior admission is pending.
-The equally exposed v2 short is queued behind the original B panel on GPU2,
-with a fresh mature initialization and its own full evaluation. No formal
-A/B experiment is promoted. See 34.33.6 and pinned external queue receipts.
+A/B-r1 reached short step 12036 and completed 256 offline batches plus the
+standard panels: A 13/18, B-v1 17/18, mature baseline 11/18. All old successes
+remain, but cases 05/11 include pushing another block into the target; the
+scores do not certify correct identity selection. The equally exposed v2
+short now runs on GPU2 from the original mature initialization, with its own
+full evaluation. No formal A/B experiment is promoted. See 34.33.6-34.33.9
+and pinned external receipts for current evidence and pending qualifications.
 
 The immutable BS8 short-run source is 3a84399926d50831470518e1b7f105131d3f1056.
 A on GPU0 and B on GPU2 each execute 1024 updates from mature step 11012,
