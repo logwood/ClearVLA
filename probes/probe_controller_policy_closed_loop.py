@@ -2,7 +2,8 @@
 """Matched CALVIN policy rollout with an explicit diagnostic TCP command anchor.
 
 Stored-target mode preserves the original panel. Measured-TCP mode uses the
-backend's existing measured-pose alternative; results are labeled separately.
+backend's existing measured-pose alternative. Replan-TCP anchors a new chunk
+at its measured start, then integrates only that chunk. Results are separate.
 Every action is freshly predicted at the original eight-row replan boundaries.
 Neither mode supplies simulator object identity or controller state to policy.
 """
@@ -34,7 +35,7 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--execute-rows", type=int, default=8)
     parser.add_argument("--continue-after-success", action="store_true")
-    parser.add_argument("--anchor", choices=("stored_target", "measured_tcp"), required=True)
+    parser.add_argument("--anchor", choices=("stored_target", "measured_tcp", "replan_tcp"), required=True)
     args = parser.parse_args()
 
     if args.max_steps <= 0 or args.execute_rows <= 0:
@@ -97,7 +98,7 @@ def main() -> None:
     try:
         env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
         assert env.robot.use_target_pose is True
-        env.robot.use_target_pose = args.anchor == "stored_target"
+        env.robot.use_target_pose = args.anchor != "measured_tcp"
         observation = env.get_obs()
         start_info = env.get_info()
         model.reset()
@@ -105,6 +106,12 @@ def main() -> None:
         robot_states.append(np.asarray(observation["robot_obs"], dtype=np.float32).copy())
         for step in range(1, args.max_steps + 1):
             action = model.step(observation, instruction)
+            if args.anchor == "replan_tcp" and (step - 1) % args.execute_rows == 0:
+                # An explicit diagnostic: each newly observed/replanned path is
+                # anchored to that same measured state. The backend integrates
+                # the next eight rows; earlier plans cannot leave a hidden backlog.
+                env.robot.target_pos = np.asarray(observation["robot_obs"][:3]).copy()
+                env.robot.target_orn = np.asarray(observation["robot_obs"][3:6]).copy()
             observation, _reward, _done, info = env.step(action.copy())
             robot_states.append(np.asarray(observation["robot_obs"], dtype=np.float32).copy())
             capture(observation, info)
