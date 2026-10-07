@@ -1694,6 +1694,26 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### Current CALVIN audit constraint (2026-10-07)
+
+For causal-repair decisions, use G_SLOT_IDENTITY_BINDING_REVIEW.md sections
+34.26–34.29 alongside the admitted source/config. Full a2d597d2 behavior is
+11/18; the 512-update repair is 7/18 and retained-Adam 64-update diagnostics are
+9/18. Sixty-four updates do not establish convergence or promote a graph.
+
+The actual original Teacher selects g_assignment_v1. Exact same-image probes
+show nonzero semantic/coordinate change, increasing with the future search
+width; raw_chart_v1 alone does not restore static consistency. S's independent
+matcher passes identical-image zero change but fails known signed displacement.
+Any replacement measurement must pass both contracts at every declared physical
+offset while retaining K/view/source support and unknown/null semantics. Keep
+observed outcome, predicted outcome and prediction error distinct; source an
+S/coarse outcome read before forming a proposal with the single shared binding.
+This is a repair constraint, not an already implemented or trained replacement.
+The six-group audit also retains identity/selection, arm/gripper compatibility,
+native controller state and update-induced regression as separate open repairs.
+
+
 The historical default and the accumulated structural candidate are different
 explicit graphs. Do not read legacy scalar constants below as overriding a
 serialized candidate selection. Neither graph is promoted by passing unit tests.

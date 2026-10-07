@@ -1528,7 +1528,9 @@ commands, hashes and source snapshots remain alongside each experiment.
 ### 34.25 Remaining structural repair contract and the two future trainings
 
 The next repair must address several distinct boundaries; none of the completed
-inference controls establishes a complete replacement architecture. Do not launch
+inference controls establishes a complete replacement architecture. The new
+static-Teacher evidence in 34.28 takes priority: repair the shared measurement
+contract before strengthening outcome supervision or promoting raw_chart_v1. Do not launch
 two formal runs simply because the diagnostic panels finished.
 
 1. **Observed outcome versus prediction error.** policy.py:679–688 computes the
@@ -1581,3 +1583,233 @@ the same full declared training exposure and standard 256-batch offline plus
 not success. Keep data/normalizer/outlet/controller choices explicit, preserve
 failure records, and do not silently reuse an incompatible checkpoint or Adam
 state. Simulator positions/contact/masks remain audit-only under current scope.
+
+### 34.26 S correspondence: wrong spatial semantics despite ordinary gradients
+
+All new panels in 34.26–34.29 use the **original complete a2d597d2 checkpoint**,
+step 11012, SHA-256 `5ca168e3f4f33772dd01aca26adcc1b00dfc029b526a950f3b534d5428d19d15`,
+admitted under its own Q checkout. They are not results of the 64-update or
+512-update candidate. No optimizer update, new checkpoint, or policy deployment
+was performed. Earlier completed probes and short trainings were retained.
+
+`correspondence-geometry-contract-r1` uses actual native DINO grids from
+01/40, 03/40, 07/40 and 17/136. It cyclically permutes the feature chart by known
+one/two-cell shifts, excludes wrapped query cells from geometric scoring, and
+calls the production S kernel in FP32. This is an algebraic correspondence test,
+not a rendered physical trajectory. Four windows × six shifts × two cameras
+give 48 camera/shift checks; unchanged image gives exactly zero difference.
+
+| Kernel | Top / wrist median displacement gain | Correct-location top-1 |
+|---|---:|---:|
+| Trained S Q/K + position | 0.0380 / 0.0367 | 0–0.00417 |
+| Remove query-mean destination prior, retain real/null mass | -0.00579 / 0.02128 | 0–0.00417 |
+| Raw DINO cosine, retain real/null mass | 0.6815 / 0.5362 | 1.0 |
+
+For +1 X-cell shifts, the top-camera trained reader has **negative gain in all
+four windows**, -0.323 to -0.261. The query-independent destination prior explains
+35.7–52.2% of top-camera centered-logit variance, but removing it does not restore
+correspondence. The independently projected query/key content and coordinates
+are not a geometric identity contract (`instruction_posterior.py:168–192`).
+The positive cosine control still has biased soft expectation and, in 34.24's
+actual policy controls, did not restore the failed phase. It is not an accepted
+replacement or justification for sharpening logits.
+
+Ordinary backward was then run on **one admitted bs8 validation batch** using the
+original training forward, objective weights, RNG and masks. Each scalar is an
+existing weighted contribution; parameters, optimizer state and completed-update
+clock remain unchanged. This establishes connectivity and a local gradient scale,
+not an epoch-wide importance allocation or training efficacy.
+
+| Existing weighted scalar | S correspondence gradient L2 | Shared binder gradient L2 |
+|---|---:|---:|
+| Total | 0.033405 | 0.018539 |
+| Action flow | 0.020649 | 0.018322 |
+| Binary gripper CE | 0.016117 | 0.003258 |
+| Operation / intent online | 1.071e-5 | 7.118e-6 |
+| Coarse action | 1.155e-6 | 2.061e-5 |
+| G reconstruction | no path | no path |
+| Supervised W future / transition | no path | no path |
+| Existing flow geometry losses | no path | no path |
+
+The comparator is trainable, not accidentally detached. Existing flow geometry
+losses train another producer; they do not constrain this S matcher. Operation
+supervision has an indirect path through S, but it supervises predicted future
+outcomes, not current/reference location identity. `components.py:1063–1070`
+assigns operation_total to online_intent_loss; `losses.py:2582–2604` applies the
+small shared scaffold budget. The original absent annotated endpoint labels
+again yield zero effective gradient here; the later candidate's repaired labels
+must not be described as still missing.
+
+The repeat total has correspondence relative-gradient difference 0.01338,
+cosine 0.999911; binder difference 0.006687. Norms do not add as independent
+shares. This is not a recommendation to multiply an auxiliary loss until its
+norm matches action flow. Its target semantics must be fixed first.
+
+Artifacts under the existing causal-repair-20261006-v4 directory:
+`structural-source-root-decision.json`, `structural-objective-routes-r2.json`,
+`correspondence-geometry-contract-r1/results.json`. The r1 gradient probe completed
+total backward but OOMed during partial backward while retaining unused objective
+graphs. Its log/source/receipt remain. R2 releases those unused probe graphs,
+uses expandable allocator segments, and completes all 12 passes at **bs8**.
+No production training memory policy or batch size was changed.
+
+### 34.27 Observed outcome reaches P3 after the coarse proposal has been formed
+
+`observed-outcome-routes-r1` replays seven factual windows: 01/03/07 at 40 and
+10/17 at 120/136. Maximum recorded first-eight arm replay RMSE is 0.000440;
+all recorded gripper commands match. Weight versions remain unchanged. All
+controls keep RGB, history, binding and sampled action noise fixed.
+
+The dedicated short-term measured state/object-motion summary is formed at
+`intent.py:1108–1182`, **after** public intervals and operation expectation.
+`ObjectIntentState.action_dock()` (`types.py:1204–1215`) does not include it.
+Reversing that summary in the actual captured intent leaves every coarse input
+the identical object in all seven windows. Zeroing it or the explicit robot/W
+feedback reads yields zero coarse arm difference in this panel. A repeat has
+0.000227 numerical coarse difference in one window; the exact interface identity
+proof does not depend on deterministic GPU reduction.
+
+| Window | Coarse first-eight mean X/Z | Final X/Z | Final X/Z with short-change + robot/W feedback reads zeroed |
+|---|---:|---:|---:|
+| 10/120 | +0.0968 / +0.0500 | +0.2770 / +0.0015 | +0.2616 / -0.0006 |
+| 10/136 | -0.0338 / +0.1514 | -0.1216 / +0.3247 | -0.1168 / +0.3327 |
+| 17/120 | +0.0924 / +0.0445 | +0.2532 / -0.0031 | +0.2399 / -0.0038 |
+| 17/136 | -0.0474 / +0.1419 | -0.2005 / +0.3836 | -0.1950 / +0.3945 |
+
+Units are native normalized CALVIN commands, not measured metres. These controls
+do not remove instruction-reference change or all historical information. They
+show that the retreat is already in coarse and persists without the short-term
+P3 feedback; they do not show that all feedback is useless. Removing just the
+short-change value changes final arm RMS by 0.0123–0.0722, versus repeat
+0.000174–0.000468. P3 does consume it. Current image/state/history and G geometry
+still provide indirect cues to S/coarse, so "S has no observed information" is
+false. The dedicated causal outcome channel is allocated too late to directly
+revise the proposal.
+
+`policy.py:679–688` exports measured-minus-predicted world change;
+`robot_execution.py:53–66` similarly exports response innovation. Neither equals
+task achievement or controller tracking error. W semantic innovation is actually
+0.207–0.239 RMS in these windows, not numerically absent. The information-loss
+counterexample (accurate prediction of motion and accurate prediction of no
+motion can both produce zero innovation) is an interface limitation, not evidence
+that these seven failures were caused by zero innovations. Preserve measured
+outcome, prediction and residual separately before changing consumer placement.
+
+The earlier S/bottom history substitutions, real-command/real-motion controls,
+and endpoint removals remain necessary evidence (34.8–34.17); none is superseded
+by this P3 panel. Artifact: `observed-outcome-routes-decision.json` with raw
+producer values in `observed-outcome-routes-r1/results.json`.
+
+### 34.28 Shared Teacher manufactures change under a static observation
+
+This is a new source-level finding, not an inference from loss size. The runtime
+Teacher in the original full checkpoint is **g_assignment_v1**. This default is
+omitted by ordinary config serialization (`config.py:508,1543–1545`), so absence
+of the string in run_context does not mean raw_chart_v1 was selected.
+
+`teacher-static-identity-r3` captures actual past G facts during the same four
+factual windows used in 34.26. The static successor is the past frame's exact
+raw DINO grid. It is verified **bit-identical** to
+`observation.observation_supports(executed_world_window.dino_history[:, -1:])`.
+No simulated object state is needed. The camera_transport_prior tensor is
+then zeroed only in the isolated measurement call; policy replay is unchanged.
+
+| Same image, zero motion prior | Semantic change RMS, range over four windows | Image-coordinate change RMS |
+|---|---:|---:|
+| Production reference, offset 0 | 0.2289–0.2475 | 0.0307–0.0362 |
+| Production reference, offset 4 | 0.2519–0.2705 | 0.0655–0.0743 |
+| Production reference, offset 24 | 0.3289–0.3483 | 0.1611–0.1977 |
+| Existing raw_chart_v1 alternative, offset 0 | 0.1244–0.1621 | 0.0307–0.0362 |
+| Existing raw_chart_v1 alternative, offset 4 | 0.1531–0.1888 | 0.0655–0.0743 |
+| Existing raw_chart_v1 alternative, offset 24 | 0.2329–0.2584 | 0.1611–0.1977 |
+
+Image units are per-camera normalized coordinates. These are not physical TCP
+errors or success percentages. Intermediate endpoints 8 and 16 also increase in
+all four windows. No weights, image, state or motion prior change with the offset.
+
+The actual source has two separable problems:
+
+1. **Different reference values.** G exports pooled candidate content plus a
+   learned slot residual (`grounding.py:764–768`); production Teacher subtracts
+   that value. Successor values come from raw DINO under a new frozen matching
+   distribution (`observation_association.py:220–300,422–464`). With null mass n,
+   the semantic result is `(1-n) * (E_match[F] - C_G)`. Same image does not force
+   E_match[F] to equal C_G. Replacing only C_G by the raw value at the same G
+   address, while retaining the exact match posterior, reduces the offset-4
+   static RMS to 0.1531–0.1888; it does not restore zero.
+2. **Different reading distributions and time-dependent search width.** Even with
+   a raw current reference, its G-owned reading law differs from successor
+   association. The spatial prior denominator includes
+   `support_width^2 + 0.08 + 0.20 * search_fraction`
+   (`observation_association.py:313–315,357–389`). Increasing future offset spreads
+   this distribution and moves its expectation in an asymmetric scene. Geometry
+   subtracts the original G centre (`:531–539`), so a reading-law change is counted
+   as displacement although the image is unchanged. Changing reference values
+   alone leaves this coordinate bias intact.
+
+These measurements feed **three real consumers**: W future targets and their
+interval aggregation (`teacher.py:97–175`), S operation targets
+(`operation_expectation.py:268–275`, `components.py:1063–1070`), and online executed
+W feedback (`policy.py:676–688`). A small loss against them cannot independently
+certify physically correct progress. This test does not quantify how much of any
+closed-loop failure the bias caused, and it does not prove that subtracting a
+static baseline is a complete repair. Such a repair must also retain genuine
+motion, object identity, occlusion/null meaning and camera support.
+
+S's separate comparator and this Teacher have different failures: S returns zero
+for identical images but fails known displacement; Teacher already fails static
+consistency. Do not reuse one module's passing zero-change check to certify the
+other. The raw_chart_v1 alternative was invoked only for isolated calls and
+restored before every factual policy replay; it was not silently promoted or used
+to relabel the checkpoint. Artifacts: `teacher-static-identity-decision.json` and
+`teacher-static-identity-r1/r2/r3`, including each original script snapshot.
+
+### 34.29 Problem groups and the repair order supported by current evidence
+
+This map consolidates prior completed work with 34.26–34.28. It separates proved
+source defects from an unmeasured claim that fixing one defect will rescue all
+seven original failures. Original full run remains 11/18; 512-update candidate
+7/18; retained-Adam 64-update diagnostic 9/18. No new full training was launched.
+
+| Group | Confirmed boundary and behavior | Repair requirement / unresolved behavior |
+|---|---|---|
+| Object identity and instruction selection | G reconstruction admits camera/background solutions; language compression strongly favors direction over colour before binding; some fixed K/view supports barely cover the target. Genuine target-swap/natural-language controls remain weak. | Preserve object/view evidence and token-level target distinctions; verify real-object selection and approach Y/Z, not K cosine or common-carrier amplitude. No tested one-line pooling/temperature change solves this. |
+| Observed change and its supervision | S's learned matcher lacks positional identity; Teacher changes reading laws and manufactures static/time-dependent change. Ordinary backward is live, but existing flow geometry losses do not supervise the S matcher. | Repair the measurement contract first, jointly for current/reference comparison and W/operation targets. Passing self identity alone is insufficient; require known signed motion and real object/occlusion checks. |
+| Phase, persistence and causal outcome | Empty/correct/wrong grasps can continue similar stages; dedicated short-change and explicit feedback cannot directly revise coarse; response residual is not achieved progress; independent bottom history can retain retreat. | Keep outcome/prediction/innovation distinct and allow correctly owned outcome to inform S/coarse before the proposal, with one binding. Review independent bottom history consumption too. Simply adding P3 gain, deleting history, or zeroing lanes is not a fix. |
+| Arm/gripper compatibility | Clean-arm endpoint supervision and generated-arm deployment conditions differ; matched CE/agreement degrades mainly with arm condition. Old 14 has a physical gripper replay rescue, while new 08/13 fail before closure. | Train and evaluate compatible joint conditions; do not force expert gripper labels onto a mechanically incompatible generated arm or infer a repair from teacher-forced CE. |
+| Native execution contract | Training relative motion uses actual TCP; deployment accumulates a hidden held target. Blocking amplifies error. Full controller panel reduces tracking error but rescues none of the seven original failures. | Admit or reconcile held-target/realized-motion state with calibrated free-motion gain. Preserve this separate execution fix without presenting it as a replacement for identity/phase repair. |
+| Update-induced regression | Joint 512-update repair shifts initial approach for all 18 cases; bottom/P1 reversion localizes much of the new drift. Adam inheritance is implemented; matched 64-update result still does not improve original 11/18. | Preserve appropriate optimizer/clock identity and established approach behavior while evaluating new objectives. Sixty-four updates check mechanics and direction, not convergence or success. |
+
+**Revised order for A/B preparation:** first establish one source-consistent
+measurement of current/past and future observed change; then repair its outcome
+ownership and placement at S/coarse plus the independent bottom consumer; then
+admit arm/gripper and controller contracts. A contains justified interface repairs;
+B extends A with the larger identity/value and task-organization changes. These
+are still design targets, not completed trained models. No need to increase token,
+horizon or posterior budget to correct a source-measurement inconsistency.
+
+Mandatory acceptance checks are evidence-specific: identical image/state gives no
+asserted signed movement at every declared offset; genuine known motion retains
+direction and scale; null/unknown and real/no-change remain distinct; K/view
+permutation and one binding are preserved; ordinary action and producer gradients
+reach their intended owners without changing detached measurement truth; no
+future/oracle input; arm/gripper plans remain mechanically compatible; full-size
+training retains near-target approach as well as acquiring far-target recovery.
+Only the fixed full offline and 18-case replan-8 evaluations certify behavior.
+
+Reproduction: all four scripts are repository-managed under `probes/` in N;
+runtime imports and checkpoint admission use Q, with the original checkpoint and
+`failure-object-identity-20261006-v1/probe_plan.json`. Each artifact has a sibling
+`*-command.json` containing the exact command, cwd, device and source hash, and a
+`.source.py` snapshot. Use a fresh output directory when reproducing. The gradient
+probe additionally uses the admitted original config, changing only
+`data.output_dir`; keep its bs8 and validation/data contract intact.
+
+```bash
+# After setting AUDIT_REPO=N, RUNTIME_REPO=Q, CHECKPOINT, PLAN and a fresh OUTPUT:
+cd "$RUNTIME_REPO"
+PYTHONPATH="$RUNTIME_REPO" CUDA_VISIBLE_DEVICES=4 \
+  /data/senwang/envs/clearvla-sim/bin/python -B -u \
+  "$AUDIT_REPO/probes/probe_teacher_static_identity.py" \
+  --checkpoint "$CHECKPOINT" --plan "$PLAN" --output "$OUTPUT"
+```
