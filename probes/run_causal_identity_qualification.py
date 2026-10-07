@@ -38,6 +38,16 @@ def main():
         return json.loads(path.read_text())
 
     try:
+        for dependency in receipt.get('prerequisites', []):
+            status('waiting_prior_evidence', dependency=dependency['path'])
+            value = wait_path(dependency['path'])
+            while value.get('state') not in {'complete', 'failed'}:
+                if time.monotonic() > deadline:
+                    raise TimeoutError('prior evidence did not finish: ' + dependency['path'])
+                time.sleep(30)
+                value = json.loads(Path(dependency['path']).read_text())
+            if value.get('state') != 'complete':
+                raise RuntimeError('prior evidence failed; inspect retained logs: ' + dependency['path'])
         repo = Path(receipt['production_source'])
         if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip() != receipt['train_commit']:
             raise ValueError('production checkout identity differs')

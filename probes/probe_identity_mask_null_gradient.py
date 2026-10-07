@@ -21,6 +21,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--unmasked-control', action='store_true')
     args = parser.parse_args()
     args.output.mkdir(exist_ok=False)
     torch.set_num_threads(4)
@@ -43,8 +44,11 @@ def main():
         return value
 
     with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16, enabled=config.runtime.compute_dtype == 'bf16', cache_enabled=False):
-        _, state, _ = model.encode_online(batch.online)
+        _, state, _ = model.encode_online(batch.online, training_mask=not args.unmasked_control)
         facts = state.top.facts
+        supported_fraction = float(facts.current_image_source.supported.float().mean())
+        if not args.unmasked_control and supported_fraction >= 1:
+            raise ValueError('requested training-mask probe did not apply the producer mask')
         production.encode_owners = recorded
         try:
             actual = production.identity_terms(model, batch.online, facts, batch.identity)
@@ -97,7 +101,7 @@ def main():
         raise ValueError('probe does not reproduce selected production objective: ' + str(gap))
     if any(p._version != versions[n] for n, p in model.named_parameters()):
         raise RuntimeError('read-only probe changed weights')
-    report = dict(complete=True, checkpoint=str(args.checkpoint), checkpoint_sha256=bundle.checkpoint_sha256, source=bundle.identity.git_commit, batch_size=b, updates=0, mode='train with production observation mask', interpretation='negative uniform-null-logit derivative means direct gradient descent pressure to increase source abstention; not the full parameter optimizer update', production={key: float(value) for key, value in actual.items()}, reproduction_gap=gap, records=records)
+    report = dict(complete=True, checkpoint=str(args.checkpoint), checkpoint_sha256=bundle.checkpoint_sha256, source=bundle.identity.git_commit, batch_size=b, updates=0, training_mask=not args.unmasked_control, producer_supported_fraction=supported_fraction, mode='train; explicit encode_online training_mask selector', interpretation='negative uniform-null-logit derivative means direct gradient descent pressure to increase source abstention; not the full parameter optimizer update', production={key: float(value) for key, value in actual.items()}, reproduction_gap=gap, records=records)
     (args.output / 'results.json').write_text(json.dumps(report, indent=2, allow_nan=False) + '\n')
     print(json.dumps(report), flush=True)
 
