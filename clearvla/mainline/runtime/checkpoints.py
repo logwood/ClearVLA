@@ -50,6 +50,8 @@ JOINT_TASK_OBJECT_BINDING_V1_MIGRATION = "joint_task_object_binding_v1"
 JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION = (
     "joint_task_object_binding_trajectory_v1"
 )
+from .causal_identity_migration import CAUSAL_IDENTITY_AB_V1
+
 CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION = "calvin_endpoint_trajectory_repair_v1"
 CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS = frozenset({
     "clearvla/benchmarks/calvin_raw.py",
@@ -1196,6 +1198,7 @@ def load_checkpoint_for_initialization(
         JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
         CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
+        CAUSAL_IDENTITY_AB_V1,
         DINOV3_DEEP_REPAIR_V1_MIGRATION,
         S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
         G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
@@ -1210,9 +1213,9 @@ def load_checkpoint_for_initialization(
         "config identity differs",
         "source identity differs",
     }
-    if verified_source_dataset is not None and selected_model_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+    if verified_source_dataset is not None and selected_model_migration not in {CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION, CAUSAL_IDENTITY_AB_V1}:
         raise ValueError("verified source dataset is only valid for endpoint provenance repair")
-    if selected_migration is not None or selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+    if selected_migration is not None or selected_model_migration in {CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION, CAUSAL_IDENTITY_AB_V1}:
         admitted_identity_reasons.add("dataset identity differs")
     rejected_reasons = tuple(
         reason
@@ -1417,6 +1420,15 @@ def load_checkpoint_for_initialization(
             raise ValueError(
                 "G-slot identity source repair requires identical dataset identity"
             )
+    elif selected_model_migration == CAUSAL_IDENTITY_AB_V1:
+        from .causal_identity_migration import config_view, validate_selection
+        validate_selection(saved_config,config,saved_identity.source.digest)
+        if config_view(_initialization_config_view(saved_config)) != config_view(_initialization_config_view(config)):
+            raise ValueError("causal identity repair differs outside its declared graph/objective selectors")
+        if saved_identity.dataset != identity.dataset:
+            from dataclasses import replace
+            if verified_source_dataset != saved_identity.dataset or replace(identity.dataset,inventory_sha256=saved_identity.dataset.inventory_sha256) != saved_identity.dataset:
+                raise ValueError("causal identity repair requires exact source inventory proof")
     elif selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
         if (
             saved_config.data.data_profile != "calvin_relative_7d_v1"
@@ -1613,7 +1625,10 @@ def load_checkpoint_for_initialization(
             if saved_sources.get(source_path) != current_sources.get(source_path)
         )
     )
-    if selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+    if selected_model_migration == CAUSAL_IDENTITY_AB_V1:
+        from .causal_identity_migration import SOURCE_PATHS
+        allowed_source_paths = SOURCE_PATHS
+    elif selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
         allowed_source_paths = CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS
     elif selected_model_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION:
         allowed_source_paths = P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS
@@ -1777,6 +1792,9 @@ def load_checkpoint_for_initialization(
             )
         mapped_model = dict(mapped_model)
         mapped_model[new_condition_key] = new_condition.detach().clone()
+    elif selected_model_migration == CAUSAL_IDENTITY_AB_V1:
+        from .causal_identity_migration import migrate_state
+        mapped_model=migrate_state(mapped_model,current_model,config)
     elif selected_model_migration == G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION:
         missing = set(current_model) - set(mapped_model)
         unexpected = set(mapped_model) - set(current_model)

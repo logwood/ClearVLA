@@ -20,7 +20,16 @@ if TYPE_CHECKING:
 EXECUTED_WORLD_FEEDBACK = "executed_four_step_world_v1"
 
 
-def executed_world_metadata() -> dict[str, object]:
+def executed_world_metadata(measurement_mode="legacy_v1", outcome_mode="none") -> dict[str, object]:
+    if measurement_mode != "legacy_v1" or outcome_mode != "none":
+        if measurement_mode != "source_consistent_v1" or outcome_mode not in {"none","before_proposal_v1"}:
+            raise ValueError("unknown observed outcome ABI")
+        base=executed_world_metadata()
+        return {**base,"schema":"source-consistent-executed-outcome-v1",
+                "measurement":"frozen-source-descriptor-law-no-forecast-conditioned-search",
+                "values":"observed-predicted-and-innovation-separate-same-raw-reference",
+                "S":"observed-only-before-proposal-one-existing-replay" if outcome_mode=="before_proposal_v1" else "none",
+                "gradients":"detached-measurement-ordinary-current-G-overlap-and-single-S-binding"}
     return {
         "schema": "causal-executed-world-comparison-v1",
         "mode": EXECUTED_WORLD_FEEDBACK,

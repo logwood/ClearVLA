@@ -430,6 +430,9 @@ class AuditMetadata:
             raise TypeError("audit frame_progress must be float32")
 
 
+from .identity_supervision import IdentityCorrespondence
+
+
 @dataclass(frozen=True)
 class TrainingBatch:
     """Training engine input; only the engine can see all three partitions."""
@@ -438,6 +441,7 @@ class TrainingBatch:
     action_target: ActionSupervision
     future: FutureSupervision
     audit: AuditMetadata = AuditMetadata()
+    identity: IdentityCorrespondence | None = None
 
     def validate(self, config: ExperimentConfig) -> None:
         self.online.validate(config)
@@ -463,6 +467,10 @@ class TrainingBatch:
             if bool((endpoint.declared & (expected_age != reference.age_steps)).any()):
                 raise ValueError("annotation endpoint and instruction reference source clocks differ")
         self.audit.validate(self.online.batch)
+        if (self.identity is not None) != (config.top.identity_supervision_mode != "none"):
+            raise ValueError("identity training labels differ from the selected graph")
+        if self.identity is not None:
+            self.identity.validate(batch=self.online.batch,device=self.online.device)
 
 
 __all__ = [

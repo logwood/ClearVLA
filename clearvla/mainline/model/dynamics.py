@@ -474,8 +474,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             )
         self.object_content = nn.Linear(content_dim, hidden, bias=False)
         self.object_identity = nn.Linear(hidden,hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
+        if self.object_identity is not None:nn.init.zeros_(self.object_identity.weight)
         self.observed_view_content = nn.Linear(content_dim,hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
         self.observed_view_role = nn.Linear(len(camera_names),hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
+        if self.observed_view_content is not None:nn.init.zeros_(self.observed_view_content.weight)
         self.object_semantic = nn.Linear(route_dim, hidden, bias=False)
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
         self.object_geometry = nn.Linear(route_dim, hidden, bias=False)

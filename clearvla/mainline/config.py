@@ -544,6 +544,8 @@ class TopConfig:
     entity_chart_mode: str = "query_lattice_v1"
     entity_transport_gradient_mode: str = "positive_corners_v1"
     entity_ownership_mode: str = "local_mixture_v1"
+    entity_competition_scale_mode: str = "batch_global_v1"
+    identity_supervision_mode: str = "none"
     entity_history_mode: str = "current_only_v1"
     entity_motion_mode: str = "query_anchor_v1"
     target_binding_mode: str = "reader_local_v1"
@@ -712,6 +714,8 @@ class TopConfig:
             raise ValueError("unknown top entity_motion_mode")
         if self.entity_history_mode not in {"current_only_v1", "flow_pulled_history_v1"}:
             raise ValueError("unknown top entity_history_mode")
+        if self.entity_competition_scale_mode not in {"batch_global_v1", "per_observation_v1"}:
+            raise ValueError("unknown entity competition scale scope")
         if self.entity_ownership_mode not in {"local_mixture_v1", "canonical_image_v1"}:
             raise ValueError("unknown global entity ownership law")
         if self.entity_ownership_mode == "canonical_image_v1" and (self.entity_chart_mode != "current_image_support_v1" or self.entity_context_mode != "completed_g3_v1" or self.object_view_mode != "per_camera_values_v1" or self.target_binding_input_mode != "full_tokens_views_v1" or self.observation_measurement_mode != "source_consistent_v1"):
@@ -977,6 +981,8 @@ class BottomConfig:
 class ObjectiveConfig:
     annotated_goal: float = 0.0
     robot_response: float = 0.0
+    identity_correspondence: float = 0.0
+    identity_source_prediction: float = 0.0
     future_dynamics: float = 0.10
     intent_structure: float = 0.02
     flow_warp: float = 0.03
@@ -1112,6 +1118,7 @@ class ObjectiveConfig:
 
 @dataclass(frozen=True)
 class OptimizerConfig:
+    update_origin: int = 0  # retained model clock; fresh optimizer curve starts here
     epochs: int = 8
     batch_size: int = 8
     learning_rate: float = 8e-5
@@ -1131,6 +1138,8 @@ class OptimizerConfig:
     bottom_capacity_relative_lr_scale: float = 2.0
 
     def validate(self) -> None:
+        if type(self.update_origin) is not int or self.update_origin < 0:
+            raise ValueError("optimizer update origin must be a nonnegative integer")
         if min(self.epochs, self.batch_size, self.warmup_steps) <= 0:
             raise ValueError("epochs, batch_size and warmup_steps must be positive")
         if min(self.learning_rate, self.epsilon, self.grad_clip) <= 0.0:
@@ -1234,6 +1243,12 @@ class ExperimentConfig:
             raise ValueError("future support count and time grid disagree")
         if self.observation.visual_chart_mode not in {"legacy_v1", "full_rgb_endpoint_v1"}:
             raise ValueError("unknown visual chart")
+        if self.top.identity_supervision_mode not in {"none", "rgbd_temporal_v1"}:
+            raise ValueError("unknown identity supervision source")
+        if self.top.identity_supervision_mode == "rgbd_temporal_v1" and (self.top.entity_ownership_mode != "canonical_image_v1" or self.top.entity_competition_scale_mode != "per_observation_v1" or self.data.visual_feature_mode != "dinov3_online_v1" or not self.data.calvin_raw_source or self.data.image_store_mode != "hdf5-direct" or self.objectives.identity_correspondence <= 0 or self.objectives.identity_source_prediction <= 0):
+            raise ValueError("identity training requires canonical online CALVIN, raw sensors and explicit objectives")
+        if self.top.identity_supervision_mode == "none" and (self.objectives.identity_correspondence != 0 or self.objectives.identity_source_prediction != 0):
+            raise ValueError("identity objective has no admitted source")
         if self.top.target_binding_input_mode not in {"protected_pooled_v1", "full_tokens_views_v1"}:
             raise ValueError("unknown target binding input contract")
         if self.top.target_binding_input_mode == "full_tokens_views_v1" and (self.top.object_view_mode != "per_camera_values_v1" or self.top.target_binding_mode != "shared_operation_v1"):
@@ -1550,6 +1565,16 @@ class ExperimentConfig:
             cast(dict[str, object], payload["top"]).pop("entity_motion_mode")
         if self.top.entity_history_mode == "current_only_v1":
             cast(dict[str, object], payload["top"]).pop("entity_history_mode")
+        if self.optimizer.update_origin == 0:
+            cast(dict[str, object], payload["optimizer"]).pop("update_origin")
+        if self.top.identity_supervision_mode == "none":
+            cast(dict[str, object], payload["top"]).pop("identity_supervision_mode")
+        if self.objectives.identity_correspondence == 0:
+            cast(dict[str, object], payload["objectives"]).pop("identity_correspondence")
+        if self.objectives.identity_source_prediction == 0:
+            cast(dict[str, object], payload["objectives"]).pop("identity_source_prediction")
+        if self.top.entity_competition_scale_mode == "batch_global_v1":
+            cast(dict[str, object], payload["top"]).pop("entity_competition_scale_mode")
         if self.top.entity_ownership_mode == "local_mixture_v1":
             cast(dict[str, object], payload["top"]).pop("entity_ownership_mode")
         if self.top.entity_transport_gradient_mode == "positive_corners_v1":

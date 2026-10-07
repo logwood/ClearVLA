@@ -521,6 +521,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             raise ValueError("unknown endpoint goal mode")
 
         self.object_identity = nn.Linear(hidden,hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
+        if self.object_identity is not None:nn.init.zeros_(self.object_identity.weight)
         from .observed_outcome import ObservedOutcomeRead
         self.observed_outcome = ObservedOutcomeRead(hidden, content_dim, camera_names) if observed_outcome_mode == "before_proposal_v1" else None
 

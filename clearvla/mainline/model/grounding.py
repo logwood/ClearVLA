@@ -239,6 +239,7 @@ class DenseObjectGrounder(nn.Module):
         entity_chart_mode: str = QUERY_CHART,
         entity_transport_gradient_mode: str = "positive_corners_v1",
         entity_ownership_mode: str = "local_mixture_v1",
+        entity_competition_scale_mode: str = "batch_global_v1",
         observation_measurement_mode: str = "legacy_v1",
         camera_names: tuple[str,...] = (),
         entity_history_mode: str = NO_ENTITY_HISTORY,
@@ -250,6 +251,9 @@ class DenseObjectGrounder(nn.Module):
         self.ordinary_coordinate_gradients = entity_transport_gradient_mode == "ordinary_bilinear_v1"
         self.retain_image_source = retain_image_source
         self.entity_ownership_mode = entity_ownership_mode
+        if entity_competition_scale_mode not in {"batch_global_v1","per_observation_v1"}:
+            raise ValueError("unknown entity competition scale scope")
+        self.entity_competition_scale_mode = entity_competition_scale_mode
         self.observation_measurement_mode = observation_measurement_mode
         self.camera_names = tuple(camera_names)
         self.per_camera_values = object_view_mode == "per_camera_values_v1"
@@ -441,10 +445,16 @@ class DenseObjectGrounder(nn.Module):
             # candidate normalization.  Match it to a detached fraction of
             # the current competition scale so the carrier remains observable
             # without changing candidate values or the probability law axes.
-            main_logit_rms = logits.float().square().mean().sqrt().detach()
-            identity_logit_rms = (
-                identity_logits.float().square().mean().sqrt().detach()
-            )
+            if self.entity_competition_scale_mode == "per_observation_v1":
+                # No cross-sample/view-source information through a scalar gain.
+                # Validity is producer support, not learned allocation mass.
+                support=(valid>0).expand_as(logits)
+                support_count=support.sum((1,2),keepdim=True).clamp_min(1)
+                main_logit_rms=(torch.where(support,logits.square(),0.).sum((1,2),keepdim=True)/support_count).sqrt().detach()
+                identity_logit_rms=(torch.where(support,identity_logits.square(),0.).sum((1,2),keepdim=True)/support_count).sqrt().detach()
+            else:
+                main_logit_rms = logits.float().square().mean().sqrt().detach()
+                identity_logit_rms = identity_logits.float().square().mean().sqrt().detach()
             identity_gain = (
                 0.25 * main_logit_rms / identity_logit_rms.clamp_min(1.0e-6)
             ).clamp(max=8.0)

@@ -1084,6 +1084,14 @@ class MainlineTrainingEngine:
             collect_diagnostics=collect_diagnostics,
         )
         metrics = {**encoded.metrics, **teacher_metrics, **output.metrics}
+        if batch.identity is not None:
+            from .identity import identity_terms
+            values=identity_terms(self.model,batch.online,encoded.training_state.top.facts,batch.identity)
+            contributions={name:getattr(self.config.objectives,name)*values[name] for name in ("identity_correspondence","identity_source_prediction")}
+            extra=sum(contributions.values())
+            ledger=LossLedger(total=ledger.total+extra,groups={**ledger.groups,"representation":ledger.groups["representation"]+extra},contributions={**ledger.contributions,**contributions},terms={**ledger.terms,**values})
+            ledger.validate()
+            metrics.update({name:value.detach() for name,value in values.items()})
         if endpoint_supervision is not None:
             metrics["training_endpoint_head_calls"] = flow_state.time.new_ones(())
             metrics["training_endpoint_supervised_rows"] = (

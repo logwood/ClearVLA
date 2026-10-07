@@ -97,6 +97,8 @@ from ..world_control import KNOWN_PREFIX_WORLD_CONTROL, LEGACY_WORLD_CONTROL, wo
 from ..world_robot import NO_ROBOT_WORLD, OBSERVED_ROBOT_VIEWS, world_robot_metadata
 from .flow_schedule import DeploymentFlowSchedule
 
+from ..causal_identity import causal_identity_metadata
+
 DEPLOYMENT_ABI_SCHEMA = "clearvla-mainline-deployment-abi-v1"
 CONTINUOUS_GRIPPER_CODEC_BOUNDARY_SCOPE = (
     "profile_owned_full_horizon_encode_decode_loss_evaluation"
@@ -423,9 +425,9 @@ def build_deployment_abi(
            if config.top.annotation_goal_mode != "none" else {}),
         **({"operation_expectation": operation_expectation_metadata(tuple(config.data.camera_names))}
            if config.top.operation_intent_mode == OBJECT_OUTCOME_INTENT else {}),
-        **({"instruction_change": instruction_change_metadata(tuple(config.data.camera_names), config.top.instruction_change_mode)}
+        **({"instruction_change": instruction_change_metadata(tuple(config.data.camera_names), config.top.instruction_change_mode, config.top.observation_measurement_mode)}
            if config.top.instruction_change_mode in TYPED_CHANGE_MODES else {}),
-        **({"executed_world":executed_world_metadata()} if config.top.world_feedback_mode!="none" else {}),
+        **({"executed_world":executed_world_metadata(config.top.observation_measurement_mode, config.top.observed_outcome_mode)} if config.top.world_feedback_mode!="none" else {}),
         **({"robot_execution": robot_execution_metadata()} if config.top.robot_feedback_mode != "none" else {}),
         **({"p3_coordination": p3_coordination_metadata()}
            if config.top.p3_coordination_mode == TYPED_HORIZON_PLAN else {}),
@@ -434,6 +436,7 @@ def build_deployment_abi(
         **({"world_robot": world_robot_metadata(state_mode=config.top.state_feature_mode,
                                                state_dim=config.dimensions.state_dim)}
            if config.top.world_robot_condition_mode == OBSERVED_ROBOT_VIEWS else {}),
+        **({"causal_identity": causal_identity_metadata(config.top)} if causal_identity_metadata(config.top) is not None else {}),
         "source_config_digest": identity.config_digest,
         **({"future_time_grid": resolve_future_time(config.top.future_time_grid_mode).metadata()}
            if config.top.future_time_grid_mode != LEGACY_FUTURE_TIME else {}),
@@ -617,13 +620,16 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
         cameras = observation.get("camera_names")
         if not isinstance(cameras, list) or not all(isinstance(n, str) for n in cameras):
             raise ValueError("instruction change ABI requires named cameras")
-        if abi.get("instruction_change") != instruction_change_metadata(tuple(cameras), change_mode):
+        if abi.get("instruction_change") != instruction_change_metadata(tuple(cameras), change_mode, graph_top.get("observation_measurement_mode","legacy_v1")):
             raise ValueError("instruction change ABI semantics mismatch")
     elif change_mode != MIXED_REFERENCE_CHANGE or "instruction_change" in abi:
         raise ValueError("instruction change ABI is unselected or unknown")
+    expected_identity=causal_identity_metadata(graph_top)
+    if abi.get("causal_identity") != expected_identity:
+        raise ValueError("causal identity ABI semantics mismatch")
     feedback_mode=graph_top.get("world_feedback_mode","none")
     if feedback_mode==EXECUTED_WORLD_FEEDBACK:
-        if abi.get("executed_world")!=executed_world_metadata():
+        if abi.get("executed_world")!=executed_world_metadata(graph_top.get("observation_measurement_mode","legacy_v1"),graph_top.get("observed_outcome_mode","none")):
             raise ValueError("executed world feedback ABI semantics mismatch")
     elif feedback_mode!="none" or "executed_world" in abi:
         raise ValueError("executed world feedback ABI is unselected or unknown")

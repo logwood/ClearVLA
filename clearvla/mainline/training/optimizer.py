@@ -260,10 +260,11 @@ class WarmupCosineSchedule:
     STATE_SCHEMA = "clearvla-warmup-cosine-v2"
 
     def __init__(self, optimizer: torch.optim.Optimizer, *, warmup_steps: int,
-                 total_steps: int, minimum_ratio: float) -> None:
+                 total_steps: int, minimum_ratio: float, update_origin: int = 0) -> None:
         self.optimizer = optimizer
         self.warmup_steps = self._integer(warmup_steps, "warmup_steps", positive=True)
-        self.total_steps = self._integer(total_steps, "total_steps", positive=True)
+        self.update_origin = self._integer(update_origin, "update_origin")
+        self.total_steps = self._integer(total_steps, "total_steps", positive=True) + self.update_origin
         if isinstance(minimum_ratio, bool) or not isinstance(minimum_ratio, (int, float)):
             raise ValueError("minimum LR ratio must be finite and in (0,1]")
         self.minimum_ratio = float(minimum_ratio)
@@ -272,7 +273,7 @@ class WarmupCosineSchedule:
         # identities or their ordering. These references are runtime-only.
         self._parameter_groups = tuple(tuple(g["params"]) for g in optimizer.param_groups)
         self.base_lrs = self._rates(tuple(g["lr"] for g in optimizer.param_groups))
-        self.step_index = 0
+        self.step_index = self.update_origin
         self._apply_current_ratio()
 
     @staticmethod
@@ -295,7 +296,8 @@ class WarmupCosineSchedule:
         self._integer(self.total_steps, "total_steps", positive=True)
         if type(self.minimum_ratio) is not float or not math.isfinite(self.minimum_ratio) or not 0.0 < self.minimum_ratio <= 1.0:
             raise ValueError("minimum LR ratio must be a finite float in (0,1]")
-        return {"algorithm": "warmup-cosine-clamped-v1",
+        return {**({"update_origin": self.update_origin} if self.update_origin else {}),
+                "algorithm": "warmup-cosine-clamped-v1",
                 "clock": "completed-updates-next-update-lr-v1",
                 "warmup_steps": self.warmup_steps, "total_steps": self.total_steps,
                 "minimum_ratio": self.minimum_ratio}
@@ -314,11 +316,12 @@ class WarmupCosineSchedule:
             raise ValueError("scheduler optimizer group count changed")
 
     def ratio(self, step: int) -> float:
-        step = self._integer(step, "step index")
+        step = self._integer(step, "step index") - self.update_origin
+        if step < 0:raise ValueError("scheduler step predates its declared update origin")
         if step < self.warmup_steps:
             return float(step + 1) / float(self.warmup_steps)
         progress = min(max((step - self.warmup_steps)
-                           / float(max(self.total_steps - self.warmup_steps, 1)), 0.0), 1.0)
+                           / float(max(self.total_steps - self.update_origin - self.warmup_steps, 1)), 0.0), 1.0)
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         return self.minimum_ratio + (1.0 - self.minimum_ratio) * cosine
 

@@ -13,8 +13,12 @@ from .dataset import CachedTokenPolicyWindowDataset, ObservedStateWindowDataset,
 
 class OnlineRGBPolicyWindowDataset(CachedTokenPolicyWindowDataset):
     """Share sampler/boundary delegation, replace only the feature producer."""
-    def __init__(self, base: ObservedStateWindowDataset):
+    def __init__(self, base: ObservedStateWindowDataset, *, identity_raw_root=None):
         self.base = base
+        self.identity_labels = None
+        if identity_raw_root is not None:
+            from .identity_correspondence import IdentityLabelProducer
+            self.identity_labels = IdentityLabelProducer(identity_raw_root)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample = self.base[index]
@@ -40,6 +44,8 @@ class OnlineRGBPolicyWindowDataset(CachedTokenPolicyWindowDataset):
         if not bool((keys[:,0] == episode_idx).all()):
             raise ValueError("one policy window cannot read another episode's frames")
         episode = self.base.episodes[episode_idx]
+        if self.identity_labels is not None:
+            sample.update(self.identity_labels(episode,history,self.base.image_store))
         source_rows = keys[valid,1].unique(sorted=True).numpy()
         frames = self.base.image_store.load_window(episode, source_rows)
         loaded = _camera_stack(frames, self.base.camera_names)

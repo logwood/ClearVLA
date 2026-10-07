@@ -247,6 +247,9 @@ def active_source_snapshot(repo_root: str | Path) -> SourceSnapshot:
     preset = root / "configs" / "mainline" / "object_intent_dynamics_323.json"
     if preset.is_file():
         sources.append(preset)
+    sensor_geometry = package / "assets" / "calvin_rgbd_joint_geometry_v1.json"
+    if sensor_geometry.is_file():
+        sources.append(sensor_geometry)
     rows = tuple(
         (path.relative_to(root).as_posix(), _sha256_source_text(path))
         for path in sorted(set(sources))

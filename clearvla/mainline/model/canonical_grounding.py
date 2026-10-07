@@ -146,7 +146,7 @@ def canonical_grounding(module,local,chart,history_context,*,collect_diagnostics
     confidence=q/(q+null).clamp_min(torch.finfo(q.dtype).tiny)
     existence=(read*confidence).sum((2,3))[...,None]
     facts=ObjectFactSet(dense_chart=chart,content=content,semantic=aggregate(fields['semantic']),appearance=aggregate(fields['appearance']),geometry=aggregate(fields['geometry']),
-        identity_state=identity,observed_content=observed_content,view_mass=view_mass,
+        identity_state=identity,image_ownership=owner_log.exp(),observed_content=observed_content,view_mass=view_mass,
         camera_content=camera_content,camera_semantic=views['semantic'],camera_appearance=views['appearance'],camera_geometry=views['geometry'],
         camera_coordinates=coordinates,camera_transport_prior=transport,camera_support=camera_support,camera_validity=camera_valid,log_camera_validity=_finite_log_measure(camera_valid),
         support=support,existence=existence,validity=valid,log_validity=_finite_log_measure(valid),object_to_chart=chart_read,

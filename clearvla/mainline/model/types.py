@@ -559,6 +559,7 @@ class ObjectFactSet:
     camera_appearance: Tensor | None = None
     camera_geometry: Tensor | None = None
     identity_state: Tensor | None = None  # shared learned K state, not raw DINO
+    image_ownership: Tensor | None = None  # B,K+null,C,Yfull,Xfull, conditional ownership
     observed_content: Tensor | None = None  # source-consistent W measurement reference
     view_mass: Tensor | None = None  # joint allocation B,K,C, distinct from validity
 
@@ -676,6 +677,16 @@ class ObjectFactSet:
         if isinstance(self.current_image_source, CanonicalImageReadSource):
             if any(value is not None for value in (self.candidate_assignment,self.semantic_candidate_assignment,self.appearance_candidate_assignment,self.geometry_candidate_assignment,self.null_assignment)):
                 raise ValueError("canonical graph must not manufacture independent local K assignments")
+            if self.image_ownership is None or self.identity_state is None or self.view_mass is None:
+                raise ValueError("canonical identity must preserve ownership, state, and view mass")
+            _shape(self.image_ownership, (batch, objects + 1, cameras, *self.current_image_source.log_measure.shape[-2:]), "canonical conditional ownership")
+            _shape(self.view_mass, (batch, objects, cameras), "canonical view mass")
+            if self.identity_state.ndim != 3 or self.identity_state.shape[:2] != (batch, objects):
+                raise ValueError("canonical identity state lost its K axis")
+            if not bool(torch.isfinite(self.image_ownership).all()) or bool((self.image_ownership < 0).any()):
+                raise ValueError("canonical ownership must remain a finite probability law")
+            if not torch.allclose(self.image_ownership.sum(1), torch.ones_like(self.image_ownership[:,0]), atol=2e-6, rtol=2e-6):
+                raise ValueError("canonical K+null ownership must conserve mass")
         else:
             candidates = self.dense_chart.candidate_content
             _shape(
@@ -718,6 +729,7 @@ class ObjectFactSet:
             camera_appearance=None if self.camera_appearance is None else self.camera_appearance[:, index],
             camera_geometry=None if self.camera_geometry is None else self.camera_geometry[:, index],
             identity_state=None if self.identity_state is None else self.identity_state[:,index],
+            image_ownership=None if self.image_ownership is None else torch.cat((self.image_ownership[:,:-1][:,index],self.image_ownership[:,-1:]),1),
             observed_content=None if self.observed_content is None else self.observed_content[:,index],
             view_mass=None if self.view_mass is None else self.view_mass[:,index],
             object_chart_mode=self.object_chart_mode,

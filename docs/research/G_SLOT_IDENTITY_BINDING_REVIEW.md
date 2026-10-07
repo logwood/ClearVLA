@@ -2292,3 +2292,43 @@ action differences above repeat noise; no arm/gripper/approach regression on
 known positives. A 64-update mechanical check cannot promote either candidate.
 Use a meaningful common short-run exposure before equal formal training,
 256-batch offline validation and separate 18-case seed-0/max-360/R8 closed loops.
+
+#### 34.33.1 Integrated candidate and admission progress
+
+A's ordinary normalized transport, observed-feature measurement, masked full-token
+single binder and observed-only S outcome read are now connected. B additionally
+has canonical pre-pooling ownership, a restricted shared identity/view decoder,
+compact view/identity S/W consumption and training-only RGB-D/temporal objectives.
+These are implemented candidates, not proven learned physical identity.
+
+The held-view test found a further hard defect: the existing G identity-logit
+gain used batch-global RMS. Altering another source changed held-out encoding
+(max 0.00444 in a compact fixture), an unintended cross-sample information path.
+per_observation_v1 computes this gain independently with producer support.
+Its source-isolation check now passes exactly; legacy batch_global_v1 remains
+available for faithful old-checkpoint replay.
+
+Raw RGB temporal forward/backward/photometric matches passed the same four
+factual windows: offset 4 accepted 4028/4300 object pixels, offset 8 accepted
+3028/4300; all accepted pixels retained body identity. Samples are correlated
+and coverage drops under motion. Broader and wrong-pair audits remain gates.
+Production camera transforms now use the observed seven joints and fixed URDF,
+not approximate TCP-camera extrinsics. Twelve-frame matrix discrepancy is at
+most 1.15007e-7 (rgbd-calibration-r3); the earlier 0.00678 TCP approximation is
+rejected. The small versioned geometry asset is part of source identity.
+
+Tests r8: 9 passed, 4 non-B cases skipped; r9: 23 passed, 4 skipped.
+They exercise FP32/BF16 ordinary parameter gradients, source exclusion,
+unknown/empty support, unchanged forecast with observed-only S consumption,
+and an observed change even at zero innovation. They do not establish a trained
+identity or short-run behavioral improvement. Retained failure logs include
+empty-support logsumexp NaN (repaired), a shadowed dimension variable (repaired),
+and a test parameter-name error.
+
+Migration explicitly adds/removes five/five A tensors and thirteen/six B
+tensors from the admitted mature source. Old values of all common parameters
+are retained exactly; no old Adam moments migrate across changed semantics.
+The mature model clock is retained at 11012 while a versioned optimizer origin
+starts fresh LR warmup. Formal/meaningful short training is not yet started:
+production label admission, full checkpoint migration/ABI, real-data BS8
+mechanics, physical selection/consumer probes and behavioral gates remain.
