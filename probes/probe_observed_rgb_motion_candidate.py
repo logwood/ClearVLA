@@ -31,17 +31,24 @@ def dump(path,value):
     tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(value,indent=2)+'\n');tmp.replace(path)
 
 
-def estimate(source,target,method):
+def estimate(source,target,method,seeds=None):
     # Keep oracle labels outside this function's interface.
-    if method=='farneback':return observed_rgb_flow(source,target)
+    if method=='farneback':
+        if seeds is not None:raise ValueError('undeclared Farneback seed')
+        return observed_rgb_flow(source,target)
     if method!='dis_medium':raise ValueError('unknown estimator')
     if source.shape!=target.shape or source.dtype!=np.uint8 or target.dtype!=np.uint8:
         raise ValueError('RGB shape/dtype contract')
     a=cv2.cvtColor(source,cv2.COLOR_RGB2GRAY);b=cv2.cvtColor(target,cv2.COLOR_RGB2GRAY)
     # Separate estimators prevent cached internal state or supplied flow from
     # providing undeclared tracking history.
-    f=cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM).calc(a,b,None)
-    back=cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM).calc(b,a,None)
+    initial=(None,None) if seeds is None else seeds
+    if seeds is not None:
+        if any(x.shape!=source.shape[:2]+(2,) or x.dtype!=np.float32 or not np.isfinite(x).all() for x in seeds):
+            raise ValueError('RGB flow seed must use the declared native pixel chart')
+        initial=tuple(np.ascontiguousarray(x).copy() for x in seeds)
+    f=cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM).calc(a,b,initial[0])
+    back=cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM).calc(b,a,initial[1])
     h,w=a.shape;yy,xx=np.mgrid[:h,:w].astype(np.float32)
     xy=np.stack((xx,yy),-1)+f
     returned=cv2.remap(back,xy[...,0],xy[...,1],cv2.INTER_LINEAR,borderMode=cv2.BORDER_CONSTANT)

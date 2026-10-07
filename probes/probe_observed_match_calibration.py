@@ -143,6 +143,7 @@ def main():
     parser.add_argument('--label-source', choices=('sensor','rigid_audit'), default='sensor',
         help='Audit truth only; rigid_audit is simulator geometry and is prohibited as a training/online input')
     parser.add_argument('--existing-flow',action='store_true',help='Capture the existing SEA-RAFT-style RGB and coarse flow without extra model calls')
+    parser.add_argument('--reference-rgb-labels',type=Path,help='Audit-only current-to-start rigid labels; test global frozen-DINO initialization for RGB refinement')
     args = parser.parse_args()
     args.output.mkdir(exist_ok=False)
     if os.environ.get('CUBLAS_WORKSPACE_CONFIG') != ':4096:8':
@@ -187,6 +188,12 @@ def main():
     versions = {name: p._version for name, p in model.named_parameters()}
     labels = json.loads((args.labels/'results.json').read_text())
     index = {(r['case'], r['step']): r for r in labels}
+    reference_labels=None
+    if args.reference_rgb_labels:
+        complete=json.loads((args.reference_rgb_labels/'complete.json').read_text())
+        if complete.get('pair_mode')!='current_start' or complete.get('rigid_simulation_oracle_audit_only') is not True:
+            raise ValueError('reference RGB control requires independently replayed current-to-start geometry')
+        reference_labels={(r['case'],r['step']):r for r in json.loads((args.reference_rgb_labels/'results.json').read_text())}
     report = dict(identity=dict(checkpoint=str(args.checkpoint), checkpoint_sha256=policy.bundle.checkpoint_sha256,
         checkpoint_source=policy.bundle.identity.git_commit, measurement_mode=model.config.top.observation_measurement_mode,
         script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), scope=__doc__,
@@ -288,10 +295,55 @@ def main():
                              and torch.equal(p['dino'],online.observation.dino_history)]
                     if len(matched)!=1:raise ValueError('existing-flow capture must match exactly one current online observation')
                     p=matched[0]
+                    if 'raw' in p:
+                        high=p['raw'][0];coarse=p['coarse'][0];hc,wc=coarse.shape[-2:];hh,wh=high.shape[-2:]
+                        rebuilt=F.interpolate(high.flatten(0,1).float(),size=(hc,wc),mode='bilinear',align_corners=True)
+                        rebuilt=rebuilt.reshape_as(coarse)*((wc-1)/(wh-1))
+                        torch.testing.assert_close(rebuilt,coarse.float(),atol=2e-6,rtol=0.)
+                        record['existing_flow_coarse_reproduction_max']=float((rebuilt-coarse.float()).abs().max())
                     record['existing_learned_flow']={name:[score_existing_flow(
                         values[0][:,camera],values[1][:,camera],values[2][:,camera],labels_now,camera,data[key].shape[1:3])
                         for camera,key in enumerate(('rgb_static','rgb_gripper'))]
                         for name,values in p.items() if name!='dino'}
+                if reference_labels is not None:
+                    import cv2
+                    from probe_observed_rgb_motion_candidate import estimate as rgb_estimate, score as rgb_score
+                    cv2.setNumThreads(1)
+                    entry=reference_labels[(case.name,t)];label_path=Path(entry['production_labels'])
+                    if hashlib.sha256(label_path.read_bytes()).hexdigest()!=entry['production_labels_sha256']:
+                        raise ValueError('reference rigid labels changed')
+                    with np.load(label_path,allow_pickle=False) as z:ref_labels={k:z[k] for k in z.files}
+                    if ref_labels['source_frames'].tolist()!=[t,0]:raise ValueError('current/reference physical clock mismatch')
+                    reference=online.instruction_reference
+                    if reference is None or not torch.all(reference.age_steps==t):raise ValueError('reference is not the observed instruction start')
+                    if not torch.all(reference.observed):raise ValueError('seed audit requires completely observed reference charts')
+                    now_dino=online.observation.dino_history[:,-1].float()
+                    start_dino=reference.dino.float()
+                    side=int(now_dino.shape[-2]**.5)
+                    if side*side!=now_dino.shape[-2]:raise ValueError('seed requires the declared full endpoint chart')
+                    grid=current_image_grid(side,side,device=policy.device).reshape(-1,2)
+                    def seed(first,second,shape):
+                        # A global appearance seed is only an initialization,
+                        # never a confidence claim, object label or policy law.
+                        similarity=F.normalize(first.float(),dim=-1)@F.normalize(second.float(),dim=-1).T
+                        delta=grid[similarity.argmax(-1)]-grid
+                        field=delta.T.reshape(1,2,side,side)
+                        field=F.interpolate(field,size=shape,mode='bilinear',align_corners=True)[0].permute(1,2,0)
+                        scale=torch.tensor([(shape[1]-1)/2,(shape[0]-1)/2],device=field.device)
+                        return (field*scale).detach().cpu().numpy().astype(np.float32)
+                    record['reference_rgb_candidates']=dict(label_sha256=entry['production_labels_sha256'],
+                        opencv_version=cv2.__version__,scope='current/start observed DINO initializes RGB DIS; evaluation only; no policy inputs changed',cameras=[])
+                    for camera,key in enumerate(('rgb_static','rgb_gripper')):
+                        src,dst=data[key][t],data[key][0];shape=src.shape[:2]
+                        seeds=(seed(now_dino[0,camera],start_dino[0,camera],shape),seed(start_dino[0,camera],now_dino[0,camera],shape))
+                        flow=rgb_estimate(src,dst,'dis_medium',seeds=seeds)
+                        repeated=rgb_estimate(src,dst,'dis_medium',seeds=seeds)
+                        if not np.array_equal(flow['xy'],repeated['xy']) or not np.array_equal(flow['accepted'],repeated['accepted']):
+                            raise ValueError('DINO-seeded RGB control is not repeatable')
+                        scored=rgb_score(flow,ref_labels,camera,shape)
+                        scored['seed_motion_pixels']=stats(np.linalg.norm(seeds[0],axis=-1))
+                        scored['repeat_max']=0.
+                        record['reference_rgb_candidates']['cameras'].append(scored)
                 if args.localization_controls:
                     record['localization_controls'] = {name: [
                         score_camera(candidate,h,w,camera,labels_now,data[key].shape[1:3])
