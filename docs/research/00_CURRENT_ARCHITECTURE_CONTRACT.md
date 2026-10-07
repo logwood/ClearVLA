@@ -1679,6 +1679,19 @@ or censored endpoints remain masked BC rows. This is observed endpoint truth,
 not a success flag and not an online feature. Historical checkpoints retain
 their recorded source coverage; changing the loader does not relabel old results.
 
+## Parameter-preserving repair training clock (2026-10-06)
+
+Model-only initialization keeps its historical fresh-clock default. For the
+strict CALVIN endpoint/trajectory migration only, an explicit
+`--init-training-clock checkpoint` may retain the verified source completed-update
+count. Every model parameter must retain its original identity; the option
+cannot skip warmup for a changed/new architecture. Optimizer moments, RNG and
+loader position remain fresh. The new schedule declares source completed updates
+plus this run's planned updates, and engine/schedule/deployment use the same
+saved clock. Run context records the retained count and distinguishes this
+fine-tuning initialization from exact resume. This prevents a mature model's
+execution adaptation from being accidentally disabled by a short repair test.
+
 ## Agent quick contract
 
 The historical default and the accumulated structural candidate are different

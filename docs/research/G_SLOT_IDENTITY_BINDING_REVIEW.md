@@ -819,3 +819,63 @@ python -m probes.audit_controller_anchor --audit AUDIT_WITH_GEOMETRY_R2 --rollou
 ### 34.3 未遗漏的并行研究项
 
 原长跑配置确实将 `gripper_command_transition=0`、`calvin_frame_weight_mode=uniform`；早期 trajectory repair 代码已合入但本次未启用。后续候选需明确合并/验收这两项，而非默认为已使用。同时继续追查进入全局K以前的真实物块采样质量、共享对象选择、以及10/17接触前后历史消费与剩余目标判断。
+
+### 34.4 Exact inventory migration and merged real-data smoke
+
+The fixed overlay restores `source_annotation_index` only after raw annotation,
+task/text, bounds, split and physical-prefix checks. All 2,599 sources now resolve
+measured endpoints: 2,165 train / 280 validation / 154 test. Recomputing the old
+inventory from immutable HDF5 attributes reproduces the source checkpoint identity
+exactly (`e3a3e672...`). Only the annotation-bearing inventory changes
+(`b370c993...`); data paths, splits, file inventory, normalizers and frozen online
+vision identity remain equal. Initialization admits this difference only with
+that exact source proof; unrelated drift is rejected.
+
+`dinov3_causal_repair_calvin_20261006.json` includes the full current model plus the
+previously inactive `motion_event_v1` row weighting and gripper transition weight
+0.05. Row weights remain normalized against the existing horizon budget. The
+first real smoke (`merged-objective-smoke-bs8-r3`) performed 4 updates / 32 samples
+and 6 validation batches / 48 samples across all 6 tasks. Endpoint state/visual
+coverage = 1.0; weighted endpoint loss = 0.0132243, gripper transition = 0.00192329;
+ledger gap = 0 and maximum contribution rounding error = 5.96e-8. After the first
+warmup batch, runtime was 6.21–6.42 s/batch with bs8. This verifies labels and
+backward execution, not improved task success. Its default fresh update clock
+must not be confused with the mature source checkpoint phase.
+
+For actual repair fine-tuning, the new explicit retained-clock option above
+keeps the source's 11,012 completed updates and mature execution phase while
+starting fresh optimizer/RNG state. Tests verify exact parameter loading,
+inventory/normalizer/source rejection, shared schedule/model counters and the
+restriction to the parameter-preserving migration.
+
+### 34.5 Separate spatial and language bottlenecks
+
+Artifacts under `probes/causal-repair-20261006-v4`:
+`local_spatial_r1`, `coarse_bank_r1`, `language-chain-r1`, `language-attention-r2`.
+All use the full 11,012-step checkpoint, actual causal histories, current online
+producer interventions and matched initial action noise. Raw masks remain
+evaluation truth and never enter policy inputs.
+
+At 01/05/11 state 24, pre-G1 centered score RMS is 11.5–11.9 versus G1's learned
+correction 1.39–1.69. Neutralizing the inherited G2 parent law raises
+binding-weighted true target top-camera coverage about 29–210 times, yet natural
+color action changes remain near the repeat floor. The larger geometric RMS is
+not itself causal attribution: separate bank measurements show content-only
+object coverage lower than geometry-only coverage, and their combined local
+law compounds suppression. Source availability alone does not restore selection.
+
+Natural color swaps and direction swaps have comparable mean T5 input deltas
+(0.01793 vs 0.01857). The learned input projection produces 0.02092 vs 0.08204;
+the protected goal reader produces 0.02243 vs 0.56365, and the following self block
+0.02329 vs 0.54731. This is a learned direction preference before K binding, not
+evidence that the input language bank omitted color. The four language tokens
+are not identical; attention also reads the near-common final token heavily
+(roughly 0.41–0.46 mean weight). Attention alone is not an independent contribution
+percentage. Binder scoring and native actions remain weakly color-dependent
+through multiple spatial interventions. Do not promote camera centering,
+uniform spatial reads, or a larger common carrier from these diagnostics.
+
+Reproduction commands and exact output paths are recorded in the v4
+`*_command.json` receipts. Full controller-policy panels use the original source
+checkpoint and distinct declared controller anchor contracts; they must be
+reported separately from the original 11/18 standard panel.

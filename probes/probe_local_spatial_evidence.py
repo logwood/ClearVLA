@@ -53,6 +53,9 @@ def main():
     ap=argparse.ArgumentParser()
     for name in ["checkpoint","plan","masks","coverage-script","output"]:ap.add_argument("--"+name,type=Path,required=True)
     ap.add_argument("--bank-source", action="store_true")
+    ap.add_argument("--frozen-bank", action="store_true")
+    ap.add_argument("--language-chain", action="store_true")
+    ap.add_argument("--first-window-only", action="store_true")
     args=ap.parse_args();args.output.mkdir(exist_ok=False);torch.set_num_threads(4)
     coverage=load_coverage(args.coverage_script)
     policy=ClearVLACheckpointPolicy(args.checkpoint,device=torch.device("cuda:0"),
@@ -66,13 +69,48 @@ def main():
     bank_module=banks[0];original_bank=bank_module.forward;bank_records={}
     import clearvla.simulation.clearvla_policy as frontend
     original_sample=frontend.sample_action
+    from clearvla.mainline.model.intent import StatelessObjectIntentOrganizer, _diagnostic_attention_weights
+    organizers=[m for m in model.modules() if isinstance(m,StatelessObjectIntentOrganizer)]
+    assert len(organizers)==1
+    organizer=organizers[0];binder=organizer.shared_binder
+    original_bind=binder.forward;language_trace={};language_hooks=[]
+    def keep(name):
+        def save(module,inputs,output):
+            value=output[0] if isinstance(output,tuple) else output
+            language_trace[name]=arr(value)
+        return save
+    def bind(*a,**kw):
+        out,local=observe_return(original_bind,a,kw)
+        language_trace.update({name:arr(local[name]) for name in ["obj","task_value","read","object_score","task_object_score","score"]})
+        return out
+    if args.language_chain:
+        binder.forward=bind
+        for name in ["goal_input","goal_read","goal_self"]:
+            language_hooks.append(getattr(organizer,name).register_forward_hook(keep(name)))
     captured={};gs=[];caches=[];samples=[];variant="baseline";group=0
     def bank_forward(*a,**kw):
-        hook=None;floor=bank_module.flow_prior_floor;prior=bank_module.flow_prior_log_scale.detach().clone()
-        if group==0 and args.bank_source:
+        hook=None;key_hook=None;floor=bank_module.flow_prior_floor;prior=bank_module.flow_prior_log_scale.detach().clone()
+        if group==0 and (args.bank_source or args.frozen_bank):
             if variant in ["bank_content_zero","bank_content_half"]:
                 factor=0.0 if variant=="bank_content_zero" else .5
                 hook=bank_module.query_norm.register_forward_hook(lambda m,i,o:o*factor)
+            elif variant=="bank_frozen_dino":
+                source=kw["source_dino"].float()
+                target=kw["target_dino"].float()
+                b,c,h,w,d=source.shape
+                source_grid=flow.resize_endpoint_chart(
+                    source.permute(0,1,4,2,3).reshape(b*c,d,h,w),
+                    (bank_module.grid,bank_module.grid),bank_module.visual_chart_mode
+                ).reshape(b,c,d,bank_module.grid,bank_module.grid).permute(0,1,3,4,2)
+                # Fixed observed DINO cosine uses the same sqrt(D) metric as
+                # the endpoint measurement. This intervention changes only
+                # current producer scores; all values are rematerialized.
+                scale=bank_module.content_log_scale.float().exp().clamp(1.,16.)
+                q=F.normalize(source_grid,dim=-1,eps=1e-6)[:,:,:,:,None].expand(-1,-1,-1,-1,bank_module.slots,-1)
+                q=q*(math.sqrt(d*bank_module.route_dim)/scale)
+                k=F.normalize(target,dim=-1,eps=1e-6).reshape(b,c,h*w,d)
+                hook=bank_module.query_norm.register_forward_hook(lambda m,i,o:q)
+                key_hook=bank_module.key_norm.register_forward_hook(lambda m,i,o:k)
             elif variant=="bank_spatial_zero":
                 bank_module.flow_prior_floor=0.0
                 with torch.no_grad():bank_module.flow_prior_log_scale.fill_(-100)
@@ -85,6 +123,7 @@ def main():
             return out
         finally:
             if hook is not None:hook.remove()
+            if key_hook is not None:key_hook.remove()
             bank_module.flow_prior_floor=floor
             with torch.no_grad():bank_module.flow_prior_log_scale.copy_(prior)
     def update(state,rollout,**kw):
@@ -118,7 +157,7 @@ def main():
         out=original_sample(*a,**kw);samples[:]=[out];return out
     def clear():
         nonlocal group
-        group=0;captured.clear();gs.clear();caches.clear();samples.clear();bank_records.clear()
+        group=0;captured.clear();gs.clear();caches.clear();samples.clear();bank_records.clear();language_trace.clear()
     def native(sample):
         x=policy.bundle.action_normalizer.decode(arr(sample.action)[0]);x[:,-1]=arr(sample.gripper_command)[0];return x
     bank_module.forward=bank_forward
@@ -126,7 +165,8 @@ def main():
     grounder.forward=gh;model.encode_online=encode;frontend.sample_action=sample
     rows=[];plan=json.loads(args.plan.read_text())
     try:
-        for cid,steps in [(1,[24]),(5,[24]),(11,[24]),(17,[136])]:
+        windows=[(1,[24])] if args.first_window_only else [(1,[24]),(5,[24]),(11,[24]),(17,[136])]
+        for cid,steps in windows:
             row=next(r for r in plan if r["case_id"]==cid);case=Path(row["case"])
             with np.load(case/"trajectory.npz") as z:data={k:z[k] for k in z.files}
             policy.reset();history=CausalHistory(executed_world=True);variant="baseline"
@@ -145,6 +185,8 @@ def main():
                 with np.load(maskpath) as z:masks=[z[k+"_masks"].copy() for k in ["top","wrist"]];names=z["object_names"].tolist()
                 entry={"case_id":cid,"state":t,"object_names":names,"recorded_arm_rmse":rms(baseline[:8,:6]-data["raw_chunks"][t//8,:8,:6]),"variants":[]}
                 variants=(["baseline","bank_content_zero","bank_content_half","bank_spatial_zero"] if args.bank_source else ["baseline","neutral_parent","parent_half","parent_only","neutral_semantic","neutral_appearance","neutral_geometry"])
+                if args.language_chain: variants=["baseline"]
+                if args.frozen_bank: variants=["baseline","bank_frozen_dino"]
                 for variant in variants:
                     clear()
                     with torch.no_grad():out=sample_action(model,online,policy.bundle.config,initial_physical_noise=seed)
@@ -179,16 +221,56 @@ def main():
                     parts=captured["bank_parts"]
                     record["bank_parameters"]={k:{"min":float(parts[k].min()),"mean":float(parts[k].mean()),"max":float(parts[k].max())} for k in ["sigma","content_scale","confidence_grid","uncertainty_dino","occlusion_grid"]}
                     record["bank_centered_score_rms"]={k:rms(arr(parts[k]-parts[k].mean(-1,keepdim=True))) for k in ["content_logits","floor_flow_bias","adaptive_flow_bias"]}
-                    if variant in ["baseline","neutral_parent","parent_half","bank_content_zero","bank_content_half","bank_spatial_zero"]:
+                    if variant in ["baseline","neutral_parent","parent_half","bank_content_zero","bank_content_half","bank_spatial_zero","bank_frozen_dino"]:
                         record["natural_colors"]=[]
-                        for color in ["red","blue","pink"]:
-                            instruction="go push the "+color+" block "+row["instruction"].split()[-1]
+                        natural_conditions=([(color,direction) for color in ["red","blue","pink"] for direction in ["left","right"]]
+                            if args.language_chain else [(color,row["instruction"].split()[-1]) for color in ["red","blue","pink"]])
+                        traces={}
+                        for color,direction in natural_conditions:
+                            instruction="go push the "+color+" block "+direction
                             tokens,mask=policy._goal(instruction)
                             other=replace(online,goal=replace(online.goal,tokens=tokens.to(policy.device),mask=mask.to(policy.device)))
                             clear()
                             with torch.no_grad():v=sample_action(model,other,policy.bundle.config,initial_physical_noise=seed)
-                            record["natural_colors"].append({"color":color,"binding":arr(caches[0].top.intent.target_binding.mass)[0].tolist(),
-                                "native_first8":native(v)[:8].tolist()})
+                            natural={"color":color,"direction":direction,"binding":arr(caches[0].top.intent.target_binding.mass)[0].tolist(),
+                                "native_first8":native(v)[:8].tolist()}
+                            if args.language_chain:
+                                trace={name:value.copy() for name,value in language_trace.items()}
+                                valid=arr(mask).astype(bool)
+                                trace["t5_mean"]=arr(tokens)[0,valid[0]].mean(0)
+                                trace["projected_goal_mean"]=trace["goal_input"][0,valid[0]].mean(0)
+                                trace["native_arm"]=np.asarray(natural["native_first8"])[:,:6]
+                                trace["binding"]=np.asarray(natural["binding"])
+                                natural["valid_tokens"]=int(valid.sum())
+                                natural["trace_rms"]={name:rms(value) for name,value in trace.items()}
+                                memory=torch.from_numpy(trace["goal_input"]).to(policy.device)
+                                with torch.no_grad():
+                                    weights=_diagnostic_attention_weights(organizer.goal_read.attention,
+                                      organizer.goal_read.query_norm(organizer.goal_queries.to(memory)),
+                                      organizer.goal_read.memory_norm(memory),~mask.to(policy.device).bool())
+                                natural["goal_read_attention"]=arr(weights)[0,:,:int(valid.sum())].tolist()
+                                natural["language_token_variation"]={name:rms(trace[name]-trace[name].mean(1,keepdims=True))
+                                    for name in ["goal_read","goal_self","task_value"]}
+                                natural["t5_per_token_rms"]=np.sqrt((arr(tokens)[0,valid[0]].astype(float)**2).mean(-1)).tolist()
+                                trace["t5_valid_tokens"]=arr(tokens)[0,valid[0]]
+                                natural["scores"]={name:trace[name].tolist() for name in ["object_score","task_object_score","score"]}
+                                traces[(color,direction)]=trace
+                            record["natural_colors"].append(natural)
+                        if args.language_chain:
+                            pairs=[]
+                            conditions=list(traces)
+                            for ia,key_a in enumerate(conditions):
+                                for key_b in conditions[ia+1:]:
+                                    if key_a[0]!=key_b[0] and key_a[1]!=key_b[1]:continue
+                                    ta,tb=traces[key_a],traces[key_b]
+                                    keys=set(ta)&set(tb)
+                                    pairs.append({"a":key_a,"b":key_b,"kind":"color" if key_a[0]!=key_b[0] else "direction",
+                                      "absolute_rms_delta":{name:rms(ta[name]-tb[name]) for name in keys if ta[name].shape==tb[name].shape},
+                                      "K_log_odds_rms_delta":rms((ta["score"]-ta["score"].mean(-1,keepdims=True))-(tb["score"]-tb["score"].mean(-1,keepdims=True))),
+                                      "per_token_t5_delta":np.sqrt(((ta["t5_valid_tokens"]-tb["t5_valid_tokens"]).astype(float)**2).mean(-1)).tolist() if ta["t5_valid_tokens"].shape==tb["t5_valid_tokens"].shape else None})
+                            record["language_chain_pairs"]=pairs
+                            record["binder_weight_rms"]={name:rms(arr(value)) for name,value in binder.named_parameters()}
+
                     entry["variants"].append(record)
                     dump(args.output/"results.json",rows+[entry])
                     print(json.dumps({"case":cid,"state":t,"variant":variant,"arm_delta":record["native_vs_baseline_arm_rmse"]}),flush=True)
@@ -197,6 +279,8 @@ def main():
           "scope":"current online local producer only; coherent recomputation; masks never enter model; no closed-loop efficacy claim",
           "script_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
     finally:
+        for hook in language_hooks:hook.remove()
+        binder.forward=original_bind
         bank_module.forward=original_bank
         enc.update_progressive_grounding_address=original_update;flow.couple_local_observation=original_law
         grounder.forward=original_g;model.encode_online=original_encode;frontend.sample_action=original_sample

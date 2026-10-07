@@ -74,3 +74,38 @@ def test_endpoint_trajectory_initialization_preserves_all_weights_and_rejects_dr
         load_checkpoint_for_initialization(path,model=target,config=target_config,
             identity=replace(current_id,dataset=bad_dataset),model_contract_migration=MIGRATION,
             verified_source_dataset=saved_id.dataset)
+
+
+def test_retained_clock_preserves_maturity_without_loading_optimizer_state():
+    from types import SimpleNamespace
+    from clearvla.mainline.train import _initialize_training_clock
+    from clearvla.mainline.training.optimizer import WarmupCosineSchedule
+    parameter=torch.nn.Parameter(torch.ones(()))
+    optimizer=torch.optim.AdamW([parameter],lr=8e-5)
+    schedule=WarmupCosineSchedule(optimizer,warmup_steps=500,total_steps=1600,minimum_ratio=.1)
+    calls=[]
+    engine=SimpleNamespace(global_step=0,model=SimpleNamespace(set_training_step=calls.append))
+    initialization=SimpleNamespace(global_step=11012,model_contract_migration=MIGRATION)
+    _initialize_training_clock(engine,schedule,initialization,mode="checkpoint")
+    assert engine.global_step==schedule.step_index==11012
+    assert schedule.total_steps==12612 and calls==[11012]
+    assert not optimizer.state
+    assert optimizer.param_groups[0]["lr"]==8e-5*schedule.ratio(11012)
+    schedule.step()
+    assert schedule.step_index==11013
+    with pytest.raises(ValueError,match="fresh optimizer"):
+        _initialize_training_clock(engine,schedule,initialization,mode="checkpoint")
+
+
+def test_retained_clock_rejects_other_graph_migrations_before_mutation():
+    from types import SimpleNamespace
+    from clearvla.mainline.train import _initialize_training_clock
+    from clearvla.mainline.training.optimizer import WarmupCosineSchedule
+    parameter=torch.nn.Parameter(torch.ones(()))
+    optimizer=torch.optim.AdamW([parameter],lr=8e-5)
+    schedule=WarmupCosineSchedule(optimizer,warmup_steps=500,total_steps=100,minimum_ratio=.1)
+    engine=SimpleNamespace(global_step=0,model=SimpleNamespace(set_training_step=lambda step: None))
+    original=schedule.state_dict()
+    with pytest.raises(ValueError,match="parameter-preserving"):
+        _initialize_training_clock(engine,schedule,SimpleNamespace(global_step=11012,model_contract_migration="other"),mode="checkpoint")
+    assert engine.global_step==0 and schedule.state_dict()==original

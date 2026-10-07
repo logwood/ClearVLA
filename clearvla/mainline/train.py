@@ -163,6 +163,12 @@ def _parser() -> argparse.ArgumentParser:
             "otherwise identical checkpoint."
         ),
     )
+    parser.add_argument(
+        "--init-training-clock", choices=("fresh", "checkpoint"), default="fresh",
+        help=("For the parameter-preserving CALVIN endpoint/trajectory repair only, "
+              "explicitly retain completed model updates and mature execution phase. "
+              "Optimizer/RNG remain fresh; this is not exact resume."),
+    )
     parser.add_argument("--validate-checkpoint", type=Path)
     parser.add_argument(
         "--validation-flow-schedule",
@@ -419,7 +425,42 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
             "data-contract and model-contract initialization migrations "
             "cannot be combined"
         )
+    if getattr(args, "init_training_clock", "fresh") == "checkpoint" and (
+        args.init_checkpoint is None
+        or args.init_model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION
+    ):
+        raise ValueError("checkpoint training clock requires the parameter-preserving CALVIN endpoint/trajectory migration")
     return result
+
+
+def _initialize_training_clock(
+    engine: MainlineTrainingEngine, schedule: WarmupCosineSchedule,
+    initialization: InitializationState, *, mode: str,
+) -> None:
+    """Seed one declared completed-update clock after strict weight verification.
+
+    This never restores optimizer moments, RNG, loader position or old schedule
+    state. The current schedule declares the retained updates plus this run's
+    planned updates. It is limited to a migration that preserves every model
+    parameter; a newly introduced module cannot skip its training warmup here.
+    """
+    if mode == "fresh":
+        engine.global_step = 0
+        engine.model.set_training_step(0)
+        return
+    if mode != "checkpoint" or initialization.model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+        raise ValueError("retained training clock requires a parameter-preserving migration")
+    step = initialization.global_step
+    if not isinstance(step, int) or isinstance(step, bool) or step < 0:
+        raise ValueError("retained completed-update count must be a nonnegative integer")
+    if engine.global_step != 0 or schedule.step_index != 0 or schedule.optimizer.state:
+        raise ValueError("retained clock can only seed fresh optimizer/engine state")
+    schedule.total_steps += step
+    state = schedule.state_dict()
+    state["step_index"] = step
+    schedule.load_state_dict(state)
+    engine.global_step = step
+    engine.model.set_training_step(step)
 
 
 def _validation_sampling_config(
@@ -2412,10 +2453,11 @@ def main() -> None:
             verified_source_dataset=verified_source_dataset,
         )
         initialization_checkpoint_resolved = str(Path(args.init_checkpoint).resolve())
-        # A model-only initialization intentionally starts all continuation
-        # state from zero.  The source checkpoint's counters are recorded in
-        # run_context.json, but never fed into the fresh schedule or RNG.
-        engine.global_step = 0
+        # Optimizer/RNG/loader remain fresh. Only this explicit, strictly
+        # parameter-preserving migration may retain the completed model clock.
+        _initialize_training_clock(
+            engine, schedule, initialization_state, mode=args.init_training_clock
+        )
         best_metric = None
         print(
             "[mainline-initialization] "
@@ -2423,6 +2465,7 @@ def main() -> None:
             f"checkpoint_epoch={initialization_state.epoch:03d} "
             f"checkpoint_step={initialization_state.global_step} "
             f"model_migration={initialization_state.model_contract_migration} "
+            f"training_clock={args.init_training_clock} initial_step={engine.global_step} "
             "optimizer_load=disabled schedule_load=disabled rng_load=disabled",
             flush=True,
         )
@@ -2547,7 +2590,10 @@ def main() -> None:
             "schedule_loaded": False,
             "rng_loaded": False,
             "data_loader_state_loaded": False,
-            "fresh_global_step": engine.global_step,
+            "training_clock": args.init_training_clock,
+            "initial_global_step": engine.global_step,
+            "retained_completed_updates": engine.global_step if args.init_training_clock == "checkpoint" else 0,
+            "fresh_global_step": 0 if args.init_training_clock == "fresh" else None,
             "fresh_best_metric": best_metric,
         }
     if validation_state is not None:
