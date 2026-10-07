@@ -2486,3 +2486,63 @@ Recorded regression: 15 passed, 6 fixture skips; real BS8 and behavioral
 qualification remain pending. Raw evidence stays under the A/B experiment root:
 identity-null-escape-counterexample.json, B-short-r1-promotion-block.json,
 conditional-identity-tests-r2.log. The v1 source and running jobs are immutable.
+
+
+#### 34.33.6 Masked-target pressure, mechanical v2 admission and preserved queues
+
+Both original A/B short runs reached 1024 updates / step 12036. All recorded
+training scalars are finite; A ledger gap is zero and B max absolute gap is
+1.79e-8. Median batch times are 6.36 / 6.09 seconds. A final logged supported
+G null is 0.00214; B is 0.90838 while correspondence loss falls to 0.01003.
+This establishes a qualification risk, not the physical null rate on each
+object. True-body K+null audit is queued separately; background abstention
+must not be confused with object collapse. Offline and full behavior remain
+required. B source prediction also improved (1.178 to 0.305), so its useful
+learned information must be measured, not discarded with the failed objective.
+
+The null escape has a concrete training input trigger. Engine._forward passes
+training_mask=True. Canonical grounding marks unobserved producer cells as
+null-only; independent correspondence sources remain observed. The v1 joint
+loss nevertheless supervises these pairs. In a real BS8 mask-mode probe,
+producer support is 0.625 and only 7050/16357 correspondence pairs have complete
+online interpolation support. Missing-support rows contribute negative direct
+source-null-logit derivatives in all four groups, summed -0.0063076 versus
+-0.00022225 on supported rows (before the four-group mean). Increasing source
+abstention therefore reduces this part of the old loss. V2's direct null-logit
+derivative is exactly zero in all four groups; its actual loss reproduction
+gap is zero. This is a local final-logit derivative, not the full parameter
+optimizer update or proof that all identity collapse modes are eliminated.
+
+Reproduce with probes/probe_identity_mask_null_gradient.py from probe source
+5c7420a4 or later and PYTHONPATH pointing to the checkpoint's immutable source.
+The earlier mask-gradient-r1 accidentally used encode_online's unmasked
+default despite model.train(); preserve it as an unmasked control with its
+SCOPE_CORRECTION.json. r2 explicitly selects the production mask and asserts
+that producer support is not full. Do not cite r1 as masked training evidence.
+
+Production candidate 0e861f56c4f7e49a2b5756dc70431e05ba917cb6 completed two
+real BS8 updates plus two offline batches, strict mature initialization,
+checkpoint save and cold factual deployment (step 11014). The checkpoint SHA
+is 026d7b59b8daa5c26fbf43dba4dcc323408650bd1d587db0b2dd7292b5688e79.
+Ledger error is <=1.2e-7 and gradients are finite. Source-control production
+reproduction gaps are <=3e-8; the same-instruction repeats and static
+measurement changes are exactly zero. These are mechanical admissions only.
+Source prediction remains worse than the neutral control at two updates,
+and the original camera specialization is still visible.
+
+B-nullv2-short-bs8-1024-r1 is QUEUED, not yet training: it waits for the original
+B standard 18-case panel to finish and release GPU2. It starts again from the
+same mature checkpoint, with 1024 BS8 updates, 256 offline batches, model clock
+11012 and fresh optimizer/100-step warmup. Neither collapsed B-r1 weights nor
+its optimizer are reused. Its own complete 18-case R8/stored_target watcher
+and 12-episode source / matched-old / fresh-mask / full-node qualification
+are already queued. All queues are evidence-only; none promotes formal runs.
+Original A/B training, panels and the aa5ebc5b qualification remain intact.
+
+Queued physical supplements use their own original runtime source. The B-r1
+K+null/body check waits for original qualification to release GPU4, then v2
+qualification follows it. Raw receipts/status/logs remain in the A/B experiment
+root. probes/probe_causal_identity_module_gradients.py additionally exposes
+ordinary total/action/world/identity VJPs to the new outcome, binder, S/W
+identity/view and canonical decoder weights without any optimizer step.
+Its nonzero gradients are connectivity evidence, not physical success.

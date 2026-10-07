@@ -1714,6 +1714,15 @@ This removes a direct abstention shortcut, not uniform/single-K collapse;
 real-object/source-dependence/behavior gates are still required. Never infer
 healthy physical allocation from a real-K-normalized audit alone.
 
+The observed training-mask trigger is confirmed: masked canonical cells are
+null-only while the independent source is still visible; v1 compared them as
+identity labels. V2 never uses learned null/allocation to decide support.
+Its production source is 0e861f56; the real BS8 mechanical check passed.
+A/B-r1 reached short step 12036, but offline/behavior admission is pending.
+The equally exposed v2 short is queued behind the original B panel on GPU2,
+with a fresh mature initialization and its own full evaluation. No formal
+A/B experiment is promoted. See 34.33.6 and pinned external queue receipts.
+
 The immutable BS8 short-run source is 3a84399926d50831470518e1b7f105131d3f1056.
 A on GPU0 and B on GPU2 each execute 1024 updates from mature step 11012,
 then 256 offline batches and a separate standard 18-case seed-0/max-360/R8
