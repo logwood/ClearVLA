@@ -2925,3 +2925,127 @@ B-fresh-factual-short-r1/decision-summary.json and
 B-r1-null-object-factual-r1/decision-summary.json. Original broad qualification
 and its B-null supplement have exited; the v2 qualification has advanced to
 waiting_training_and_offline. All formal promotion gates remain active.
+
+#### 34.33.12 Independent motion qualification and completed v2 short (2026-10-07)
+
+**Rigid geometry closes the measurement cross-check, not the repair.** The
+18/63 oracle audit is complete: 643 top/1350 wrist visible interior points,
+camera roundtrip <=4.82e-11 px, 756 original sensor arrays exactly unchanged,
+and production null/pair-delta reproduction exactly zero. Labels are joined
+by (case, step), not repeated worker-local filenames. Simulator poses, body
+IDs and depth visibility remain scorer-only; no such arrays enter the policy
+or production identity labels. These are correlated image-plane measurements,
+including wrist camera motion, not independent trials or world velocities.
+
+| Moving >1px geometry subset | Top | Wrist |
+| --- | ---: | ---: |
+| Points / windows | 100 / 19 | 819 / 35 |
+| True displacement = zero-motion baseline EPE | 6.441 | 3.908 |
+| Production DINO measured displacement | 0.148 | 0.162 |
+| Production DINO displacement EPE | 6.454 | 3.828 |
+| Conditionalized DINO EPE | 9.879 | 12.333 |
+| Native16 actual-confidence EPE | 6.459 | 3.847 |
+
+Same-null top1 is exactly stationary in 12/19 top and 10/35 wrist moving
+windows. Near-static production EPE is 0.190/0.149 px. RGB-flow labels versus
+rigid geometry have mean EPE 0.199/0.785 px on 587/1160 common points, with
+maxima 5.89/6.90 px. Thus prior same-body flow admission is not pointwise
+motion truth. Artifact: A-observed-match-rigid-full63-r1/decision-summary.json;
+receipt observed-match-rigid-full63-r1, pinned probe 434ad3b2.
+
+**RGB candidates expose separate short-gap, long-gap and visibility limits.**
+The estimator receives only observed RGB pairs; geometry labels score its
+output afterward. OpenCV DIS medium uses a fixed forward/backward <0.75px
+and photometric <0.08 acceptance rule, without fitting audit thresholds.
+That rule is not a calibrated match probability. Report accepted EPE plus
+all-visible EPE with zero displacement at rejected points: abstention must not
+hide missed motion. Method references: [DIS paper](https://arxiv.org/abs/1603.03590)
+and [OpenCV API](https://docs.opencv.org/4.10.0/de/d4f/classcv_1_1DISOpticalFlow.html).
+
+On the old63 moving subset, DIS all-visible EPE is 2.139/1.539 px versus
+DINO 6.454/3.828; accepted support is 86/100 top and 717/819 wrist. On the
+distinct 16 fresh A12/B02-four windows, short-gap DIS EPE is 0.379/1.040 px,
+accepting 34/34 and 317/353 moving points. However, it also accepts 25/31
+geometrically occluded wrist points. Same-body endpoints cannot certify
+visibility. For current-to-instruction-start matching, DIS accepts 0/516
+visible moving wrist points; Farneback accepts only 29/516. Their wrist
+all-visible EPE remains 21.796/21.409 px. No blanket RGB replacement is admitted.
+
+Exact sensor-label reproduction has a runtime boundary: CALVIN replay uses
+OpenCV 4.11, training uses 5.0. Uint8 remap rounding changes the temporal
+photometric gate on 66/129024 old sampled pixels (five object pixels), despite
+common endpoints agreeing within 2.98e-8 normalized units. Thread count was
+not the cause in the checked case. Original sensor arrays remain unchanged;
+cross-runtime controls explicitly report support mismatches. Earlier r1 jobs
+and SCOPE_CORRECTION.json are retained. Do not claim the renderer's accepted
+32x32 set exactly equals production support. The cross-view depth/RGB path
+does not use this OpenCV remap. Artifacts: observed-rgb-candidate-old63-r2,
+observed-rgb-fresh16-{past4_current,current_start}-r2; receipt
+observed-rgb-candidate-fresh16-r2, immutable probe be4f529b.
+
+**Existing learned flow is informative but does not close the interface.**
+Capture the already computed raw84 forward flow and its actual coarse8
+conversion before observation cleanup; no new encoder pass or policy edit.
+The local SEA-RAFT-style implementation is not an official pretrained model.
+On A's fresh moving top/wrist points, DINO EPE 2.781/3.705 becomes
+1.018/2.892 for raw84; multiplying by predicted confidence*(1-occlusion)
+gives 1.954/3.642. B02 wrist raw84 EPE remains 4.544 versus true mean motion
+4.890. Raw-to-coarse reproduction is exactly zero in all 16 later checks.
+The raw/coarse conversion is flow_dino_evidence.py:9837-9849;
+source_measurement.py:27-43 instead computes DINO-law pair differences.
+These fixed-input measurements do not justify treating learned confidence as
+calibrated visibility. Artifacts: A/B-existing-flow-fresh-r2 (8502b60f).
+
+DINO global nearest matches used only as DIS initial flow improve some
+long-gap localization, but remain unqualified. A's wrist accepts 7/486 moving
+points, all-visible EPE 21.194 versus 21.378 zero-motion; B02 accepts 1/30,
+EPE 28.153 versus 28.563. B02 top accepts eight moving points, all >2px error;
+five exceed 5px. At true geometric endpoints, the existing photometric rule
+would accept 491/516 wrist points, so uniformly impossible brightness matching
+does not explain the candidate's low support. This oracle control is scoring
+only, never input initialization or a reason to relax unknown. Artifacts:
+A/B-reference-rgb-seed-fresh-r1 and
+observed-rgb-fresh16-reference-oracle-photometry.json; probe b2485755.
+All same-runtime paired repeats and parameter checks pass. Preserve the
+failed existing-flow r1 launcher (missing deterministic CUBLAS environment);
+r2 corrects the launcher, not production execution.
+
+**Conditional-v2 short and offline are complete; behavioral admission is pending.**
+Source 0e861f56 reaches epoch1/step12036 after 1024 BS8 updates from mature
+step11012 and 256 offline batches (2046 samples, 6/6 tasks). best.pt is
+2487524008 bytes, SHA256
+ee6271e67a1cbbc1bb038b9e63c3108677b665e9e7140d85df6dcaf4feed17fc.
+All 52 logged windows are finite, median 6.051s/batch; the maximum window
+preclip gradient is 3.288 at step12033. Sparse console samples must not replace
+this peak. Loss-ledger maximum error is 1.49e-8. Annotated-goal supervision
+is active. Offline native action/first8 RMSE is 0.263964/0.231610;
+arm/gripper RMSE 0.131082/0.620195. Decoded gripper event F1 is 0.3451,
+1049 predicted versus 765 target events. Finite logs do not close control.
+Payload/source/config hashes and audit receipts remain in
+B-nullv2-short-final-audit.json and B-nullv2-complete-log-audit.json.
+
+The completed 12-episode/24-window source control reproduces production loss
+within 2.98e-8 and common-K relabeling exactly. Other-episode whole-source
+replacement raises MSE only 0.56/1.77/4.01/1.04% in cross01/cross10/time0/time1,
+while mismatching K values raises it 27.1/39.6/44.9/16.8%. Low offline source/
+target ownership null (0.00177/0.00297) therefore does not establish physical
+identity or useful scene dependence. Artifact:
+B-nullv2-source-dependence-short-r1/decision-summary.json.
+
+At 22:22 UTC the existing v2 panel is running (four cases completed), broad
+qualification is processing old matched factual windows, and final VJP,
+object/source and deterministic-target receipts remain queued. Keep these
+existing jobs; do not duplicate them. Both formal experiments remain unstarted.
+Next resolve long-gap localization/visibility and physical object separation,
+then test ordinary consumers and own-trajectory behavior before changing the
+production graph. Do not replace the matcher, raise confidence, change
+controller or promote training based on the controls above.
+
+Reproduction: run probe_observed_rgb_motion_candidate.py with --plan,
+--labels and --output under the declared OpenCV runtime; labels come from
+probe_rgbd_object_admission.py --rigid-audit --export-labels --pair-mode
+past4_current or current_start. For model capture use
+probe_observed_match_calibration.py --label-source rigid_audit --existing-flow;
+add --reference-rgb-labels for DINO-seeded RGB refinement. Immutable receipts
+record complete commands, checkpoint identity and plan hashes. Large evidence
+stays in the experiment directory; no internal tensor archive is downloaded.

@@ -1722,8 +1722,11 @@ A/B-r1 reached short step 12036 and completed 256 offline batches plus the
 standard panels: A 13/18, B-v1 17/18, mature baseline 11/18. All old successes
 remain, but cases 05/11 include pushing another block into the target; the
 scores do not certify correct identity selection. The equally exposed v2
-short now runs on GPU2 from the original mature initialization, with its own
-full evaluation. No formal A/B experiment is promoted. See 34.33.6-34.33.9
+short completed 1024 BS8 updates and 256 offline batches at step 12036;
+its standard panel and physical-object qualification are running. Other-episode
+source replacement still raises prediction MSE only 0.56-4.01%, despite low
+offline ownership null. Neither fact proves learned physical identity.
+No formal A/B experiment is promoted. See 34.33.6-34.33.12
 and pinned external receipts for current evidence and pending qualifications.
 
 The immutable BS8 short-run source is 3a84399926d50831470518e1b7f105131d3f1056.
@@ -1758,11 +1761,19 @@ displacement (before source aggregation), static behavior and unknown support
 separately before any matcher change; never simply promote null to real mass.
 The production v2 identity repair and all existing evaluations remain unchanged.
 
-The completed 18/63 motion audit (34.33.11) gives moving-object transport
-errors 3.528/3.133 px (top/wrist), versus zero-motion errors 3.550/3.211 px.
-A separate rigid-body geometry oracle is now being admitted strictly for
-evaluation, to validate RGB-flow labels independently. Simulator object poses
-or IDs must never enter training labels or policy inputs through this audit.
+The completed rigid-geometry cross-check (34.33.12) scores 643 top/1350 wrist
+visible interior points in 18/63 windows. On moving points, true mean motion
+is 6.441/3.908 px; the production DINO transport measures only 0.148/0.162 px.
+Simulator object poses/IDs remain evaluation-only. RGB flow labels have their
+own geometric errors; same-body matching does not certify point motion.
+Short-gap RGB estimates improve displacement, but reject many long-gap wrist
+matches and accept some occlusions. Existing learned high-resolution flow and
+DINO-seeded RGB refinement also fail full qualification. No matcher, unknown
+mass, policy input or budget has changed. Preserve separate moving/static,
+visibility, long-gap, K/view support and ordinary-gradient gates.
+Renderer OpenCV 4.11 and training OpenCV 5.0 differ at a few temporal photo-gate
+boundaries. State the runtime when claiming exact sensor-label reproduction;
+do not generalize renderer admission to identical training support.
 
 
 ### Current CALVIN audit constraint (2026-10-07)
