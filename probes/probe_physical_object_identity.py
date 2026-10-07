@@ -34,6 +34,7 @@ def main():
  q=argparse.ArgumentParser();q.add_argument("--plan",type=Path,required=True);q.add_argument("--masks",type=Path,required=True)
  q.add_argument("--coverage-script",type=Path,required=True);q.add_argument("--checkpoint",type=Path,required=True)
  q.add_argument("--output",type=Path,required=True)
+ q.add_argument("--match-rollout-rng",action="store_true")
  a=q.parse_args();a.output.mkdir(exist_ok=False);torch.set_num_threads(4)
  coverage=load(a.coverage_script).object_coverage
  policy=ClearVLACheckpointPolicy(a.checkpoint,device=torch.device("cuda:0"),t5_condition=Path("/data/senwang/data/calvin/language/abc_d_full_t5_xxl_bank.pt"),
@@ -76,7 +77,8 @@ def main():
  identity={"checkpoint":str(a.checkpoint),"checkpoint_sha256":policy.bundle.checkpoint_sha256,"probe_sha256":sha(__file__),
   "coverage_script_sha256":sha(a.coverage_script),"source_commit":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
   "scope":"frozen targeted snapshots on recorded causal history; instruction reference remains state 0",
-  "sampler_scope":"snapshot RNG sequence is not original rollout RNG; natural comparisons share exact initial physical noise",
+  "sampler_scope":("original rollout RNG advanced once at every 8-step replan; natural comparisons share exact initial physical noise"
+    if a.match_rollout_rng else "snapshot RNG sequence is not original rollout RNG; natural comparisons share exact initial physical noise"),
   "dynamic_node_scope":"last refined endpoint call; native commands compare full sampled plans",
   "ground_truth_use":"simulator body masks and positions are read-only audit references, never policy input",
   "mask_metric":"per-camera sampling support coverage, not semantic-information percentage or certified K identity"}
@@ -96,6 +98,8 @@ def main():
       # An add-on plan may start late; its instruction reference must still
       # be established on the original state 0, not its first probed state.
       policy.act_with_input(history.snapshot(),row["instruction"])
+     elif a.match_rollout_rng and t%8==0:
+      model.outlet_adapter.sample_noise(1,device=policy.device,dtype=torch.float32,generator=policy._generator)
      continue
     mask=a.masks/case.name/("state_%03d.npz"%t)
     if not mask.exists():raise FileNotFoundError(mask)
@@ -124,6 +128,9 @@ def main():
       "recorded_native_first8_mean":data["raw_chunks"][t//8,:8].mean(0).tolist(),
       "task_relation_rms":{n:rms(array(getattr(cache.top.intent.task_relation,n))) for n in ("target","scene") if isinstance(getattr(cache.top.intent.task_relation,n,None),torch.Tensor)},
       "node_rms":{k:rms(v) for k,v in current.items()}}
+    condition["recorded_first8_arm_rmse"]=rms(action[:8,:6]-data["raw_chunks"][t//8,:8,:6])
+    condition["recorded_first8_gripper_mismatches"]=int(np.count_nonzero(action[:8,6]!=data["raw_chunks"][t//8,:8,6]))
+    condition["sampled_native_first8"]=action[:8].tolist()
     condition["binding_weighted_visible_object_read"]=[
        {"camera":c["camera"],"object_names":c["object_names"],"mass":(mass@np.asarray(c["k_object_probability"])).tolist()}
        for c in cover["cameras"]]

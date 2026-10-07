@@ -993,3 +993,14 @@ difference is 0.03613 versus 0.54798. The learned direction preference therefore
 extends beyond the panel's canonical wording. This pure language diagnostic
 does not assign real objects or demonstrate a policy benefit. Output/command:
 v4/all-language-templates-r1.json and its command receipt.
+
+Fresh-rollout auditing is separately registered at
+short-mature-bs8-r1-fresh-trajectory-audit (GPU6, after standard panel completion):
+all18 physical phase ledgers -> per-case fresh simulator RGB-exact mask replay
+-> G/S/P1/P2/P3/native-action identity tracing. It rejects incomplete or wrong-
+source panels and waits for a free GPU. No original masks are reused on changed
+trajectories. New --match-rollout-rng in probe_physical_object_identity.py advances
+the owned noise once at every skipped replan; the original default remains
+explicitly unmatched for historical compatibility. On original case04 states
+0/24/40, replay arm RMSE is 0.000273/0.000147/0.000135 with zero gripper mismatches
+(v4/matched-rng-case04-r1). These finite BF16 discrepancies remain the repeat floor.
