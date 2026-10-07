@@ -704,7 +704,7 @@ class ObjectFactSet:
             camera_geometry=None if self.camera_geometry is None else self.camera_geometry[:, index],
             object_chart_mode=self.object_chart_mode,
             current_image_measure=(
-                ImageLogMeasure(self.current_image_measure.log_mass[:, index], self.current_image_measure.supported[:, index])
+                self.current_image_measure.permute(index)
                 if self.current_image_measure is not None else None
             ),
             content=self.content[:, index],

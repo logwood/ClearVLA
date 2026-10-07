@@ -542,11 +542,13 @@ class TopConfig:
     state_feature_mode: str = NATIVE_AFFINE_STATE
     entity_context_mode: str = "candidate_only_v1"
     entity_chart_mode: str = "query_lattice_v1"
+    entity_transport_gradient_mode: str = "positive_corners_v1"
     entity_history_mode: str = "current_only_v1"
     entity_motion_mode: str = "query_anchor_v1"
     target_binding_mode: str = "reader_local_v1"
     instruction_reference_mode: str = "none"
     instruction_change_mode: str = MIXED_REFERENCE_CHANGE
+    observation_measurement_mode: str = "legacy_v1"
     operation_intent_mode: str = POSTERIOR_INTENT
     object_view_mode: str = "pooled_v1"
     task_execution_mode: str = NO_TASK_EXECUTION
@@ -616,6 +618,10 @@ class TopConfig:
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
         ):
             raise ValueError("object operation outcomes require shared target, aligned time and typed P3")
+        if self.observation_measurement_mode not in {"legacy_v1", "source_consistent_v1"}:
+            raise ValueError("unknown observed measurement mode")
+        if self.observation_measurement_mode != "legacy_v1" and self.instruction_change_mode != POSTERIOR_REFERENCE_CHANGE:
+            raise ValueError("source-consistent measurements require the posterior source graph")
         if self.instruction_change_mode not in INSTRUCTION_CHANGE_MODES:
             raise ValueError("unknown instruction_change_mode")
         if self.instruction_change_mode in TYPED_CHANGE_MODES and (
@@ -699,6 +705,10 @@ class TopConfig:
             raise ValueError("unknown top entity_motion_mode")
         if self.entity_history_mode not in {"current_only_v1", "flow_pulled_history_v1"}:
             raise ValueError("unknown top entity_history_mode")
+        if self.entity_transport_gradient_mode not in {"positive_corners_v1", "ordinary_bilinear_v1"}:
+            raise ValueError("unknown entity transport gradient contract")
+        if self.entity_transport_gradient_mode != "positive_corners_v1" and self.entity_chart_mode != "current_image_support_v1":
+            raise ValueError("ordinary bilinear transport requires a current-image source")
         if self.entity_chart_mode not in {"query_lattice_v1", "current_image_support_v1"}:
             raise ValueError("unknown top entity_chart_mode")
         if self.entity_context_mode not in {"candidate_only_v1", "completed_g3_v1"}:
@@ -1485,6 +1495,8 @@ class ExperimentConfig:
             cast(dict[str, object], payload["top"]).pop("task_execution_mode")
         if self.top.operation_intent_mode == POSTERIOR_INTENT:
             cast(dict[str, object], payload["top"]).pop("operation_intent_mode")
+        if self.top.observation_measurement_mode == "legacy_v1":
+            cast(dict[str, object], payload["top"]).pop("observation_measurement_mode")
         if self.top.instruction_change_mode == MIXED_REFERENCE_CHANGE:
             cast(dict[str, object], payload["top"]).pop("instruction_change_mode")
         if self.top.world_feedback_value_mode == INNOVATION_ONLY:
@@ -1519,6 +1531,8 @@ class ExperimentConfig:
             cast(dict[str, object], payload["top"]).pop("entity_motion_mode")
         if self.top.entity_history_mode == "current_only_v1":
             cast(dict[str, object], payload["top"]).pop("entity_history_mode")
+        if self.top.entity_transport_gradient_mode == "positive_corners_v1":
+            cast(dict[str, object], payload["top"]).pop("entity_transport_gradient_mode")
         if self.top.entity_chart_mode == "query_lattice_v1":
             cast(dict[str, object], payload["top"]).pop("entity_chart_mode")
         if self.top.entity_context_mode == "candidate_only_v1":

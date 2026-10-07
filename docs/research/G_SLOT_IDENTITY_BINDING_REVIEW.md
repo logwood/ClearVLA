@@ -2222,3 +2222,73 @@ dependency driver SHA is 1574b32d72f162428420ed27c2bce971da7a72904f2a0bd0cb3ec54
 Four-window first-eight arm replay RMSE <=3.22e-4. r1 failed on a probe-only
 prior singleton-axis mismatch; its failure is retained. r3's parameter panel
 used converted FP32 input and is superseded by r4's exact dtype-preserving replay.
+
+
+### 34.33 A/B preparation: numerical contracts and independent correspondence (2026-10-07)
+
+Candidate branch: codex/causal-identity-ab-20261007, parent
+7d3fbb62f9987f617d9995e0c1b7a873dc88a250. This is source preservation,
+not a promoted graph or a started formal run. Original modes remain defaults.
+A covers confirmed measurement/feedback/condition interfaces; B must also close
+pre-pooling ownership, restricted view reconstruction, one S binding, compact
+W view values and independent identity supervision. Partial B is not runnable
+as the intended formal experiment. Source artifacts remain under
+/data/senwang/clearvla/experiments/causal-identity-ab-20261007.
+
+Implemented candidate: entity_transport_gradient_mode=ordinary_bilinear_v1
+carries the original bilinear measure through normalized image reads, including
+zero-weight corners with nonzero coordinate derivatives. Four unit tests
+(including 12 normalization/chart/knot subcases) pass. Forward values retain
+the original log-space path. Higher derivatives are deliberately unsupported.
+Direct arbitrary use of exp(log_mass) is not this repaired normalized-read API.
+The new source_consistent_v1 measurement is a candidate, not an admitted
+physical tracker: match observed descriptors before G pooling, keep unknown
+mass separate, compare each matched source cell to its successor. Same-image,
+known permutation/signed coordinate displacement, invalid-input quarantine and
+kernel gradient tests pass. Full-model/regression tests are in progress.
+Remaining semantic ownership, ABI/migration and factual correspondence gates
+must pass before any short-run promotion.
+
+Independent source admission:
+- Frozen DINO mutual-nearest matches alone failed physical-object checks in
+  four exact-replay windows (raw descriptors already confused objects in
+  case 11; centering also produced wrong-object/background matches). They
+  cannot be used as hard cross-view identity truth.
+- Raw CALVIN contains both metric depth images and robot observations.
+  RGB-D matches are constructed from sensor depth and camera/robot kinematics,
+  without scene poses, object names or G assignment. Twelve A/B/C/D frames
+  show accepted-pixel median RGB MAE 0 to 0.002614.
+- Four exact two-camera RGB-replay windows (01/24,05/24,11/24,17/136),
+  both projection directions: 1,659/1,669 accepted object-source pixels land
+  on the SAME simulator body; 10 land on background edges; 0 on another
+  object. These are correlated pixel samples, not 1,669 independent trials.
+  Audit-only body masks never enter match construction or training.
+- A 5 cm wrong-extrinsic negative control sharply reduces coverage but still
+  retains some same-object interior pixels; rejection is not perfect. Keep
+  visibility/depth support, correspondence precision and coverage distinct.
+- Temporal correspondence and deployment-source purity remain unqualified.
+
+Reproduce with the model environment:
+python -m unittest tests.test_log_transport_adjoint tests.test_observed_correspondence -v.
+RGB-D admission uses the existing CALVIN evaluation environment:
+probes/probe_rgbd_correspondence.py --output <new-dir> and
+probes/probe_rgbd_object_admission.py --plan <rgbd-object-plan.json> --output <new-dir>.
+Exact commands, script hashes, logs (including two dependency failures) and
+results are in the artifact directory, not embedded here.
+
+Research basis: [VideoSAUR](https://arxiv.org/html/2306.04829v2) supplies a
+temporal-feature-distribution prediction example;
+[SlotContrast](https://arxiv.org/html/2412.14295v2) motivates combining temporal
+identity pressure with reconstruction and cautions that slot seeds alone can
+shortcut temporal contrast. Neither establishes our physical correspondences.
+Our preliminary B proposal uses independently admitted geometry for overlapping
+views, separately admitted temporal correspondences, restricted shared-identity
+view reconstruction, and object-mask audits that stay outside training.
+
+Promotion gates: finite ordinary parameter gradients and complete loss ledger;
+static/signed-motion/unknown measurement contracts; full-token/view support;
+unchanged causal deployment inputs; correct real-object choice and retained
+action differences above repeat noise; no arm/gripper/approach regression on
+known positives. A 64-update mechanical check cannot promote either candidate.
+Use a meaningful common short-run exposure before equal formal training,
+256-batch offline validation and separate 18-case seed-0/max-360/R8 closed loops.

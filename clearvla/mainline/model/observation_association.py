@@ -59,8 +59,10 @@ class ObjectObservationAssociation(nn.Module):
         flow_reference_frames: int = 4,
         camera_names: tuple[str, ...] = (),
         current_reference_mode: str = "g_assignment_v1",
+        observation_measurement_mode: str = "legacy_v1",
     ) -> None:
         super().__init__()
+        self.observation_measurement_mode = observation_measurement_mode
         self.camera_names = tuple(camera_names)
         self.content_dim = int(content_dim)
         self.key_dim = int(key_dim)
@@ -192,6 +194,9 @@ class ObjectObservationAssociation(nn.Module):
         )
         if not bool(torch.isfinite(offsets.float()).all()):
             raise ValueError("Teacher future offsets contain non-finite values")
+        if self.observation_measurement_mode == "source_consistent_v1":
+            from .source_measurement import source_consistent_measurement
+            return source_consistent_measurement(self, facts, observations, offsets, observed)
         objects = facts.objects
 
         # ``DenseObjectGrounder`` quarantines invalid candidate rows before its

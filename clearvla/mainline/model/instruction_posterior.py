@@ -161,8 +161,10 @@ class PosteriorInstructionReferenceRead(nn.Module):
         content_dim: int,
         state_dim: int,
         camera_names: tuple[str, ...],
+        observation_measurement_mode: str = "legacy_v1",
     ) -> None:
         super().__init__()
+        self.observation_measurement_mode = observation_measurement_mode
         self.camera_names = camera_names
         self.scale = hidden ** -0.5
         self.query = nn.Linear(content_dim, hidden, bias=False)
@@ -175,6 +177,9 @@ class PosteriorInstructionReferenceRead(nn.Module):
             state_dim=state_dim, camera_names=camera_names,
         )
         self.output = nn.Linear(5 * hidden, hidden, bias=False)
+        if observation_measurement_mode == "source_consistent_v1":
+            for name in ("query", "key", "query_position", "key_position", "null_key"):
+                self.register_parameter(name, None) if isinstance(getattr(self, name), nn.Parameter) else setattr(self, name, None)
 
     def _kernel(
         self, query: Tensor, content: Tensor, observed: Tensor, grid: Tensor
@@ -222,8 +227,9 @@ class PosteriorInstructionReferenceRead(nn.Module):
             & common[:, None].reshape(batch, 1, cameras, side, side)
             & binding.supported[:, :, None, None, None]
         )
-        source_probability, _ = ImageLogMeasure(
-            image.log_mass, spatial_support
+        source_probability, _ = image.restrict(
+            common[:, None].reshape(batch, 1, cameras, side, side)
+            & binding.supported[:, :, None, None, None]
         ).normalized((-2, -1))
         source_probability = source_probability.flatten(-2)
         view_ok = spatial_support.flatten(-2).any(-1) & (facts.camera_validity[..., 0] > 0)
@@ -231,12 +237,18 @@ class PosteriorInstructionReferenceRead(nn.Module):
         grid = current_image_grid(
             side, side, device=current_dino.device
         ).reshape(patches, 2).float()
-        safe_now = torch.where(common[..., None], current_dino, 0.0).to(self.query.weight.dtype)
-        query = self.query(safe_now) + self.query_position(
-            grid.to(self.query.weight.dtype)
-        )[None, None]
-        kernel_now = self._kernel(query, current_dino, common, grid)
-        kernel_start = self._kernel(query, reference.dino, common, grid)
+        if self.observation_measurement_mode == "source_consistent_v1":
+            from clearvla.vision.observed_correspondence import observed_feature_correspondence
+            kernel_start = observed_feature_correspondence(
+                current_dino, reference.dino, common, common)
+            kernel_now = None
+        else:
+            safe_now = torch.where(common[..., None], current_dino, 0.0).to(self.query.weight.dtype)
+            query = self.query(safe_now) + self.query_position(
+                grid.to(self.query.weight.dtype)
+            )[None, None]
+            kernel_now = self._kernel(query, current_dino, common, grid)
+            kernel_start = self._kernel(query, reference.dino, common, grid)
         with torch.autocast(device_type=current_dino.device.type, enabled=False):
             def mixture(kernel: Tensor) -> tuple[Tensor, Tensor]:
                 return (
@@ -244,8 +256,14 @@ class PosteriorInstructionReferenceRead(nn.Module):
                     torch.einsum("bkcn,bcn->bkc", source_probability, kernel[..., -1]),
                 )
 
-            p_now, null_now = mixture(kernel_now)
             p_start, null_start = mixture(kernel_start)
+            if kernel_now is None:
+                # Compare only matched source mass on BOTH sides. Unmatched
+                # evidence is unknown, never an apparent disappearance/change.
+                p_now = source_probability * kernel_start[..., :-1].sum(-1)[:, None]
+                null_now = null_start
+            else:
+                p_now, null_now = mixture(kernel_now)
             now = torch.einsum(
                 "bkcn,bcnd->bkcd", p_now,
                 torch.where(common[..., None], current_dino.float(), 0.0),

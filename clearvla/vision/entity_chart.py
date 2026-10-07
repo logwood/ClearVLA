@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
+from .log_transport import BilinearLogTransport
+
 QUERY_CHART = "query_lattice_v1"
 CURRENT_IMAGE_CHART = "current_image_support_v1"
 
@@ -196,6 +198,16 @@ class ImageLogMeasure:
 
     log_mass: Tensor
     supported: Tensor
+    transport: BilinearLogTransport | None = None
+
+    def restrict(self, mask: Tensor) -> "ImageLogMeasure":
+        mask = torch.broadcast_to(mask, self.supported.shape)
+        return ImageLogMeasure(self.log_mass, self.supported & mask,
+            None if self.transport is None else self.transport.restrict(mask))
+
+    def permute(self, index: Tensor) -> "ImageLogMeasure":
+        return ImageLogMeasure(self.log_mass[:, index], self.supported[:, index],
+            None if self.transport is None else self.transport.permute(index))
 
     def normalized(self, axes: tuple[int, ...]) -> tuple[Tensor, Tensor]:
         if self.log_mass.ndim != 5 or self.supported.shape != self.log_mass.shape:
@@ -204,6 +216,8 @@ class ImageLogMeasure:
             raise TypeError("image log measure requires FP32 and Boolean support")
         if self.log_mass.device != self.supported.device:
             raise ValueError("image log measure must share one device")
+        if self.transport is not None:
+            return self.transport.normalized(self.log_mass, self.supported, axes)
         any_support = self.supported.any(dim=axes, keepdim=True)
         masked = self.log_mass.masked_fill(~self.supported, -torch.inf)
         safe = torch.where(any_support, masked, torch.zeros_like(masked))
@@ -227,6 +241,7 @@ def pushforward_log_to_current_image(
     *,
     rows: int,
     columns: int,
+    ordinary_coordinate_gradients: bool = False,
 ) -> ImageLogMeasure:
     """Segmented log-sum-exp of bilinear source mass, without tiny-mass division.
 
@@ -305,6 +320,11 @@ def pushforward_log_to_current_image(
         return ImageLogMeasure(
             result.reshape(batch, objects, cameras, rows, columns),
             supported.reshape(batch, objects, cameras, rows, columns),
+            BilinearLogTransport(
+                base_log.reshape(batch, objects, cameras, -1),
+                torch.where(spatial.valid[..., None], spatial.coordinates.float(), 0.).reshape(batch, cameras, -1, 2),
+                valid.reshape(batch, objects, cameras, -1),
+            ) if ordinary_coordinate_gradients else None,
         )
 
 
@@ -318,13 +338,16 @@ class ObjectImageReadSource:
     log_measure: Tensor             # [B,K,C,Yq,Xq,M]
     supported: Tensor               # Boolean same axes
     spatial: CurrentImageSupport
+    ordinary_coordinate_gradients: bool = False
 
     def on_image(self, *, rows: int, columns: int) -> ImageLogMeasure:
         return pushforward_log_to_current_image(
-            self.log_measure, self.supported, self.spatial, rows=rows, columns=columns
+            self.log_measure, self.supported, self.spatial, rows=rows, columns=columns,
+            ordinary_coordinate_gradients=self.ordinary_coordinate_gradients
         )
 
     def permute(self, index: Tensor) -> "ObjectImageReadSource":
         return ObjectImageReadSource(
-            self.log_measure[:, index], self.supported[:, index], self.spatial
+            self.log_measure[:, index], self.supported[:, index], self.spatial,
+            self.ordinary_coordinate_gradients,
         )

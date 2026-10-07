@@ -333,6 +333,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         target_binding_mode: str = LOCAL_TARGET_READERS,
         instruction_reference_mode: str = "none",
         instruction_change_mode: str = MIXED_REFERENCE_CHANGE,
+        observation_measurement_mode: str = "legacy_v1",
         operation_intent_mode: str = POSTERIOR_INTENT,
         annotation_goal_mode: str = "none",
         task_execution_mode: str = NO_TASK_EXECUTION,
@@ -479,7 +480,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
             reader_type = (PosteriorInstructionReferenceRead if instruction_change_mode == POSTERIOR_REFERENCE_CHANGE
                            else TypedInstructionReferenceRead)
             self.instruction_progress = reader_type(
-                hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
+                hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names,
+                **({"observation_measurement_mode": observation_measurement_mode}
+                   if reader_type is PosteriorInstructionReferenceRead else {}))
         else:
             self.instruction_progress = (
                 InstructionReferenceRead(hidden=hidden, content_dim=content_dim,
@@ -998,7 +1001,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 raise ValueError("joint task relation native patch chart must be square")
             image = source.on_image(rows=side, columns=side)
             spatial_support = image.supported & camera_valid[..., None, None]
-            position_probability, _ = ImageLogMeasure(image.log_mass, spatial_support).normalized((-2, -1))
+            position_probability, _ = image.restrict(camera_valid[..., None, None]).normalized((-2, -1))
             relation_views = spatial_support.flatten(-2).any(-1) & camera_valid
             task_relation = self.task_relation_encoder(
                 task_intervals=goal_innovation,

@@ -237,12 +237,14 @@ class DenseObjectGrounder(nn.Module):
         maximum_update_rms: float = 0.35,
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = QUERY_CHART,
+        entity_transport_gradient_mode: str = "positive_corners_v1",
         entity_history_mode: str = NO_ENTITY_HISTORY,
         entity_motion_mode: str = QUERY_ANCHOR_MOTION,
         retain_image_source: bool = False,
         object_view_mode: str = "pooled_v1",
     ) -> None:
         super().__init__()
+        self.ordinary_coordinate_gradients = entity_transport_gradient_mode == "ordinary_bilinear_v1"
         self.retain_image_source = retain_image_source
         self.per_camera_values = object_view_mode == "per_camera_values_v1"
         if self.per_camera_values and entity_chart_mode != CURRENT_IMAGE_CHART:
@@ -931,6 +933,7 @@ class DenseObjectGrounder(nn.Module):
                 read_log_probability.reshape(batch, self.objects, *candidate_shape),
                 source_supported, chart.current_image_support,
                 rows=image_rows, columns=image_columns,
+                ordinary_coordinate_gradients=self.ordinary_coordinate_gradients,
             )
             chart_read, _ = image_measure.normalized((2, 3, 4))
             camera_coordinates = image_measure.camera_centers().to(chart.candidate_coordinates.dtype)
@@ -948,6 +951,7 @@ class DenseObjectGrounder(nn.Module):
             reconstruction_measure = pushforward_log_to_current_image(
                 recon_log_mass, source_supported, chart.current_image_support,
                 rows=image_rows, columns=image_columns,
+                ordinary_coordinate_gradients=self.ordinary_coordinate_gradients,
             )
             # Conditional K at the destination. Underflowed but supported mass
             # retains finite derivatives; empty cells still count in the loss.
@@ -1002,7 +1006,7 @@ class DenseObjectGrounder(nn.Module):
             current_image_source=(ObjectImageReadSource(
                 read_log_probability.reshape(batch,self.objects,*candidate_shape),
                 read_support.reshape(batch,self.objects,*candidate_shape),
-                chart.current_image_support,
+                chart.current_image_support, self.ordinary_coordinate_gradients,
             ) if self.retain_image_source and chart.current_image_support is not None else None),
             content=content,
             semantic=semantic,

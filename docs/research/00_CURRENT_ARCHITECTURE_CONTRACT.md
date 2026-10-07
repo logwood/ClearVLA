@@ -1694,6 +1694,18 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### A/B repair preparation (2026-10-07; not promoted)
+
+See audit section 34.33. Candidate normalized bilinear adjoints and
+source-consistent measurement have unit coverage, but are not yet an admitted
+complete repair. Legacy modes remain defaults. Independent RGB-D overlap
+correspondence passed four factual object-mask windows (1659/1669 correct
+accepted pixels, zero wrong-object pixels); this supports a candidate identity
+training source, not a learned identity result. Temporal correspondence,
+complete B source/consumer integration, migration and healthy meaningful
+short runs remain gates before both formal trainings and both standard R8
+closed loops. Depth and audit masks are not online policy inputs.
+
 ### Current CALVIN audit constraint (2026-10-07)
 
 For causal-repair decisions, use G_SLOT_IDENTITY_BINDING_REVIEW.md sections

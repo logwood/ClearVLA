@@ -61,7 +61,7 @@ class ExecutedWorldPlanRead(nn.Module):
         with torch.no_grad():
             image = source.on_image(rows=rows, columns=columns)
             support = image.supported & binding.supported[:, :, None, None, None]
-            current_law, _ = ImageLogMeasure(image.log_mass, support).normalized((-2, -1))
+            current_law, _ = image.restrict(binding.supported[:, :, None, None, None]).normalized((-2, -1))
             current_law = current_law.flatten(-2)
             current_views = support.flatten(-2).any(-1) & (facts.camera_validity[..., 0] > 0)
             current_law = torch.where(current_views[..., None], current_law, 0.0)

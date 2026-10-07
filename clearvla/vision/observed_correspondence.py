@@ -1,0 +1,48 @@
+"""Source-consistent observed-feature matching, with explicit unknown mass.
+
+This is an appearance correspondence candidate, not a physical identity oracle.
+It compares frozen observed descriptors before G pooling. Identical descriptors
+have an exact-match limit; unmatched rows stay unknown. No forecast/search-time
+width, language, learned G content, or task label changes this measurement.
+"""
+from __future__ import annotations
+import torch
+import torch.nn.functional as F
+from torch import Tensor
+
+
+def observed_feature_correspondence(source: Tensor, target: Tensor,
+                                    source_observed: Tensor, target_observed: Tensor,
+                                    *, distance_scale: float = .05) -> Tensor:
+    """Return [...,N,M+1], last column is unknown; all axes are declared.
+
+    Inverse squared descriptor distance uses a null reference at distance_scale.
+    The real partition is averaged over observed candidates, so increasing chart
+    size cannot by itself suppress null. Exact duplicate descriptors share their
+    mass; this represents ambiguity instead of inventing a persistent identity.
+    """
+    if source.shape[:-2] != target.shape[:-2] or source.shape[-1] != target.shape[-1]:
+        raise ValueError('correspondence requires matching batch/view/descriptor axes')
+    if source_observed.shape != source.shape[:-1] or target_observed.shape != target.shape[:-1]:
+        raise ValueError('correspondence source masks are misaligned')
+    if source_observed.dtype != torch.bool or target_observed.dtype != torch.bool or distance_scale <= 0:
+        raise ValueError('correspondence requires Boolean support and positive scale')
+    with torch.autocast(device_type=source.device.type,enabled=False):
+        a=F.normalize(torch.where(source_observed[...,None],source.float(),0.),dim=-1)
+        b=F.normalize(torch.where(target_observed[...,None],target.float(),0.),dim=-1)
+        # Double dot products remove cancellation around identical FP32 vectors.
+        # This is a small N x M comparison, not a materialized N x M x D value.
+        a,b=a.double(),b.double()
+        distance=(a.square().sum(-1)[...,None]+b.square().sum(-1)[...,None,:]-2*(a@b.transpose(-1,-2))).clamp_min(0.)
+        legal=source_observed[...,None] & target_observed[...,None,:]
+        exact=legal & (distance <= 1e-12)
+        has_exact=exact.any(-1,keepdim=True)
+        safe_distance=torch.where(legal & ~exact,distance,1.)
+        score=2*(torch.log(torch.tensor(distance_scale,dtype=distance.dtype,device=distance.device))-safe_distance.log())
+        score=score-target_observed.sum(-1).clamp_min(1).double().log()[...,None,None]
+        score=score.masked_fill(~legal,-torch.inf)
+        null=torch.zeros_like(score[...,:1])
+        law=torch.softmax(torch.cat((score,null),-1),-1)
+        exact_law=exact.double()/exact.sum(-1,keepdim=True).clamp_min(1)
+        law=torch.where(has_exact,torch.cat((exact_law,torch.zeros_like(null)),-1),law)
+        return law.float()

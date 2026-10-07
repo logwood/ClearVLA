@@ -31,6 +31,7 @@ class ObjectFutureTeacher(ObjectObservationAssociation):
         flow_reference_frames: int = 4,
         camera_names: tuple[str, ...] = (),
         current_reference_mode: str = "g_assignment_v1",
+        observation_measurement_mode: str = "legacy_v1",
     ) -> None:
         grid = resolve_future_time(future_time_grid_mode)
         super().__init__(
@@ -39,6 +40,7 @@ class ObjectFutureTeacher(ObjectObservationAssociation):
             flow_reference_frames=flow_reference_frames,
             camera_names=camera_names,
             current_reference_mode=current_reference_mode,
+            observation_measurement_mode=observation_measurement_mode,
         )
         self.time_grid = grid
 
