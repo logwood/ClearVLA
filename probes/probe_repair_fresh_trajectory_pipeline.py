@@ -17,13 +17,20 @@ def main():
             if time.time()>deadline:raise TimeoutError("standard 18-case panel did not finish")
             time.sleep(30)
         panel=json.loads((root/"summary.json").read_text())
+        if panel.get("execute_rows")!=8 or panel.get("max_steps")!=360 or panel.get("controller_anchor")!="stored_target":
+            raise RuntimeError("fresh audit requires the declared standard controller/8-row/360-step setup")
         if not panel["complete"] or panel["trials"]!=18 or panel["errors"]:
             raise RuntimeError("standard panel incomplete; retain failed cases for recovery")
         if panel["source_commit"]!=r["train_commit"] or panel["checkpoint"]!=r["checkpoint"]:
             raise RuntimeError("fresh rollout identity differs")
         health=json.loads((root/"bridge_health.json").read_text())["deployment"]["checkpoint"]
-        if health["global_step"]!=11524 or health["git_commit"]!=r["train_commit"]:
-            raise RuntimeError("bridge did not serve the final repair")
+        expected_step=r.get("global_step",11524)
+        if not isinstance(expected_step,int) or expected_step<1:
+            raise ValueError("receipt global_step must be an explicit positive completed-update count")
+        if health["global_step"]!=expected_step or health["git_commit"]!=r["train_commit"]:
+            raise RuntimeError("bridge did not serve the declared repair checkpoint")
+        if "checkpoint_sha256" in r and health["sha256"]!=r["checkpoint_sha256"]:
+            raise RuntimeError("served weights differ from the admitted checkpoint hash")
         for path,sha in r["script_sha256"].items():
             if digest(path)!=sha:raise RuntimeError("probe changed: "+path)
         source=Path(r["production_source"])

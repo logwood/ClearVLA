@@ -1273,3 +1273,68 @@ bad shapes, nonfinite moments, negative variance, illegal steps and wrong clocks
 A real bs8 continuation pilot and behavioral validation remain required before
 claiming a repair to training drift. The target-selection and persistence
 investigations remain open; this option does not solve them by definition.
+
+### 34.18 Reconstruction pressure favors camera/scene coding in the measured windows
+
+The probe_reconstruction_identity_pressure.py script captures the actual complete
+11012 checkpoint at 01/05/11 state 24 and 17 state 136. Parameters and policy inputs
+are untouched. Actual simulator masks only partition the report. Area pooling
+onto the 8x8 loss grid is an approximate region allocation, not a claim that a
+DINO cell contains only that physical object. Keep it separate from the exact
+bilinear K-read coverage audit.
+
+Holding existing decoded K values and the shared position term fixed, every
+visible top-view block-overlapping region prefers K1; wrist regions prefer K3.
+Non-block pixels account for 94.99–97.24% of area-allocated reconstruction error
+and 97.18–99.76% of the corresponding detached destination-owner-logit gradient
+magnitude. The latter is an analytical local interface derivative, not a whole
+network gradient share or an independent contribution percentage.
+
+The source computes one cross-camera K content at grounding.py:764–768, then
+uses it for both cameras in reconstruction at 959–967. Actual per-camera values
+are exported only afterwards at 988–994. A diagnostic fit of ONE constant value
+per camera, with no object identity and the same position term, attains lower
+MSE than the existing K mixture in all four windows:
+
+| case/state | actual FP32 reconstruction | one fitted value/camera |
+|---|---:|---:|
+| 01/24 | 0.245272 | 0.239682 |
+| 05/24 | 0.267984 | 0.246437 |
+| 11/24 | 0.277942 | 0.257924 |
+| 17/136 | 0.264690 | 0.257740 |
+
+This is an optimistic per-observation fit, not a trained replacement. It is a
+counterexample to treating lower reconstruction error as proof of real-object
+identity. Substituting existing camera-conditioned values lowers MSE in some
+windows but does not certify object separation, so that substitution is not
+promoted as a complete repair. The earlier natural-instruction/full-loss probes
+also show weak color pressure. Current endpoint supervision has no direct
+G/binder VJP; restoring endpoint provenance alone cannot establish target
+binding. Do not cure this by merely increasing a common carrier.
+
+Reproduce from the 11012 checkpoint's own checkout with:
+PYTHONPATH=. python /path/to/candidate/probes/probe_reconstruction_identity_pressure.py
+--checkpoint <original11012>/checkpoints/best.pt --plan <identity-v1>/probe_plan.json
+--masks <identity-v1>/masks-r2 --output <new-dir>.
+Exact commands/hashes and both runs are in causal-repair-20261006-v4/
+reconstruction-identity-pressure-r{1,2}; no raw tensors enter this document.
+
+### 34.19 Optimizer pilot admission and pending behavioral gate
+
+The continued-moment 64-update bs8 pilot completed at step 11076, source ffb6c39c,
+with 1249 parameter moment states admitted. New checkpoint SHA256:
+b02d6e9bc58674c6199dadb86111f8018a7f795cfd9f2c766472a8af194a22f8.
+Same 18 initial observations/seeds yield median mean native XYZ change
+(-0.002080,-0.005394,-0.008877) versus original 11012. These are snapshot actions,
+not 18 successful episodes. The matched fresh-moment 64-update pilot is separate;
+do not compare 64 versus 512 updates as an optimizer causal estimate.
+
+The 16-batch offline panel contains 126 samples, 21/task, and is NOT the standard
+256-batch panel. Diagnostic limits set to 0 mean ALL available batches in this
+entry point, not disabled diagnostics; serialized validation coverage is 16/16.
+Training is finite at approximately 6.2–6.6s/batch. Full standard 18 closed loop
+(seed 0, max 360, execute 8, stored-target) is launched separately, and exact fresh
+trajectory masks/physical-identity probes are chained afterwards. Artifacts:
+dinov3-causal-repair-20261006/pilot64-mature-bs8-adam-{checkpoint,fresh}-r1,
+pilot64-adam-checkpoint-eval18-command.json and
+pilot64-adam-checkpoint-fresh-audit-receipt.json. No candidate acceptance yet.
