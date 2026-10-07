@@ -3,7 +3,7 @@ from pathlib import Path
 import json
 import numpy as np
 import torch
-from clearvla.vision.sensor_geometry import camera_views, depth_correspondence
+from clearvla.vision.sensor_geometry import camera_views, depth_correspondence, photometric_support
 from clearvla.vision.observed_flow import observed_rgb_flow
 
 
@@ -49,7 +49,9 @@ class IdentityLabelProducer:
         for camera,key in enumerate(('static','gripper')):
             shape=depths[camera].shape;y,x=self._sample(shape);source=np.stack((x,y),-1)
             cross=depth_correspondence(depths,views,self.calibration['projection'],camera,1-camera)
-            index=y*shape[1]+x;valid=cross['accepted'][index]
+            index=y*shape[1]+x
+            rgbs=[now['rgb_static'],now['rgb_gripper']]
+            valid=photometric_support(cross,rgbs[camera],rgbs[1-camera])[index]
             target=self._endpoint(cross['xy'][index],depths[1-camera].shape)
             out['cross_source'].append(self._endpoint(source,shape));out['cross_target'].append(np.where(valid[:,None],target,0.));out['cross_valid'].append(valid)
             temporal=observed_rgb_flow(frames[0]['rgb_'+key],now['rgb_'+key])

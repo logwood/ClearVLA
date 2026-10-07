@@ -529,6 +529,8 @@ def _load_mainline_data(
     """Build the formal inventory, optionally materializing bounded datasets."""
 
     config.validate()
+    if config.top.identity_supervision_mode != "none" and (not config.data.calvin_raw_source or config.data.image_store_mode != "hdf5-direct"):
+        raise ValueError("identity training labels require uncached raw sensors and HDF5 source provenance")
     if materialized_splits is None:
         if max_episodes_per_materialized_split is not None:
             raise ValueError("an episode limit requires explicit materialized splits")

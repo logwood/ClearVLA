@@ -2332,3 +2332,35 @@ The mature model clock is retained at 11012 while a versioned optimizer origin
 starts fresh LR warmup. Formal/meaningful short training is not yet started:
 production label admission, full checkpoint migration/ABI, real-data BS8
 mechanics, physical selection/consumer probes and behavioral gates remain.
+
+#### 34.33.2 Full-panel source admission and real BS8 mechanics
+
+Both mechanical candidates completed two BS8 updates, 2-batch offline validation,
+and saved best/latest at step 11014 from source 3bc0df46. This is only mechanical
+evidence. A/B first losses were 1.2372/1.2605; preclip owner norms 2.759/2.741;
+loss contribution gaps <=2.4e-7. B's two identity terms appear explicitly in
+the representation ledger. No formal or meaningful short run is yet promoted.
+
+The 12-frame 1.15e-7 calibration agreement applies to joint-reset FK. On dynamic
+replays, physical constraint errors cause view-matrix disagreement up to 0.00239.
+The first expanded probe's reset-only tolerance failed; its log is retained.
+The production transform was therefore audited by physical correspondences
+across all 18 original trajectories (63 windows), not declared exact from reset
+tests. Depth-only: 16787/16928 accepted object pixels correct, 18 wrong-object and
+123 background-edge pixels. Adding raw RGB mean-absolute error <0.08 as a
+support filter (not a new estimated location) retained all 16787 correct pixels
+and removed all 141 wrong/background pixels in this panel. Temporal flow:
+83926/83929 correct, 0 wrong-object and 3 background-edge pixels. These remain
+correlated in-domain pixels; no universal precision claim. RGB, depth, joints
+and fixed calibration construct labels; physical body masks only audit them.
+Reproduce: probe_rgbd_object_admission.py with rgbd-object-full-plan.json;
+full-r1 failed, full-r2 depth-only, full-r3 depth+photometric support.
+
+Twenty-four uncached production windows across six training episodes passed
+pair shape/clock/support checks; both full BS8 training paths loaded the mature
+checkpoint via the strict declared migration. Cold B deployment exposed a
+label-plane validation bug: deployment correctly discards training data paths,
+but the graph validator was demanding a raw sensor path. The requirement now
+belongs to the dataset loader; graph ABI and trained objective identity remain
+strict. Both deployment configs reconstruct with no raw sensors, while training
+without source provenance is rejected (deployment-label-plane-r1.log).

@@ -2,6 +2,18 @@
 import numpy as np
 
 
+def photometric_support(law, source_rgb, target_rgb, *, maximum_error=.08):
+    """Reject occlusion/color edges using raw sensor values, never learned IDs.
+
+    The depth projection remains the correspondence. Photometry only removes
+    uncertain pairs and may lose coverage under view-dependent illumination.
+    """
+    source=np.asarray(source_rgb,dtype=np.float32).reshape(-1,3)/255.
+    target=np.asarray(target_rgb,dtype=np.float32)[law['v'],law['u']]/255.
+    error=np.abs(source-target).mean(-1)
+    return law['accepted'] & np.isfinite(error) & (error<maximum_error)
+
+
 def rigid(xyz=(0,0,0),rpy=(0,0,0)):
     rx,ry,rz=rpy;cx,cy,cz=np.cos(rpy);sx,sy,sz=np.sin(rpy)
     rotation=np.array([[cz*cy,cz*sy*sx-sz*cx,cz*sy*cx+sz*sx],

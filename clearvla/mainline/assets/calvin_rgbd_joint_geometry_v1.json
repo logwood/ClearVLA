@@ -521,5 +521,6 @@
   ],
   "depth_units": "metres",
   "verified_frames": 12,
-  "view_max_abs_disagreement": 1.150069454114444e-07
+  "view_max_abs_disagreement": 1.150069454114444e-07,
+  "verification_scope": "nominal joint-reset FK: 12 recorded joint configurations; dynamic sensor-pair precision audited separately"
 }

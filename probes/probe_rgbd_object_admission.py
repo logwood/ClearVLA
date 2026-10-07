@@ -10,9 +10,10 @@ import pybullet as p
 from clearvla.benchmarks.calvin_eval import _environment, _official_task_assets
 from probe_rgbd_correspondence import correspondence, matrix
 from clearvla.vision.observed_flow import observed_rgb_flow
+from clearvla.vision.sensor_geometry import camera_views, photometric_support
 
 
-def audit(depth, views, projections, masks):
+def audit(depth, views, projections, masks, rgbs):
     rows=[]
     for source,target in ((0,1),(1,0)):
         for control in ('calibrated','wrong_extrinsic_5cm'):
@@ -21,7 +22,7 @@ def audit(depth, views, projections, masks):
             law=correspondence(depth,transforms,projections,source,target)
             current=masks[source].reshape(masks[source].shape[0],-1)
             other=masks[target][:,law['v'],law['u']]
-            obj=current.any(0);keep=law['accepted']&obj
+            obj=current.any(0);keep=photometric_support(law,rgbs[source],rgbs[target])&obj
             correct=(current&other).any(0)
             rows.append(dict(source=source,target=target,control=control,
                 object_pixels=int(obj.sum()),accepted_object_pixels=int(keep.sum()),
@@ -48,6 +49,7 @@ def main():
         (a.output/'complete.json').write_text(json.dumps(dict(windows=len(results),script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())))
         return
     row=plan[a.index];case=Path(row['case']);result=json.loads((case/'result.json').read_text())
+    calibration=json.loads((Path(__file__).resolve().parents[1]/'clearvla/mainline/assets/calvin_rgbd_joint_geometry_v1.json').read_text())
     with np.load(case/'trajectory.npz',allow_pickle=False) as z:d={k:z[k] for k in z.files}
     official,*_=_official_task_assets();env=_environment(Path('/data/senwang/data/calvin/raw/task_ABC_D'),show_gui=False)
     results=[]
@@ -74,7 +76,12 @@ def main():
                 depths.append(depth);views.append(matrix(camera,'view'));projections.append(matrix(camera,'projection'))
             snapshots[step]=masks
             if step not in row['steps']:continue
-            results.append(dict(case=case.name,step=step,directions=audit(depths,views,projections,masks)))
+            derived=camera_views(d['robot_obs'][step],calibration)
+            error=max(float(np.max(np.abs(x-y))) for x,y in zip(derived,views))
+            # Physics constraints can flex by sub-millimeters during motion.
+            # Record this independently; factual match precision, not reset-only
+            # matrix agreement, admits the production sensor correspondence.
+            results.append(dict(case=case.name,step=step,production_view_max_abs_error=error,directions=audit(depths,derived,projections,masks,[d['rgb_static'][step],d['rgb_gripper'][step]])))
             print(results[-1],flush=True)
         for result in results:
             step=result['step'];temporal=[]
