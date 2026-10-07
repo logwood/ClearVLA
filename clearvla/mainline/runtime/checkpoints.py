@@ -49,6 +49,13 @@ JOINT_TASK_OBJECT_BINDING_V1_MIGRATION = "joint_task_object_binding_v1"
 JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION = (
     "joint_task_object_binding_trajectory_v1"
 )
+CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION = "calvin_endpoint_trajectory_repair_v1"
+CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS = frozenset({
+    "clearvla/benchmarks/calvin_raw.py",
+    "clearvla/mainline/data/loading.py",
+    "clearvla/mainline/train.py",
+    "clearvla/mainline/runtime/checkpoints.py",
+})
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/model/compiler.py",
@@ -1185,6 +1192,7 @@ def load_checkpoint_for_initialization(
         WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
+        CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
         DINOV3_DEEP_REPAIR_V1_MIGRATION,
         S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
         G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
@@ -1404,6 +1412,23 @@ def load_checkpoint_for_initialization(
             raise ValueError(
                 "G-slot identity source repair requires identical dataset identity"
             )
+    elif selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+        if (
+            saved_config.data.data_profile != "calvin_relative_7d_v1"
+            or config.data.data_profile != "calvin_relative_7d_v1"
+            or saved_config.top.annotation_goal_mode != "annotated_endpoint_relation_v1"
+            or config.top.annotation_goal_mode != "annotated_endpoint_relation_v1"
+            or saved_config.objectives.annotated_goal <= 0
+            or saved_config.objectives.calvin_frame_weight_mode != "uniform"
+            or config.objectives.calvin_frame_weight_mode != "motion_event_v1"
+            or saved_config.objectives.gripper_command_transition != 0
+            or config.objectives.gripper_command_transition <= 0
+        ):
+            raise ValueError("endpoint/trajectory repair requires the existing CALVIN endpoint graph and explicit trajectory supervision")
+        if _joint_task_object_binding_trajectory_migration_config_view(saved_config) != _joint_task_object_binding_trajectory_migration_config_view(config):
+            raise ValueError("endpoint/trajectory repair differs outside its six trajectory-supervision selectors")
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError("endpoint/trajectory repair requires identical dataset identity")
     elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION:
         if (
             saved_config.data.data_profile != "calvin_relative_7d_v1"
@@ -1578,7 +1603,9 @@ def load_checkpoint_for_initialization(
             if saved_sources.get(source_path) != current_sources.get(source_path)
         )
     )
-    if selected_model_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION:
+    if selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+        allowed_source_paths = CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS
+    elif selected_model_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION:
         allowed_source_paths = P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS
     elif (
         selected_model_migration
@@ -2011,6 +2038,8 @@ __all__ = [
     "JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY",
     "JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS",
     "JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION",
+    "CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION",
+    "CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS",
     "JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_SOURCE_PATHS",
     "DINOV3_DEEP_REPAIR_V1_MIGRATION",
     "DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY",
