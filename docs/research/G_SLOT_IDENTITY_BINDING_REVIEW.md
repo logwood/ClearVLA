@@ -2407,3 +2407,36 @@ native first eight rows; approach/contact/gripper regressions on the complete
 18-case trajectories. Only qualified candidates proceed to equal formal
 exposure and their two final standard closed loops. Hourly thread continuation
 is registered as clearvla-a-b; unchanged status is silent.
+
+#### 34.33.4 Source-dependence and complete trajectory qualification
+
+probe_identity_source_dependence.py reproduces the actual B loss from captured
+production source-only outputs, then holds target labels fixed while shuffling
+whole source state plus ownership across distinct validation episodes, breaking
+K value/weight pairing, or consistently relabeling both. It separately names
+zero identity values with retained q and wholly neutral source. The initial
+four-episode mechanical admission reproduces all production losses within
+2e-5; common K relabeling gives zero prediction change and <=6e-8 JS change.
+Untrained source prediction is worse than neutral and whole-source shuffling
+has almost no effect: expected negative evidence, not an identity success.
+The same controls will use 12 held-out episodes / 24 windows after the short run.
+
+The generic A/B factual probe now records actual S/P1/P2/P3/bottom outputs
+without recomputing reader probabilities. Its 32-node mechanical repeat is
+exactly equal. Natural color traces use a repeat under the same sampler as
+their reference; frontend-vs-replay differences stay separate. Node differences
+are total responses at matched solver calls, not independent source fractions.
+Physical K distributions use actual joint read mass restricted to each body
+mask, renormalized over K; unsupported raster pixels do not enter a probability
+denominator. The earlier pixel-average preliminary read was subnormalized and
+must not be used as a K-distribution TV statistic.
+
+run_causal_identity_qualification.py collects matched all-18 evidence, B source
+controls, then fresh A/B phase ledgers, exact RGB mask replay and node traces.
+Training and each full 18-case panel must match source/weights/step/protocol.
+All stages retain failures and never launch or promote a formal run.
+The generic phase planner selects observed contact, closest-approach, peak
+progress and final windows, without historical case-specific extras; it passed
+all 18 original trajectories (119 diagnostic windows). Fresh masks are admitted
+only by exact replay of BOTH camera RGB streams. No internal tensor archives
+are downloaded or written into repository memory.

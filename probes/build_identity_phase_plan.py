@@ -9,6 +9,7 @@ def spans(a):
 
 def main():
  q=argparse.ArgumentParser();q.add_argument("--root",type=Path,required=True);q.add_argument("--output",type=Path,required=True)
+ q.add_argument("--generic-events-only",action="store_true",help="Use observed contact/closest-approach/peak events, excluding historical case-specific windows")
  a=q.parse_args();a.output.mkdir(parents=True,exist_ok=False)
  rows=[];plan=[]
  extra={1:[160,168,176,184,192],2:[80,88,96,208,216,224,320],3:[320,328,336,344],9:[64,72,256,264],
@@ -31,10 +32,14 @@ def main():
   tcp=d["robot_obs"][:,:3];ctrl=np.array([v["target_pos"] for v in tele["controller_targets"]]);gap=np.linalg.norm(ctrl-tcp,axis=1)
   progress=sign*(positions[target][:,0]-positions[target][0,0])
   last=(t-1)//8*8
-  wanted={0,24,min(40,last),last,*extra.get(idx,[])}
-  if touch[target].any():
-   first=int(np.flatnonzero(touch[target])[0])//8*8
-   wanted.update((max(0,first-8),first,min(first+8,last)))
+  wanted={0,24,min(40,last),last,*([] if a.generic_events_only else extra.get(idx,[]))}
+  for contact_name in (names if a.generic_events_only else [target]):
+   if touch[contact_name].any():
+    first=int(np.flatnonzero(touch[contact_name])[0])//8*8
+    wanted.update((max(0,first-8),first,min(first+8,last)))
+  if a.generic_events_only:
+   closest=int(np.argmin(np.linalg.norm(tcp[:,:2]-positions[target][:,:2],axis=1)))//8*8
+   wanted.add(min(closest,last))
   peak=int(np.argmax(progress))//8*8;wanted.add(min(peak,last))
   wanted=sorted(x for x in wanted if x<=last and x%8==0)
   events=[]

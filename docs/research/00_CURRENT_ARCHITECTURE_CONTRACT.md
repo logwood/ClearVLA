@@ -2472,7 +2472,7 @@ Current checkpoint observations, when needed, live in the temporary
 |---|---|
 | OnlinePolicyInput | Causal RGB/DINO, state, executed history and language only |
 | FutureSupervision | Disjoint training-only future action/state/DINO evidence |
-| ObjectFactSet | K=4 physical objects plus explicit null and observable object/camera mass |
+| ObjectFactSet | K=4 learned entity slots plus explicit null and observable slot/camera mass; physical identity needs independent correspondence audits |
 | ActionIntentDock | Public S interval/history/K memory plus producer-owned K validity mask; no typed fact re-entry |
 | PolicyIntentDock | Typed task/context with shared operation binding in the cumulative mode; observed change and expected outcome remain separate |
 | PhysicalActionCondition | Four physical interval means plus current-anchored deltas |

@@ -13,6 +13,7 @@ from clearvla.simulation.clearvla_policy import ClearVLACheckpointPolicy
 from clearvla.simulation.history import CausalHistory
 from clearvla.benchmarks.calvin_eval import calvin_policy_observation
 from clearvla.mainline.runtime.sampling import sample_action
+from causal_identity_node_trace import NodeTrace, compare_nodes, identity_from_masks
 
 
 def array(t):return t.detach().float().cpu().numpy()
@@ -28,9 +29,12 @@ def physical_read(facts,masks):
         read=conditional[0,:,camera];global_read=joint[0,:,camera]
         weight=torch.as_tensor(mask,device=read.device,dtype=read.dtype)
         coverage=torch.einsum('khw,ohw->ko',read,weight)
-        law,_=measure.normalized((1,))
-        regional=torch.einsum('khw,ohw->ok',law[0,:,camera],weight)/weight.sum((-2,-1))[:,None].clamp_min(1)
-        result.append(dict(k_object_read=array(coverage).tolist(),K_given_object=array(regional).tolist(),view_mass=array(global_read.sum((-2,-1))).tolist(),visible_pixels=mask.sum((-2,-1)).tolist()))
+        all_source,_=measure.normalized((1,2,3,4))
+        object_joint=torch.einsum('khw,ohw->ok',all_source[0,:,camera],weight)
+        object_mass=object_joint.sum(-1)
+        regional=object_joint/object_mass[:,None].clamp_min(torch.finfo(object_joint.dtype).tiny)
+        supported_pixels=torch.einsum('hw,ohw->o',(all_source[0,:,camera].sum(0)>0).float(),weight)
+        result.append(dict(k_object_read=array(coverage).tolist(),K_given_object=array(regional).tolist(),object_source_mass=array(object_mass).tolist(),object_supported_pixels=array(supported_pixels).tolist(),view_mass=array(global_read.sum((-2,-1))).tolist(),visible_pixels=mask.sum((-2,-1)).tolist()))
     return result
 
 
@@ -40,6 +44,7 @@ def main():
     a=q.parse_args();a.output.mkdir(exist_ok=False);torch.set_num_threads(4)
     policy=ClearVLACheckpointPolicy(a.checkpoint,device=torch.device('cuda:0'),t5_condition=Path('/data/senwang/data/calvin/language/abc_d_full_t5_xxl_bank.pt'),dinov3_model=Path('/data/senwang/clearvla/third_party/dinov3/hf-vitb16-lvd1689m'),seed=0)
     model=policy.bundle.model;g=model.grounding.grounder;captures=[];holder={}
+    trace=NodeTrace(model)
     original_g=g.forward;original_encode=model.encode_online
     import clearvla.simulation.clearvla_policy as frontend
     original_sample=frontend.sample_action
@@ -55,6 +60,7 @@ def main():
     dump(a.output/'identity.json',identity)
     try:
         for row in plan:
+            previous_coverage=None
             with np.load(Path(row['case'])/'trajectory.npz',allow_pickle=False) as z:data={k:z[k] for k in ('rgb_static','rgb_gripper','robot_obs','executed')}
             policy.reset();history=CausalHistory(executed_world=True)
             for t in range(max(row['steps'])+1):
@@ -71,16 +77,21 @@ def main():
                 facts=next(f for f in captures if f.camera_coordinates is cache.top.belief.camera_coordinates)
                 with np.load(a.masks/Path(row['case']).name/('state_%03d.npz'%t),allow_pickle=False) as z:masks=[z['top_masks'],z['wrist_masks']];names=z['object_names'].tolist()
                 with torch.no_grad():coverage=physical_read(facts,masks)
-                entry=dict(case_id=row['case_id'],step=t,object_names=names,coverage=coverage,grounder_calls=len(captures),baseline_first8=action[:8].tolist(),natural=[])
+                entry=dict(case_id=row['case_id'],step=t,object_names=names,coverage=coverage,physical_identity=identity_from_masks(coverage,previous_coverage),grounder_calls=len(captures),baseline_first8=action[:8].tolist(),natural=[],node_comparison_scope='same observed history/reference/noise, total natural instruction response at matching solver calls; not an independent causal contribution fraction')
+                previous_coverage=coverage
                 direction='left' if row['instruction'].endswith('left') else 'right'
-                labels=[row['instruction']]+['go push the '+color+' block '+direction for color in ('red','blue','pink') if color not in row['instruction']]
+                labels=[row['instruction'],row['instruction']]+['go push the '+color+' block '+direction for color in ('red','blue','pink') if color not in row['instruction']]
+                reference_nodes=None;reference_native=None
                 for text in labels:
                     tokens,mask=policy._goal(text)
                     other=replace(online,goal=replace(online.goal,tokens=tokens.to(policy.device),mask=mask.to(policy.device)))
+                    trace.reset()
                     with torch.no_grad():out=sample_action(model,other,policy.bundle.config,initial_physical_noise=sample.initial_physical_noise)
                     new=holder['cache'];mass=array(new.top.intent.target_binding.mass)[0]
                     native=policy.bundle.action_normalizer.decode(array(out.action)[0]);native[:,-1]=array(out.gripper_command)[0]
-                    entry['natural'].append(dict(instruction=text,repeat=text==row['instruction'],binding=mass.tolist(),null=float(new.top.intent.target_binding.null_mass[0]),native_first8=native[:8].tolist(),native_arm_difference_rms=rms(native[:8,:6]-action[:8,:6]),selected_object_read=[(mass@np.asarray(view['k_object_read'])).tolist() for view in coverage],G_content_difference_max=float((new.top.belief.content-facts.content).abs().max())))
+                    nodes=trace.finish(new.top.intent)
+                    if reference_nodes is None:reference_nodes=nodes;reference_native=native.copy()
+                    entry['natural'].append(dict(instruction=text,repeat=text==row['instruction'],binding=mass.tolist(),null=float(new.top.intent.target_binding.null_mass[0]),native_first8=native[:8].tolist(),native_arm_difference_rms=rms(native[:8,:6]-reference_native[:8,:6]),frontend_arm_difference_rms=rms(native[:8,:6]-action[:8,:6]),native_gripper_changed_rows=int((native[:8,-1]!=reference_native[:8,-1]).sum()),nodes=compare_nodes(reference_nodes,nodes),selected_object_read=[(mass@np.asarray(view['k_object_read'])).tolist() for view in coverage],G_content_difference_max=float((new.top.belief.content-facts.content).abs().max())))
                 with torch.no_grad():
                     raw=facts.dense_chart.dino_content[:,None]
                     offsets=torch.tensor([0,4,8,16,24],device=raw.device)
@@ -89,7 +100,7 @@ def main():
                 records.append(entry);dump(a.output/'results.json',dict(identity=identity,records=records,complete=False))
                 print('ADMISSION',row['case_id'],t,flush=True)
         dump(a.output/'results.json',dict(identity=identity,records=records,complete=True))
-    finally:g.forward=original_g;model.encode_online=original_encode;frontend.sample_action=original_sample
+    finally:trace.restore();g.forward=original_g;model.encode_online=original_encode;frontend.sample_action=original_sample
 
 
 if __name__=='__main__':main()
