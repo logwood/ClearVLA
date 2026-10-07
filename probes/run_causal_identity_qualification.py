@@ -1,4 +1,4 @@
-"""Declared read-only qualification stages; never launch formal training."""
+"""Resume-safe read-only qualification stages; never launch formal training."""
 from pathlib import Path
 import argparse
 import hashlib
@@ -102,6 +102,14 @@ def main():
                 passed = value.get('complete') is True and bool(value.get('records'))
             elif stage['contract'] == 'status_complete':
                 passed = value.get('status') == 'complete'
+            elif stage['contract'] == 'label_export_complete':
+                labels = json.loads(Path(stage['result']).with_name('results.json').read_text())
+                passed = value.get('windows') == stage['expected_windows'] == len(labels)
+                passed = passed and len({(row['case'], row['step']) for row in labels}) == len(labels)
+                for row in labels:
+                    path = Path(row['production_labels'])
+                    if hashlib.sha256(path.read_bytes()).hexdigest() != row['production_labels_sha256']:
+                        raise ValueError('exported audit label identity differs: ' + str(path))
             else:
                 raise ValueError('unknown qualification output contract')
             if not passed:

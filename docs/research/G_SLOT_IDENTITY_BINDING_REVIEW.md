@@ -2753,3 +2753,96 @@ Probe development failures are retained with source snapshots: smoke r1 used a
 inconsistent modified observed/innovation data. The qualified r3 decodes only
 unchanged TCP channels and removes projected consumer values while preserving
 all factual feedback validation. Production training/evaluation was untouched.
+
+
+#### 34.33.10 Goal transport and independently observed motion qualification
+
+The complete 12-A/4-B fresh outcome controls preserve parameters and shared
+binding, with exact deterministic repeats. Median native first-eight arm RMS
+changes for A/B are 0.000560/0.000471 when removing observed outcome,
+0.000310/0.000390 for visual goal values, and 0.00591/0.00926 for robot goal
+values. Every removal preserves the original mean X/Z command signs in all
+16 windows. Thus the stronger robot-goal sensitivity does not by itself explain
+withdrawal. These are fixed-input consumer sensitivities, not independent
+contribution fractions or coherent alternate physical rollouts. Artifacts:
+A/B-outcome-maintenance-fresh-r1, including decision-summary.json.
+
+The producer ledger then captures actual S and P3 projection outputs and
+reproduces their contrast and transport contractions exactly in all 16 windows.
+Before current-to-instruction-start transport, desired/current visual laws
+differ (TV about 0.51-0.55); their endpoint real mass is almost one.
+After transport, the current-to-start match retains only 0.0031-0.0265 real
+mass per K/view. S projected image contrast RMS 0.076-0.165 becomes
+0.000146-0.000385. All contraction reproduction errors and paired repeats
+are zero. The successful A04 windows also share this attenuation.
+This establishes a common preparation bottleneck; it does not uniquely
+explain which trial fails. Artifacts: A/B-goal-producer-ledger-fresh-r1;
+pinned probe 2a4a432f, production 3a843999.
+
+The source is model/instruction_posterior.py:242-264, followed by
+model/annotation_goal.py:272-295. The match is computed from frozen observed
+descriptors, averaged over candidate distances relative to a fixed .05 null
+reference (vision/observed_correspondence.py). This correspondence unknown
+mass is separate from G's ownership null, the shared target-binding null and
+the predicted endpoint's null. Conditional-v2 changes the identity objective,
+not this matcher. Renormalizing correspondence unknown back to real mass would
+assert evidence that has not been established.
+
+An independent past-four-frame calibration uses exact RGB replay and admitted
+RGB-flow pairs, with body masks only partitioning outputs. The actual W
+measurement uses pooled/normalized 8x8 features; instruction-start matching
+uses the 16x16 frontend chart. The probe verifies both feature provenance and
+production K-weighted null and pair-delta transport (maximum errors zero).
+In four windows (old 01/24,05/24,11/24,17/136), same-body wrist endpoints retain
+only 0.97-1.81% real match mass. Their conditional endpoint errors average
+7.83-17.60 pixels. Native 16x16 controls still give 8.80-20.06 pixels at the
+wrist and worsen one top-camera window to 25.67 pixels. Grid size alone
+therefore does not admit a repair.
+
+Keep endpoint localization and production transport separate. Production
+source_measurement.py:38-43 takes pair differences BEFORE source aggregation;
+subtracting a continuous query after law interpolation also includes a
+confidence-weighted source-centroid term. Calibration-r2/r3 and localization-r1
+retain this scope correction in MEASUREMENT_SCOPE.json. The completed
+A-observed-match-localization-r2 reproduces actual transport, reports that
+pair-delta error separately, and separates admitted motion >1 pixel from
+near-static <=0.25 pixel endpoints. These audit bins never enter the model.
+
+Same-null top1/top5 controls isolate candidate averaging from confidence.
+They reduce several conditional endpoint errors, but top1 gives exactly zero
+pooled motion for all sampled top-camera objects in these four windows and
+for wrist objects in 11/17. For example, case17 top true motion averages
+3.26 pixels while top1 pair-delta error remains 3.26 pixels.
+A lower endpoint error can therefore hide an unresponsive motion estimator.
+Neither top1, finer grids nor a confidence increase is qualified.
+These correlated four-window results require broader displacement and
+occlusion support before defining a new production measurement.
+
+Meta's [DINOv3 tracking example](https://github.com/facebookresearch/dinov3/blob/main/notebooks/segmentation_tracking.ipynb)
+uses local top-k feature matching and first-frame instance labels. It motivates
+an aggregation control, but its label initialization and probability semantics
+do not provide our online unknown/physical-motion contract. No oracle instance
+initialization, raw color rule or new training objective has been added.
+
+A's complete own-panel consumer audit now contains 128 windows and exact
+same-image measurement zeros. 86/256 same-instruction comparisons vary
+(up to 0.000681 native arm RMS); color-response median is 0.000464.
+The official runtime remains unchanged; use deterministic paired controls
+before interpreting small downstream semantic gains.
+Artifact: A-fresh-factual-short-r1/decision-summary.json.
+
+Current B-v2 training explicitly includes annotated_goal supervision
+(weight .01; at batch680 raw 0.443588, contribution 0.00443588).
+Do not reuse the historical claim that endpoint supervision is absent.
+Neither formal training is promoted. Next qualify actual motion and
+correspondence confidence on the existing full 18/63 historical plan, then
+check the candidate on distinct fresh trajectories and longer instruction-start
+gaps. Preserve all ongoing v2 and identity/consumer evaluations.
+
+Reproduce the focused calibration with each checkpoint's own runtime:
+PYTHONPATH=<training-source> CUBLAS_WORKSPACE_CONFIG=:4096:8 python
+probes/probe_observed_match_calibration.py --checkpoint <best.pt>
+--plan candidate-factual-plan.json --labels identity-object-source-labels-r1
+--output <new-dir> --native-control --localization-controls.
+Use probe_causal_outcome_maintenance.py --producer-ledger --ledger-only with
+the saved A/B-outcome-maintenance-fresh-plan.json for the actual goal ledger.

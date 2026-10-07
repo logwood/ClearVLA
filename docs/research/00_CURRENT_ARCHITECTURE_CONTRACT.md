@@ -1748,6 +1748,16 @@ old-model panels scored stored_target 11/18, measured_tcp 3/18, replan_tcp
 therefore does not justify blindly switching controller mode. Arm/gripper
 conditioning and controller-state issues remain separately audited.
 
+The 16 fresh outcome/goal ledgers in 34.33.10 identify current-to-instruction-
+start correspondence attenuation before S/P3: per-K/view real match mass is
+0.0031-0.0265 even in successful windows. This is correspondence uncertainty,
+not G ownership null or binding null. Independent RGB-flow calibration also
+finds poor localization; finer features alone do not solve it. Same-null top1
+can reduce endpoint error by predicting zero motion. Qualify measured pair
+displacement (before source aggregation), static behavior and unknown support
+separately before any matcher change; never simply promote null to real mass.
+The production v2 identity repair and all existing evaluations remain unchanged.
+
 ### Current CALVIN audit constraint (2026-10-07)
 
 For causal-repair decisions, use G_SLOT_IDENTITY_BINDING_REVIEW.md sections

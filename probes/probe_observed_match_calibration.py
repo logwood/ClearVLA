@@ -69,7 +69,15 @@ def score_camera(law, h, w, camera, labels, image_shape):
     endpoint = (sampled[:,:-1]@grid)/real[:,None].clamp_min(1e-30)
     truth = torch.from_numpy(labels['temporal_target'][camera]).to(device)
     pixels = torch.tensor([(image_shape[1]-1)/2,(image_shape[0]-1)/2],device=device)
-    expected_delta = (sampled[:,:-1]@grid-real[:,None]*xy)*pixels
+    # Production transports pair differences before aggregating source rows.
+    # A sampled endpoint minus the query location has an additional source
+    # centroid term when neighboring rows carry different confidence.
+    row_real = law[:,camera,:,:-1]
+    row_delta = row_real@grid-row_real.sum(-1,keepdim=True)*grid
+    pair_delta = F.grid_sample(row_delta.permute(0,2,1).reshape(1,2,h,w),
+        xy[None,:,None],mode='bilinear',align_corners=True)[0,:,:,0].T*pixels
+    conditional_pair_delta = pair_delta/real[:,None].clamp_min(1e-30)
+    endpoint_offset = (sampled[:,:-1]@grid-real[:,None]*xy)*pixels
     true_delta = (truth-xy)*pixels
     endpoint_error = torch.linalg.vector_norm((endpoint-truth)*pixels,dim=-1)
     distance = torch.linalg.vector_norm(true_delta,dim=-1)
@@ -78,6 +86,8 @@ def score_camera(law, h, w, camera, labels, image_shape):
     target_body = labels['temporal_target_body'][camera]
     same_object = (source_body>=0)&(source_body==target_body)
     regions = dict(all_accepted=valid,nonobject=valid&(source_body<0),same_object=valid&same_object)
+    regions['same_object_motion_gt1px'] = valid&same_object&(array(distance)>1.)
+    regions['same_object_motion_le025px'] = valid&same_object&(array(distance)<=.25)
     for obj,name in enumerate(labels['object_names']):
         regions[str(name)] = valid&same_object&(source_body==obj)
     metrics = {}
@@ -86,8 +96,10 @@ def score_camera(law, h, w, camera, labels, image_shape):
         metrics[name] = dict(count=int(ids.sum()),real_mass=stats(array(real[ids])),
             conditional_endpoint_error_pixels=stats(array(endpoint_error[ids])),
             true_displacement_pixels=stats(array(distance[ids])),
-            unconditional_displacement_pixels=stats(array(torch.linalg.vector_norm(expected_delta[ids],dim=-1))),
-            unconditional_displacement_error_pixels=stats(array(torch.linalg.vector_norm(expected_delta[ids]-true_delta[ids],dim=-1))))
+            endpoint_offset_pixels=stats(array(torch.linalg.vector_norm(endpoint_offset[ids],dim=-1))),
+            production_pair_delta_pixels=stats(array(torch.linalg.vector_norm(pair_delta[ids],dim=-1))),
+            production_pair_delta_error_pixels=stats(array(torch.linalg.vector_norm(pair_delta[ids]-true_delta[ids],dim=-1))),
+            conditional_pair_delta_error_pixels=stats(array(torch.linalg.vector_norm(conditional_pair_delta[ids]-true_delta[ids],dim=-1))))
     return dict(camera=camera,source_body_mismatch_count=int((valid&(source_body>=0)&~same_object).sum()),regions=metrics)
 
 
@@ -184,10 +196,16 @@ def main():
                     joint, _ = facts.current_image_source.on_image(rows=h,columns=w).restrict(source_mask[:,None]).normalized((2,3,4))
                     reproduced = torch.einsum('bkcn,bcn->bk',joint.flatten(-2),law[...,-1])
                     torch.testing.assert_close(reproduced, produced.null_probability[:,0,:,0], rtol=0., atol=2e-6)
+                    conditional,_ = facts.current_image_source.on_image(rows=h,columns=w).restrict(source_mask[:,None]).normalized((-2,-1))
+                    chart = current_image_grid(h,w,device=policy.device).reshape(h*w,2)
+                    pair_delta = law[...,:-1]@chart-law[...,:-1].sum(-1,keepdim=True)*chart
+                    reproduced_delta = torch.einsum('bkcn,bcnd->bkcd',conditional.flatten(-2),pair_delta)
+                    torch.testing.assert_close(reproduced_delta, produced.transport_per_support[:,0], rtol=0., atol=2e-6)
                 record = dict(case_id=row['case_id'],case=case.name,step=t,source_frames=labels_now['source_frames'].tolist(),
                     label_sha256=entry['production_labels_sha256'],production_measurement_chart=[h,w],
                     native_frontend_tokens=int(online.observation.dino_history.shape[-2]),
                     actual_G_measurement_null=array(produced.null_probability[:,0,:,0])[0].tolist(),
+                    production_pair_delta_reproduction_max=float((reproduced_delta-produced.transport_per_support[:,0]).abs().max()),
                     production_null_reproduction_max=float((reproduced-produced.null_probability[:,0,:,0]).abs().max()),cameras=[])
                 for camera,rgb_key in enumerate(('rgb_static','rgb_gripper')):
                     record['cameras'].append(score_camera(law,h,w,camera,labels_now,data[rgb_key].shape[1:3]))
