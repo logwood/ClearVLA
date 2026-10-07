@@ -1726,6 +1726,10 @@ short completed 1024 BS8 updates and 256 offline batches at step 12036;
 its standard panel and physical-object qualification are running. Other-episode
 source replacement still raises prediction MSE only 0.56-4.01%, despite low
 offline ownership null. Neither fact proves learned physical identity.
+The partial v2 panel already regresses case03 versus A/B-v1 at identical
+initial states; B-nullv2-short-r1-promotion-block.json keeps formal promotion
+blocked while the full panel/probes continue. Correct-object contact alone
+does not certify post-contact progress or task maintenance.
 No formal A/B experiment is promoted. See 34.33.6-34.33.12
 and pinned external receipts for current evidence and pending qualifications.
 

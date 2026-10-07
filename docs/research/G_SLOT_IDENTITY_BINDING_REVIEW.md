@@ -3049,3 +3049,33 @@ probe_observed_match_calibration.py --label-source rigid_audit --existing-flow;
 add --reference-rgb-labels for DINO-seeded RGB refinement. Immutable receipts
 record complete commands, checkpoint identity and plan hashes. Large evidence
 stays in the experiment directory; no internal tensor archive is downloaded.
+
+At 22:28 UTC the panel has nine completed cases: six successes, failures
+02/03/09. This is not a final panel score. Case03 regresses relative to both
+A and B-v1; case09 regresses relative to B-v1. All compared initial robot and
+scene arrays are exactly equal. Case03 first contacts the correct blue block
+at state195, reaches only 4.370cm displacement at state287 and finishes at
+2.790cm. Goal/TCP gap at its progress peak is 2.05mm (whole-trial max 2.09cm).
+Case09 first contacts red at 127, peaks at 4.235cm at 137 with a 4.40mm gap.
+These observations require contact/post-contact maintenance analysis; they do
+not attribute the regression uniquely to the identity-loss change or a
+controller mechanism. B-nullv2-short-r1-promotion-block.json prevents formal
+promotion pending full qualification and repair. All existing jobs continue.
+
+The first 25 matched old windows also retain a physical separation concern:
+32/39 supported object pairs share their dominant K, with per-camera median
+real-K TV 0.0774/0.0595. This partial audit is not the complete 60-window result,
+and dominant-K equality alone does not prove every downstream value identical.
+Retain the atom-null/source-support and natural-command chain alongside it.
+Artifact B-nullv2-matched-factual-partial-2230.json records its actual 22:25 UTC
+snapshot; B-nullv2-partial-panel-snapshot.json records the panel comparison.
+
+An additional read-only v2 audit now uses these own completed trajectories:
+success01 at112/120/128; regression03 at184/192/200 and272/280/288;
+regression09 at112/120/128/136/144. These are actual first-correct-contact
+and peak-progress replans, not reused A/B-v1 timestamps. The existing
+outcome/goal consumer removals and exact producer ledger run together under
+pinned b2485755/T2, deterministic paired controls, unchanged binding and
+parameters. Receipt B-nullv2-outcome-regressions-fresh-r1.receipt.json records
+the selection and script/plan hashes; job status has the -job directory suffix.
+It does not replace the full v2 fresh physical-mask/natural-command audit.
