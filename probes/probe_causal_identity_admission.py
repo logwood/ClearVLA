@@ -6,7 +6,7 @@ not produced. Run with PYTHONPATH pointing to the checkpoint's source checkout.
 """
 from pathlib import Path
 from dataclasses import replace
-import argparse,json,hashlib
+import argparse,json,hashlib,os
 import numpy as np
 import torch
 from clearvla.simulation.clearvla_policy import ClearVLACheckpointPolicy
@@ -52,7 +52,14 @@ def physical_read(facts,masks):
 def main():
     q=argparse.ArgumentParser()
     for name in ('checkpoint','plan','masks','output'):q.add_argument('--'+name,type=Path,required=True)
+    q.add_argument('--deterministic',action='store_true',help='Audit-only deterministic operator control; does not change trained graph or official panel')
     a=q.parse_args();a.output.mkdir(exist_ok=False);torch.set_num_threads(4)
+    if a.deterministic:
+        if os.environ.get('CUBLAS_WORKSPACE_CONFIG') not in (':4096:8',':16:8'):
+            raise ValueError('set CUBLAS_WORKSPACE_CONFIG before starting this probe process')
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark=False
+        torch.backends.cudnn.deterministic=True
     policy=ClearVLACheckpointPolicy(a.checkpoint,device=torch.device('cuda:0'),t5_condition=Path('/data/senwang/data/calvin/language/abc_d_full_t5_xxl_bank.pt'),dinov3_model=Path('/data/senwang/clearvla/third_party/dinov3/hf-vitb16-lvd1689m'),seed=0)
     model=policy.bundle.model;g=model.grounding.grounder;captures=[];holder={}
     trace=NodeTrace(model)
@@ -68,6 +75,8 @@ def main():
     g.forward=ground;model.encode_online=encode;frontend.sample_action=sampled
     plan=json.loads(a.plan.read_text());records=[]
     identity=dict(checkpoint=str(a.checkpoint),checkpoint_sha256=policy.bundle.checkpoint_sha256,script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),config=policy.bundle.config.top.__dict__,mask_use='audit-only',source='recorded-causal-history-at-fixed-observation',scope='read-support/appearance correspondence, not independently proven semantic identity')
+    identity['deterministic_operator_control']=a.deterministic
+    identity['cublas_workspace_config']=os.environ.get('CUBLAS_WORKSPACE_CONFIG')
     dump(a.output/'identity.json',identity)
     try:
         for row in plan:
