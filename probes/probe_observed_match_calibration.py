@@ -103,6 +103,37 @@ def score_camera(law, h, w, camera, labels, image_shape):
     return dict(camera=camera,source_body_mismatch_count=int((valid&(source_body>=0)&~same_object).sum()),regions=metrics)
 
 
+def score_existing_flow(flow, confidence, occlusion, labels, camera, image_shape):
+    """Score the already computed forward flow; no rerun or policy substitution."""
+    h,w=flow.shape[-2:];ih,iw=image_shape
+    query=torch.from_numpy(labels['temporal_source'][camera]).to(flow.device).float()[None,:,None]
+    scale=flow.new_tensor([(iw-1)/(w-1),(ih-1)/(h-1)])[None]
+    def sample(value):
+        return F.grid_sample(value.float(),query,mode='bilinear',padding_mode='border',align_corners=True)[0,:,:,0].T
+    vector=sample(flow)*scale
+    reliability=confidence.float()*(1-occlusion.float())
+    # Gate before interpolation. This is a diagnostic use of the existing
+    # reliability, not a calibrated null probability or production W law.
+    weighted=sample(flow.float()*reliability)*scale
+    true=(labels['temporal_target'][camera]-labels['temporal_source'][camera])*np.array([(iw-1)/2,(ih-1)/2])
+    true=torch.from_numpy(true).to(flow.device).float()
+    source_body=labels['temporal_source_body'][camera]
+    valid=labels['temporal_valid'][camera]&(source_body>=0)&(source_body==labels['temporal_target_body'][camera])
+    magnitude=array(torch.linalg.vector_norm(true,dim=-1))
+    masks=dict(same_object=valid,same_object_motion_gt1px=valid&(magnitude>1),
+               same_object_motion_le025px=valid&(magnitude<=.25))
+    regions={}
+    for name,mask in masks.items():
+        ids=torch.from_numpy(mask).to(flow.device)
+        regions[name]=dict(count=int(mask.sum()),true_displacement_pixels=stats(magnitude[mask]),
+            raw_flow_pixels=stats(array(torch.linalg.vector_norm(vector[ids],dim=-1))),
+            raw_error_pixels=stats(array(torch.linalg.vector_norm(vector[ids]-true[ids],dim=-1))),
+            reliability_weighted_error_pixels=stats(array(torch.linalg.vector_norm(weighted[ids]-true[ids],dim=-1))),
+            reliability=stats(array(sample(reliability)[ids])),confidence=stats(array(sample(confidence)[ids])),
+            occlusion=stats(array(sample(occlusion)[ids])))
+    return dict(camera=camera,grid=[h,w],regions=regions)
+
+
 def main():
     parser = argparse.ArgumentParser()
     for key in ('checkpoint', 'plan', 'labels', 'output'):
@@ -111,6 +142,7 @@ def main():
     parser.add_argument('--localization-controls', action='store_true', help='Measure top1/top5 spreading controls at identical row null; never feed them to policy')
     parser.add_argument('--label-source', choices=('sensor','rigid_audit'), default='sensor',
         help='Audit truth only; rigid_audit is simulator geometry and is prohibited as a training/online input')
+    parser.add_argument('--existing-flow',action='store_true',help='Capture the existing SEA-RAFT-style RGB and coarse flow without extra model calls')
     args = parser.parse_args()
     args.output.mkdir(exist_ok=False)
     if os.environ.get('CUBLAS_WORKSPACE_CONFIG') != ':4096:8':
@@ -128,6 +160,23 @@ def main():
     teacher = model.training_targets.teacher
     original = teacher.measure_observations
     captured = []
+    prepared_captured=[]
+    original_prepare=model.observation.prepare
+
+    def prepare(*items,**kwargs):
+        prepared=original_prepare(*items,**kwargs)
+        if args.existing_flow:
+            pack=prepared.pack;raw=pack.raw_context
+            item=dict(dino=prepared.observation.dino_history.detach(),
+                coarse=(pack.patch_flow_forward[:,-1].detach().clone(),
+                        pack.flow_confidence[:,-1].detach().clone(),pack.flow_occlusion[:,-1].detach().clone()))
+            if raw is not None:
+                item['raw']=(raw.flow_forward[:,-1].detach().clone(),
+                             raw.confidence[:,-1].detach().clone(),raw.occlusion[:,-1].detach().clone())
+            prepared_captured.append(item)
+        return prepared
+
+    if args.existing_flow:model.observation.prepare=prepare
 
     def measure(**kwargs):
         result = original(**kwargs)
@@ -191,6 +240,7 @@ def main():
                 if labels_now['source_frames'].tolist() != [t-4,t]:
                     raise ValueError('independent temporal labels do not use the observed four-step window')
                 captured.clear()
+                prepared_captured.clear()
                 _, online = policy.act_with_input(history.snapshot(), row['instruction'])
                 if len(captured) != 1:
                     raise ValueError('expected exactly one executed observed-world measurement')
@@ -233,6 +283,15 @@ def main():
                     record['sensor_vs_rigid_audit'] = sensor_comparison
                 for camera,rgb_key in enumerate(('rgb_static','rgb_gripper')):
                     record['cameras'].append(score_camera(law,h,w,camera,labels_now,data[rgb_key].shape[1:3]))
+                if args.existing_flow:
+                    matched=[p for p in prepared_captured if p['dino'].shape==online.observation.dino_history.shape
+                             and torch.equal(p['dino'],online.observation.dino_history)]
+                    if len(matched)!=1:raise ValueError('existing-flow capture must match exactly one current online observation')
+                    p=matched[0]
+                    record['existing_learned_flow']={name:[score_existing_flow(
+                        values[0][:,camera],values[1][:,camera],values[2][:,camera],labels_now,camera,data[key].shape[1:3])
+                        for camera,key in enumerate(('rgb_static','rgb_gripper'))]
+                        for name,values in p.items() if name!='dino'}
                 if args.localization_controls:
                     record['localization_controls'] = {name: [
                         score_camera(candidate,h,w,camera,labels_now,data[key].shape[1:3])
@@ -265,6 +324,7 @@ def main():
         dump(args.output/'results.json',report)
     finally:
         teacher.measure_observations = original
+        model.observation.prepare = original_prepare
 
 
 if __name__ == '__main__':
