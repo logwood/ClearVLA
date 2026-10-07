@@ -1338,3 +1338,246 @@ trajectory masks/physical-identity probes are chained afterwards. Artifacts:
 dinov3-causal-repair-20261006/pilot64-mature-bs8-adam-{checkpoint,fresh}-r1,
 pilot64-adam-checkpoint-eval18-command.json and
 pilot64-adam-checkpoint-fresh-audit-receipt.json. No candidate acceptance yet.
+
+### 34.20 Research priority and completed 64-update diagnostic (2026-10-07)
+
+The user clarified that 64 updates are a diagnostic of update direction and
+regression, not a credible efficacy or convergence test. Do not replace a
+structural diagnosis with repeated 64-update repairs. Existing work was allowed
+to finish naturally; no training, closed loop or probe was stopped for this
+change of emphasis. Endpoint provenance remains a correctness repair, not the
+main explanation for the behavioral failures.
+
+The retained-Adam pilot in 34.19 has now completed the standard 18-case closed
+loop: **9/18**, versus the original complete model's 11/18. Cases 1, 3 and 15
+were lost, and 11 was gained. The gain in 11 is indirect: the robot contacted
+pink, pink contacted red, and red reached 101.858 mm signed progress. It is not
+evidence of correct red-object selection. The 512-update merged candidate was
+7/18; neither short continuation is promoted.
+
+The matched 64-update fresh/retained-Adam runs share source, data, seed, batch
+size and update count. Median first-eight arm snapshot change over 18 initial
+observations is 0.009571 versus 0.008888 (about 7% smaller), not a large behavioral
+repair. Median absolute mean-X shift is 0.008562 versus 0.008885; do not confuse
+cancellation in the signed median with suppression of drift. Both 16-batch,
+126-sample offline panels have decoded event F1 0.271186; these are not the full
+256-batch panel. Both log audits remain finite; saturated capacity is a triage
+finding, not the demonstrated cause of failure.
+
+The retained pilot's fresh trajectory audit completed 125 exact-RGB mask states
+covering all 18 cases. Recorded-command replay has median arm RMSE 0.000213,
+maximum 0.000595, and no gripper disagreement. K3 is binding argmax in every
+audited state; this does not establish a persistent physical identity. Natural
+color changes remain weak (median arm RMS 0.000356, repeat 0.000206), while
+direction changes are 0.057716. Fixed-read target coverage is poor in 05/24 and
+11/24, but a target-covering read is available in 17/136. Selection and later
+task maintenance remain distinct failure boundaries.
+
+Artifacts under dinov3-causal-repair-20261006: adam-pilot64-matched-decision.json,
+adam-pilot64-log-audit.json, pilot64-mature-bs8-adam-checkpoint-r1-fresh-audit-decision.json,
+the corresponding fresh-trajectory-audit, and changed-cases-physical.json.
+
+### 34.21 Ordinary backward and language-read controls
+
+probe_objective_update_routes.py replays one actual bs8 ordinary training batch
+at step 11012 with restored RNG/buffers, normal backward/clipping and CPU AdamW
+proposals. Live parameters, optimizer and training clock do not change. Compared
+with the formal repaired objective, restoring uniform action-row weights changes
+the bottom/P1 clipped gradient by about 16.5%; removing the adjacent gripper
+transition term changes it by about 7.3%. Removing endpoint supervision changes
+bottom/P1 gradients by about 0.5–0.6%, comparable to the repeated-forward floor,
+but changes intent gradients by 17.8%. This is one batch, not an attribution of
+the 64/512-update rollout regression. The binary action-flow loss is already
+arm-only; no continuous-gripper flow bug was found.
+
+Artifact: pilot64-mature-bs8-adam-checkpoint-r1-objective-routes-r3.json.
+The first two rejected probe attempts and their receipts remain preserved.
+
+The full 11012 model was also tested at 01/05/11 state 24 and 17 state 136 with
+uniform goal attention, half query scale, and masking only the last valid text
+token. Actual V/output/self blocks and downstream computation remain active.
+Masking the final token roughly doubles the color difference at the goal read
+(0.0231 to 0.0511), but action color differences remain around 0.0004–0.0008.
+Uniform attention also damages direction distinction. None is an accepted fix;
+do not call the final valid token EOS without verifying token identity.
+Artifact: causal-repair-20261006-v4/language-attention-interventions-r1-decision.json.
+
+### 34.22 Arm-conditioned gripper training/deployment boundary
+
+Source: training/engine.py:1009–1065, endpoint_supervision.py:60–74 and
+runtime/sampling.py:271–285,417–455. The training endpoint head reads the labelled
+arm endpoint on the coarse W cache. Deployment reads the generated arm endpoint;
+the refined pass also rebuilds W. This factorization is explicit in the source,
+not a newly discovered label leak or proof that every changed gripper is wrong.
+
+probe_endpoint_condition_distribution.py crosses these two factors on the SAME
+16 validation batches (128 samples, 2536 observed command rows, 958 first-eight
+rows). This differs from the 126-sample short-run panel above. Labels, source
+noise and row support are matched. Recomputed refined/generated logits match
+the original sampler exactly, with zero command disagreement. No optimization
+or checkpoint write occurs.
+
+| W cache / endpoint arm | observed-row command agreement | first-eight agreement | mean CE |
+|---|---:|---:|---:|
+| coarse / labelled | 95.071% | 96.242% | 0.140907 |
+| coarse / generated | 87.934% | 91.336% | 0.543074 |
+| refined / labelled | 95.032% | 96.347% | 0.141321 |
+| refined / generated | 88.013% | 91.545% | 0.542118 |
+
+Changing arm field alters 274–275 commands; changing only W cache alters 4–5.
+The complete-24-row sample subgroup retains the difference, so unknown tail
+noise does not explain it. Exact-row/type event matching is recorded separately
+and must not be conflated with the production decoded-event metric.
+
+This establishes conditional distribution sensitivity. A generated arm can
+already be physically wrong; forcing its gripper to match the expert's different
+arm plan is not automatically a valid repair. Any training change must check
+arm/gripper compatibility and real contact outcomes, not only increase CE
+agreement. Artifact: causal-repair-20261006-v4/endpoint-condition-distribution-r2-decision.json.
+The rejected r1 config-admission attempt is preserved; the gate was not weakened.
+
+### 34.23 Auxiliary dialogue checked against factual stage records
+
+The attached dialogue usefully separates several failure stages. Its following
+claims were independently reproduced from all-18 trajectory/environment records:
+
+* At state 40, 03 has an empty gripper (0.00662 mm opening), no block contact,
+  yet requests nominal first-eight XYZ displacement (-76.451,-13.871,+21.823) mm.
+  01 holds wrong pink with 41.202 mm opening and requests (-126.246,-7.842,+15.123);
+  07 holds correct red with 41.220 mm opening and requests (-124.924,-6.989,+17.124).
+  These are nominal command increments, not measured TCP displacement.
+* At 09/201, TCP X error to target is -0.408 mm but Y error is 47.826 mm.
+  The held-target Y error is 50.273 mm and target-to-TCP tracking error only
+  2.447 mm. At 11/231 the corresponding Y errors are 67.779, 70.714 and 2.936 mm.
+  Correcting servo accumulation alone does not align these requested contacts.
+* After their last target contacts (10/139 and 17/138), both execute another
+  27 replans and about 1.434 m of TCP travel. Further target progress is
+  -0.019 mm and +0.414 mm. Repeated robot movement is not task progress.
+
+These observations do not prove a hidden task clock. Artifact:
+causal-repair-20261006-v4/auxiliary-dialogue-stage-verification.json.
+
+The width-only sensor intervention updates current state and its timestamp-zero
+duplicate through the actual encoder/normalizer, while retaining factual RGB,
+past state/control and reference. It is not a physical counterfactual rollout.
+In 13 windows it changes commands, ruling out complete absence of width input.
+At 17/136 the mean first-eight Z command is +0.384, +0.395 and +0.396 for factual,
+held-object and open-width inputs; the withdrawal remains. At 03/40, empty and
+held-object width both retain left/up transport. Do not reduce the failure to
+one missing proprioceptive scalar. Artifact: observed-opening-consumption-r1-decision.json.
+
+### 34.24 Newly localized S correspondence failure and bounded causal controls
+
+The actual S posterior is produced by model/instruction_posterior.py:179–192,
+218–257. G's current spatial source is multiplied by a learned full-image
+current-to-current kernel, then by a separate current-to-reference kernel. The
+current side therefore performs another search after the G source was located.
+Independent learned Q/K/content-position projections have no self-identity
+constraint in this module; its geometric interpretation is not guaranteed by
+its name. Policy gradients can learn a useful global comparison without learning
+physical correspondence.
+
+The complete model was traced over 14 factual windows, with simulator masks only
+partitioning the report. At 17/136, the best K/view pink-overlap mass on the
+native 16x16 chart is 0.599399 before current rematching; the SAME K4/wrist read
+retains only 0.064683 afterwards (the best post-rematch K/view is 0.092937).
+The actual binding/view-weighted target footprint is 0.06835 before and 0.03991
+after rematching, with background dominating both. An available target-covering
+K does not mean S selected that K. This is an area-pooled mask footprint, not the earlier exact bilinear P1
+coverage measure and not proof that a DINO feature contains only that object.
+K-to-K probability differences also contract substantially. Do not interpret
+artificial K index swaps as real physical identities.
+
+Five windows were then inspected at kernel level in both the original complete
+checkpoint and the 64-update checkpoint on EACH model's own exact-RGB histories:
+
+| model | current-to-itself diagonal mean | normalized entropy | self-location top-1 fraction |
+|---|---:|---:|---:|
+| original 11012 | 0.002823–0.003320 | 0.9725–0.9888 | 0–0.003906 |
+| retained-Adam 11076 | 0.002878–0.003496 | 0.9683–0.9910 | 0–0.003906 |
+
+There are 256 real patches (uniform real-cell probability about 0.0039).
+The learned module does not behave as an identity-preserving current-image
+correspondence. A fixed DINO-cosine RANKING with each row's exact probability
+multiset and null retained improves object-overlap, but the original distribution
+is too diffuse for ranking alone to recover a concentrated object read.
+
+In the actual S progress output at 17/136, projected source RMS is robot 1.319,
+content 0.599, joint content/position 0.336, status 0.362, image 0.0100, before the
+shared RMS contract. These are source magnitudes, not independent contribution
+percentages or a proof that the robot component alone causes withdrawal.
+
+Seven matched full-sampler controls include the reset observation and the
+empty/wrong/correct-contact and late-withdrawal windows. No G/binding change is
+allowed. They test (a) repeated baseline, (b) DINO-cosine ranking with EXACT real
+mass/null/concentration, (c) fixed cosine/sqrt(D) redistribution with original
+null, and (d) zeroing only S's robot-displacement value. Both kernel alternatives
+preserve zero content/image/posterior difference when current and reference are
+identical at reset. Neither removes withdrawal: at 17/136 baseline X/Z is
+-0.201/+0.384, ranking -0.223/+0.377, fixed metric -0.284/+0.375, robot-zero
+-0.198/+0.377. A one-line matcher replacement or deleting robot evidence is NOT
+an accepted behavioral repair. This narrows what the remaining repair must do.
+
+Artifacts: causal-repair-20261006-v4/instruction-correspondence-{identity-r1,
+kernel-r2,controls-r1}, instruction-correspondence-identity-decision.json, and
+dinov3-causal-repair-20261006/pilot64-mature-bs8-adam-checkpoint-r1-instruction-kernel-r1.
+Scripts are probe_instruction_correspondence_identity.py (--kernel-audit for the
+bounded kernel panel) and probe_instruction_correspondence_controls.py. Exact
+commands, hashes and source snapshots remain alongside each experiment.
+
+### 34.25 Remaining structural repair contract and the two future trainings
+
+The next repair must address several distinct boundaries; none of the completed
+inference controls establishes a complete replacement architecture. Do not launch
+two formal runs simply because the diagnostic panels finished.
+
+1. **Observed outcome versus prediction error.** policy.py:679–688 computes the
+   measured semantic/image change and subtracts W's prediction, then exports the
+   innovation. ExecutedWorldPlanRead primarily consumes this innovation. A
+   correctly predicted lack of motion and a correctly predicted useful motion
+   can both give zero innovation. Covariance/null/status do not reconstruct the
+   discarded signed outcome. RobotExecutionObserver has the same distinction.
+   This is a lossy FEEDBACK interface; the whole network still has current RGB,
+   state/history and instruction-reference inputs. A repair should retain typed
+   observed change, predicted change and innovation separately, with source-owned
+   masks. It must not label prediction accuracy as task completion.
+2. **Where feedback can revise the proposal.** Current policy ordering is robot
+   observer -> G -> S -> executed-W replay -> coarse -> candidate W. Explicit
+   executed-world and robot-response reads enter compiler.py:1853/1873 at P3.
+   They do not condition this S/coarse proposal directly. Split binding from
+   interval/phase organization if necessary, so the ONE S-owned binding can read
+   causal observed outcome before forming the proposal, without another G pass,
+   duplicate target law, future label, task-conditioned W, or extra ODE clock.
+3. **Identity and correspondence.** G reconstruction's camera/background shortcut
+   (34.18), weak language-to-object pressure (34.21), and the measured S rematch
+   diffusion (34.24) are separate. Merely increasing S amplitude or sharpening
+   uncalibrated logits does not fix them. Camera-conditioned reconstruction must
+   not reward coding camera identity as object identity. A revised correspondence
+   needs self/known-transform consistency and explicit unknown handling, tested
+   against actual object movement, occlusion and cross-view source support.
+4. **Joint arm/gripper conditions.** Resolve the matched conditional discrepancy
+   from 34.22 while retaining ordinary gradients and observed-label support.
+   Detached predicted-arm endpoint conditions are a candidate training method,
+   not a certified fix; expert command labels on an incompatible generated arm
+   require mechanical compatibility checks. Do not accept CE improvement alone.
+
+The requested two full trainings are reserved as:
+
+* **A — confirmed interface repair:** changes justified by source/trajectory
+  evidence, with explicit outcome/innovation ownership, proposal consumption and
+  an admitted arm/gripper condition contract. Keep unproven broad changes out of
+  this variant. The current one-line kernel/robot-zero controls are excluded.
+* **B — structural extension on A:** additionally rebuild the object/value and
+  task-phase organization where camera/background reconstruction and compressed
+  language/progress signals fail. Preserve token/object/view/source-time axes
+  until their owning read, instead of amplifying a common pooled carrier.
+
+These are implementation targets, not completed model configs. Before either
+launch: review all accumulated repairs together; verify forward and ordinary
+backward source ownership, same-image no-change, missing/unknown support, K/view
+permutation, no future/oracle leakage, and real stage/identity diagnostics. Use
+the same full declared training exposure and standard 256-batch offline plus
+18-case replan-8 closed loop for both; 64 updates may check numerical mechanics,
+not success. Keep data/normalizer/outlet/controller choices explicit, preserve
+failure records, and do not silently reuse an incompatible checkpoint or Adam
+state. Simulator positions/contact/masks remain audit-only under current scope.

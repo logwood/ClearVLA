@@ -60,6 +60,7 @@ def main():
     ap.add_argument("--reconstruction-chain", action="store_true")
     ap.add_argument("--native-value", action="store_true")
     ap.add_argument("--binder-view-source", action="store_true")
+    ap.add_argument("--goal-attention-intervention", action="store_true")
     args=ap.parse_args();args.output.mkdir(exist_ok=False);torch.set_num_threads(4)
     coverage=load_coverage(args.coverage_script)
     policy=ClearVLACheckpointPolicy(args.checkpoint,device=torch.device("cuda:0"),
@@ -78,6 +79,32 @@ def main():
     assert len(organizers)==1
     organizer=organizers[0];binder=organizer.shared_binder
     original_bind=binder.forward;language_trace={};language_hooks=[]
+    original_goal_attention=organizer.goal_read.attention.forward
+    def attention_inputs(query, padding):
+        if not args.goal_attention_intervention:
+            return query, padding
+        if variant == "uniform_goal_tokens":
+            query = torch.zeros_like(query)
+        elif variant == "half_goal_logits":
+            query = query * 0.5
+        elif variant == "mask_final_valid_goal_token":
+            if padding is None or padding.dtype != torch.bool:
+                raise ValueError("goal intervention requires explicit boolean token padding")
+            valid = ~padding
+            index = torch.arange(valid.shape[1], device=valid.device)[None].expand_as(valid)
+            last = index.masked_fill(~valid, -1).max(-1).values
+            legal = valid.sum(-1) > 1
+            padding = padding.clone()
+            batch_rows = torch.arange(valid.shape[0], device=valid.device)[legal]
+            padding[batch_rows, last[legal]] = True
+        return query, padding
+    def goal_attention(query, key, value, **kw):
+        query, padding = attention_inputs(query, kw.get("key_padding_mask"))
+        return original_goal_attention(query, key, value, **dict(kw, key_padding_mask=padding))
+    if args.goal_attention_intervention:
+        if not args.language_chain or any([args.binder_view_source, args.native_value, args.bank_source, args.frozen_bank, args.reconstruction_chain]):
+            raise ValueError("goal attention intervention requires only --language-chain")
+        organizer.goal_read.attention.forward = goal_attention
     def keep(name):
         def save(module,inputs,output):
             value=output[0] if isinstance(output,tuple) else output
@@ -246,6 +273,9 @@ def main():
                         raise ValueError("--binder-view-source requires --language-chain for paired natural-instruction diagnostics")
                     variants = ["baseline", "global_without_slot_residual", "per_view_conditional",
                                 "per_view_plus_slot_residual", "balanced_views_plus_slot_residual"]
+                if args.goal_attention_intervention:
+                    variants = ["baseline", "uniform_goal_tokens", "half_goal_logits",
+                                "mask_final_valid_goal_token", "baseline_repeat"]
                 for variant in variants:
                     clear()
                     with torch.no_grad():out=sample_action(model,online,policy.bundle.config,initial_physical_noise=seed)
@@ -301,7 +331,7 @@ def main():
                     parts=captured["bank_parts"]
                     record["bank_parameters"]={k:{"min":float(parts[k].min()),"mean":float(parts[k].mean()),"max":float(parts[k].max())} for k in ["sigma","content_scale","confidence_grid","uncertainty_dino","occlusion_grid"]}
                     record["bank_centered_score_rms"]={k:rms(arr(parts[k]-parts[k].mean(-1,keepdim=True))) for k in ["content_logits","floor_flow_bias","adaptive_flow_bias"]}
-                    if not args.reconstruction_chain and (args.binder_view_source or variant in ["baseline","neutral_parent","parent_half","bank_content_zero","bank_content_half","bank_spatial_zero","bank_frozen_dino","native_value_only","bank_frozen_and_native"]):
+                    if not args.reconstruction_chain and (args.goal_attention_intervention or args.binder_view_source or variant in ["baseline","neutral_parent","parent_half","bank_content_zero","bank_content_half","bank_spatial_zero","bank_frozen_dino","native_value_only","bank_frozen_and_native"]):
                         record["natural_colors"]=[]
                         natural_conditions=([(color,direction) for color in ["red","blue","pink"] for direction in ["left","right"]]
                             if args.language_chain else [(color,row["instruction"].split()[-1]) for color in ["red","blue","pink"]])
@@ -325,9 +355,11 @@ def main():
                                 natural["trace_rms"]={name:rms(value) for name,value in trace.items()}
                                 memory=torch.from_numpy(trace["goal_input"]).to(policy.device)
                                 with torch.no_grad():
+                                    query, effective_mask = attention_inputs(
+                                        organizer.goal_read.query_norm(organizer.goal_queries.to(memory)),
+                                        ~mask.to(policy.device).bool())
                                     weights=_diagnostic_attention_weights(organizer.goal_read.attention,
-                                      organizer.goal_read.query_norm(organizer.goal_queries.to(memory)),
-                                      organizer.goal_read.memory_norm(memory),~mask.to(policy.device).bool())
+                                      query, organizer.goal_read.memory_norm(memory), effective_mask)
                                 natural["goal_read_attention"]=arr(weights)[0,:,:int(valid.sum())].tolist()
                                 natural["language_token_variation"]={name:rms(trace[name]-trace[name].mean(1,keepdims=True))
                                     for name in ["goal_read","goal_self","task_value"]}
@@ -356,10 +388,11 @@ def main():
                     print(json.dumps({"case":cid,"state":t,"variant":variant,"arm_delta":record["native_vs_baseline_arm_rmse"]}),flush=True)
                 rows.append(entry);variant="baseline"
         dump(args.output/"complete.json",{"complete":True,"windows":len(rows),"checkpoint_sha256":policy.bundle.checkpoint_sha256,
-          "scope":"source-only local/binder interventions; full downstream recomputation; masks never enter model; no closed-loop efficacy claim",
+          "scope":"source-only local/binder/language interventions; full downstream recomputation; masks never enter model; no closed-loop efficacy claim",
           "script_sha256":SCRIPT_SHA256})
     finally:
         for hook in language_hooks:hook.remove()
+        organizer.goal_read.attention.forward=original_goal_attention
         binder.forward=original_bind
         bank_module.forward=original_bank
         enc.update_progressive_grounding_address=original_update;flow.couple_local_observation=original_law
