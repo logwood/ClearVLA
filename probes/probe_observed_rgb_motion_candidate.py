@@ -120,16 +120,20 @@ def main():
     q=argparse.ArgumentParser()
     for name in ('plan','labels','output'):q.add_argument('--'+name,type=Path,required=True)
     q.add_argument('--methods',nargs='+',choices=('farneback','dis_medium'),default=['farneback','dis_medium'])
+    q.add_argument('--label-opencv-version',help='Verified renderer version for older receipts without this field')
     a=q.parse_args();a.output.mkdir(exist_ok=False)
     cv2.setNumThreads(1)
     complete=json.loads((a.labels/'complete.json').read_text())
     if complete.get('rigid_simulation_oracle_audit_only') is not True:raise ValueError('independent rigid audit labels required')
+    label_version=complete.get('sensor_opencv_version',a.label_opencv_version)
+    if not label_version:raise ValueError('label OpenCV version must be declared, never inferred from current runtime')
+    if a.label_opencv_version and a.label_opencv_version!=label_version:raise ValueError('conflicting label runtime identity')
     label_rows=json.loads((a.labels/'results.json').read_text())
     index={(r['case'],r['step']):r for r in label_rows}
     if len(index)!=len(label_rows):raise ValueError('duplicate audit window')
     report=dict(identity=dict(script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         label_complete=complete,plan_sha256=hashlib.sha256(a.plan.read_bytes()).hexdigest(),
-        opencv_version=cv2.__version__,methods=a.methods,scope=__doc__,policy_changed=False,
+        opencv_version=cv2.__version__,label_opencv_version=label_version,methods=a.methods,scope=__doc__,policy_changed=False,
         sources=['https://arxiv.org/abs/1603.03590','https://docs.opencv.org/4.10.0/de/d4f/classcv_1_1DISOpticalFlow.html']),
         records=[],repeat_controls=[],complete=False)
     checked=set()
@@ -152,14 +156,25 @@ def main():
                     start=time.perf_counter();flow=estimate(source,target,method);elapsed=time.perf_counter()-start
                     # Verify the existing method reproduces its sensor labels;
                     # those labels remain distinct from the rigid scoring truth.
+                    reproduction=None
                     if method=='farneback':
                         h,w=source.shape[:2];scale=np.array([(w-1)/2,(h-1)/2])
                         pos=np.rint((labels['temporal_source'][camera]+1)*scale).astype(int)
                         x,y=pos[:,0],pos[:,1];valid=flow['accepted'][y,x]&(before!=after)
                         predicted=np.where(valid[:,None],flow['xy'][y,x]/scale-1,0.)
-                        if not np.array_equal(valid,labels['temporal_valid'][camera]):raise ValueError('sensor acceptance reproduction failed')
-                        if not np.allclose(predicted,labels['temporal_target'][camera],rtol=0,atol=2e-7):raise ValueError('sensor endpoint reproduction failed')
+                        original_valid=labels['temporal_valid'][camera];common=valid&original_valid
+                        diff=float(np.max(np.abs((predicted-labels['temporal_target'][camera])[common]))) if common.any() else 0.
+                        mismatch=valid!=original_valid
+                        reproduction=dict(label_runtime_matches=cv2.__version__==label_version,
+                            common_endpoint_max=diff,acceptance_mismatches=int(mismatch.sum()),
+                            object_acceptance_mismatches=int((mismatch&(labels['temporal_source_body'][camera]>=0)).sum()))
+                        # OpenCV 4.11 and 5.0 differ in uint8 remap rounding at
+                        # the photo gate. Cross-runtime results are scored as
+                        # their own estimator, never claimed exact label replay.
+                        if reproduction['label_runtime_matches'] and (mismatch.any() or diff>2e-7):
+                            raise ValueError('same-runtime sensor reproduction failed')
                     scored=score(flow,labels,camera,source.shape[:2]);scored['seconds']=elapsed;cameras.append(scored)
+                    if reproduction is not None:scored['sensor_label_reproduction']=reproduction
                     if (method,camera) not in checked:
                         repeat=estimate(source,target,method)
                         err=float(np.max(np.abs(repeat['xy']-flow['xy'])))

@@ -8,6 +8,7 @@ for scoring measurements. It never replaces production sensor labels.
 from pathlib import Path
 import argparse, hashlib, importlib.util, json, subprocess, sys
 import numpy as np
+import cv2
 import pybullet as p
 from clearvla.benchmarks.calvin_eval import _environment, _official_task_assets
 from probe_rgbd_correspondence import correspondence, matrix
@@ -224,6 +225,7 @@ def main():
             production_label_source_sha256=hashlib.sha256(_label_file.read_bytes()).hexdigest(),
             rigid_simulation_oracle_audit_only=a.rigid_audit,
             pair_mode=a.pair_mode,
+            sensor_opencv_version=cv2.__version__,
             scope='exact RGB replay; production 32x32 sensor label counts, before model training-mask support; not loss or gradient attribution',
             legacy_all_accepted_pixels='depth acceptance before photometric filtering')))
         return
