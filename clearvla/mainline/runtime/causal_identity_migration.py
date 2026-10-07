@@ -70,7 +70,7 @@ def validate_selection(saved,current,source_digest):
     for name in ('entity_transport_gradient_mode','entity_competition_scale_mode','observation_measurement_mode','target_binding_input_mode','observed_outcome_mode'):
         if getattr(current.top,name)!=MODES[name][1]:raise ValueError('incomplete confirmed repair: '+name)
     is_b=current.top.entity_ownership_mode=='canonical_image_v1'
-    if (current.top.identity_supervision_mode=='rgbd_temporal_v1')!=is_b:
+    if (current.top.identity_supervision_mode in {'rgbd_temporal_v1','rgbd_temporal_conditional_v2'})!=is_b:
         raise ValueError('B must include physical correspondence supervision, A must exclude it')
     if current.objectives.calvin_frame_weight_mode!='motion_event_v1' or current.objectives.gripper_command_transition<=0:
         raise ValueError('causal repair must retain admitted trajectory objectives')

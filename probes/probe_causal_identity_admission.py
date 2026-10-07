@@ -34,7 +34,18 @@ def physical_read(facts,masks):
         object_mass=object_joint.sum(-1)
         regional=object_joint/object_mass[:,None].clamp_min(torch.finfo(object_joint.dtype).tiny)
         supported_pixels=torch.einsum('hw,ohw->o',(all_source[0,:,camera].sum(0)>0).float(),weight)
-        result.append(dict(k_object_read=array(coverage).tolist(),K_given_object=array(regional).tolist(),object_source_mass=array(object_mass).tolist(),object_supported_pixels=array(supported_pixels).tolist(),view_mass=array(global_read.sum((-2,-1))).tolist(),visible_pixels=mask.sum((-2,-1)).tolist()))
+        item=dict(k_object_read=array(coverage).tolist(),K_given_object=array(regional).tolist(),object_source_mass=array(object_mass).tolist(),object_supported_pixels=array(supported_pixels).tolist(),view_mass=array(global_read.sum((-2,-1))).tolist(),visible_pixels=mask.sum((-2,-1)).tolist())
+        if facts.image_ownership is not None:
+            law=facts.image_ownership[0,:,camera].float();height,width=law.shape[-2:]
+            yy,xx=torch.meshgrid(torch.linspace(-1,1,height,device=law.device),torch.linspace(-1,1,width,device=law.device),indexing='ij')
+            grid=torch.stack((xx,yy),-1)[None].expand(len(mask),-1,-1,-1)
+            body_weights=torch.nn.functional.grid_sample(weight[:,None],grid,align_corners=True)[:,0]
+            legal=facts.current_image_source.supported[0,:,camera].any(0)
+            supported_weights=body_weights*legal[None]
+            counts=supported_weights.sum((-2,-1))
+            owner=torch.einsum('khw,ohw->ok',law,supported_weights)/counts[:,None].clamp_min(1e-12)
+            item['canonical_atom_audit']=dict(body_weight=array(body_weights.sum((-2,-1))).tolist(),supported_body_weight=array(counts).tolist(),K_and_null_given_supported_body=array(owner).tolist(),weighting='RGB body-mask bilinear occupancy on actual canonical endpoint atoms; producer support; no learned allocation weighting')
+        result.append(item)
     return result
 
 

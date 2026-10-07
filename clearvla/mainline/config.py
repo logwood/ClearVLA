@@ -1243,9 +1243,9 @@ class ExperimentConfig:
             raise ValueError("future support count and time grid disagree")
         if self.observation.visual_chart_mode not in {"legacy_v1", "full_rgb_endpoint_v1"}:
             raise ValueError("unknown visual chart")
-        if self.top.identity_supervision_mode not in {"none", "rgbd_temporal_v1"}:
+        if self.top.identity_supervision_mode not in {"none", "rgbd_temporal_v1", "rgbd_temporal_conditional_v2"}:
             raise ValueError("unknown identity supervision source")
-        if self.top.identity_supervision_mode == "rgbd_temporal_v1" and (self.top.entity_ownership_mode != "canonical_image_v1" or self.top.entity_competition_scale_mode != "per_observation_v1" or self.data.visual_feature_mode != "dinov3_online_v1" or self.objectives.identity_correspondence <= 0 or self.objectives.identity_source_prediction <= 0):
+        if self.top.identity_supervision_mode != "none" and (self.top.entity_ownership_mode != "canonical_image_v1" or self.top.entity_competition_scale_mode != "per_observation_v1" or self.data.visual_feature_mode != "dinov3_online_v1" or self.objectives.identity_correspondence <= 0 or self.objectives.identity_source_prediction <= 0):
             raise ValueError("identity supervision requires canonical online CALVIN and explicit objectives")
         if self.top.identity_supervision_mode == "none" and (self.objectives.identity_correspondence != 0 or self.objectives.identity_source_prediction != 0):
             raise ValueError("identity objective has no admitted source")

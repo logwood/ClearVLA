@@ -24,6 +24,21 @@ def js_divergence(left,right):
         return .5*(a+b).sum(-1)
 
 
+def conditional_real_law(log_measure,supported,*,dim=1):
+    """Identity given a real entity; abstention is not an identity label.
+
+    Normalize BEFORE spatial interpolation so a varying real/null fraction
+    cannot reweight the correspondence stencil. Producer support alone owns
+    missing cells. The old joint K+null objective remains a separate version.
+    """
+    with torch.autocast(device_type=log_measure.device.type,enabled=False):
+        legal=supported.any(dim,keepdim=True)
+        safe=torch.where(supported,log_measure.float(),-torch.inf)
+        safe=torch.where(legal,safe,0.)
+        conditional=torch.softmax(safe,dim=dim)
+        return torch.where(legal,conditional,0.),legal
+
+
 def identity_terms(model,online,facts,labels):
     module=model.grounding.grounder
     if module.canonical_decoder is None or facts.image_ownership is None:
@@ -48,7 +63,11 @@ def identity_terms(model,online,facts,labels):
     target=observed[:,-1].reshape(b,c,side,side,d).permute(0,1,4,2,3)
     full=facts.image_ownership
     if full.shape!=(b,k+1,c,side,side):raise ValueError('online ownership differs from admitted identity chart')
-    pair_losses=[];prediction_losses=[];counts=[];without=[]
+    conditional_mode=model.config.top.identity_supervision_mode=='rgbd_temporal_conditional_v2'
+    if conditional_mode:
+        image_source=facts.current_image_source
+        full_real,full_supported=conditional_real_law(image_source.log_measure,image_source.supported)
+    pair_losses=[];prediction_losses=[];counts=[];without=[];identity_counts=[];null_source=[];null_target=[]
     for kind,time in (('cross',1),('temporal',0)):
         for camera in range(c):
             destination=1-camera if kind=='cross' else camera
@@ -57,14 +76,24 @@ def identity_terms(model,online,facts,labels):
             xy_target=torch.where(valid[...,None],getattr(labels,kind+'_target')[:,camera],0.)
             source_law=sample(owner[:,time,camera],xy_source)
             target_law=sample(full[:,:,destination],xy_target)
+            count=valid.float().sum();counts.append(count)
+            null_source.append(torch.where(valid,source_law[...,-1],0.).sum()/count.clamp_min(1))
+            null_target.append(torch.where(valid,target_law[...,-1],0.).sum()/count.clamp_min(1))
+            identity_valid=valid
+            if conditional_mode:
+                source_law=sample(conditional[:,time,camera],xy_source)
+                target_law=sample(full_real[:,:,destination],xy_target)
+                identity_valid=valid & (sample(full_supported[:,:,destination].float(),xy_target)[...,0]>1-1e-6)
             # Also align actual online ownership across cameras. Slot index
             # equality alone never supplies a positive without a sensor match.
             if kind=='cross':
-                current_law=sample(full[:,:,camera],xy_source)
+                current_law=sample(full_real[:,:,camera] if conditional_mode else full[:,:,camera],xy_source)
+                if conditional_mode:
+                    identity_valid=identity_valid & (sample(full_supported[:,:,camera].float(),xy_source)[...,0]>1-1e-6)
                 divergence=(js_divergence(source_law,target_law)+js_divergence(current_law,target_law))/2
             else:divergence=js_divergence(source_law,target_law)
-            count=valid.float().sum();counts.append(count)
-            pair_losses.append(torch.where(valid,divergence,0.).sum()/count.clamp_min(1))
+            identity_count=identity_valid.float().sum();identity_counts.append(identity_count)
+            pair_losses.append(torch.where(identity_valid,divergence,0.).sum()/identity_count.clamp_min(1))
             prototype,background=module.canonical_decoder(state[:,time,camera])
             q=sample(conditional[:,time,camera],xy_source)
             predicted=torch.einsum('bnk,bkd->bnd',q.to(prototype),prototype[:,:,destination])
@@ -78,6 +107,12 @@ def identity_terms(model,online,facts,labels):
                 zero_prediction=torch.einsum('bnk,bkd->bnd',q.to(zero_value),zero_value[:,:,destination])+position+zero_background[destination][None,None]
                 zero_error=(zero_prediction.float()-truth).square().mean(-1)
                 without.append(torch.where(valid,zero_error,0.).sum()/count.clamp_min(1))
-    return dict(identity_correspondence=torch.stack(pair_losses).mean(),identity_source_prediction=torch.stack(prediction_losses).mean(),
+    result=dict(identity_correspondence=torch.stack(pair_losses).mean(),identity_source_prediction=torch.stack(prediction_losses).mean(),
         identity_cross_admitted_pairs=counts[0]+counts[1],identity_temporal_admitted_pairs=counts[2]+counts[3],
         identity_source_removed_prediction_mse=torch.stack(without).mean())
+    if conditional_mode:
+        result.update(identity_conditional_supported_pairs=torch.stack(identity_counts).sum().detach(),
+            identity_conditional_support_fraction=(torch.stack(identity_counts).sum()/torch.stack(counts).sum().clamp_min(1)).detach(),
+            identity_source_null_mass=torch.stack(null_source).mean().detach(),
+            identity_target_null_mass=torch.stack(null_target).mean().detach())
+    return result

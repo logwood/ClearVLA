@@ -9,7 +9,7 @@ MODES = {
     'target_binding_input_mode': ('protected_pooled_v1', 'full_tokens_views_v1'),
     'observed_outcome_mode': ('none', 'before_proposal_v1'),
     'entity_ownership_mode': ('local_mixture_v1', 'canonical_image_v1'),
-    'identity_supervision_mode': ('none', 'rgbd_temporal_v1'),
+    'identity_supervision_mode': ('none', 'rgbd_temporal_v1', 'rgbd_temporal_conditional_v2'),
 }
 
 
@@ -18,7 +18,7 @@ def causal_identity_metadata(top):
     if any(modes[key] not in pair for key,pair in MODES.items()):
         raise ValueError('unknown causal identity graph selector')
     if all(modes[key]==pair[0] for key,pair in MODES.items()):return None
-    return {
+    result = {
         'schema':'clearvla-causal-identity-candidate-v1','selectors':modes,
         'normalized_transport':'ordinary-bilinear-coordinate-adjoint' if modes['entity_transport_gradient_mode']=='ordinary_bilinear_v1' else 'legacy-positive-corners',
         'competition_scope':modes['entity_competition_scale_mode'],
@@ -30,3 +30,6 @@ def causal_identity_metadata(top):
         'policy_inputs':'unchanged-RGB-language-observed-proprioception-and-executed-controls',
         'identity_claim':'candidate-learned-correspondence-not-certified-physical-objects',
     }
+    if modes['identity_supervision_mode']=='rgbd_temporal_conditional_v2':
+        result['identity_supervision']['correspondence']='real-K-conditional-before-interpolation;producer-support-only;null-is-not-an-identity-label'
+    return result

@@ -2440,3 +2440,49 @@ progress and final windows, without historical case-specific extras; it passed
 all 18 original trajectories (119 diagnostic windows). Fresh masks are admitted
 only by exact replay of BOTH camera RGB streams. No internal tensor archives
 are downloaded or written into repository memory.
+
+
+#### 34.33.5 B-r1 null escape and conditional identity candidate
+
+The meaningful short run exposed a structural failure despite finite gradients
+and a closed loss ledger. At batch 20, B identity correspondence was 0.4008
+and G null mass 0.00246; at batch 660 these were 0.01335 and 0.89421.
+A remained near 0.004 null. B-r1 is explicitly blocked from formal promotion;
+its 1024-update run, offline validation, standard panel and queued probes remain
+intact to characterize the failure.
+
+The old objective compares joint K+null laws. Multiplying real-K mass by
+alpha and assigning the remainder to shared null reduces JS in direct
+proportion without changing real-K relative identity. The saved counterexample
+has joint JS 0.506981 / 0.050698 / 0.005070 for alpha 1 / 0.1 / 0.01, while
+conditional-real-K JS stays 0.512102. The actual production objective reproduces
+this escape in FP32 and BF16. Canonical reconstruction and source prediction
+already use real-K conditional values and therefore do not close the escape.
+
+The new explicit selector rgbd_temporal_conditional_v2 compares real-K
+conditional laws, normalized before correspondence interpolation. Online laws
+come from current_image_source.log_measure and its producer support; missing
+source cells remain unknown, not invented identities. Independent source-only
+encodings still exclude target/context/history values. Ordinary gradients remain;
+a direct null-logit change cannot lower the conditional identity term.
+Source-prediction pairs and the declared exposure are unchanged. New diagnostics
+report supported-pair fraction and source/target null at admitted matches.
+
+This closes a specific abstention shortcut, not the general identity problem:
+uniform or single-real-K assignment can still satisfy consistency. Source
+dependence, true-object separation, cross-view/time identity, natural target
+selection and first-eight-row behavior remain promotion gates. The factual
+probe now separately reports unweighted K+null occupancy on producer-supported
+canonical atoms inside actual RGB body masks; real-K-normalized K|object alone
+would hide null collapse. No learned allocation weights define that audit's
+support or pixel denominator.
+
+Source references: training/identity.py:conditional_real_law and identity_terms;
+causal_identity.py metadata; runtime/causal_identity_migration.py;
+probe_causal_identity_admission.py:physical_read.
+Reproduce the numeric/gradient contracts with tests/test_identity_null_escape.py,
+tests/test_identity_supervision.py and tests/test_causal_identity_contract.py.
+Recorded regression: 15 passed, 6 fixture skips; real BS8 and behavioral
+qualification remain pending. Raw evidence stays under the A/B experiment root:
+identity-null-escape-counterexample.json, B-short-r1-promotion-block.json,
+conditional-identity-tests-r2.log. The v1 source and running jobs are immutable.

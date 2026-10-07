@@ -1704,6 +1704,16 @@ and camera values, compact S/W consumption, and training-only independently
 constructed RGB-D/temporal correspondence plus source-only prediction.
 Legacy checkpoint modes remain replayable. Neither candidate is promoted.
 
+B-r1 meaningful-short qualification exposed a null escape in joint K+null JS
+(34.33.5). Its formal promotion is blocked; retain the run and all evidence.
+The explicit rgbd_temporal_conditional_v2 candidate uses real-K conditional
+identity BEFORE interpolation and only producer support for correspondence
+validity. Source prediction retains its admitted labels. Ordinary gradients,
+K/null semantics of the online graph and all action budgets remain unchanged.
+This removes a direct abstention shortcut, not uniform/single-K collapse;
+real-object/source-dependence/behavior gates are still required. Never infer
+healthy physical allocation from a real-K-normalized audit alone.
+
 The immutable BS8 short-run source is 3a84399926d50831470518e1b7f105131d3f1056.
 A on GPU0 and B on GPU2 each execute 1024 updates from mature step 11012,
 then 256 offline batches and a separate standard 18-case seed-0/max-360/R8
