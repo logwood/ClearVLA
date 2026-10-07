@@ -1694,17 +1694,37 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
-### A/B repair preparation (2026-10-07; not promoted)
+### A/B repair qualification (2026-10-07; formal promotion pending)
 
-See audit section 34.33. Candidate normalized bilinear adjoints and
-source-consistent measurement have unit coverage, but are not yet an admitted
-complete repair. Legacy modes remain defaults. Independent RGB-D overlap
-correspondence passed four factual object-mask windows (1659/1669 correct
-accepted pixels, zero wrong-object pixels); this supports a candidate identity
-training source, not a learned identity result. Temporal correspondence,
-complete B source/consumer integration, migration and healthy meaningful
-short runs remain gates before both formal trainings and both standard R8
-closed loops. Depth and audit masks are not online policy inputs.
+See audit section 34.33. A now connects ordinary normalized transport,
+source-consistent measurement, a masked full-token/per-view single binder,
+observed-only outcome before proposal, and per-observation competition scale.
+B adds canonical image ownership before local mixing, separate shared identity
+and camera values, compact S/W consumption, and training-only independently
+constructed RGB-D/temporal correspondence plus source-only prediction.
+Legacy checkpoint modes remain replayable. Neither candidate is promoted.
+
+The immutable BS8 short-run source is 3a84399926d50831470518e1b7f105131d3f1056.
+A on GPU0 and B on GPU2 each execute 1024 updates from mature step 11012,
+then 256 offline batches and a separate standard 18-case seed-0/max-360/R8
+closed loop. Final short step is 12036. All RGB/DINO value caches remain off.
+Strict model migration preserves common weights; fresh Adam/LR warmup starts
+at an explicit update origin while the mature execution clock is retained.
+
+Full original-panel sensor admission covers 63 replay windows: photometric
+support retained 16787/16787 same-body cross-view object pixels; temporal
+matches retained 83926/83929 same-body pixels, 3 background-edge pixels and no
+wrong-object matches. Correlated pixels are support evidence, not 16787
+independent trials or proof of learned identity. Depth and audit masks are not
+online policy inputs. Uniform ownership can satisfy consistency, so source
+dependence, real-object separation, correct natural target choice and retained
+native first-eight-row behavior remain required gates.
+
+The standard controller stays stored_target for these comparisons. Matched
+old-model panels scored stored_target 11/18, measured_tcp 3/18, replan_tcp
+10/18 and inverse_servo 9/18. The known training/execution contract mismatch
+therefore does not justify blindly switching controller mode. Arm/gripper
+conditioning and controller-state issues remain separately audited.
 
 ### Current CALVIN audit constraint (2026-10-07)
 

@@ -2364,3 +2364,46 @@ but the graph validator was demanding a raw sensor path. The requirement now
 belongs to the dataset loader; graph ABI and trained objective identity remain
 strict. Both deployment configs reconstruct with no raw sensors, while training
 without source provenance is rejected (deployment-label-plane-r1.log).
+
+#### 34.33.3 Meaningful A/B qualification in progress
+
+Both candidates now run BS8 x 1024 updates (8192 training samples), starting
+from the admitted mature checkpoint at step 11012 and retaining its execution
+clock. Fresh Adam uses LR 2e-5, 100-update warmup, explicit origin 11012.
+Immutable source: 3a84399926d50831470518e1b7f105131d3f1056 at
+/data/senwang/clearvla/checkouts/causal-identity-training-3a843999.
+Artifacts/configs/receipts: /data/senwang/clearvla/experiments/causal-identity-ab-20261007,
+A-short-bs8-1024-r1 (GPU0) and B-short-bs8-1024-r1 (GPU2).
+Launcher: /home/sen.wang/mysh/clearvla-causal-identity-short-20261007.sh A|B.
+
+Each run has 256 offline validation batches and its own evaluation-only
+watcher, probes/run_causal_identity_panel.py. Watcher receipts record exact
+commands, source and expected epoch 1 / step 12036. The 18-case / six-task /
+three-trial panel uses seed 0, max_steps 360, execute_rows 8, stored_target;
+all raw trajectories are retained. No watcher promotes formal training.
+At update 100, A/B loss totals 0.618869/0.649529, recent seconds per batch
+6.42681/6.42796; no recorded numerical failures. This is progress, not final
+health or behavioral acceptance.
+
+Mechanical factual probes completed four fixed windows. Same-image measured
+semantic/image/covariance changes are exactly zero at offsets 0/4/8/16/24.
+Natural color changes still produce small native arm differences (~2e-4 to
+7e-4 RMS), and A has measurable replay noise in some windows. These two-update
+results cannot establish restored target selection. The diagnostic named
+identity_source_removed_prediction_mse removes the identity-state value only;
+it retains source ownership q. It is not complete source removal, and needs
+whole-source shuffle/neutral controls plus physical-object audits.
+
+Retained full old-model controller panels: stored_target 11/18,
+measured_tcp 3/18, replan_tcp 10/18, inverse_servo 9/18. All have 18 results.
+TCP-relative label vs controller-target accumulation is a real contract
+difference, but naive measured-anchor substitution is not an admitted repair.
+Controller dynamics and arm/gripper conditioning remain separate open groups.
+
+Next gates: complete loss/gradient ledger and 256-batch validation; actual
+cross-view/time object separation and source dependence; natural target
+selection above repeat noise; target changes through P1/P2/protected/P3 and
+native first eight rows; approach/contact/gripper regressions on the complete
+18-case trajectories. Only qualified candidates proceed to equal formal
+exposure and their two final standard closed loops. Hourly thread continuation
+is registered as clearvla-a-b; unchanged status is silent.
