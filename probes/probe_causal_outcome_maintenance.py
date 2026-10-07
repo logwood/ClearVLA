@@ -35,10 +35,47 @@ def dump(path, value):
     temp.replace(path)
 
 
+def goal_producer_ledger(evidence, values, parts):
+    """Replay only tensor contractions from captured production projections."""
+    p, change = evidence.prediction, evidence.instruction_change
+    with torch.autocast(device_type=p.scene.device.type, enabled=False):
+        legal = torch.cat((evidence.current_observed[:, :, None].expand_as(p.log_probability[..., :-1]),
+                           torch.ones_like(p.log_probability[..., -1:], dtype=torch.bool)), -1)
+        desired_law = p.log_probability.masked_fill(~legal, -torch.inf).softmax(-1)
+        desired, observed = desired_law[..., :-1], evidence.current_probability[..., :-1]
+        mapping = change.posterior.reference_probability.float()
+        real_mass = mapping.sum(-1)
+        fields = {}
+        for name in ('content', 'image', 'joint'):
+            if name == 'image':
+                contrast = torch.einsum('bcnm,mh->bcnh', desired-observed, parts[name][0].float())
+            else:
+                now, end = parts[name]
+                contrast = torch.einsum('bcnm,bcmh->bcnh', desired, end.float()) - torch.einsum('bcnm,bcmh->bcnh', observed, now.float())
+            raw = torch.einsum('bkcn,bcnh->bkch', mapping, contrast)
+            mapped = torch.where(change.view_observed[..., None], raw, 0.)
+            actual = getattr(values, name)
+            torch.testing.assert_close(mapped, actual, rtol=0., atol=1e-6)
+            # Diagnostic only: never feed conditionalized unknown mass back to
+            # the policy or call this a physically valid alternate observation.
+            conditioned = torch.where(real_mass[..., None] > 0, mapped / real_mass[..., None].clamp_min(1e-30), 0.)
+            fields[name] = dict(projected_contrast_rms=rms(array(contrast)), mapped_value_rms=rms(array(mapped)),
+                conditional_mapping_audit_rms=rms(array(conditioned)),
+                reproduction_max=float((mapped-actual).abs().max()))
+        return dict(reference_match_real_mass=array(real_mass)[0].tolist(),
+            observed_goal_law_real_mass_mean=float(observed.sum(-1).mean()),
+            predicted_goal_law_real_mass_mean=float(desired.sum(-1).mean()),
+            desired_observed_law_tv_mean=float((desired_law-evidence.current_probability).abs().sum(-1).mean()/2),
+            source_view_observed=array(change.view_observed)[0].tolist(), fields=fields,
+            conditional_mapping_scope='amplitude diagnostic only; no policy intervention or confidence claim')
+
+
 def main():
     parser = argparse.ArgumentParser()
     for name in ('checkpoint', 'plan', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--producer-ledger', action='store_true', help='Capture production goal projections and close their transport ledger')
+    parser.add_argument('--ledger-only', action='store_true', help='Run factual baseline and exact repeat only, without removals')
     args = parser.parse_args()
     args.output.mkdir(exist_ok=False)
     if os.environ.get('CUBLAS_WORKSPACE_CONFIG') not in (':4096:8', ':16:8'):
@@ -100,7 +137,18 @@ def main():
         readers.append((module, old))
 
         def prepare(evidence, old=old, name=name):
-            value = old(evidence)
+            parts, hooks = {}, []
+            if args.producer_ledger:
+                owner = old.__self__
+                for key, layer in (('content', owner.content), ('image', owner.image), ('joint', owner.joint_output)):
+                    hooks.append(layer.register_forward_hook(lambda _m, _i, out, key=key: parts.setdefault(key, []).append(out.detach())))
+            try:
+                value = old(evidence)
+            finally:
+                for hook in hooks:
+                    hook.remove()
+            if args.producer_ledger:
+                capture.setdefault('goal_producer_ledger', {})[name] = goal_producer_ledger(evidence, value, parts)
             capture.setdefault('goal_components', {})[name] = {
                 field: rms(array(getattr(value, field))) for field in ('content', 'image', 'joint', 'robot')}
             fields = {'goal_visual_zero': ('content', 'image', 'joint'),
@@ -119,6 +167,7 @@ def main():
         script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         plan_sha256=hashlib.sha256(args.plan.read_bytes()).hexdigest(), deterministic=True,
         config=policy.bundle.config.top.__dict__, scope=__doc__), records=[], complete=False)
+    report['identity'].update(producer_ledger=args.producer_ledger, ledger_only=args.ledger_only)
 
     def summarize(result):
         intent = capture['cache'].top.intent
@@ -138,7 +187,7 @@ def main():
             binding_null=array(intent.target_binding.null_mass)[0].tolist(),
             current_tcp_xyz=current.tolist(), predicted_endpoint_tcp_xyz=endpoint.tolist(), predicted_remaining_tcp_xyz=(endpoint-current).tolist(),
             observed_input=capture['observed_input'], observed_output_rms=capture['observed_output_rms'],
-            goal_component_source_rms=capture['goal_components'])
+            goal_component_source_rms=capture['goal_components'], goal_producer_ledger=capture.get('goal_producer_ledger'))
 
     try:
         for row in json.loads(args.plan.read_text()):
@@ -175,8 +224,9 @@ def main():
                     recorded_arm_rms=rms(action[:8, :6]-data['raw_chunks'][t//8, :8, :6]),
                     recorded_gripper_changed_rows=int(np.sum(action[:8, 6] != data['raw_chunks'][t//8, :8, 6])),
                     variants=[])
-                for mode in ('repeat', 'observed_outcome_zero', 'observed_image_value_zero', 'observed_semantic_value_zero',
-                             'goal_robot_zero', 'goal_visual_zero', 'goal_all_zero'):
+                modes = ('repeat',) if args.ledger_only else ('repeat', 'observed_outcome_zero', 'observed_image_value_zero', 'observed_semantic_value_zero',
+                                                            'goal_robot_zero', 'goal_visual_zero', 'goal_all_zero')
+                for mode in modes:
                     control['name'] = mode
                     capture.clear()
                     trace.reset()
