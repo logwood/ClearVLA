@@ -879,3 +879,108 @@ Reproduction commands and exact output paths are recorded in the v4
 `*_command.json` receipts. Full controller-policy panels use the original source
 checkpoint and distinct declared controller anchor contracts; they must be
 reported separately from the original 11/18 standard panel.
+
+### 34.6 Complete controller panels and independent actuator calibration
+
+All four panels retain the same original final checkpoint, 18 initial RGB pairs,
+seed 0, execute_rows 8 and max_steps 360. The controller contracts differ:
+
+| Controller | Success | Largest held-goal/TCP error |
+|---|---:|---:|
+| Original stored target | 11/18 | 159.20 mm |
+| Measured TCP each step | 3/18 | 9.66 mm |
+| Measured TCP at each replan | 10/18 | 73.59 mm |
+| Independently calibrated inverse servo | 9/18 | 22.12 mm |
+
+Every initial RGB pair matches. Inverse-servo goal recurrence reproduces exactly
+from the stored float32 robot observations, coefficients and submitted commands;
+its finite goal bound did not activate. The other recurrence residuals below
+3e-8 m use NPZ float32 start poses; §33's float64 environment recurrence remains
+the separate near-machine-precision measurement.
+
+The independent servo fit uses 1,152 balanced random air-motion commands,
+two calibration poses, and a third held-out pose. It reads only measured TCP,
+past measured displacement and known commands: no task label, object/contact
+truth, checkpoint or closed-loop success enters calibration. Measured-anchor
+position gains about 0.49–0.51 become 0.99–1.03 under the inverse on the held-out
+pose. This recovers the free-motion response lost by naive per-step anchoring.
+
+Even then, none of the original seven failed cases succeeds. Original successes
+01 and 03 are lost; 15 still recovers late. Thus controller windup is a real
+semantic/state defect, but changing its dynamics does not solve object selection
+or premature withdrawal. None of these controller variants is promoted.
+Actual first object contact remains wrong for 01/05/11/15 in the inverse panel.
+Sources: robot.py::relative_to_absolute; repo probes
+probe_calvin_servo_response.py, probe_controller_policy_closed_loop.py and
+summarize_controller_policy_panel.py. Data: v4/servo-calibration-r2 and
+controller_four_panel_summary.json. The failed r1 calibration serialization
+record is preserved; r2 reran calibration and held-out validation completely.
+
+### 34.7 Reconstruction does not certify object identity
+
+The original full checkpoint reconstructs red, blue and pink top-camera regions
+mainly through the same K1. At 01/state24, conditional reconstruction K1 ownership
+is 0.9827 / 0.9993 / 0.9970 respectively; each object covers only about 0.36–0.52
+of the 64 coarse target cells. Region reconstruction errors can remain below the
+background error. Therefore low average reconstruction MSE is compatible with
+several real objects sharing one value basis.
+
+The existing G content/target chart is explicitly pooled to 8x8; full 16x16
+candidate coordinate support is not native 16x16 content values. This is the
+declared current chart contract, not a newly discovered format mismatch.
+A coherent current-G3 native-content diagnostic, and a combined frozen-DINO
+matching/native-content diagnostic, do not restore natural color selection in
+01/05/11 state24 or 17 state136. Frozen matching can improve object coverage and
+reconstruction while first-8 color action differences remain around 1e-4–1e-3.
+Do not promote resolution increases or cosine matching alone as a behavioral fix.
+
+Source boundaries: flow_dino_evidence.py::_teacher_content_grid and current G3
+content materialization; grounding.py:927–987 (destination K reconstruction
+assignment, shared position term, observed-cell MSE). Data:
+v4/reconstruction-identity-r1, frozen-bank-r1, native-content-r1.
+
+### 34.8 Formal supervision ownership and next acceptance gates
+
+A no-update VJP probe now runs through the actual train entry, strict source/
+inventory initialization, retained step11012, online DINO, formal engine forward
+and weighted ledger. On one ordinary four-sample batch, action-flow gradients
+reach G (L2 0.0941) and shared binder (0.0781). Reconstruction reaches G (0.000407)
+but not binder; annotated endpoint loss reaches neither G nor binder directly,
+while reaching the protected language encoder and endpoint predictor.
+This is the source-defined supervision ownership, not an accidental detach:
+annotation_goal.py::supervise_annotated_goal directly compares the start-image/
+protected-language endpoint predictor to measured endpoint labels.
+Nonzero action gradients alone do not establish correct semantic learning.
+
+Probe r1 failed on an incorrect diagnostic record field; r2's retained multi-VJP
+bs8 graph exceeded 24GiB. The corrected diagnostic uses bs4 and zero optimizer
+updates; the actual repair training remains bs8. Focused early/non-nearest-target
+training diagnostics separately map annotation age to source_start-context_start
+plus age, retaining the real 24-step context prefix. Dropped language rows are
+excluded from legal instruction-direction perturbations using the producer's
+goal_keep, not the token mask (conditioning keeps that mask). Their zero-input
+normalization derivatives must not be called color learning pressure.
+
+The actual repair run is short-mature-bs8-r1 under
+/data/senwang/clearvla/experiments/dinov3-causal-repair-20261006, immutable source
+1b5c302de530494746b63dadf14ff25b696ae73e. It starts original step11012 with fresh
+optimizer/RNG, keeps the mature model phase, performs 512 bs8 updates, then 256
+validation batches and the original-controller standard 18-case panel.
+Target checkpoint is epoch1/step11524. It is not an exact optimizer resume.
+
+A separate registered GPU5 continuation checks the final checkpoint/source/hash,
+then repeats fixed-observation language-chain, real-object reconstruction and
+10/17 history/withdrawal probes. Those are new weights on original histories,
+not fresh closed-loop trajectories. Fresh 18-case behavior runs separately on
+GPU4 and must be analyzed before promotion. Endpoint loss improvement, numerical
+health and increased S/K variance do not close the task.
+
+Final focused diagnostic is v4/formal-object-routes-far-r4.json: four real train
+windows at annotation age8, target distances 0.178–0.258m, all non-nearest.
+The exact producer dropped language on row0; remaining three rows have finite
+admitted goal-input action VJP RMS7.44e-6. Colored perturbation directional
+derivatives are small and not uniformly positive; these are local Taylor
+derivatives, not full counterfactual losses or evidence that a particular color
+was physically selected. G/action L2=0.0410 and binder/action L2=0.0292.
+The full model parameters receive finite gradients; enormous virtual tangents
+at zeroed language inputs are not admissible instruction perturbations.

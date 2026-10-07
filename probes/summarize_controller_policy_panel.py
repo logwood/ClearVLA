@@ -36,7 +36,24 @@ def summarize_case(case):
     selected=previous[:,:3].copy()
     if anchor=="measured_tcp": selected=state[:-1,:3].copy()
     elif anchor=="replan_tcp": selected[chunks==0]=state[:-1,:3][chunks==0]
-    recurrence=goals[:,:3]-selected-requested
+    if anchor=="inverse_servo":
+        calibration=result["servo_calibration"]
+        coefficients=np.asarray([[r[k] for k in ("previous_delta","goal_delta","bias")]
+                                 for r in calibration["coefficients"]],dtype=float)
+        scales=np.asarray([.02]*3+[.05]*3,dtype=float)
+        measured=state[:,:6].astype(float)
+        previous_delta=np.zeros((n,6),dtype=float)
+        previous_delta[1:]=measured[1:n]-measured[:n-1]
+        previous_delta[:,3:]=(previous_delta[:,3:]+np.pi)%(2*np.pi)-np.pi
+        goal_delta=(action[:,:6].astype(float)*scales-coefficients[:,0]*previous_delta-coefficients[:,2])/coefficients[:,1]
+        bound=float(calibration["goal_delta_bound_in_native_scales"])*scales
+        expected=measured[:-1]+np.clip(goal_delta,-bound,bound)
+        recurrence=goals[:,:3]-expected[:,:3]
+        assert int(np.any(np.clip(goal_delta,-bound,bound)!=goal_delta,axis=1).sum())==result["inverse_servo_bound_steps"]
+    elif anchor in ("stored_target","measured_tcp","replan_tcp"):
+        recurrence=goals[:,:3]-selected-requested
+    else:
+        raise ValueError(f"unowned controller recurrence: {anchor}")
     error=goals[:,:3]-state[1:,:3]
     contacts=[];force=[];target_frames=[];free=[]
     for t,row in enumerate(info["info"]):

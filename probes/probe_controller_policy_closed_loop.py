@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import time
 from pathlib import Path
 
@@ -35,11 +36,25 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=64)
     parser.add_argument("--execute-rows", type=int, default=8)
     parser.add_argument("--continue-after-success", action="store_true")
-    parser.add_argument("--anchor", choices=("stored_target", "measured_tcp", "replan_tcp"), required=True)
+    parser.add_argument("--anchor", choices=("stored_target", "measured_tcp", "replan_tcp", "inverse_servo"), required=True)
+    parser.add_argument("--servo-calibration", type=Path)
     args = parser.parse_args()
 
     if args.max_steps <= 0 or args.execute_rows <= 0:
         raise ValueError("max_steps and execute_rows must be positive")
+    calibration = None
+    if args.anchor == "inverse_servo":
+        if args.servo_calibration is None:
+            raise ValueError("inverse servo requires independently measured air-motion calibration")
+        calibration = json.loads(args.servo_calibration.read_text())
+        coefficients = np.asarray([[r[k] for k in ("previous_delta", "goal_delta", "bias")]
+                                   for r in calibration["coefficients"]], dtype=float)
+        if coefficients.shape != (6, 3) or not np.isfinite(coefficients).all():
+            raise ValueError("invalid servo coefficient chart")
+        if np.any(coefficients[:, 1] < .2) or np.any(coefficients[:, 1] > 1.5):
+            raise ValueError("servo calibration cannot support a bounded inverse")
+    elif args.servo_calibration is not None:
+        raise ValueError("servo calibration is only admitted by its explicit controller mode")
     args.output_dir.mkdir(parents=True, exist_ok=False)
     state = json.loads(args.state_json.read_text())
     if not isinstance(state, dict):
@@ -70,9 +85,38 @@ def main() -> None:
     # Read-only telemetry: preserve every admitted observation for exact history replay.
     rgb_static_frames, rgb_gripper_frames, scene_states, info_frames, controller_frames = [], [], [], [], []
     applied_goals = []
+    inverse_clamps = []
+    if calibration is not None:
+        scales = np.asarray(calibration["scales"], dtype=float)
+        actual_scales = np.asarray([env.robot.max_rel_pos * env.robot.magic_scaling_factor_pos] * 3 +
+                                   [env.robot.max_rel_orn * env.robot.magic_scaling_factor_orn] * 3)
+        if scales.shape != (6,) or not np.allclose(scales, actual_scales):
+            raise ValueError("servo calibration scale differs from backend")
+        reports["servo_calibration"] = {
+            "path": str(args.servo_calibration),
+            "sha256": hashlib.sha256(args.servo_calibration.read_bytes()).hexdigest(),
+            "coefficients": calibration["coefficients"],
+            "goal_delta_bound_in_native_scales": 3.,
+            "source": "independent air motions; exact previous measured TCP delta; no task labels",
+        }
     original_relative = env.robot.relative_to_absolute
     def relative_with_telemetry(action):
-        absolute = original_relative(action)
+        if calibration is None:
+            absolute = original_relative(action)
+        else:
+            current = robot_states[-1][:6].astype(float)
+            previous_delta = np.zeros(6)
+            if len(robot_states) > 1:
+                previous_delta = current - robot_states[-2][:6]
+                previous_delta[3:] = (previous_delta[3:] + np.pi) % (2*np.pi) - np.pi
+            desired_delta = np.asarray(action[:6], dtype=float) * scales
+            goal_delta = (desired_delta - coefficients[:, 0] * previous_delta - coefficients[:, 2]) / coefficients[:, 1]
+            # Finite one-observation target bound; no persistent unfulfilled
+            # command sum. All commands and any bound activation are recorded.
+            bounded = np.clip(goal_delta, -3*scales, 3*scales)
+            inverse_clamps.append(bool(np.any(bounded != goal_delta)))
+            pose = current + bounded
+            absolute = (pose[:3], pose[3:], np.asarray(action[6:]).copy())
         applied_goals.append(np.concatenate([
             np.asarray(absolute[0]).reshape(3),
             np.asarray(absolute[1]).reshape(3),
@@ -98,7 +142,7 @@ def main() -> None:
     try:
         env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
         assert env.robot.use_target_pose is True
-        env.robot.use_target_pose = args.anchor != "measured_tcp"
+        env.robot.use_target_pose = args.anchor not in ("measured_tcp", "inverse_servo")
         observation = env.get_obs()
         start_info = env.get_info()
         model.reset()
@@ -127,6 +171,7 @@ def main() -> None:
                 "steps": steps,
                 "elapsed_seconds": time.perf_counter() - started,
                 "action_audit": model.action_audit(),
+                "inverse_servo_bound_steps": sum(inverse_clamps),
                 "robot_obs_trajectory": np.stack(robot_states).tolist(),
                 "complete": True,
             }

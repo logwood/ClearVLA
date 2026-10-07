@@ -9,6 +9,7 @@ import argparse, json, importlib.util, hashlib, math, time
 import numpy as np
 import torch
 import torch.nn.functional as F
+SCRIPT_SHA256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 from clearvla.simulation.clearvla_policy import ClearVLACheckpointPolicy
 from clearvla.simulation.history import CausalHistory
 from clearvla.benchmarks.calvin_eval import calvin_policy_observation
@@ -56,6 +57,8 @@ def main():
     ap.add_argument("--frozen-bank", action="store_true")
     ap.add_argument("--language-chain", action="store_true")
     ap.add_argument("--first-window-only", action="store_true")
+    ap.add_argument("--reconstruction-chain", action="store_true")
+    ap.add_argument("--native-value", action="store_true")
     args=ap.parse_args();args.output.mkdir(exist_ok=False);torch.set_num_threads(4)
     coverage=load_coverage(args.coverage_script)
     policy=ClearVLACheckpointPolicy(args.checkpoint,device=torch.device("cuda:0"),
@@ -90,11 +93,11 @@ def main():
     captured={};gs=[];caches=[];samples=[];variant="baseline";group=0
     def bank_forward(*a,**kw):
         hook=None;key_hook=None;floor=bank_module.flow_prior_floor;prior=bank_module.flow_prior_log_scale.detach().clone()
-        if group==0 and (args.bank_source or args.frozen_bank):
+        if group==0 and (args.bank_source or args.frozen_bank or args.native_value):
             if variant in ["bank_content_zero","bank_content_half"]:
                 factor=0.0 if variant=="bank_content_zero" else .5
                 hook=bank_module.query_norm.register_forward_hook(lambda m,i,o:o*factor)
-            elif variant=="bank_frozen_dino":
+            elif variant in ["bank_frozen_dino","bank_frozen_and_native"]:
                 source=kw["source_dino"].float()
                 target=kw["target_dino"].float()
                 b,c,h,w,d=source.shape
@@ -120,6 +123,7 @@ def main():
                 "content_logits","floor_flow_bias","adaptive_flow_bias","sigma",
                 "content_scale","confidence_grid","uncertainty_dino","occlusion_grid",
                 "flow_center_dino","source_high"]}
+            bank_records[id(local["bank"])]["native_current_dino"]=kw["target_dino"]
             return out
         finally:
             if hook is not None:hook.remove()
@@ -129,7 +133,13 @@ def main():
     def update(state,rollout,**kw):
         nonlocal group
         if kw["stage"]==1:group+=1
-        out=original_update(state,rollout,**kw)
+        old_content=state.bank.dense_current_dino_content
+        if group==1 and kw["stage"]==3 and variant in ["native_value_only","bank_frozen_and_native"]:
+            with torch.autocast(device_type=rollout.device.type,enabled=False):
+                native=bank_records[id(state.bank)]["native_current_dino"]
+                state.bank.dense_current_dino_content=enc.teacher_norm(native.float()).to(old_content.dtype)
+        try:out=original_update(state,rollout,**kw)
+        finally:state.bank.dense_current_dino_content=old_content
         if group==1 and kw["stage"]==1:
             captured["bank_parts"]=bank_records[id(state.bank)]
             captured["coarse_base"]=state.bank.coarse_base_logits
@@ -149,7 +159,18 @@ def main():
         return out
     def gh(*a,**kw):
         out,local=observe_return(original_g,a,kw)
-        gs.append((out[0],{k:local[k] for k in ["chart","camera_read","structured_read","candidate_prior","validity","candidate_shape"]}))
+        source={k:local[k] for k in ["chart","camera_read","structured_read","candidate_prior","validity","candidate_shape"]}
+        if args.reconstruction_chain:
+            owner=local["reconstruction_owner"]
+            value=local["aggregated_content"]
+            residual=grounder.decode_content_residual(local["slots"])
+            source["reconstruction"]={
+                "observed":local["observed"],"target":local["target_content"],
+                "full":local["reconstructed"],"owner":owner,
+                "without_slot_residual":torch.einsum("bkcyx,bkd->bcyxd",owner.to(value.dtype),value)+local["shared_support"].to(local["decoded_position"].dtype)[...,None]*local["decoded_position"],
+                "without_position":torch.einsum("bkcyx,bkd->bcyxd",owner.to(local["content"].dtype),local["content"]),
+            }
+        gs.append((out[0],source))
         return out
     def encode(*a,**kw):
         out=original_encode(*a,**kw);caches[:]=[out[0]];return out
@@ -185,8 +206,9 @@ def main():
                 with np.load(maskpath) as z:masks=[z[k+"_masks"].copy() for k in ["top","wrist"]];names=z["object_names"].tolist()
                 entry={"case_id":cid,"state":t,"object_names":names,"recorded_arm_rmse":rms(baseline[:8,:6]-data["raw_chunks"][t//8,:8,:6]),"variants":[]}
                 variants=(["baseline","bank_content_zero","bank_content_half","bank_spatial_zero"] if args.bank_source else ["baseline","neutral_parent","parent_half","parent_only","neutral_semantic","neutral_appearance","neutral_geometry"])
-                if args.language_chain: variants=["baseline"]
+                if args.language_chain or args.reconstruction_chain: variants=["baseline"]
                 if args.frozen_bank: variants=["baseline","bank_frozen_dino"]
+                if args.native_value: variants=["baseline","native_value_only","bank_frozen_and_native"]
                 for variant in variants:
                     clear()
                     with torch.no_grad():out=sample_action(model,online,policy.bundle.config,initial_physical_noise=seed)
@@ -216,12 +238,33 @@ def main():
                        "null":float(cache.top.intent.target_binding.null_mass[0]),
                        "native_first8":act[:8].tolist(),"native_vs_baseline_arm_rmse":rms(act[:8,:6]-baseline[:8,:6]),
                        "g_reconstruction_error":float(facts.reconstruction_error)}
+                    if args.reconstruction_chain:
+                        recon=source["reconstruction"];diagnostic=[]
+                        for camera,mask in enumerate(masks):
+                            # Area occupancy is diagnostic support on DINO cells,
+                            # not an oracle mask entering model or its objective.
+                            size=recon["full"].shape[2:4]
+                            weights=F.adaptive_avg_pool2d(torch.as_tensor(mask,device=policy.device,dtype=torch.float32)[None],size)[0]
+                            background=(1-weights.sum(0)).clamp_min(0)
+                            weights=torch.cat([weights,background[None]],0)
+                            target=recon["target"][0,camera].float()
+                            for oi,name in enumerate(names+["background"]):
+                                w=weights[oi]*recon["observed"][0,camera,...,0].float()
+                                den=w.sum()
+                                error={}
+                                for key in ["full","without_slot_residual","without_position"]:
+                                    cell=(recon[key][0,camera].float()-target).square().mean(-1)
+                                    error[key]=float((cell*w).sum()/den.clamp_min(1e-12))
+                                owners=(recon["owner"][0,:,camera]*w[None]).sum((1,2))/den.clamp_min(1e-12)
+                                diagnostic.append({"camera":["top","wrist"][camera],"object":name,"cell_area":float(den),
+                                    "reconstruction_mse":error,"conditional_reconstruction_K":arr(owners).tolist()})
+                        record["reconstruction_object_audit"]=diagnostic
                     if variant=="baseline":
                         record["within_candidate_score_rms"]={k:rms(arr(v-v.mean(-1,keepdim=True))) for k,v in {**captured["typed"],"parent":captured["original_parent"],"G1_base":captured["coarse_base"],"G1_delta":captured["coarse_logits"]-captured["coarse_base"]}.items()}
                     parts=captured["bank_parts"]
                     record["bank_parameters"]={k:{"min":float(parts[k].min()),"mean":float(parts[k].mean()),"max":float(parts[k].max())} for k in ["sigma","content_scale","confidence_grid","uncertainty_dino","occlusion_grid"]}
                     record["bank_centered_score_rms"]={k:rms(arr(parts[k]-parts[k].mean(-1,keepdim=True))) for k in ["content_logits","floor_flow_bias","adaptive_flow_bias"]}
-                    if variant in ["baseline","neutral_parent","parent_half","bank_content_zero","bank_content_half","bank_spatial_zero","bank_frozen_dino"]:
+                    if not args.reconstruction_chain and variant in ["baseline","neutral_parent","parent_half","bank_content_zero","bank_content_half","bank_spatial_zero","bank_frozen_dino","native_value_only","bank_frozen_and_native"]:
                         record["natural_colors"]=[]
                         natural_conditions=([(color,direction) for color in ["red","blue","pink"] for direction in ["left","right"]]
                             if args.language_chain else [(color,row["instruction"].split()[-1]) for color in ["red","blue","pink"]])
@@ -277,7 +320,7 @@ def main():
                 rows.append(entry);variant="baseline"
         dump(args.output/"complete.json",{"complete":True,"windows":len(rows),"checkpoint_sha256":policy.bundle.checkpoint_sha256,
           "scope":"current online local producer only; coherent recomputation; masks never enter model; no closed-loop efficacy claim",
-          "script_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
+          "script_sha256":SCRIPT_SHA256})
     finally:
         for hook in language_hooks:hook.remove()
         binder.forward=original_bind
