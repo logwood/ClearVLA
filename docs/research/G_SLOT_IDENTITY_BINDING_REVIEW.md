@@ -2546,3 +2546,28 @@ root. probes/probe_causal_identity_module_gradients.py additionally exposes
 ordinary total/action/world/identity VJPs to the new outcome, binder, S/W
 identity/view and canonical decoder weights without any optimizer step.
 Its nonzero gradients are connectivity evidence, not physical success.
+
+
+The actual full-loss VJP mechanical admission completed in
+B-nullv2-module-vjp-mechanical-r3 (source probe 775e59ad, production 0e861f56).
+All 23 selected consumer parameters have connected, finite total-loss gradients.
+Examples: W identity/view-content L2 0.159/0.175, S identity 0.00105,
+observed-outcome output 0.00478; its inner image/view gradients are only
+1.35e-11/5.06e-12 after two updates, not evidence of strong learned use.
+Action loss reaches S/W identity and view consumers; the goal-free world loss
+does not update the S binder, and identity reconstruction does not train the
+S consumer directly. This is consistent gradient ownership, not task admission.
+
+r1/r2 VJP launcher failures are retained: the training CLI correctly rejected
+a checkpoint-clock request without an admitted training migration, then rejected
+a fresh clock with nonzero optimizer origin. The read-only probe now uses
+fresh unused optimizer origin 0, restores the verified checkpoint execution
+step immediately before the ordinary loss forward, and exits before any update
+or checkpoint write. It does not weaken or modify the training clock contract.
+
+AB-r1-module-vjp-short-r1 is queued on GPU0 after A's standard panel; it checks
+both final A/B-r1 checkpoints with their own production source.
+B-nullv2-module-vjp-short-r1 is queued on GPU2 after v2's own standard panel.
+These complement the existing GPU4 physical/source/trajectory audits. Formal
+promotion still requires their actual final results plus full behavior; the
+mechanical initial gradients cannot substitute for those checks.
