@@ -20,6 +20,9 @@ def test_native_posterior_update_and_rebuild(tmp_path,monkeypatch):
     model,engine=base.baseline.engine(cfg,bundle)
     tracked={n:p for n,p in model.named_parameters() if "spatial_posterior_context" in n}
     assert len(tracked)==4
+    # W's zero-start output heads intentionally block upstream derivatives on
+    # update one. Qualify the ordinary next update after the heads have opened.
+    engine.train_step(batch)
     before={n:p.detach().clone() for n,p in tracked.items()}
     engine.train_step(batch)
     for n,p in tracked.items():

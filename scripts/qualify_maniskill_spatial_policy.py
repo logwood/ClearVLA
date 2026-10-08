@@ -36,7 +36,7 @@ def main():
     forward=MainlineTrainingEngine._forward_encoded
     train=MainlineTrainingEngine.train_step
     receipt={"status":"running","updates":[]}
-    audited=False
+    audited=0
     def save():
         temp=args.receipt.with_suffix(".tmp")
         temp.write_text(json.dumps(receipt,indent=2,allow_nan=False)+"\n")
@@ -44,13 +44,12 @@ def main():
     def traced(engine,batch,*,encoded,**kwargs):
         nonlocal audited
         ledger,metrics=forward(engine,batch,encoded=encoded,**kwargs)
-        if audited or not engine.model.training:return ledger,metrics
-        audited=True
+        if audited >= 2 or not engine.model.training:return ledger,metrics
+        audited += 1
         tracked=[(n,p) for n,p in legacy_named_parameters(engine.model) if p.requires_grad and owner(n)]
         counts={key:0 for key in ("W_spatial","P2_spatial","S_spatial","P2_expected_actual","shared_target")}
         params=[p for g in engine.optimizer.param_groups for p in g["params"]]
         assert tracked and all(sum(x is p for x in params)==1 for _,p in tracked)
-        state=engine.model.state_dict()
         rng=torch.cuda.get_rng_state().clone()
         grads=torch.autograd.grad(ledger.total,[p for _,p in tracked],retain_graph=True,allow_unused=True)
         rows=[]
@@ -60,12 +59,14 @@ def main():
             rms=float(g.float().square().mean().sqrt())
             rows.append({"name":n,"owner":owner(n),"rms":rms})
             if rms>0:counts[owner(n)]+=1
-        if not all(counts.values()):raise RuntimeError("Missing structural VJP: "+repr(counts))
+        # Fresh W heads are exactly zero on the first forward. The next
+        # ordinary update must reach every new owner without artificial gates.
+        if audited == 2 and not all(counts.values()):raise RuntimeError("Missing structural VJP: "+repr(counts))
         if not torch.equal(rng,torch.cuda.get_rng_state()):raise RuntimeError("Read-only VJP changed CUDA RNG")
         law=encoded.cache.top.belief.camera_position_probability
         assert law is encoded.cache.top.predicted_dynamics.camera_position_probability
         assert law.shape[-2:]==(16,16)
-        receipt.update(first_step=engine.global_step,owner_vjps=rows,live_owner_counts=counts,
+        receipt.update(audited_step=engine.global_step,owner_vjps=rows,live_owner_counts=counts,
                        loss_groups={k:float(v.detach()) for k,v in ledger.groups.items()},
                        structural_terms={k:float(v.detach()) for k,v in ledger.terms.items() if k.startswith("spatial_")},
                        spatial_law_shape=list(law.shape),optimizer_ownership="exactly_once",
@@ -80,7 +81,7 @@ def main():
             if n in before:
                 if not torch.isfinite(p).all():raise FloatingPointError(n)
                 if not torch.equal(p,before[n]):changed[owner(n)]+=1
-        if not all(changed.values()):raise RuntimeError("No optimizer change for "+repr(changed))
+        if receipt["updates"] and not all(changed.values()):raise RuntimeError("No optimizer change for "+repr(changed))
         receipt["updates"].append({"step":engine.global_step,"changed_owner_counts":changed})
         receipt["peak_allocated_gib"]=torch.cuda.max_memory_allocated()/1024**3
         save()
@@ -89,7 +90,7 @@ def main():
     try:
         with patch.object(MainlineTrainingEngine,"_forward_encoded",traced),patch.object(MainlineTrainingEngine,"train_step",stepped):
             runpy.run_module("clearvla.mainline.train",run_name="__main__",alter_sys=True)
-        if not audited or len(receipt["updates"])!=2:raise RuntimeError("Expected exactly two real updates")
+        if audited != 2 or len(receipt["updates"])!=2:raise RuntimeError("Expected exactly two real updates")
         receipt["status"]="passed";save()
         print("STRUCTURAL_PREFLIGHT_PASSED "+str(args.receipt),flush=True)
     except BaseException as error:
