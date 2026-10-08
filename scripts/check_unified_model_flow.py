@@ -26,6 +26,7 @@ def configuration(
     variant: str,
     typed_object_values: str = "legacy_selected_v1",
     compute_dtype: str = "fp32",
+    outcome_mode: str = "before_proposal_v1",
 ):
     from importlib import import_module
 
@@ -45,7 +46,7 @@ def configuration(
         entity_competition_scale_mode="per_observation_v1",
         observation_measurement_mode="source_consistent_v1",
         target_binding_input_mode="full_tokens_views_v1",
-        observed_outcome_mode="before_proposal_v1",
+        observed_outcome_mode=outcome_mode,
         typed_interval_gradient_mode="ordinary_v1",
         typed_object_value_mode=typed_object_values,
         object_view_mode="per_camera_values_v1",
@@ -85,6 +86,7 @@ def run(
     compute_dtype: str = "fp32",
     batch_size: int = 1,
     reference_support: str = "full",
+    outcome_mode: str = "before_proposal_v1",
 ) -> dict:
     import torch
 
@@ -106,7 +108,7 @@ def run(
         raise ValueError("unknown synthetic reference support mode")
     torch.set_num_threads(1)
     torch.manual_seed(28431)
-    config = configuration(shape, variant, typed_object_values, compute_dtype)
+    config = configuration(shape, variant, typed_object_values, compute_dtype, outcome_mode)
     config = replace(config, optimizer=replace(config.optimizer, batch_size=batch_size))
     config.validate()
     fixture_config = replace(
@@ -273,6 +275,7 @@ def run(
         reference_observed_cells=int(reference.observed.sum()),
         reference_total_cells=reference.observed.numel(),
         observation_measurement_mode=config.top.observation_measurement_mode,
+        observed_outcome_mode=config.top.observed_outcome_mode,
         actual_batch_size=batch_size,
         optimizer_batch_size=config.optimizer.batch_size,
         compute_dtype=config.runtime.compute_dtype,
@@ -313,6 +316,11 @@ def main():
     parser.add_argument("--compute-dtype", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--reference-support", choices=("full", "alternating"), default="full")
+    parser.add_argument(
+        "--outcome-mode",
+        choices=("before_proposal_v1", "robot_world_before_proposal_v2"),
+        default="before_proposal_v1",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists() or args.updates < 1:
@@ -329,6 +337,7 @@ def main():
             args.compute_dtype,
             args.batch_size,
             args.reference_support,
+            args.outcome_mode,
         )
     except Exception as error:
         args.output.write_text(

@@ -1694,6 +1694,28 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### Measured robot result in S before proposal (2026-10-08 candidate)
+
+`observed_outcome_mode=robot_world_before_proposal_v2` keeps the existing
+measured-world read and additionally consumes the one already computed robot
+transition inside S, before interval organization/coarse. It uses current
+proprioception, the confirmed command, actual feature delta and source
+availability; not forecast innovation, contact/success labels, or a guessed
+controller target. The existing interval context conditions these observed
+values. S's one target binding, G/W invocation counts and physical clocks do not
+change. Reset/dropped predecessor support gives exactly zero; observed zero
+motion is distinct from unknown. Task gradients train the reader/context but
+cannot enter the response predictor through its measured packet.
+
+The new zero-output reader preserves inherited constructor RNG/parameters and
+initial sampled actions. It adds three explicitly owned parameter tensors and
+therefore is not an exact old-checkpoint resume. Only
+`causal_unified_outcome_v1` admits initialization from the previously declared
+mature source; previous A/B/source/values/reference migrations remain strict.
+New optimizer warmup and real-data/behavior gates remain mandatory. This is
+not evidence that an opening scalar identifies an object or that measured robot
+motion means task progress. See `UNIFIED_REFACTOR_QUALIFICATION.md`.
+
 ### Independent instruction-reference support (2026-10-08; not promoted)
 
 The source-consistent S/current-reference comparison now uses independent

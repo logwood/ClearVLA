@@ -7,7 +7,7 @@ MODES = {
     "entity_competition_scale_mode": ("batch_global_v1", "per_observation_v1"),
     "observation_measurement_mode": ("legacy_v1", "source_consistent_v1"),
     "target_binding_input_mode": ("protected_pooled_v1", "full_tokens_views_v1"),
-    "observed_outcome_mode": ("none", "before_proposal_v1"),
+    "observed_outcome_mode": ("none", "before_proposal_v1", "robot_world_before_proposal_v2"),
     "entity_ownership_mode": ("local_mixture_v1", "canonical_image_v1"),
     "identity_supervision_mode": ("none", "rgbd_temporal_v1", "rgbd_temporal_conditional_v2"),
 }
@@ -82,4 +82,12 @@ def causal_identity_metadata(top):
         result["typed_interval_gradient"] = "ordinary-common-residual-identity-v1"
     if value_mode == "conditional_object_v1":
         result["typed_object_values"] = "conditional-source-values-single-K-read-v1"
+    if modes["observed_outcome_mode"] == "robot_world_before_proposal_v2":
+        result["robot_outcome"] = {
+            "source": "measured-current-state-recorded-command-observed-state-delta-and-availability",
+            "clock": "exactly-one-confirmed-control-step",
+            "consumer": "same-S-interval-context-before-coarse-and-candidate-W",
+            "gradient": "detached-observations-reader-and-S-context-only-no-predictor-task-gradient",
+            "excludes": "predicted-response-innovation-contact-oracle-goal-success",
+        }
     return result

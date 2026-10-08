@@ -568,7 +568,9 @@ class TopConfig:
             self.target_binding_mode != "shared_operation_v1"
             or self.typed_interval_gradient_mode != "ordinary_v1"
         ):
-            raise ValueError("conditional object values require shared binding and ordinary gradients")
+            raise ValueError(
+                "conditional object values require shared binding and ordinary gradients"
+            )
         if self.typed_interval_gradient_mode not in {"legacy_common_surrogate_v1", "ordinary_v1"}:
             raise ValueError("unknown typed interval gradient contract")
         if self.annotation_goal_mode not in {"none", "annotated_endpoint_relation_v1"}:
@@ -640,13 +642,25 @@ class TopConfig:
             raise ValueError(
                 "object operation outcomes require shared target, aligned time and typed P3"
             )
-        if self.observed_outcome_mode not in {"none", "before_proposal_v1"}:
+        if self.observed_outcome_mode not in {
+            "none",
+            "before_proposal_v1",
+            "robot_world_before_proposal_v2",
+        }:
             raise ValueError("unknown observed outcome placement")
         if self.observed_outcome_mode != "none" and (
             self.world_feedback_mode == "none"
             or self.observation_measurement_mode != "source_consistent_v1"
         ):
             raise ValueError("S outcome requires source-consistent existing executed replay")
+        if self.observed_outcome_mode == "robot_world_before_proposal_v2" and (
+            self.robot_feedback_mode != "one_step_proprioceptive_v1"
+            or self.typed_interval_gradient_mode != "ordinary_v1"
+            or self.typed_object_value_mode != "conditional_object_v1"
+        ):
+            raise ValueError(
+                "robot outcome requires measured one-step feedback and ordinary conditional S values"
+            )
         if self.observation_measurement_mode not in {"legacy_v1", "source_consistent_v1"}:
             raise ValueError("unknown observed measurement mode")
         if (

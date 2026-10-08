@@ -15,21 +15,30 @@ from torch import Tensor
 if TYPE_CHECKING:
     from .config import ExperimentConfig
     from .model.target_binding import TargetBinding
-    from .model.types import ExecutedActionSequenceCondition, ObjectFactSet
+    from .model.types import ExecutedActionSequenceCondition
 
 EXECUTED_WORLD_FEEDBACK = "executed_four_step_world_v1"
 
 
 def executed_world_metadata(measurement_mode="legacy_v1", outcome_mode="none") -> dict[str, object]:
     if measurement_mode != "legacy_v1" or outcome_mode != "none":
-        if measurement_mode != "source_consistent_v1" or outcome_mode not in {"none","before_proposal_v1"}:
+        if measurement_mode != "source_consistent_v1" or outcome_mode not in {
+            "none",
+            "before_proposal_v1",
+            "robot_world_before_proposal_v2",
+        }:
             raise ValueError("unknown observed outcome ABI")
-        base=executed_world_metadata()
-        return {**base,"schema":"source-consistent-executed-outcome-v1",
-                "measurement":"frozen-source-descriptor-law-no-forecast-conditioned-search",
-                "values":"observed-predicted-and-innovation-separate-same-raw-reference",
-                "S":"observed-only-before-proposal-one-existing-replay" if outcome_mode=="before_proposal_v1" else "none",
-                "gradients":"detached-measurement-ordinary-current-G-overlap-and-single-S-binding"}
+        base = executed_world_metadata()
+        return {
+            **base,
+            "schema": "source-consistent-executed-outcome-v1",
+            "measurement": "frozen-source-descriptor-law-no-forecast-conditioned-search",
+            "values": "observed-predicted-and-innovation-separate-same-raw-reference",
+            "S": "observed-only-before-proposal-one-existing-replay"
+            if outcome_mode != "none"
+            else "none",
+            "gradients": "detached-measurement-ordinary-current-G-overlap-and-single-S-binding",
+        }
     return {
         "schema": "causal-executed-world-comparison-v1",
         "mode": EXECUTED_WORLD_FEEDBACK,
@@ -166,17 +175,38 @@ class ExecutedWorldFeedback:
             raise ValueError("executed W observation lost declared measurement support")
         if self.view_observed.shape != (b, k, c) or self.view_observed.dtype != torch.bool:
             raise ValueError("executed W source support must remain boolean")
-        outcomes = (self.observed_semantic, self.observed_image, self.predicted_semantic, self.predicted_image)
+        outcomes = (
+            self.observed_semantic,
+            self.observed_image,
+            self.predicted_semantic,
+            self.predicted_image,
+        )
         if any(v is not None for v in outcomes):
             if any(v is None for v in outcomes):
                 raise ValueError("observed, predicted and innovation records must be complete")
-            for value, expected in zip(outcomes, (self.semantic, self.image, self.semantic, self.image)):
-                if value.shape != expected.shape or value.dtype != torch.float32 or value.device != expected.device or value.requires_grad:
-                    raise ValueError("outcome record lost detached observation units or source axes")
+            for value, expected in zip(
+                outcomes, (self.semantic, self.image, self.semantic, self.image)
+            ):
+                if (
+                    value.shape != expected.shape
+                    or value.dtype != torch.float32
+                    or value.device != expected.device
+                    or value.requires_grad
+                ):
+                    raise ValueError(
+                        "outcome record lost detached observation units or source axes"
+                    )
             if strict:
                 if not all(bool(torch.isfinite(v).all()) for v in outcomes):
                     raise ValueError("nonfinite outcome record")
-                if not torch.allclose(self.semantic, self.observed_semantic-self.predicted_semantic, atol=2e-6, rtol=1e-5) or not torch.allclose(self.image, self.observed_image-self.predicted_image, atol=2e-6, rtol=1e-5):
+                if not torch.allclose(
+                    self.semantic,
+                    self.observed_semantic - self.predicted_semantic,
+                    atol=2e-6,
+                    rtol=1e-5,
+                ) or not torch.allclose(
+                    self.image, self.observed_image - self.predicted_image, atol=2e-6, rtol=1e-5
+                ):
                     raise ValueError("innovation is not observed minus predicted outcome")
         for t in (
             self.semantic,

@@ -254,3 +254,54 @@ clock 1200, two ordinary updates and full two-pass sampling. JUnit records the
 actual source configuration, support counts, batch/dtype and runtime. These are
 CPU BS1/FP32 checks; the separate small BS8/BF16 and all real-data/behavior gates
 retain their own scope and outcomes.
+
+
+## Measured robot result consumption (2026-10-08 continuation)
+
+The source previously retained `RobotResponseFeedback.observed_delta` and
+`predicted_delta` but its explicit reader consumed only innovation. S's
+`before_proposal_v1` read measured WORLD results, not that one-step robot packet.
+Two correctly predicted results (stall/motion) could therefore have the same
+zero explicit robot feedback. Existing RGB/proprioceptive history was still
+available; this does not claim those sensors were absent.
+
+The opt-in `robot_world_before_proposal_v2` passes the existing robot packet
+from policy encoding into the S interval producer. The internal
+`ObservedRobotOutcomeRead` consumes actual current state, confirmed command,
+actual feature delta and an observation witness, modulated by the existing
+interval context. Response prediction and innovation are not arguments to its
+value calculation. No new sensor, physical unit conversion, contact flag,
+controller setpoint, phase threshold, selector, loss or G/W replay is created.
+The single existing world outcome read is unchanged. Mechanical facts can be
+available with a null visual target; they do not assert object identity.
+
+Producer identity, exact one-step offsets, observed finite inputs and actual
+state-difference equality are checked. Missing-source NaNs are quarantined
+before any projection. The new output starts at zero and only three new
+parameter tensors are added; inherited random initialization and initial full
+sampler outputs are preserved. Ordinary task loss reaches these parameters
+once the zero-start output begins learning; observation tensors and response
+predictor cannot be rewritten by that task gradient.
+
+The graph is serialized in config and causal ABI, requires ordinary conditional
+S values and one-step measured robot feedback, and uses only the new
+`causal_unified_outcome_v1` migration. Its exact parameter inventory and neutral
+initialization are required; earlier source allowlists are not broadened. A/B
+check configs are `unified_outcomes_{a,b}_calvin_check.json`. The corresponding
+real-data admission command must select `--migration causal_unified_outcome_v1`.
+These are bounded training CHECKS, not full training budgets or promoted models.
+
+Tests distinguish unchanged/changed result at identical zero innovation,
+forecast-only noninterference, missing-source NaNs, observed zero vs unknown,
+ordinary first/second context derivatives, batch/interval permutations,
+constructor RNG, source identity through conditioning, ABI/migration rejection,
+two ordinary updates and full proposal/W/refined sampling. The full-policy
+lifecycle test follows the CONDITIONED producer packet (the conditioning layer
+can replace source wrappers); it does not compare the raw preconditioning
+wrapper by identity. Original failed fixture output remains an audit artifact.
+
+No behavior or real-data result is inferred from these artificial checks.
+Physical instance identity, target choice, contact-compatible arm/gripper,
+long-gap correspondence, controller state and sustained task maintenance retain
+their outstanding scientific gates. An actual asset-owning CUDA training run
+and new closed loops are still required.

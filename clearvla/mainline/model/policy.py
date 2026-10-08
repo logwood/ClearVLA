@@ -946,6 +946,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             instruction_reference=conditioned_policy_input.instruction_reference,
             current_dino=conditioned_policy_input.observation.dino_history[:, -1],
             executed_feedback=feedback,
+            robot_feedback=robot_feedback,
             facts=facts,
             collect_diagnostics=collect_diagnostics,
         )

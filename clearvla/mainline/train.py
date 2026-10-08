@@ -31,6 +31,7 @@ from .model.types import PhysicalActionCondition, PhysicalActionSequenceConditio
 from .runtime.causal_identity_migration import (
     CAUSAL_IDENTITY_AB_V1,
     CAUSAL_INITIALIZATION_MODES,
+    CAUSAL_UNIFIED_OUTCOME_V1,
     CAUSAL_UNIFIED_REFERENCE_V1,
     CAUSAL_UNIFIED_SOURCE_V1,
     CAUSAL_UNIFIED_VALUES_V1,
@@ -165,6 +166,7 @@ def _parser() -> argparse.ArgumentParser:
             CAUSAL_UNIFIED_SOURCE_V1,
             CAUSAL_UNIFIED_VALUES_V1,
             CAUSAL_UNIFIED_REFERENCE_V1,
+            CAUSAL_UNIFIED_OUTCOME_V1,
             DINOV3_DEEP_REPAIR_V1_MIGRATION,
             S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
             G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,

@@ -20,6 +20,7 @@ from ..instruction_change import (
 )
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
+from ..robot_execution import RobotResponseFeedback
 from ..role_values import ADDRESS_ONLY_ROLE
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
 from ..task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION
@@ -397,7 +398,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
 
         validate_typed_object_value_mode(typed_object_value_mode)
         if typed_object_value_mode == "conditional_object_v1" and (
-            target_binding_mode != "shared_operation_v1" or typed_interval_gradient_mode != "ordinary_v1"
+            target_binding_mode != "shared_operation_v1"
+            or typed_interval_gradient_mode != "ordinary_v1"
         ):
             raise ValueError("conditional values require one shared binding and ordinary gradients")
         self.typed_object_value_mode = typed_object_value_mode
@@ -613,7 +615,15 @@ class StatelessObjectIntentOrganizer(nn.Module):
 
         self.observed_outcome = (
             ObservedOutcomeRead(hidden, content_dim, camera_names)
-            if observed_outcome_mode == "before_proposal_v1"
+            if observed_outcome_mode in {"before_proposal_v1", "robot_world_before_proposal_v2"}
+            else None
+        )
+
+        from .observed_robot_outcome import ObservedRobotOutcomeRead
+
+        self.observed_robot_outcome = (
+            ObservedRobotOutcomeRead(state_dim=state_dim, action_dim=action_dim, hidden=hidden)
+            if observed_outcome_mode == "robot_world_before_proposal_v2"
             else None
         )
 
@@ -896,6 +906,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         instruction_reference: InstructionReference | None = None,
         current_dino: Tensor | None = None,
         executed_feedback=None,
+        robot_feedback: RobotResponseFeedback | None = None,
     ) -> tuple[ObjectIntentState, dict[str, Tensor]]:
         if goal_tokens.ndim != 3 or goal_mask.ndim != 2:
             raise ValueError("intent organizer requires full T5 tokens and mask")
@@ -1283,6 +1294,14 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 raise ValueError("S outcome lost its observed replay or shared target")
             observed_outcome = self.observed_outcome(executed_feedback, facts, target_binding)
             interval_source = interval_source + observed_outcome[:, None].to(interval_source.dtype)
+        if self.observed_robot_outcome is not None:
+            if robot_feedback is None or robot_feedback.current_state is not state:
+                raise ValueError(
+                    "S robot outcome requires this observation's measured robot source"
+                )
+            interval_source = interval_source + self.observed_robot_outcome(
+                robot_feedback, interval_source
+            ).to(interval_source.dtype)
         public_intervals = self.interval_self(interval_source)
         if self.task_relation_encoder is not None:
             # Add the carrier after the interval self-read so its identity
@@ -1676,7 +1695,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
             selected = typed_relevance_value[..., type_index, :].detach().float()
             component = typed_policy_components[..., type_index, :].detach().float()
             if self.typed_object_value_mode == "conditional_object_v1":
-                metrics[f"object_intent_{name}_conditional_value_rms"] = selected.square().mean().sqrt()
+                metrics[f"object_intent_{name}_conditional_value_rms"] = (
+                    selected.square().mean().sqrt()
+                )
                 if target_binding is None:
                     raise ValueError("conditional-value diagnostics lost target binding")
                 # Keep historical 'selected' diagnostics on their actual
