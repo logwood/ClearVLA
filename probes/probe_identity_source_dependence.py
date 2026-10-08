@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import subprocess
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -30,7 +31,7 @@ def dump(path, value):
     temporary.replace(path)
 
 
-def capture_source(model, online, facts, labels):
+def capture_source(model, online, facts, labels, *, common_objective_only=False):
     """Capture the independent source encoding made by the actual objective."""
     capture = []
     original = production.encode_owners
@@ -42,7 +43,13 @@ def capture_source(model, online, facts, labels):
 
     production.encode_owners = record
     try:
-        actual = production.identity_terms(model, online, facts, labels)
+        source_model=model
+        if common_objective_only:
+            if model.config.top.identity_supervision_mode!='rgbd_temporal_regions_v3':
+                raise ValueError('common-objective-only is explicit v3 audit scope')
+            source_model=SimpleNamespace(grounding=model.grounding,observation=model.observation,
+                config=SimpleNamespace(top=SimpleNamespace(identity_supervision_mode='rgbd_temporal_conditional_v2')))
+        actual = production.identity_terms(source_model, online, facts, labels)
     finally:
         production.encode_owners = original
     if len(capture) != 1:
@@ -50,9 +57,9 @@ def capture_source(model, online, facts, labels):
     return actual, capture[0]
 
 
-def controls(model, online, facts, labels, *, prepared=None, donor=None, audit_regions=None):
+def controls(model, online, facts, labels, *, prepared=None, donor=None, audit_regions=None, common_objective_only=False):
     module = model.grounding.grounder
-    actual, captured = prepared if prepared is not None else capture_source(model, online, facts, labels)
+    actual, captured = prepared if prepared is not None else capture_source(model, online, facts, labels, common_objective_only=common_objective_only)
     raw = online.observation.dino_history[:, -2:].detach()
     b, times, cameras, cells, width = raw.shape
     side = math.isqrt(cells)
@@ -76,7 +83,7 @@ def controls(model, online, facts, labels, *, prepared=None, donor=None, audit_r
         donor_conditional = conditional.roll(1, 0)
     target = observed[:, -1].reshape(b, cameras, side, side, width).permute(0, 1, 4, 2, 3)
     full = facts.image_ownership
-    conditional_mode = model.config.top.identity_supervision_mode == 'rgbd_temporal_conditional_v2'
+    conditional_mode = model.config.top.identity_supervision_mode in {'rgbd_temporal_conditional_v2','rgbd_temporal_regions_v3'}
     comparison_source = conditional if conditional_mode else law
     if conditional_mode:
         source = facts.current_image_source
@@ -205,6 +212,7 @@ def controls(model, online, facts, labels, *, prepared=None, donor=None, audit_r
     if max(gaps.values()) > 2e-5:
         raise ValueError('probe did not reproduce actual production objective: ' + str(gaps))
     return dict(identity_supervision_mode=model.config.top.identity_supervision_mode,
+                objective_scope='original correspondence and source MSE only; extra region losses NOT scored' if common_objective_only else 'all configured identity terms',
                 production={k: float(v) for k, v in actual.items()}, reproduction_gaps=gaps, pairs=records)
 
 
@@ -215,6 +223,7 @@ def main():
     parser.add_argument('--episodes', type=int, default=12)
     parser.add_argument('--windows-per-episode', type=int, default=2)
     parser.add_argument('--batch-size', type=int, default=4)
+    parser.add_argument('--common-objective-only',action='store_true',help='V3 only: score unchanged original objectives on independent windows without inventing region annotations')
     args = parser.parse_args()
     if args.episodes < args.batch_size or args.episodes % args.batch_size:
         raise ValueError('use whole batches with distinct donor episodes')
@@ -227,12 +236,20 @@ def main():
     device = torch.device('cuda:0')
     payload = torch.load(args.checkpoint, map_location='meta', weights_only=False)
     config = config_from_mapping(payload['config'])
-    if config.top.identity_supervision_mode not in {'rgbd_temporal_v1', 'rgbd_temporal_conditional_v2'}:
+    if config.top.identity_supervision_mode not in {'rgbd_temporal_v1', 'rgbd_temporal_conditional_v2','rgbd_temporal_regions_v3'}:
         raise ValueError('probe requires the trained B objective')
     deployment = load_deployment_checkpoint(args.checkpoint, device=device, t5_condition=config.data.t5_condition)
     model = deployment.model.eval()
     versions = {name: p._version for name, p in model.named_parameters()}
-    data = load_mainline_data(config)
+    data_config=config
+    if config.top.identity_supervision_mode=='rgbd_temporal_regions_v3':
+        if not args.common_objective_only:raise ValueError('v3 independent source controls require explicit --common-objective-only scope')
+        data_payload=config.as_dict()
+        data_payload['data'].update(identity_region_manifest='',identity_region_manifest_sha256='')
+        data_payload['top']['identity_supervision_mode']='rgbd_temporal_conditional_v2'
+        data_payload['objectives'].update(identity_region_separation=0.,identity_region_prediction=0.)
+        data_config=config_from_mapping(data_payload)
+    data = load_mainline_data(data_config)
     dataset = data.datasets['val']
     groups = defaultdict(list)
     for index, ref in enumerate(dataset.base.refs):
@@ -254,6 +271,7 @@ def main():
         split='val', episode_indices=chosen, sample_indices=indices,
         scope='held observed source dependence; no physical-object labels, no optimizer updates',
         identity_supervision_mode=config.top.identity_supervision_mode,
+        common_objective_only=args.common_objective_only,
         caveat='v1 joint consistency admits null collapse; v2 conditional consistency still admits uniform/single-K collapse; physical-object audits remain required',
     )
     records = []
@@ -262,10 +280,10 @@ def main():
         episodes = worker['episode_idx'].tolist()
         if len(set(episodes)) != len(episodes):
             raise ValueError('whole-source donors are not distinct episodes')
-        batch = to_training_batch(worker, goal=data.goal, config=config, device=device, visual_encoder=vision)
+        batch = to_training_batch(worker, goal=data.goal, config=data_config, device=device, visual_encoder=vision)
         with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16, enabled=config.runtime.compute_dtype == 'bf16', cache_enabled=False):
             _, state, _ = model.encode_online(batch.online)
-            report = controls(model, batch.online, state.top.facts, batch.identity)
+            report = controls(model, batch.online, state.top.facts, batch.identity, common_objective_only=args.common_objective_only)
         report.update(batch=batch_index, episodes=episodes, source_frames=batch.identity.source_frames.cpu().tolist())
         records.append(report)
         dump(args.output / 'results.json', dict(identity=identity, complete=False, records=records))

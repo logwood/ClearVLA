@@ -54,6 +54,8 @@ def main():
                   'world': ledger.contributions['future_dynamics'] + ledger.contributions['future_transition']}
         if 'identity_correspondence' in ledger.contributions:
             losses['identity'] = ledger.contributions['identity_correspondence'] + ledger.contributions['identity_source_prediction']
+        for name in ('identity_region_separation','identity_region_prediction'):
+            if name in ledger.contributions:losses[name]=ledger.contributions[name]
         results = {}
         for index, (name, loss) in enumerate(losses.items()):
             grads = torch.autograd.grad(loss, list(selected.values()), retain_graph=index < len(losses) - 1, allow_unused=True) if loss.requires_grad else [None] * len(selected)

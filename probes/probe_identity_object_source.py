@@ -24,6 +24,7 @@ def main():
     parser=argparse.ArgumentParser()
     for key in ('checkpoint','plan','labels','output'):
         parser.add_argument('--'+key,type=Path,required=True)
+    parser.add_argument('--common-objective-only',action='store_true',help='V3: exclude additional region objectives; no region labels invented for these factual windows')
     args=parser.parse_args()
     if VISUAL_OFFSETS!=(-8,-4,0):raise ValueError('label exporter expects the actual past4/current visual pair')
     if not (args.labels/'complete.json').exists():raise ValueError('factual label replay is incomplete')
@@ -39,8 +40,10 @@ def main():
         t5_condition=Path('/data/senwang/data/calvin/language/abc_d_full_t5_xxl_bank.pt'),
         dinov3_model=Path('/data/senwang/clearvla/third_party/dinov3/hf-vitb16-lvd1689m'),seed=0)
     model=policy.bundle.model
-    if model.config.top.identity_supervision_mode not in ('rgbd_temporal_v1','rgbd_temporal_conditional_v2'):
+    if model.config.top.identity_supervision_mode not in ('rgbd_temporal_v1','rgbd_temporal_conditional_v2','rgbd_temporal_regions_v3'):
         raise ValueError('object source audit requires a B identity objective')
+    if model.config.top.identity_supervision_mode=='rgbd_temporal_regions_v3' and not args.common_objective_only:
+        raise ValueError('v3 factual controls require explicit --common-objective-only scope')
     versions={name:p._version for name,p in model.named_parameters()}
     grounder=model.grounding.grounder;captured=[];holder={}
     original_ground=grounder.forward;original_encode=model.encode_online
@@ -60,6 +63,7 @@ def main():
         label_replay=json.loads((args.labels/'complete.json').read_text()),
         scope='frozen evaluation-mode production objective, exact-replay endpoint body partitions; no training-mask/gradient attribution; bilinear DINO features can straddle boundaries',
         mask_use='report only; not a model input or loss weight',formal_promoted=False)
+    identity['common_objective_only']=args.common_objective_only
     dump(args.output/'identity.json',identity)
     try:
         for row,step in requested:
@@ -91,13 +95,13 @@ def main():
             cache=holder['cache']
             facts=next(f for f in captured if f.camera_coordinates is cache.top.belief.camera_coordinates)
             with torch.no_grad(),torch.autocast('cuda',dtype=torch.bfloat16,enabled=model.config.runtime.compute_dtype=='bf16',cache_enabled=False):
-                source=capture_source(model,online,facts,labels)
+                source=capture_source(model,online,facts,labels,common_objective_only=args.common_objective_only)
             prepared.append(dict(case=case.name,step=step,online=online,facts=facts,labels=labels,regions=regions,source=source))
             print('PREPARED',case.name,step,flush=True)
         for index,current in enumerate(prepared):
             donor=prepared[(index+1)%len(prepared)]
             with torch.no_grad(),torch.autocast('cuda',dtype=torch.bfloat16,enabled=model.config.runtime.compute_dtype=='bf16',cache_enabled=False):
-                result=controls(model,current['online'],current['facts'],current['labels'],prepared=current['source'],donor=donor['source'],audit_regions=current['regions'])
+                result=controls(model,current['online'],current['facts'],current['labels'],prepared=current['source'],donor=donor['source'],audit_regions=current['regions'],common_objective_only=args.common_objective_only)
             result.update(case=current['case'],step=current['step'],donor_case=donor['case'],donor_step=donor['step'])
             left=current['online'].observation.dino_history[:,-2:].float()
             right=donor['online'].observation.dino_history[:,-2:].float()
