@@ -529,6 +529,8 @@ def _load_mainline_data(
     """Build the formal inventory, optionally materializing bounded datasets."""
 
     config.validate()
+    if config.top.identity_supervision_mode == 'rgbd_temporal_regions_v3' and not config.data.identity_region_manifest:
+        raise ValueError('region training/validation requires its pinned annotation manifest')
     if config.top.identity_supervision_mode != "none" and (not config.data.calvin_raw_source or config.data.image_store_mode != "hdf5-direct"):
         raise ValueError("identity training labels require uncached raw sensors and HDF5 source provenance")
     if materialized_splits is None:

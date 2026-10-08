@@ -1259,7 +1259,11 @@ class ExperimentConfig:
         regions=self.top.identity_supervision_mode=="rgbd_temporal_regions_v3"
         if regions:
             digest=self.data.identity_region_manifest_sha256
-            if not self.data.identity_region_manifest or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
+            # Deployment rebuilds graph semantics without any training paths.
+            # The data loader requires this pair for training; graph validation
+            # accepts both absent, but never an incomplete or malformed pair.
+            supplied=bool(self.data.identity_region_manifest) or bool(digest)
+            if supplied and (not self.data.identity_region_manifest or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest)):
                 raise ValueError('region supervision requires a pinned annotation manifest')
             if self.objectives.identity_region_separation<=0 or self.objectives.identity_region_prediction<=0 or not 0<self.top.identity_region_js_margin<1:
                 raise ValueError('region supervision requires explicit separation and balanced prediction objectives')
