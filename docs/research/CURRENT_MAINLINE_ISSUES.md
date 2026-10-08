@@ -17,6 +17,60 @@ No GitHub writes this turn; source and local history are fully archived.
 
 # ClearVLA current decision ledger
 
+## ManiSkill spatial averaging and identity audit (2026-10-08)
+
+User redirected the next repair toward structural collapse/averaging before
+additional training or long probes. The proposed deployment-prefix objective
+was not implemented or launched. An offline audit covers every saved spatial
+candidate/control query: 98 held-out expert states, 72 original failure states,
+and 12 placement controls per arm. A separate trained-weight CPU check uses
+no GPU, model rollout or optimizer update.
+
+The four slots do not exhibit wholesale spatial collapse: candidate held-out
+pairwise centre separation averages 136.96 pixels. However, within-slot RMS
+spread is 82.16 pixels. In 67/312 visible object/view entries the exported mean
+is over 24 pixels from the cube while the strongest label-blind 25x25-window
+mode is within 24 pixels. Exported coordinates equal the posterior moments
+within 0.000140 pixels. This identifies actual mean reduction, not display
+offset. A hard mode substitute is not qualified: overall mode error is
+55.81 versus centroid 52.01 pixels, with many wrong-object/background peaks.
+
+`ImageLogMeasure.camera_centers` -> G `camera_coordinates` -> W -> P2 current
+coordinate scoring/context is an explicit first-moment bottleneck. In the
+trained P2, disjoint left/right and up/down laws with equal means give exactly
+equal position contexts at fixed W transport covariance. This does not prove
+equal whole-policy outputs: S separately retains E[phi(position)] from the
+original G law. Its selected v1 relation pools this feature before robot/task
+interaction; a 9x9-grid affine fit explains 99.25% of the trained coordinate
+feature variance. Treat that as a narrow feature-map diagnostic, not proof
+that the full S path is linear or dead.
+
+Physical identity across cameras is also unqualified. Among 41 held-out
+queries with both cubes visible in both views, 15 contain at least one slot
+with confident opposite cube associations. There are 18 conflicting cases
+among 76 eligible slot/query pairs, 13 involving evaluator-matched object
+slots. Eligibility: >=20 actor pixels/object/view, >=0.2 combined dilated
+cube-region mass per view, and red fraction >=0.7 versus <=0.3 across views.
+Control eligibility is much lower, so raw counts are not a regression test.
+The same slot index alone does not establish one physical entity across views.
+
+The shared binding averages 3.78 effective real slots, with matched-red/green/
+null mass 0.1893/0.2203/0.2347. Shared-mode P2 copies this semantic K marginal;
+its dynamic geometry reader can choose C inside K but cannot repair object
+selection downstream. A binding-composed image map is attribution only, not
+an emitted action target. The observed broad binding and cross-view mismatch
+motivate preserving spatial alternatives through conditioned geometry and
+qualifying entity/target-reference separation before another loss-only pilot.
+Keep one K+null owner, separate camera/physical charts and privileged labels
+outside online inputs. No architectural fix or policy improvement is yet
+claimed by this audit.
+
+Reproduce with `scripts/analyze_maniskill_spatial_collapse.py`,
+`scripts/audit_maniskill_spatial_moments.py` and
+`scripts/render_maniskill_spatial_structure.py`. Full data/figures are under
+local `.work/maniskill-spatial-structure-audit-20261008/r2`; the small CPU receipt
+is also at remote `/data/senwang/clearvla/artifacts/maniskill-spatial-structure-audit-20261008`.
+
 ## ManiSkill frozen-baseline spatial diagnosis (2026-10-08)
 
 The epoch-8 baseline (checkpoint SHA prefix `a6e4158bb995083e`) remains
