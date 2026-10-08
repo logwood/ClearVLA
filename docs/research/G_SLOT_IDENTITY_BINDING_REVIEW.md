@@ -3939,3 +3939,21 @@ names. Common-source controls still exclude the extra region objectives;
 the separate full VJP checks those objectives and G ownership.
 The ready receipt and status are the current scheduling authority, superseding
 the old waiting PIDs. None of these stages automatically promotes formal A/B.
+
+#### Research scope clarification: selected SAM components
+
+The user permits structural reuse from SAM when a component offers a verified,
+low-cost remedy for the actual ClearVLA failure. Current offline annotation
+placement is a run contract, not a permanent ban on useful internal mechanisms.
+Initial official-source candidates are token/image two-way interaction and
+mask/region-conditioned feature fusion:
+[TwoWayTransformer](https://github.com/facebookresearch/sam2/blob/main/sam2/modeling/sam/transformer.py)
+and [MemoryEncoder](https://github.com/facebookresearch/sam2/blob/main/sam2/modeling/memory_encoder.py).
+These are hypotheses, not measured low-cost or effective ClearVLA replacements.
+Before implementation, map the missing operation against existing G/K and
+history interfaces; then measure full BS8 throughput/memory and real-object,
+natural-command and closed-loop behavior at the same declared budget.
+Do not introduce a second visual backbone or persistent RGB/feature caching
+merely to imitate the reference design. The running T3 source and queues stay
+fixed. A borrowed mechanism can strengthen the native model; adoption remains
+conditional on evidence.

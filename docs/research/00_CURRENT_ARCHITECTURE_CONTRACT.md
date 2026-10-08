@@ -1695,6 +1695,24 @@ execution adaptation from being accidentally disabled by a short repair test.
 ## Agent quick contract
 
 
+### SAM structure reuse remains an evidence-led option (2026-10-08)
+
+The user explicitly allows individual SAM mechanisms inside ClearVLA when
+they address a demonstrated bottleneck with low measured compute/memory cost
+and reliable behavioral benefit. The current frozen annotation-only use does
+not impose a permanent architecture restriction. Prefer reusing existing DINO
+features and history/state interfaces when evaluating a replacement or small
+extension. Check whether the current graph already supplies an equivalent
+operation before adding one. Token/image two-way attention and region-conditioned
+feature fusion are initial source-review candidates only; neither is admitted
+or measured as beneficial in ClearVLA. Preserve causal inputs, shared ownership,
+ordinary gradients and declared budgets. Qualify on meaningful short training,
+real-object/natural-instruction traces and standard closed loops. Keep useful
+components when the evidence supports them; no SAM component is mandatory.
+The immutable running T3 experiment and its evaluation sequence are unchanged.
+
+
+
 ### Independent future-frame support candidate (2026-10-08)
 
 Section34.33.19 confirms that current training augmentation was copied to
