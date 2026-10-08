@@ -1695,6 +1695,23 @@ execution adaptation from being accidentally disabled by a short repair test.
 ## Agent quick contract
 
 
+### User-selected mainline improvement baseline (2026-10-08)
+
+The user redirects new mainline repairs to completed B-v1,17/18, checkpoint
+ce5753bf98a5e17254e6bbdbdd93fa80d09003a8b9b47d38cf2c3ca76d12ed25 at12036.
+New branch codex/b-v1-structural-repair-20261008 starts directly from3a843999;
+initial dc43b1b1 adds only a scoped forward-structure probe and research memory.
+Do not bulk-merge the accumulated v2/v3 objectives into that candidate.
+Investigate a concrete information-loss boundary, implement a narrow correction
+and validate against this behavioral baseline. Historical tracing is only an
+elimination tool. No new claim that the mathematical v1 null escape is sound.
+Existing v3 qualification and the separately authorized B-v2 SAM long runs
+retain their immutable sources/checkpoints and continue. This older development
+checkout preserves later candidates as evidence; it is not the new repair base.
+See research34.33.25. The new CPU probe is not itself a structural repair.
+
+
+
 ### Identity-loss migration is a behavioral hypothesis, not an admitted repair (2026-10-08)
 
 Research34.33.24 isolates the B-v1 -> B-v2 transition: support filtering,

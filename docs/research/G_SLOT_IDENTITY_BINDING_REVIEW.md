@@ -4299,3 +4299,36 @@ are still required. No new production mode or experiment was launched here.
 The existing v3 broad audit and separately authorized B-v2 SAM long trials
 continue. T4 future-support repair and other measurement/controller questions
 keep their separate scope.
+
+### 34.33.25 User-selected B-v1 structural improvement baseline (2026-10-08)
+
+The user directs subsequent mainline structural improvements to start from
+B-v1's complete17/18 checkpoint, not accumulated B-v2/v3 modifications.
+The new checkout is codex/b-v1-structural-repair-20261008, created directly from
+3a84399926d50831470518e1b7f105131d3f1056. The model/training source is still
+byte-identical to that base. Baseline checkpoint:
+B-short-bs8-1024-r1/checkpoints/best.pt under causal-identity-ab-20261007,
+SHA ce5753bf98a5e17254e6bbdbdd93fa80d09003a8b9b47d38cf2c3ca76d12ed25,
+epoch1/step12036. Subsequent changes must use explicit new identities.
+
+Preserving this behavioral baseline does not declare v1's joint-null objective
+defect correct. Structural forward checks are prioritized; losses are unchanged
+during localization. Do not bulk-merge v2/v3 or assume every historical repair
+belongs in this candidate. Independently confirmed fixes such as future target
+support require explicit minimal integration and regression checks.
+The first scoped check follows actual current inputs through canonical feature
+construction, slot competition/read/GRU/FFN and final physical-object reads.
+It saves only summaries, compares no old architecture catalog, uses no optimizer,
+and does not treat slot cosine alone as health. Body masks only score outputs.
+A located boundary must lead to a concrete narrow candidate and matched
+behavior test; repeating historical audits is not the objective.
+
+The other branch's immutable v3 qualification and separately authorized B-v2
+SAM long explorations continue. Do not retarget their running jobs, checkpoint
+bases or evaluation setups. Their results remain auxiliary evidence.
+The sections below retain historical research context; they are not a statement
+that the corresponding later production features are present in that B-v1 checkout.
+
+The initial fixed probe source is dc43b1b1, B-v1-forward-structure-r1 receipt.
+Only the probe and documentation differ from3a843999 in the new branch;
+no production fix or training restart is claimed. Existing queues retain their bases.
