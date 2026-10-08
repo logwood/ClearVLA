@@ -3864,17 +3864,78 @@ for exact replay. Earlier test-harness tuple/list comparison failures and the
 float32 null-sum tolerance correction are retained separately; neither was a
 production failure.
 
-AB-source-support-v2-mechanical-r1 is queued on an idle GPU6. Its fixed runtime
-is causal-identity-training-7899ec6b and runner78e27f81. It will independently
-run A and B-regions-v3 through two real BS8 updates plus two offline batches
-from the same mature step11012 checkpoint, then each saved checkpoint through
-four cold factual windows. B retains the complete pinned76-pair mechanical
-annotation manifest and both added region objectives. This is mechanical
-qualification only, not formal promotion or evidence of improved behavior.
+The A/B mechanical qualification is complete under fixed runtime7899ec6b:
+two ordinary BS8 updates plus two offline batches each, mature11012 to11014,
+followed by four cold factual windows per saved checkpoint. All32-node repeats
+and same-image measurements are exactly zero. Global preclip norms are
+A3.161/2.660 and B3.121/2.718; peak allocated memory is21.146/21.064GiB.
+The loss ledger gap is at most2.39e-7. B retains both region objectives and
+the complete pinned76-pair supervision manifest.
 
-The existing T3/56c217d5 B-v3 annotation/1024-update short, standard18 panel,
-broad qualifier and final full-VJP queue remain untouched. The new mask fix
-must not silently change that immutable experiment. Its compact region labels
-can be reused for a future explicitly identified combined candidate; neither
-RGB/DINO value reuse nor reduced exposure is allowed. Both formal A/B runs
-remain pending the meaningful short-run structural and behavior gates.
+Preserve the first runner's failed audit: its A training succeeded, but the
+audit expected an epoch phase field instead of the native nested train and
+validation dictionaries. Runner7b63c8c1 fixes that schema and audits the existing
+A checkpoint without retraining (checkpoint hash unchanged), then completes
+A-cold4/B-two-BS8/B-cold4 in AB-source-support-v2-mechanical-r2. Evidence and
+actual checkpoint hashes are in AB-source-support-v2-mechanical-admission-r2.json
+and each *-final-audit.json; the failed r1 job and AUDIT_SCHEMA_CORRECTION.json
+remain. This is mechanical admission only, not learned identity or behavior.
+
+The T3/56c217d5 short's source/configuration is preserved. The support repair
+must enter a future explicitly named combined candidate, never silently change
+this running experiment. Complete compact supervision labels can be reused
+for the same declared exposure. RGB/DINO value caches remain disabled.
+Both formal A/B runs still require meaningful short-run structural and
+behavior qualification.
+
+### 34.33.20 Flexible GPU placement and actual B-v3 short start (2026-10-08)
+
+At the user's request, training and evaluation no longer wait specifically
+for GPU4. All9258 auxiliary-label pairs completed at the original SAM prompt
+budget. The merged manifest SHA is
+030396047803702cef9980b07acb34311e55913b34205eab49c83060759266fc;
+all declared pairs, source identities and label hashes passed verification.
+Generation cost was15010.33 seconds wall time and28213.33 summed worker
+seconds (about4.17 and7.84 hours). This is supervision generation cost,
+not online RGB/DINO caching or trained identity evidence.
+
+The original four orchestration waiters were verified to own no model job
+and replaced; their original receipts/status/logs are retained. No training,
+annotation worker or model probe was stopped. See
+B-regions-v3-flexible-gpu-handoff-r1.json. The immutable f5c084ee runner,
+probes/run_ready_identity_short.py, checks source/config/manifest identity
+before launching and selects an idle24GiB card from the seven available GPUs.
+Each subsequent stage records its own GPU UUID and EGL index. A running stage
+is never migrated.
+
+B-regions-v3-ready-short-r1 actually launched the ordinary training entry at
+08:40:59UTC on GPU6. Training PID2444995 uses immutable source56c217d5 and the
+unchanged config SHA
+dbcb078aebadc4b4e3666de47cbe9fce1d2461e423c26a0a268f6587cdeb42f8:
+mature11012 initialization, fresh Adam/100warmup,1024BS8 updates and256offline
+batches, expected final12036. This remains source_consistent_v1; the newly
+qualified7899ec6b support repair is not silently merged into it.
+
+At08:49:45UTC, the first three logged windows cover60updates through11072.
+All numeric fields are finite, with no traceback/OOM/nonfinite console entry.
+Window time is7.255/6.842/6.990 seconds per batch; this is early throughput,
+not a final estimate. The two new weighted objectives contribute
+separation0.000842-0.001091 and region prediction0.02221-0.02349.
+After actual model support, each window averages4.8-5.6 supported negative
+operands and107.1-112.2 prediction strata per batch. These are supervision
+operands, not counts of correctly distinguished physical objects.
+Maximum preclip norm is3.161; absolute loss ledger/contribution mismatch is
+at most6.56e-8. The standard log utility flags only the known full-capacity
+condition; no budget is removed. Full evidence:
+B-regions-v3-training-start-{health,log-audit}-r1.json.
+
+The ready continuation serially preserves all previously authorized stages:
+training/offline, the unchanged standard18 seed0/max360/R8/stored_target panel,
+full masked-BS8 zero-update VJP, then common-source/old60/own-trajectory
+phase-mask-natural-command qualification. Every stage may select another idle
+card. New audit orchestration receipts use module-vjp-short-r2 and
+short-qualification-r2; actual evidence destinations stay the original r1
+names. Common-source controls still exclude the extra region objectives;
+the separate full VJP checks those objectives and G ownership.
+The ready receipt and status are the current scheduling authority, superseding
+the old waiting PIDs. None of these stages automatically promotes formal A/B.

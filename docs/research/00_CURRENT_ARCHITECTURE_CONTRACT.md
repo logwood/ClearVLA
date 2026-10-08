@@ -1702,11 +1702,24 @@ independently observed future target coordinates. Explicit
 source_consistent_v2 (7899ec6b) restricts the source with its own mask and the
 target with its actual frame availability. No source is unmasked and missing
 frames remain unknown. Fully observed calls are bitwise equal; v1 config/ABI
-replay is preserved. The real four-BS8 target audit and six regressions pass,
-but two-update/cold-load A/B mechanical qualification is still queued.
-No formal training has started. Preserve the immutable T3 identity short and
-its complete evaluation queues. This support repair does not fix diffuse
+replay is preserved. The real four-BS8 target audit, six regressions and
+two-update/two-offline plus four-window cold-load A/B mechanical qualification
+are complete (epoch1/step11014). A runner-only epoch-schema failure was recovered
+by auditing the unchanged saved A checkpoint, not retraining or hiding failure.
+See AB-source-support-v2-mechanical-admission-r2.json. These are mechanical
+checks, not learned behavior. This support repair does not fix diffuse
 descriptor destinations, long-gap visibility, endpoint conditioning or control.
+
+Section34.33.20 records the actual T3/56c217d5 B-v3 meaningful short start on
+GPU6 at08:40:59UTC. All9258 supervision labels and hashes are complete; the
+first60 BS8 updates are finite. The immutable source/config still selects
+source_consistent_v1, so do not attribute the7899ec6b fix to this run.
+B-regions-v3-ready-short-r1 now owns the continuation: select an idle card per
+stage, preserve1024updates/256offline/standard18-R8/full-VJP/broad factual
+qualification. The four old idle waiters were replaced with preserved receipts;
+do not restart them. No running model job was stopped. All RGB/DINO value
+caches remain off, and the full4.17-hour label generation cost is declared.
+Formal A/B remain unstarted pending structural and behavioral qualification.
 
 
 ### Command-preserving endpoint recoding audit (2026-10-08)
