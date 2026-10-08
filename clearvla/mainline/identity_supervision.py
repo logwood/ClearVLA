@@ -14,6 +14,9 @@ class IdentityCorrespondence:
     temporal_valid: Tensor
     source_frames: Tensor  # B,2 absolute source rows: past/current
     camera_names: tuple[str,...] = ('top','wrist')
+    region_group: Tensor | None = None  # B,C,N, -1 unknown, current chart only
+    region_different: Tensor | None = None  # B,C,G,G, independently witnessed
+    prediction_region: Tensor | None = None  # B,kind,C,N, target-current strata
 
     def validate(self,*,batch,device):
         if self.camera_names!=('top','wrist') or self.source_frames.shape!=(batch,2):
@@ -36,3 +39,17 @@ class IdentityCorrespondence:
                     raise ValueError('supported correspondence escaped its endpoint image chart')
         if bool((self.temporal_valid.any((1,2))&(self.source_frames[:,1]==self.source_frames[:,0])).any()):
             raise ValueError('padded duplicate frame cannot manufacture temporal evidence')
+        values=(self.region_group,self.region_different,self.prediction_region)
+        if any(v is not None for v in values):
+            if not all(v is not None for v in values):raise ValueError('incomplete region supervision')
+            n=self.cross_source.shape[2]
+            if self.region_group.shape!=(batch,2,n) or self.region_different.shape!=(batch,2,n,n) or self.prediction_region.shape!=(batch,2,2,n):
+                raise ValueError('region labels lost source/camera/direction axes')
+            if self.region_group.dtype!=torch.long or self.region_different.dtype!=torch.bool or self.prediction_region.dtype!=torch.long:
+                raise ValueError('region evidence requires integer groups and Boolean edges')
+            for value in values:
+                if value.requires_grad or value.device!=device:raise ValueError('region evidence must be detached on label device')
+            if bool(((self.region_group < -1)|(self.region_group >= n)).any()) or bool((self.prediction_region < -1).any()):
+                raise ValueError('invalid region ID')
+            if not torch.equal(self.region_different,self.region_different.transpose(-1,-2)) or bool(self.region_different.diagonal(dim1=-2,dim2=-1).any()):
+                raise ValueError('region negatives must be symmetric, irreflexive evidence')

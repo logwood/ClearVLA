@@ -13,12 +13,14 @@ from .dataset import CachedTokenPolicyWindowDataset, ObservedStateWindowDataset,
 
 class OnlineRGBPolicyWindowDataset(CachedTokenPolicyWindowDataset):
     """Share sampler/boundary delegation, replace only the feature producer."""
-    def __init__(self, base: ObservedStateWindowDataset, *, identity_raw_root=None):
+    def __init__(self, base: ObservedStateWindowDataset, *, identity_raw_root=None,
+                 identity_region_manifest='',identity_region_manifest_sha256=''):
         self.base = base
         self.identity_labels = None
         if identity_raw_root is not None:
             from .identity_correspondence import IdentityLabelProducer
-            self.identity_labels = IdentityLabelProducer(identity_raw_root)
+            self.identity_labels = IdentityLabelProducer(identity_raw_root,
+                region_manifest=identity_region_manifest,region_manifest_sha256=identity_region_manifest_sha256)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         sample = self.base[index]

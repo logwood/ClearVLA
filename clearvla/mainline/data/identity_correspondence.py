@@ -1,6 +1,7 @@
 """Read uncached sensor evidence and return small training-only pair labels."""
 from pathlib import Path
 import json
+import hashlib
 import numpy as np
 import torch
 from clearvla.vision.sensor_geometry import camera_views, depth_correspondence, photometric_support
@@ -8,8 +9,12 @@ from clearvla.vision.observed_flow import observed_rgb_flow
 
 
 class IdentityLabelProducer:
-    def __init__(self,raw_root):
+    def __init__(self,raw_root,*,region_manifest='',region_manifest_sha256=''):
         self.raw_root=Path(raw_root)
+        self.regions=None
+        if region_manifest:
+            from .identity_region_annotations import IdentityRegionAnnotations
+            self.regions=IdentityRegionAnnotations(region_manifest,region_manifest_sha256)
         file=Path(__file__).resolve().parents[1]/'assets/calvin_rgbd_joint_geometry_v1.json'
         self.calibration=json.loads(file.read_text())
         if self.calibration['view_max_abs_disagreement']>5e-6 or self.calibration['verified_frames']<12:
@@ -35,12 +40,21 @@ class IdentityLabelProducer:
         if split not in ('training','validation') or context!=episode.context_start:
             raise ValueError('raw correspondence and admitted episode provenance differ')
         previous=context+int(history[-2,1]);current=context+int(history[-1,1])
-        frames=[]
+        frames=[];raw_hashes=[]
         for index in (previous,current):
             path=self.raw_root/split/('episode_%07d.npz'%index)
+            if self.regions is not None:raw_hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
             with np.load(path,allow_pickle=False) as z:
                 # Explicit allowlist: no scene_obs, object poses, or task labels.
                 frames.append({key:z[key] for key in ('robot_obs','rgb_static','rgb_gripper','depth_static','depth_gripper')})
+        result=self.from_sensor_frames(frames,previous,current)
+        if self.regions is not None:
+            result.update(self.regions.read(split,[previous,current],raw_hashes))
+        return result
+
+    def from_sensor_frames(self,frames,previous,current):
+        """Same full sensor budgets for live loading and annotation preparation."""
+        if len(frames)!=2 or previous>current:raise ValueError('invalid causal sensor pair')
         now=frames[1];depths=[now['depth_static'],now['depth_gripper']]
         if [list(d.shape) for d in depths]!=self.calibration['image_shapes']:
             raise ValueError('raw depth resolution differs from admitted sensor calibration')

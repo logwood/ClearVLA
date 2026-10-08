@@ -135,6 +135,10 @@ class DataConfig:
     # outside the repository; the path is serialized in the run context but
     # excluded from relocation-insensitive config digests below.
     calvin_raw_source: str = ""
+    # Compact training annotations, never RGB/DINO cached values. A content
+    # digest locks the producer and exact raw-frame/label identities.
+    identity_region_manifest: str = ""
+    identity_region_manifest_sha256: str = ""
     # Optional, simulator-admitted LIBERO training episodes.  The base split
     # continues to own validation/test and both affine normalizers; the paired
     # overlay is train-only and carries its own content-addressed manifest.
@@ -546,6 +550,7 @@ class TopConfig:
     entity_ownership_mode: str = "local_mixture_v1"
     entity_competition_scale_mode: str = "batch_global_v1"
     identity_supervision_mode: str = "none"
+    identity_region_js_margin: float = 0.1
     entity_history_mode: str = "current_only_v1"
     entity_motion_mode: str = "query_anchor_v1"
     target_binding_mode: str = "reader_local_v1"
@@ -983,6 +988,8 @@ class ObjectiveConfig:
     robot_response: float = 0.0
     identity_correspondence: float = 0.0
     identity_source_prediction: float = 0.0
+    identity_region_separation: float = 0.0
+    identity_region_prediction: float = 0.0
     future_dynamics: float = 0.10
     intent_structure: float = 0.02
     flow_warp: float = 0.03
@@ -1243,12 +1250,21 @@ class ExperimentConfig:
             raise ValueError("future support count and time grid disagree")
         if self.observation.visual_chart_mode not in {"legacy_v1", "full_rgb_endpoint_v1"}:
             raise ValueError("unknown visual chart")
-        if self.top.identity_supervision_mode not in {"none", "rgbd_temporal_v1", "rgbd_temporal_conditional_v2"}:
+        if self.top.identity_supervision_mode not in {"none", "rgbd_temporal_v1", "rgbd_temporal_conditional_v2", "rgbd_temporal_regions_v3"}:
             raise ValueError("unknown identity supervision source")
         if self.top.identity_supervision_mode != "none" and (self.top.entity_ownership_mode != "canonical_image_v1" or self.top.entity_competition_scale_mode != "per_observation_v1" or self.data.visual_feature_mode != "dinov3_online_v1" or self.objectives.identity_correspondence <= 0 or self.objectives.identity_source_prediction <= 0):
             raise ValueError("identity supervision requires canonical online CALVIN and explicit objectives")
         if self.top.identity_supervision_mode == "none" and (self.objectives.identity_correspondence != 0 or self.objectives.identity_source_prediction != 0):
             raise ValueError("identity objective has no admitted source")
+        regions=self.top.identity_supervision_mode=="rgbd_temporal_regions_v3"
+        if regions:
+            digest=self.data.identity_region_manifest_sha256
+            if not self.data.identity_region_manifest or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
+                raise ValueError('region supervision requires a pinned annotation manifest')
+            if self.objectives.identity_region_separation<=0 or self.objectives.identity_region_prediction<=0 or not 0<self.top.identity_region_js_margin<1:
+                raise ValueError('region supervision requires explicit separation and balanced prediction objectives')
+        elif self.data.identity_region_manifest or self.data.identity_region_manifest_sha256 or self.objectives.identity_region_separation!=0 or self.objectives.identity_region_prediction!=0:
+            raise ValueError('region labels/objectives have no selected graph contract')
         if self.top.target_binding_input_mode not in {"protected_pooled_v1", "full_tokens_views_v1"}:
             raise ValueError("unknown target binding input contract")
         if self.top.target_binding_input_mode == "full_tokens_views_v1" and (self.top.object_view_mode != "per_camera_values_v1" or self.top.target_binding_mode != "shared_operation_v1"):
@@ -1573,6 +1589,12 @@ class ExperimentConfig:
             cast(dict[str, object], payload["objectives"]).pop("identity_correspondence")
         if self.objectives.identity_source_prediction == 0:
             cast(dict[str, object], payload["objectives"]).pop("identity_source_prediction")
+        if self.top.identity_supervision_mode != 'rgbd_temporal_regions_v3':
+            cast(dict[str, object], payload['top']).pop('identity_region_js_margin')
+        for name in ('identity_region_separation','identity_region_prediction'):
+            if getattr(self.objectives,name)==0:cast(dict[str,object],payload['objectives']).pop(name)
+        for name in ('identity_region_manifest','identity_region_manifest_sha256'):
+            if not getattr(self.data,name):cast(dict[str,object],payload['data']).pop(name)
         if self.top.entity_competition_scale_mode == "batch_global_v1":
             cast(dict[str, object], payload["top"]).pop("entity_competition_scale_mode")
         if self.top.entity_ownership_mode == "local_mixture_v1":

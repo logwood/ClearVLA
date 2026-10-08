@@ -9,7 +9,7 @@ MODES = {
     'target_binding_input_mode': ('protected_pooled_v1', 'full_tokens_views_v1'),
     'observed_outcome_mode': ('none', 'before_proposal_v1'),
     'entity_ownership_mode': ('local_mixture_v1', 'canonical_image_v1'),
-    'identity_supervision_mode': ('none', 'rgbd_temporal_v1', 'rgbd_temporal_conditional_v2'),
+    'identity_supervision_mode': ('none', 'rgbd_temporal_v1', 'rgbd_temporal_conditional_v2', 'rgbd_temporal_regions_v3'),
 }
 
 
@@ -30,6 +30,11 @@ def causal_identity_metadata(top):
         'policy_inputs':'unchanged-RGB-language-observed-proprioception-and-executed-controls',
         'identity_claim':'candidate-learned-correspondence-not-certified-physical-objects',
     }
-    if modes['identity_supervision_mode']=='rgbd_temporal_conditional_v2':
+    if modes['identity_supervision_mode'] in {'rgbd_temporal_conditional_v2','rgbd_temporal_regions_v3'}:
         result['identity_supervision']['correspondence']='real-K-conditional-before-interpolation;producer-support-only;null-is-not-an-identity-label'
+    if modes['identity_supervision_mode']=='rgbd_temporal_regions_v3':
+        result['identity_supervision']['inputs']+=['frozen-RGB-mask-proposals','independent-rigid-motion-evidence']
+        result['identity_supervision'].update(regions='sam-surface-motion-negative-only;unknown-retained',
+            objectives='retain-all-original-positives-and-source-MSE;add-negative-JS-margin-and-equal-region-source-MSE',
+            annotations='pinned-compact-training-labels;no-RGB-or-DINO-cache;no-online-policy-input')
     return result

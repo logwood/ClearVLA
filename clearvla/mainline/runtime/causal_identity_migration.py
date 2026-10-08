@@ -13,6 +13,7 @@ clearvla/mainline/causal_identity.py
 clearvla/mainline/data/loading.py
 clearvla/mainline/data/online_visual.py
 clearvla/mainline/data/identity_correspondence.py
+clearvla/mainline/data/identity_region_annotations.py
 clearvla/mainline/executed_world.py
 clearvla/mainline/instruction_change.py
 clearvla/mainline/identity_supervision.py
@@ -40,6 +41,7 @@ clearvla/mainline/runtime/identity.py
 clearvla/mainline/train.py
 clearvla/mainline/training/engine.py
 clearvla/mainline/training/identity.py
+clearvla/mainline/training/identity_regions.py
 clearvla/mainline/training/optimizer.py
 clearvla/vision/entity_chart.py
 clearvla/vision/canonical_transport.py
@@ -53,8 +55,11 @@ clearvla/mainline/assets/calvin_rgbd_joint_geometry_v1.json
 
 def config_view(payload):
     # The caller already removed run location/optimizer/diagnostic budgets.
-    result={**payload,'top':dict(payload['top']),'objectives':dict(payload['objectives'])}
+    result={**payload,'top':dict(payload['top']),'objectives':dict(payload['objectives']),'data':dict(payload['data'])}
     for name in MODES:result['top'].pop(name,None)
+    result['top'].pop('identity_region_js_margin',None)
+    for name in ('identity_region_manifest','identity_region_manifest_sha256'):result['data'].pop(name,None)
+    for name in ('identity_region_separation','identity_region_prediction'):result['objectives'].pop(name,None)
     for name in ('identity_correspondence','identity_source_prediction','gripper_command_transition','calvin_frame_weight_mode','calvin_frame_motion_gain','calvin_frame_event_gain','calvin_frame_event_radius','calvin_frame_max_weight'):
         result['objectives'].pop(name,None)
     return result
@@ -70,7 +75,7 @@ def validate_selection(saved,current,source_digest):
     for name in ('entity_transport_gradient_mode','entity_competition_scale_mode','observation_measurement_mode','target_binding_input_mode','observed_outcome_mode'):
         if getattr(current.top,name)!=MODES[name][1]:raise ValueError('incomplete confirmed repair: '+name)
     is_b=current.top.entity_ownership_mode=='canonical_image_v1'
-    if (current.top.identity_supervision_mode in {'rgbd_temporal_v1','rgbd_temporal_conditional_v2'})!=is_b:
+    if (current.top.identity_supervision_mode in {'rgbd_temporal_v1','rgbd_temporal_conditional_v2','rgbd_temporal_regions_v3'})!=is_b:
         raise ValueError('B must include physical correspondence supervision, A must exclude it')
     if current.objectives.calvin_frame_weight_mode!='motion_event_v1' or current.objectives.gripper_command_transition<=0:
         raise ValueError('causal repair must retain admitted trajectory objectives')

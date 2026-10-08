@@ -63,11 +63,13 @@ def identity_terms(model,online,facts,labels):
     target=observed[:,-1].reshape(b,c,side,side,d).permute(0,1,4,2,3)
     full=facts.image_ownership
     if full.shape!=(b,k+1,c,side,side):raise ValueError('online ownership differs from admitted identity chart')
-    conditional_mode=model.config.top.identity_supervision_mode=='rgbd_temporal_conditional_v2'
+    region_mode=model.config.top.identity_supervision_mode=='rgbd_temporal_regions_v3'
+    conditional_mode=model.config.top.identity_supervision_mode in {'rgbd_temporal_conditional_v2','rgbd_temporal_regions_v3'}
     if conditional_mode:
         image_source=facts.current_image_source
         full_real,full_supported=conditional_real_law(image_source.log_measure,image_source.supported)
     pair_losses=[];prediction_losses=[];counts=[];without=[];identity_counts=[];null_source=[];null_target=[]
+    balanced=[];balanced_counts=[]
     for kind,time in (('cross',1),('temporal',0)):
         for camera in range(c):
             destination=1-camera if kind=='cross' else camera
@@ -102,6 +104,10 @@ def identity_terms(model,online,facts,labels):
             truth=sample(target[:,destination],xy_target).detach()
             error=(predicted.float()-truth).square().mean(-1)
             prediction_losses.append(torch.where(valid,error,0.).sum()/count.clamp_min(1))
+            if region_mode:
+                from .identity_regions import region_balanced_prediction
+                extra=region_balanced_prediction(error,labels.prediction_region[:,0 if kind=='cross' else 1,camera],valid)
+                balanced.append(extra['loss']);balanced_counts.append(extra['supported_regions'])
             with torch.no_grad():
                 zero_value,zero_background=module.canonical_decoder(torch.zeros_like(state[:,time,camera]))
                 zero_prediction=torch.einsum('bnk,bkd->bnd',q.to(zero_value),zero_value[:,:,destination])+position+zero_background[destination][None,None]
@@ -115,4 +121,24 @@ def identity_terms(model,online,facts,labels):
             identity_conditional_support_fraction=(torch.stack(identity_counts).sum()/torch.stack(counts).sum().clamp_min(1)).detach(),
             identity_source_null_mass=torch.stack(null_source).mean().detach(),
             identity_target_null_mass=torch.stack(null_target).mean().detach())
+    if region_mode:
+        from .identity_regions import region_separation
+        separation=[];negative_counts=[]
+        for camera in range(c):
+            # The full original 32x32 source grid is retained independently of
+            # cross-view correspondence acceptance. Only actual producer
+            # support may remove an online identity operand.
+            xy=labels.cross_source[:,camera]
+            source_law=sample(conditional[:,1,camera],xy)
+            current_law=sample(full_real[:,:,camera],xy)
+            online_support=sample(full_supported[:,:,camera].float(),xy)[...,0]>1-1e-6
+            for law,groups in ((source_law,labels.region_group[:,camera]),
+                (current_law,torch.where(online_support,labels.region_group[:,camera],-1))):
+                extra=region_separation(law,groups,labels.region_different[:,camera],
+                    normalized_js_margin=model.config.top.identity_region_js_margin)
+                separation.append(extra['loss']);negative_counts.append(extra['supported_pairs'])
+        result.update(identity_region_separation=torch.stack(separation).mean(),
+            identity_region_prediction=torch.stack(balanced).mean(),
+            identity_region_supported_negative_pairs=torch.stack(negative_counts).sum().detach(),
+            identity_region_prediction_strata=torch.stack(balanced_counts).sum().detach())
     return result

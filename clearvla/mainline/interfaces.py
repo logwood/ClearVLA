@@ -471,6 +471,8 @@ class TrainingBatch:
             raise ValueError("identity training labels differ from the selected graph")
         if self.identity is not None:
             self.identity.validate(batch=self.online.batch,device=self.online.device)
+            if (self.identity.region_group is not None)!=(config.top.identity_supervision_mode=='rgbd_temporal_regions_v3'):
+                raise ValueError('region annotation presence differs from the selected loss contract')
 
 
 __all__ = [

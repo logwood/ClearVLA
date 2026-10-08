@@ -917,7 +917,10 @@ def _load_mainline_data(
             allowed_boundary_regions=allowed_regions,
         )
         if data.visual_feature_mode == ONLINE_MODE:
-            datasets[name] = OnlineRGBPolicyWindowDataset(base, identity_raw_root=data.calvin_raw_source if config.top.identity_supervision_mode != "none" else None)
+            datasets[name] = OnlineRGBPolicyWindowDataset(base,
+                identity_raw_root=data.calvin_raw_source if config.top.identity_supervision_mode != "none" else None,
+                identity_region_manifest=data.identity_region_manifest,
+                identity_region_manifest_sha256=data.identity_region_manifest_sha256)
         else:
             assert token_store is not None
             datasets[name] = CachedTokenPolicyWindowDataset(base, token_store=token_store)
@@ -1290,6 +1293,8 @@ def to_training_batch(
     if config.top.identity_supervision_mode != "none":
         from ..identity_supervision import IdentityCorrespondence
         fields = {name: _device_tensor(batch,"identity_"+name,device=device) for name in ("cross_source","cross_target","cross_valid","temporal_source","temporal_target","temporal_valid","source_frames")}
+        if config.top.identity_supervision_mode=='rgbd_temporal_regions_v3':
+            fields.update({name:_device_tensor(batch,'identity_'+name,device=device) for name in ('region_group','region_different','prediction_region')})
         identity = IdentityCorrespondence(**fields,camera_names=tuple(config.data.camera_names))
     result = TrainingBatch(online=online, action_target=action, future=future, audit=audit,identity=identity)
     result.validate(config)

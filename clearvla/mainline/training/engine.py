@@ -1087,7 +1087,10 @@ class MainlineTrainingEngine:
         if batch.identity is not None:
             from .identity import identity_terms
             values=identity_terms(self.model,batch.online,encoded.training_state.top.facts,batch.identity)
-            contributions={name:getattr(self.config.objectives,name)*values[name] for name in ("identity_correspondence","identity_source_prediction")}
+            names=['identity_correspondence','identity_source_prediction']
+            if self.config.top.identity_supervision_mode=='rgbd_temporal_regions_v3':
+                names+=['identity_region_separation','identity_region_prediction']
+            contributions={name:getattr(self.config.objectives,name)*values[name] for name in names}
             extra=sum(contributions.values())
             ledger=LossLedger(total=ledger.total+extra,groups={**ledger.groups,"representation":ledger.groups["representation"]+extra},contributions={**ledger.contributions,**contributions},terms={**ledger.terms,**values})
             ledger.validate()
