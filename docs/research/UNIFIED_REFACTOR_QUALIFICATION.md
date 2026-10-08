@@ -179,3 +179,18 @@ This candidate does not solve unqualified long-gap correspondence, physical
 instance separation or arm/gripper behavior. Nor does it remove the intentional
 posterior expectation across future intervals: centered values may legitimately
 cancel there. Those independent issues and all previous promotion blocks remain.
+
+## Actual batch and autocast qualification
+
+The full-topology fixture now declares its actual synthetic batch size and
+serialized compute dtype. Sampler noise, endpoint shape and optional identity
+source labels use that same batch; optimizer batch metadata no longer reports
+a different size from the artificial batch. Defaults remain B1/FP32. BF16 uses
+the production autocast contexts, not a result merely converted to BF16.
+
+Separate A/B regressions exercise BS8 CPU BF16, ordinary loss backward, two
+AdamW updates and complete proposal/W/refined sampling. These remain artificial
+inputs and random weights, not real pretrained BS8 training. The local 4-GiB
+container could complete B1 BF16 but its initial BS8 attempt was terminated
+under memory pressure; that is a resource-blocked attempt, not a passing check.
+Retain the remote runtime/RSS and test receipts before qualifying BS8.

@@ -21,7 +21,12 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 
-def configuration(shape: str, variant: str, typed_object_values: str = "legacy_selected_v1"):
+def configuration(
+    shape: str,
+    variant: str,
+    typed_object_values: str = "legacy_selected_v1",
+    compute_dtype: str = "fp32",
+):
     from importlib import import_module
 
     small_config = import_module("test_mainline_executed_world")._config
@@ -60,7 +65,7 @@ def configuration(shape: str, variant: str, typed_object_values: str = "legacy_s
         config,
         top=top,
         objectives=objective,
-        runtime=replace(config.runtime, compute_dtype="fp32"),
+        runtime=replace(config.runtime, compute_dtype=compute_dtype),
         data=replace(
             config.data,
             visual_feature_mode="dinov3_online_v1" if shape == "production" else "dinov2_cached_v1",
@@ -77,6 +82,8 @@ def run(
     raw_side: int,
     completed_step: int = 0,
     typed_object_values: str = "legacy_selected_v1",
+    compute_dtype: str = "fp32",
+    batch_size: int = 1,
 ) -> dict:
     import torch
 
@@ -92,9 +99,13 @@ def run(
 
     if type(completed_step) is not int or completed_step < 0:
         raise ValueError("fixture completed step must be a nonnegative integer")
+    if type(batch_size) is not int or batch_size < 1:
+        raise ValueError("synthetic batch size must be a positive integer")
     torch.set_num_threads(1)
     torch.manual_seed(28431)
-    config = configuration(shape, variant, typed_object_values)
+    config = configuration(shape, variant, typed_object_values, compute_dtype)
+    config = replace(config, optimizer=replace(config.optimizer, batch_size=batch_size))
+    config.validate()
     fixture_config = replace(
         config,
         top=replace(config.top, identity_supervision_mode="none"),
@@ -103,11 +114,13 @@ def run(
         ),
     )
     batch, normalizer = synthetic_batch(
-        fixture_config, count=1, raw_side=raw_side, device=torch.device("cpu")
+        fixture_config, count=batch_size, raw_side=raw_side, device=torch.device("cpu")
     )
     if config.top.identity_supervision_mode != "none":
-        xy = torch.tensor([[-0.5, -0.5], [0.5, 0.5], [0.1, 0.1]]).expand(1, 2, 3, 2).clone()
-        valid = torch.ones(1, 2, 3, dtype=torch.bool)
+        xy = (
+            torch.tensor([[-0.5, -0.5], [0.5, 0.5], [0.1, 0.1]]).expand(batch_size, 2, 3, 2).clone()
+        )
+        valid = torch.ones(batch_size, 2, 3, dtype=torch.bool)
         assert batch.online.history.timing is not None
         pairs = IdentityCorrespondence(
             xy,
@@ -222,19 +235,28 @@ def run(
     model.eval()
     with torch.no_grad():
         noise = model.outlet_adapter.sample_noise(
-            1,
+            batch_size,
             device=torch.device("cpu"),
             dtype=torch.float32,
             generator=torch.Generator().manual_seed(9331),
         )
         sampled = sample_action(model, batch.online, config, initial_physical_noise=noise)
-    assert sampled.action.shape == (1, 24, 7) and torch.isfinite(sampled.action).all()
+    assert (
+        sampled.action.shape
+        == (batch_size, config.dimensions.action_horizon, config.dimensions.action_dim)
+        and torch.isfinite(sampled.action).all()
+    )
     assert sampled.gripper_command is not None and torch.isfinite(sampled.gripper_command).all()
     return dict(
         passed=True,
         variant=variant,
         dimensions=config.dimensions.__dict__,
         raw_rgb_side=raw_side,
+        actual_batch_size=batch_size,
+        optimizer_batch_size=config.optimizer.batch_size,
+        compute_dtype=config.runtime.compute_dtype,
+        training_autocast_dtype=str(engine.dtype),
+        sampled_action_shape=list(sampled.action.shape),
         synthetic_completed_step=completed_step,
         typed_object_value_mode=typed_object_values,
         completed_step_semantics="execution-phase fixture only; no preceding learned updates",
@@ -267,6 +289,8 @@ def main():
         choices=("legacy_selected_v1", "conditional_object_v1"),
         default="legacy_selected_v1",
     )
+    parser.add_argument("--compute-dtype", choices=("fp32", "bf16"), default="fp32")
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists() or args.updates < 1:
@@ -280,6 +304,8 @@ def main():
             args.raw_side,
             args.completed_step,
             args.typed_object_values,
+            args.compute_dtype,
+            args.batch_size,
         )
     except Exception as error:
         args.output.write_text(
