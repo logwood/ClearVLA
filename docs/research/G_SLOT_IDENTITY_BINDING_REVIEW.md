@@ -3627,9 +3627,15 @@ https://arxiv.org/abs/2511.15706 and official code
 https://github.com/Parskatt/RoMaV2. No external matcher enters the policy or
 training. It must independently pass moving/static/visibility/long-gap and
 cost checks; published benchmark accuracy is not CALVIN qualification.
-The first weights transfer interrupted and its partial artifact/failure record
-are retained. The resumed download must match the published GitHub asset
+The official1,095,883,548-byte weights now match the published GitHub asset
 SHA2561557dec0d21b62366465f7ff4d5fdf228cc695d0582e196ad2b80e05230828b7.
+The first transfer interrupted; a subsequent curl internal retry reused its
+initial resume offset. Both failures are retained; bounded external retries
+resuming the actual file size completed with full hash verification. This
+restarted only this turn's temporary download helper, no training/probe job.
+The model source and pinned DINO source are isolated under third_party; no
+weights are substituted from the policy checkpoint. The strict-constructor
+pilot receipt is romav2-precise-motion-pilot-r1 (PID2093554).
 Probe6fdc433c retains the full precise budget and scores both directions in
 native pixels. Analytic identity/translated fields at200x200 and84x84 verify
 the align_corners=False pixel-center conversion within5.69e-14; this is an
@@ -3650,3 +3656,71 @@ Formal A/B remain unstarted. The measurement confidence bound, v3 label
 availability, original controller/arm/gripper/maintenance questions and the
 new short behavior gate remain distinct. Preserve all receipts and prior
 promotion blocks.
+
+**The completed long30 RoMa qualification is mixed.** Strict loading, exact
+repeat0 and unchanged parameters pass. On old16/own14 moving wrist points,
+raw EPE is2.566/1.594px versus zero-motion21.796/30.863px. Fixed gates accept
+223/516 and154/225, with accepted EPE1.027/1.561px. When rejected displacement
+stays zero, all-visible EPE is13.463/13.041px. Thus the global/local method
+contains useful long-gap localization that the original feature kernel lacks.
+
+It is not an admitted production repair. Geometrically hidden wrist points
+are still accepted33/64 and31/38. Old wrist learned overlap averages.247 on
+visible points but.312 on hidden points; new values are.403/.368. A learned
+overlap score cannot be assumed calibrated visibility. Accepted endpoints
+all remaining on the same rigid body do not prove the same physical point:
+old/new accepted moving-wrist errors exceed5px at12/10 points. Own14 moving
+top-view raw EPE28.601px is slightly worse than zero-motion27.614px; the worst
+windows include successful case01/112,120,128. This is a shared measurement
+defect, not evidence identifying one failure's unique cause.
+
+Official precise matching takes about1.5s per bidirectional single-camera
+pair in this shared audit and peaks10,423,253,504 bytes. These timings are not
+an isolated end-to-end policy throughput benchmark. Full-budget direct
+insertion into each BS8 batch has not met the user's cost requirement.
+Same-image raw motion is small but nonzero (.017-.021px mean in the pilot).
+No production measurement or training graph was changed.
+
+Artifacts: romav2-long30-summary-r1.json, romav2-{old16,own14}-reference-r1,
+romav2-motion-source-identity-r1.json; three own14 trajectory SHA values still
+equal their original complete-panel receipts. Reproduce with pinned
+probe_romav2_motion.py and the full93 receipt's first two stages; the official
+precise budget and RGB-only model inputs must remain explicit.
+
+The full93 runner's old63 stage rejected legacy scoring labels missing the
+occlusion fields. The failure is retained, not converted to zero occlusions.
+romav2-short63-visibility-r2 (PID2120743) repeats the exact same18/63 RGB replay
+with the established be4f529b scorer, then completes only the missing short
+stage. All756 original sensor arrays remain exactly equal by(case,step);
+only five audit visibility/body-map fields were added. Its new label directory
+is observed-match-rigid-full63-visibility-labels-r2, result romav2-old63-past4-r2.
+The corrected short63 stage completed; the combined93-window evidence is
+romav2-full93-summary-r1.json. The earlier full93 job status remains failed
+to preserve its original schema error; it is not silently rewritten.
+The coarse8/coarse16 fields are a candidate resampling diagnostic, not an
+executed replacement of the production measurement interface.
+
+
+The completed short63 adds a useful limitation check. On100/819 moving
+top/wrist points, raw EPE is0.773/0.763px versus zero-motion6.441/3.908px;
+77/732 points are accepted. With rejected motion kept at zero, errors are
+1.406/1.009px. The diagnostic downsample-to8/read-back increases these to
+4.457/1.402px; native support must be audited before any future coarse-field
+replacement. This is not a test of an installed production replacement.
+The short wrist still accepts35/61 geometrically hidden points. On144 nearly
+static wrist points, raw EPE1.115px exceeds zero-motion.120px, and six accepted
+points exceed5px. Full93 therefore does not pass the visibility/static/cost
+gate even though moving-point localization improved substantially.
+
+Next A-side work should use these concrete remaining boundaries: global/local
+localization on failed top windows, visibility and point ambiguity within a
+body, and preservation of native support at the W/S read interface. Do not
+cycle back to null-only scaling or interpret these point-oracle scores as
+proof of better task completion. Follow the existing first8 arm/gripper and
+withdrawal/maintenance trajectory ledger in parallel with the B-v3 short.
+
+At06:17UTC, B-v3 annotation has5,263/9,258 pairs; shards0/1 completed and
+shards2/3 continue on GPUs4/6 (PID2093169/2116886). The short-training config
+has not yet been generated. Pipeline/panel/broad qualification/full-VJP
+watchers are alive and unchanged. Formal A/B remain subject to the complete
+short-run structural and behavior review.

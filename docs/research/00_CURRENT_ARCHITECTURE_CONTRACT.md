@@ -1867,6 +1867,14 @@ The full v3 final-short masked BS8 VJP is now queued after its own panel;
 resolved annotation identity is pinned, optimizer updates remain zero.
 Formal A/B still require the meaningful short and causal/behavioral review.
 
+Official RoMa v2 precise qualification in34.33.17 now covers93 declared
+windows. It reduces many true moving-point errors, but hidden-point acceptance,
+static wrist errors, failed top localization and approximately1.5s per
+bidirectional camera pair/10.4GB audit peak prevent production admission.
+Same-body endpoints are not same-point correspondences. Only scoring geometry
+uses simulator state. Source T3 and B-v3 training graph remain unchanged.
+The repaired short63 visibility export preserves756 original sensor arrays.
+
 For causal-repair decisions, use G_SLOT_IDENTITY_BINDING_REVIEW.md sections
 34.26–34.32 alongside the admitted source/config. Full a2d597d2 behavior is
 11/18; the 512-update repair is 7/18 and retained-Adam 64-update diagnostics are
