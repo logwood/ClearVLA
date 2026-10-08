@@ -56,7 +56,13 @@ class RegionImageFusion(nn.Module):
         z = torch.where(legal[..., None, None], z, 0.)
         r = z.shape[-1]
         z = z.reshape(b, c, h, w, k, r).permute(0,1,4,5,2,3).reshape(b*c*k,r,h,w)
-        z = F.silu(self.depthwise(z))
+        # Signed neighbor differences, with the same valid-neighbor weights in
+        # both terms. A spatially constant valid feature must remain constant
+        # even beside padding or a support hole. Plain zero-padded convolution
+        # failed that control and created apparent "region contrast".
+        valid = legal.reshape(b,c,1,1,h,w).expand(b,c,k,r,h,w).reshape(b*c*k,r,h,w).to(z)
+        delta = self.depthwise(z) - z*self.depthwise(valid)
+        z = F.silu(z + delta)
         z = z.reshape(b,c,k,r,h,w).permute(0,1,4,5,2,3).reshape(b,n,k,r)
         z = torch.where(legal[..., None, None], z, 0.)
         return (q[..., None] * z).sum(-2)
@@ -89,7 +95,7 @@ def mechanical_contracts(cls, hidden=48, rank=8):
     xx = x.clone().requires_grad_(); qq=q.clone().requires_grad_(); ss=slots.clone().requires_grad_()
     y = model(xx,ss,qq,legal,(c,h,w))
     perm = torch.tensor([2,0,3,1])
-    equiv = float((y-model(xx,ss[:,perm],qq[...,perm],legal,(c,h,w))).abs().max().detach())
+    equiv = float((y-model(xx,ss[:,perm],qq[...,perm],legal,(c,h,w))).abs().max())
     assert equiv < 2e-6
     empty = model(torch.full_like(x,float('nan')),slots,torch.full_like(q,float('nan')),torch.zeros_like(legal),(c,h,w))
     assert torch.isfinite(empty).all() and torch.count_nonzero(empty)==0
@@ -100,10 +106,19 @@ def mechanical_contracts(cls, hidden=48, rank=8):
     other = safe.clone();other[:,:h*w] += 2
     changed = model(other,slots,q,legal,(c,h,w))
     # Feedback ignores x in its update; region fusion is camera-local.
-    camera_error=float((changed[:,h*w:]-y[:,h*w:]).abs().max().detach())
+    camera_error=float((changed[:,h*w:]-y[:,h*w:]).abs().max())
     assert camera_error==0
+    constant_error = None
+    if cls is RegionImageFusion:
+        xc = torch.ones_like(x)*.7
+        qc = torch.ones_like(q)*.2
+        zz = model.latent(xc,slots,qc,legal,(c,h,w))
+        reference=zz[legal][0]
+        constant_error=float((zz[legal]-reference).abs().max().detach())
+        assert constant_error<2e-6, 'padding/support must not fabricate contrast on constant fields'
     return dict(zero_init_exact=True,permutation_max_error=equiv,empty_finite_zero=True,
                 invalid_input_grad_zero=True,camera_isolation_exact=True,
                 initial_parameter_vjp=initial,
                 nonzero_adapter_vjp_finite=True,parameters=sum(p.numel() for p in model.parameters()),
+                constant_field_max_error=constant_error,
                 scope='random cotangent mechanical VJP; not actual action/identity loss or trained effect')
