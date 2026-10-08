@@ -2364,3 +2364,1967 @@ but the graph validator was demanding a raw sensor path. The requirement now
 belongs to the dataset loader; graph ABI and trained objective identity remain
 strict. Both deployment configs reconstruct with no raw sensors, while training
 without source provenance is rejected (deployment-label-plane-r1.log).
+
+#### 34.33.3 Meaningful A/B qualification in progress
+
+Both candidates now run BS8 x 1024 updates (8192 training samples), starting
+from the admitted mature checkpoint at step 11012 and retaining its execution
+clock. Fresh Adam uses LR 2e-5, 100-update warmup, explicit origin 11012.
+Immutable source: 3a84399926d50831470518e1b7f105131d3f1056 at
+/data/senwang/clearvla/checkouts/causal-identity-training-3a843999.
+Artifacts/configs/receipts: /data/senwang/clearvla/experiments/causal-identity-ab-20261007,
+A-short-bs8-1024-r1 (GPU0) and B-short-bs8-1024-r1 (GPU2).
+Launcher: /home/sen.wang/mysh/clearvla-causal-identity-short-20261007.sh A|B.
+
+Each run has 256 offline validation batches and its own evaluation-only
+watcher, probes/run_causal_identity_panel.py. Watcher receipts record exact
+commands, source and expected epoch 1 / step 12036. The 18-case / six-task /
+three-trial panel uses seed 0, max_steps 360, execute_rows 8, stored_target;
+all raw trajectories are retained. No watcher promotes formal training.
+At update 100, A/B loss totals 0.618869/0.649529, recent seconds per batch
+6.42681/6.42796; no recorded numerical failures. This is progress, not final
+health or behavioral acceptance.
+
+Mechanical factual probes completed four fixed windows. Same-image measured
+semantic/image/covariance changes are exactly zero at offsets 0/4/8/16/24.
+Natural color changes still produce small native arm differences (~2e-4 to
+7e-4 RMS), and A has measurable replay noise in some windows. These two-update
+results cannot establish restored target selection. The diagnostic named
+identity_source_removed_prediction_mse removes the identity-state value only;
+it retains source ownership q. It is not complete source removal, and needs
+whole-source shuffle/neutral controls plus physical-object audits.
+
+Retained full old-model controller panels: stored_target 11/18,
+measured_tcp 3/18, replan_tcp 10/18, inverse_servo 9/18. All have 18 results.
+TCP-relative label vs controller-target accumulation is a real contract
+difference, but naive measured-anchor substitution is not an admitted repair.
+Controller dynamics and arm/gripper conditioning remain separate open groups.
+
+Next gates: complete loss/gradient ledger and 256-batch validation; actual
+cross-view/time object separation and source dependence; natural target
+selection above repeat noise; target changes through P1/P2/protected/P3 and
+native first eight rows; approach/contact/gripper regressions on the complete
+18-case trajectories. Only qualified candidates proceed to equal formal
+exposure and their two final standard closed loops. Hourly thread continuation
+is registered as clearvla-a-b; unchanged status is silent.
+
+#### 34.33.4 Source-dependence and complete trajectory qualification
+
+probe_identity_source_dependence.py reproduces the actual B loss from captured
+production source-only outputs, then holds target labels fixed while shuffling
+whole source state plus ownership across distinct validation episodes, breaking
+K value/weight pairing, or consistently relabeling both. It separately names
+zero identity values with retained q and wholly neutral source. The initial
+four-episode mechanical admission reproduces all production losses within
+2e-5; common K relabeling gives zero prediction change and <=6e-8 JS change.
+Untrained source prediction is worse than neutral and whole-source shuffling
+has almost no effect: expected negative evidence, not an identity success.
+The same controls will use 12 held-out episodes / 24 windows after the short run.
+
+The generic A/B factual probe now records actual S/P1/P2/P3/bottom outputs
+without recomputing reader probabilities. Its 32-node mechanical repeat is
+exactly equal. Natural color traces use a repeat under the same sampler as
+their reference; frontend-vs-replay differences stay separate. Node differences
+are total responses at matched solver calls, not independent source fractions.
+Physical K distributions use actual joint read mass restricted to each body
+mask, renormalized over K; unsupported raster pixels do not enter a probability
+denominator. The earlier pixel-average preliminary read was subnormalized and
+must not be used as a K-distribution TV statistic.
+
+run_causal_identity_qualification.py collects matched all-18 evidence, B source
+controls, then fresh A/B phase ledgers, exact RGB mask replay and node traces.
+Training and each full 18-case panel must match source/weights/step/protocol.
+All stages retain failures and never launch or promote a formal run.
+The generic phase planner selects observed contact, closest-approach, peak
+progress and final windows, without historical case-specific extras; it passed
+all 18 original trajectories (119 diagnostic windows). Fresh masks are admitted
+only by exact replay of BOTH camera RGB streams. No internal tensor archives
+are downloaded or written into repository memory.
+
+
+#### 34.33.5 B-r1 null escape and conditional identity candidate
+
+The meaningful short run exposed a structural failure despite finite gradients
+and a closed loss ledger. At batch 20, B identity correspondence was 0.4008
+and G null mass 0.00246; at batch 660 these were 0.01335 and 0.89421.
+A remained near 0.004 null. B-r1 is explicitly blocked from formal promotion;
+its 1024-update run, offline validation, standard panel and queued probes remain
+intact to characterize the failure.
+
+The old objective compares joint K+null laws. Multiplying real-K mass by
+alpha and assigning the remainder to shared null reduces JS in direct
+proportion without changing real-K relative identity. The saved counterexample
+has joint JS 0.506981 / 0.050698 / 0.005070 for alpha 1 / 0.1 / 0.01, while
+conditional-real-K JS stays 0.512102. The actual production objective reproduces
+this escape in FP32 and BF16. Canonical reconstruction and source prediction
+already use real-K conditional values and therefore do not close the escape.
+
+The new explicit selector rgbd_temporal_conditional_v2 compares real-K
+conditional laws, normalized before correspondence interpolation. Online laws
+come from current_image_source.log_measure and its producer support; missing
+source cells remain unknown, not invented identities. Independent source-only
+encodings still exclude target/context/history values. Ordinary gradients remain;
+a direct null-logit change cannot lower the conditional identity term.
+Source-prediction pairs and the declared exposure are unchanged. New diagnostics
+report supported-pair fraction and source/target null at admitted matches.
+
+This closes a specific abstention shortcut, not the general identity problem:
+uniform or single-real-K assignment can still satisfy consistency. Source
+dependence, true-object separation, cross-view/time identity, natural target
+selection and first-eight-row behavior remain promotion gates. The factual
+probe now separately reports unweighted K+null occupancy on producer-supported
+canonical atoms inside actual RGB body masks; real-K-normalized K|object alone
+would hide null collapse. No learned allocation weights define that audit's
+support or pixel denominator.
+
+Source references: training/identity.py:conditional_real_law and identity_terms;
+causal_identity.py metadata; runtime/causal_identity_migration.py;
+probe_causal_identity_admission.py:physical_read.
+Reproduce the numeric/gradient contracts with tests/test_identity_null_escape.py,
+tests/test_identity_supervision.py and tests/test_causal_identity_contract.py.
+Recorded regression: 15 passed, 6 fixture skips; real BS8 and behavioral
+qualification remain pending. Raw evidence stays under the A/B experiment root:
+identity-null-escape-counterexample.json, B-short-r1-promotion-block.json,
+conditional-identity-tests-r2.log. The v1 source and running jobs are immutable.
+
+
+#### 34.33.6 Masked-target pressure, mechanical v2 admission and preserved queues
+
+Both original A/B short runs reached 1024 updates / step 12036. All recorded
+training scalars are finite; A ledger gap is zero and B max absolute gap is
+1.79e-8. Median batch times are 6.36 / 6.09 seconds. A final logged supported
+G null is 0.00214; B is 0.90838 while correspondence loss falls to 0.01003.
+This establishes a qualification risk, not the physical null rate on each
+object. True-body K+null audit is queued separately; background abstention
+must not be confused with object collapse. Offline and full behavior remain
+required. B source prediction also improved (1.178 to 0.305), so its useful
+learned information must be measured, not discarded with the failed objective.
+
+The null escape has a concrete training input trigger. Engine._forward passes
+training_mask=True. Canonical grounding marks unobserved producer cells as
+null-only; independent correspondence sources remain observed. The v1 joint
+loss nevertheless supervises these pairs. In a real BS8 mask-mode probe,
+producer support is 0.625 and only 7050/16357 correspondence pairs have complete
+online interpolation support. Missing-support rows contribute negative direct
+source-null-logit derivatives in all four groups, summed -0.0063076 versus
+-0.00022225 on supported rows (before the four-group mean). Increasing source
+abstention therefore reduces this part of the old loss. V2's direct null-logit
+derivative is exactly zero in all four groups; its actual loss reproduction
+gap is zero. This is a local final-logit derivative, not the full parameter
+optimizer update or proof that all identity collapse modes are eliminated.
+
+Reproduce with probes/probe_identity_mask_null_gradient.py from probe source
+5c7420a4 or later and PYTHONPATH pointing to the checkpoint's immutable source.
+The earlier mask-gradient-r1 accidentally used encode_online's unmasked
+default despite model.train(); preserve it as an unmasked control with its
+SCOPE_CORRECTION.json. r2 explicitly selects the production mask and asserts
+that producer support is not full. Do not cite r1 as masked training evidence.
+
+Production candidate 0e861f56c4f7e49a2b5756dc70431e05ba917cb6 completed two
+real BS8 updates plus two offline batches, strict mature initialization,
+checkpoint save and cold factual deployment (step 11014). The checkpoint SHA
+is 026d7b59b8daa5c26fbf43dba4dcc323408650bd1d587db0b2dd7292b5688e79.
+Ledger error is <=1.2e-7 and gradients are finite. Source-control production
+reproduction gaps are <=3e-8; the same-instruction repeats and static
+measurement changes are exactly zero. These are mechanical admissions only.
+Source prediction remains worse than the neutral control at two updates,
+and the original camera specialization is still visible.
+
+B-nullv2-short-bs8-1024-r1 is QUEUED, not yet training: it waits for the original
+B standard 18-case panel to finish and release GPU2. It starts again from the
+same mature checkpoint, with 1024 BS8 updates, 256 offline batches, model clock
+11012 and fresh optimizer/100-step warmup. Neither collapsed B-r1 weights nor
+its optimizer are reused. Its own complete 18-case R8/stored_target watcher
+and 12-episode source / matched-old / fresh-mask / full-node qualification
+are already queued. All queues are evidence-only; none promotes formal runs.
+Original A/B training, panels and the aa5ebc5b qualification remain intact.
+
+Queued physical supplements use their own original runtime source. The B-r1
+K+null/body check waits for original qualification to release GPU4, then v2
+qualification follows it. Raw receipts/status/logs remain in the A/B experiment
+root. probes/probe_causal_identity_module_gradients.py additionally exposes
+ordinary total/action/world/identity VJPs to the new outcome, binder, S/W
+identity/view and canonical decoder weights without any optimizer step.
+Its nonzero gradients are connectivity evidence, not physical success.
+
+
+The actual full-loss VJP mechanical admission completed in
+B-nullv2-module-vjp-mechanical-r3 (source probe 775e59ad, production 0e861f56).
+All 23 selected consumer parameters have connected, finite total-loss gradients.
+Examples: W identity/view-content L2 0.159/0.175, S identity 0.00105,
+observed-outcome output 0.00478; its inner image/view gradients are only
+1.35e-11/5.06e-12 after two updates, not evidence of strong learned use.
+Action loss reaches S/W identity and view consumers; the goal-free world loss
+does not update the S binder, and identity reconstruction does not train the
+S consumer directly. This is consistent gradient ownership, not task admission.
+
+r1/r2 VJP launcher failures are retained: the training CLI correctly rejected
+a checkpoint-clock request without an admitted training migration, then rejected
+a fresh clock with nonzero optimizer origin. The read-only probe now uses
+fresh unused optimizer origin 0, restores the verified checkpoint execution
+step immediately before the ordinary loss forward, and exits before any update
+or checkpoint write. It does not weaken or modify the training clock contract.
+
+AB-r1-module-vjp-short-r1 is queued on GPU0 after A's standard panel; it checks
+both final A/B-r1 checkpoints with their own production source.
+B-nullv2-module-vjp-short-r1 is queued on GPU2 after v2's own standard panel.
+These complement the existing GPU4 physical/source/trajectory audits. Formal
+promotion still requires their actual final results plus full behavior; the
+mechanical initial gradients cannot substitute for those checks.
+
+
+#### 34.33.7 Completed short panels, physical mechanisms and source-object loss
+
+Both original short checkpoints are epoch 1 / step 12036, source 3a843999.
+Each 256-batch offline panel contains 2046 samples and all six tasks.
+A/B total validation losses are 0.439531 / 0.444806; native action RMSE
+0.264833 / 0.264902. Saved identities, full hashes and metrics are in
+A-short-final-audit.json and B-short-final-audit.json, verified against payloads.
+
+The complete standard panels (18, seed 0, max 360, R8, stored_target) score
+A 13/18 and B-v1 17/18, versus the mature source's 11/18. All original 11
+positives remain positive; A adds 05/11, B adds 05/09/10/11/14/17.
+Initial states match case by case, errors are empty and every NPZ is present.
+These are short-run behavioral results, not either requested formal experiment.
+
+The contact records limit their interpretation. In B case 05 the robot first
+contacts red at 43; red contacts the requested blue block and blue reaches
++0.1012 m without recorded direct robot-blue contact. Case 11 first contacts
+pink at 55; pink contacts the requested red block, which reaches +0.1022 m
+without recorded direct robot-red contact. A's two added positives have the
+same indirect-contact pattern. Contact telemetry is sampled at control states,
+not every physics substep. Preserve the official successes; they do not certify
+correct color binding. B's remaining failure 02 reaches 0.0940 m at state 200,
+then withdraws with TCP-goal gap only 0.00684 m; the largest 0.141 m controller
+gap appears later at 295. Accumulation cannot explain that earlier departure.
+Full fresh-mask/32-node trajectory qualification remains running.
+
+B-v1's 12-episode / 24-window source controls reproduce the production
+objective to <=4.48e-8. Replacing the complete source with another episode
+raises pooled prediction MSE only 1.88%, 1.69%, 4.49%, 1.05% for cross top,
+cross wrist, temporal top, temporal wrist. Permuting values against fixed K
+weights raises it 35.2%, 25.1%, 45.8%, 8.42%; common K relabeling preserves the
+prediction exactly. Donors share scene structure; these are neither independent
+physical-object controls nor a proof of source independence.
+
+The old RGB-D audit's all_accepted_pixels was DEPTH admission before RGB
+filtering; accepted_object_pixels was after RGB filtering. Do not divide these
+legacy fields. probe_rgbd_object_admission.py now retains that field explicitly
+and adds matched denominators plus the actual IdentityLabelProducer._sample.
+Across 18 exact historical replays / 63 windows, accepted source-object counts
+are 151/6209 (top cross), 1459/35853 (wrist cross), 777/57981 (top temporal4),
+1576/42163 (wrist temporal4). All sampled object endpoints preserve body identity.
+Counts are 1.34-4.07% of admitted pairs in the four production directions.
+This is a correlated historical observation panel, not the training distribution
+or a loss/gradient attribution. Artifacts: identity-label-balance-r1.
+
+A new objective audit exports only small correspondence/body-label arrays from
+four exact replays (01/24,05/24,11/24,17/136). It reuses the production source
+encoding and partitions already-computed losses; body labels never enter the
+model, match construction or optimizer. The object/nonobject ledger closes;
+true-object endpoints account for 4.37%, 4.01%, 5.15%, 6.37% of source-prediction
+loss in these windows. B-v1 source-only joint null at these endpoints is
+0.99438-0.99992; sampled online target joint null is 0.85689-0.99917.
+This is direct endpoint evidence beyond a global null average, but not a
+statement about every visible object's pixels or a parameter-gradient share.
+
+Useful predictions and high null can coexist: training/identity.py's prediction
+weights and canonical_grounding.py's reconstruction condition on real K, whereas
+v1's correspondence compares joint K+null. The confirmed v1 shortcut remains
+real despite 17 successes; do not describe the whole checkpoint as behaviorally
+collapsed. Conditional-v2 starts anew from the original mature checkpoint and
+has now begun its matched 1024-update BS8 short run. Its production source 0e861f56
+and all original evaluations remain immutable. Neither formal run is promoted.
+
+Reproduce with probe_rgbd_object_admission.py --export-labels and
+probe_identity_object_source.py --checkpoint ... --plan candidate-factual-plan.json
+--labels identity-object-source-labels-r1 --output <new-dir>, using each checkpoint's
+own PYTHONPATH. Pinned probe 5d1dc772; B-r1-object-source-factual-r1 is complete.
+The v2 two-update mechanical counterpart also closes the actual objective and
+partition to <=8.95e-8; it proves instrumentation, not learning. Its final
+short-checkpoint counterpart is queued after v2's full panel/module VJP.
+
+#### 34.33.8 Final ordinary VJPs and natural-response repeat controls
+
+The final short A/B full training-entry VJPs (true BS8, training_mask=True,
+clock 12036, zero updates) connect all selected 15/23 consumer parameters with
+finite total-loss gradients. B S/W identity L2 are 0.00247 / 0.00644, W view
+content 0.00610. A/B observed-outcome output L2 are 0.01642 / 0.01449; image
+weights receive only 3.69e-8 / 2.25e-8, and view weights 1.46e-8 / 5.37e-9.
+These are small nonzero gradients, not disconnected paths; scales/inputs differ.
+World/identity losses do not train the goal-owning S binder directly, consistent
+with the declared ownership. Artifacts: A-module-vjp-short-r1, B-module-vjp-short-r1.
+
+A's complete 60-window old-observation audit passes same-image measurement
+exactly, but 42 windows have nonzero paired same-instruction action variation:
+median 0.000204, maximum 0.000590 native arm RMS. Color-response median is
+0.000471, so uncorrected downstream differences cannot all be called target
+transmission. Binding TV itself has median 0.01262; a larger binding change does
+not establish the correct object's selection.
+
+Four deterministic-operator controls (01/24,08/40,09/40,14/40) eliminate paired
+repeat action differences exactly, while retaining nonzero color responses.
+This localizes a numerical confound to the operator execution path; it does
+not identify a single CUDA kernel. The control uses CUBLAS_WORKSPACE_CONFIG=:4096:8
+before process start plus torch deterministic algorithms, without changing the
+trained graph or the official panel runtime. Do not silently apply this audit
+setting to a production comparison. Script ca84108f adds an explicit
+--deterministic option; unsupported operators fail rather than being ignored.
+A-deterministic-repeat-control-r1 is the complete four-window control.
+
+AB-deterministic-target-r1 now checks the four critical physical windows under
+this repeatable audit setting on GPU0, then exits. The matched v2 final target
+control is queued after its object-source final audit. Original broad source,
+old/fresh physical and new-mask qualifications remain running unchanged.
+Promotion still requires their physical choice, consumer chain and behavior
+review; standard successes, small reconstruction loss and connected gradients
+alone do not close the identity/target-maintenance questions.
+
+
+The completed deterministic critical-window A/B supplement has zero paired
+same-instruction action difference in all eight reads. Color-dependent motion
+is nonzero but small (A 0.000413-0.000960, B 0.000280-0.000556 native arm RMS).
+At 05/24 B's blue request places only 0.00326 of its blue-versus-red source
+read mass on blue; at 11/24 the red request places 0.00183 of red-versus-pink
+mass on red. Natural color changes do not reverse these source-read rankings.
+
+At these fixed G facts, even an arbitrary nonnegative binding over K cannot
+raise B's corresponding target source-read fractions above 0.0534 / 0.0269:
+every K has that same competing-object preference. Normalizing read density
+by visible body pixel counts still gives maxima below 0.5 (see exact values
+in deterministic-source-read-ceilings.json). This is a convex-mixture bound at
+the binding-weighted source READ interface, not a bound on semantic feature
+information or the complete P1/action network. Native target body support is
+small but nonzero (about one canonical atom in these two top-camera masks).
+Keep body area, camera mass, source support and feature receptive fields explicit.
+
+Thus changing S binding amplitude alone cannot reverse those two source-read
+preferences without changing its G evidence. V2 must be checked on this same
+interface after meaningful training. If conditional-v2 retains the defect, the
+next candidate must address object separation as well as matched-pair agreement:
+uniform/single-K laws still minimize positive consistency. Independently observed
+RGB-D/temporal foreground grouping and independently validated different-group
+constraints are candidates to audit before adding any such objective; simulator
+body IDs remain evaluation-only. Do not infer an approved negative-label scheme
+from this proposal, or change P3/common carriers based on these scalar bounds.
+
+
+#### 34.33.9 Fresh contact/withdrawal qualification
+
+B-v1's complete old-observation 60-window audit has exact same-image semantic,
+image and covariance zero and all 120 same-instruction comparisons are exact.
+Its natural color arm-RMS median is 0.000424, maximum 0.001457. The numerical
+repeat confound established in A must not be asserted for this B panel.
+Real-K conditional cross-view similarity still cannot certify identity when
+supported joint mass is tiny. Artifact: B-matched-factual-short-r1/decision-summary.json.
+
+A's fresh 18-case physical ledger and exact two-camera mask replay are complete;
+its consumer audit is running. All five failed cases touch the instructed
+physical body. Final signed displacements (02,09,10,14,17) are 0.01170,
+0.05005, 0.08142, -0.02137, 0.07848 m. Maximum stored-goal/TCP gaps are only
+0.0109-0.0187 m. These maxima do not identify the first cause, but no large
+controller accumulation is required for these failures. Contact alone does not
+establish deliberate selection, alignment or sustained pushing.
+
+The generic contact/closest/peak plan does not cover every withdrawal or
+recontact. Add targeted windows from these fresh trajectories, especially
+A10/128,136,144; A14/184,192,200; A17/224,232,240 and B02/184,192,200,208,
+with successful A04/48,56,64 as a context control. These are physical replan
+states, not historical case-number timestamps transplanted into new rollouts.
+The added probe reads measured outcome before proposal, predicted goal visual
+values and remaining native TCP separately, then removes one existing value
+on a fixed factual input. Record coarse, P3/bottom, native first-eight arm and
+gripper, paired deterministic repeats and recorded-runtime deviation. These
+are interface sensitivity controls, not coherent physical interventions or
+independent contribution percentages. They cannot alone qualify long training.
+
+The read-only outcome smoke r3 passes A10/136: exact repeated action/coarse,
+unchanged binding and parameters, and native TCP decoding verified against
+recorded proprioception. Removing the full observed outcome changes native
+arm RMS 0.00134; removing its image/semantic projected values changes 0.000226 /
+0.000354. Removing prepared visual goal values changes 0.000461; robot goal
+values 0.01148. The predicted remaining TCP is (-0.16083,0.00471,0.04438) m.
+This is one sensitivity window, not a cause percentage or evidence that the
+object goal has been met. Deterministic versus recorded-runtime arm RMS is
+0.000383 and is kept separate from exact same-runtime repeat error.
+
+Probe development failures are retained with source snapshots: smoke r1 used a
+7-D native normalizer on the 10-D rotation6d model state; r2 correctly rejected
+inconsistent modified observed/innovation data. The qualified r3 decodes only
+unchanged TCP channels and removes projected consumer values while preserving
+all factual feedback validation. Production training/evaluation was untouched.
+
+
+#### 34.33.10 Goal transport and independently observed motion qualification
+
+The complete 12-A/4-B fresh outcome controls preserve parameters and shared
+binding, with exact deterministic repeats. Median native first-eight arm RMS
+changes for A/B are 0.000560/0.000471 when removing observed outcome,
+0.000310/0.000390 for visual goal values, and 0.00591/0.00926 for robot goal
+values. Every removal preserves the original mean X/Z command signs in all
+16 windows. Thus the stronger robot-goal sensitivity does not by itself explain
+withdrawal. These are fixed-input consumer sensitivities, not independent
+contribution fractions or coherent alternate physical rollouts. Artifacts:
+A/B-outcome-maintenance-fresh-r1, including decision-summary.json.
+
+The producer ledger then captures actual S and P3 projection outputs and
+reproduces their contrast and transport contractions exactly in all 16 windows.
+Before current-to-instruction-start transport, desired/current visual laws
+differ (TV about 0.51-0.55); their endpoint real mass is almost one.
+After transport, the current-to-start match retains only 0.0031-0.0265 real
+mass per K/view. S projected image contrast RMS 0.076-0.165 becomes
+0.000146-0.000385. All contraction reproduction errors and paired repeats
+are zero. The successful A04 windows also share this attenuation.
+This establishes a common preparation bottleneck; it does not uniquely
+explain which trial fails. Artifacts: A/B-goal-producer-ledger-fresh-r1;
+pinned probe 2a4a432f, production 3a843999.
+
+The source is model/instruction_posterior.py:242-264, followed by
+model/annotation_goal.py:272-295. The match is computed from frozen observed
+descriptors, averaged over candidate distances relative to a fixed .05 null
+reference (vision/observed_correspondence.py). This correspondence unknown
+mass is separate from G's ownership null, the shared target-binding null and
+the predicted endpoint's null. Conditional-v2 changes the identity objective,
+not this matcher. Renormalizing correspondence unknown back to real mass would
+assert evidence that has not been established.
+
+An independent past-four-frame calibration uses exact RGB replay and admitted
+RGB-flow pairs, with body masks only partitioning outputs. The actual W
+measurement uses pooled/normalized 8x8 features; instruction-start matching
+uses the 16x16 frontend chart. The probe verifies both feature provenance and
+production K-weighted null and pair-delta transport (maximum errors zero).
+In four windows (old 01/24,05/24,11/24,17/136), same-body wrist endpoints retain
+only 0.97-1.81% real match mass. Their conditional endpoint errors average
+7.83-17.60 pixels. Native 16x16 controls still give 8.80-20.06 pixels at the
+wrist and worsen one top-camera window to 25.67 pixels. Grid size alone
+therefore does not admit a repair.
+
+Keep endpoint localization and production transport separate. Production
+source_measurement.py:38-43 takes pair differences BEFORE source aggregation;
+subtracting a continuous query after law interpolation also includes a
+confidence-weighted source-centroid term. Calibration-r2/r3 and localization-r1
+retain this scope correction in MEASUREMENT_SCOPE.json. The completed
+A-observed-match-localization-r2 reproduces actual transport, reports that
+pair-delta error separately, and separates admitted motion >1 pixel from
+near-static <=0.25 pixel endpoints. These audit bins never enter the model.
+
+Same-null top1/top5 controls isolate candidate averaging from confidence.
+They reduce several conditional endpoint errors, but top1 gives exactly zero
+pooled motion for all sampled top-camera objects in these four windows and
+for wrist objects in 11/17. For example, case17 top true motion averages
+3.26 pixels while top1 pair-delta error remains 3.26 pixels.
+A lower endpoint error can therefore hide an unresponsive motion estimator.
+Neither top1, finer grids nor a confidence increase is qualified.
+These correlated four-window results require broader displacement and
+occlusion support before defining a new production measurement.
+
+Meta's [DINOv3 tracking example](https://github.com/facebookresearch/dinov3/blob/main/notebooks/segmentation_tracking.ipynb)
+uses local top-k feature matching and first-frame instance labels. It motivates
+an aggregation control, but its label initialization and probability semantics
+do not provide our online unknown/physical-motion contract. No oracle instance
+initialization, raw color rule or new training objective has been added.
+
+A's complete own-panel consumer audit now contains 128 windows and exact
+same-image measurement zeros. 86/256 same-instruction comparisons vary
+(up to 0.000681 native arm RMS); color-response median is 0.000464.
+The official runtime remains unchanged; use deterministic paired controls
+before interpreting small downstream semantic gains.
+Artifact: A-fresh-factual-short-r1/decision-summary.json.
+
+Current B-v2 training explicitly includes annotated_goal supervision
+(weight .01; at batch680 raw 0.443588, contribution 0.00443588).
+Do not reuse the historical claim that endpoint supervision is absent.
+Neither formal training is promoted. Next qualify actual motion and
+correspondence confidence on the existing full 18/63 historical plan, then
+check the candidate on distinct fresh trajectories and longer instruction-start
+gaps. Preserve all ongoing v2 and identity/consumer evaluations.
+
+Reproduce the focused calibration with each checkpoint's own runtime:
+PYTHONPATH=<training-source> CUBLAS_WORKSPACE_CONFIG=:4096:8 python
+probes/probe_observed_match_calibration.py --checkpoint <best.pt>
+--plan candidate-factual-plan.json --labels identity-object-source-labels-r1
+--output <new-dir> --native-control --localization-controls.
+Use probe_causal_outcome_maintenance.py --producer-ledger --ledger-only with
+the saved A/B-outcome-maintenance-fresh-plan.json for the actual goal ledger.
+
+
+#### 34.33.11 Full motion audit and separate rigid-geometry cross-check
+
+A-observed-match-full63-r1 completes all 18 old trajectories / 63 windows,
+with exact production null and pair-delta reproduction (both max errors zero).
+It scores 790 top and 1519 wrist admitted same-body past4 flow endpoints,
+with no source/target body mismatch. These are correlated accepted RGB-flow
+estimates; body agreement is not subpixel geometric ground truth.
+
+On the subset moving >1 pixel according to that independent flow, production
+pair-delta mean error is 3.528 px top / 3.133 px wrist. Predicting no motion
+gives 3.550 / 3.211 px. Conditionalizing the existing law gives errors
+5.301 / 12.589 px. Native16 alone gives 3.550 / 3.152 px with the actual
+unknown mass. The estimator is nearly unresponsive on this moving subset;
+raising confidence alone would often amplify mislocalized transport.
+
+Same-null top1 produces exactly zero motion in 24/29 top-camera moving
+windows and 11/38 wrist-camera moving windows. Its aggregate errors remain
+3.542 / 3.203 px. Native16 top1 has a lower conditional wrist error (2.430 px),
+but actual-confidence error is still 3.193 px; top accuracy also varies.
+This specifies separate localization, sub-grid displacement and unknown
+calibration problems. It does not establish a qualified replacement or a
+unique closed-loop cause. Summary and reproduction receipt:
+A-observed-match-full63-r1/decision-summary.json,
+observed-match-full63-r1.receipt.json (probe d9259156).
+
+The next independent audit uses exact replay depth, camera extrinsics and
+rigid-body poses to reproject source pixels through object motion. This is
+explicitly simulator-oracle EVALUATION ONLY, never a new training label,
+online measurement, body mask input or identity objective. Its optional
+audit_rigid_* arrays are stored beside unchanged production sensor labels.
+Source points are one pixel inside a movable body's mask; projected points
+must remain on that body and satisfy target depth visibility. Camera
+unproject/reproject identity is asserted at 1e-6 pixels. Compare sensor flow
+against this geometry as well as scoring the existing DINO law, to avoid
+validating a future RGB-flow repair solely against its own label generator.
+The initial four-window replay is a probe admission, not repair admission.
+
+The full63 RGB-flow result supports replacing an ineffective measurement,
+but the new estimator must recover independently verified movement while
+preserving static zero, occlusion unknown, K/view support and ordinary
+consumer gradients. Check fresh trajectories and longer instruction-start
+gaps separately. Identity separation, natural target choice and arm/gripper
+remain independent gates for the two formal experiments.
+
+
+The rigid pilot is complete (probe 434ad3b2). Camera roundtrip error is
+<=4.74e-11 pixels, all pre-existing sensor label arrays are exactly unchanged,
+and production null/transport reproduce exactly. It retains 49 top and 133
+wrist visible interior points. This is oracle instrumentation admission.
+On common visible points, RGB-flow mean error versus rigid geometry is
+0.024-0.954 px top and 0.483-0.696 px wrist; it can reach 4.11 px in one top
+point. In case01 the admitted top rigid points are essentially stationary,
+despite nonzero RGB-flow estimates. Do not call all accepted flow motion
+physical ground truth, or use the same flow generator as a new estimator's
+sole judge. Same-body agreement alone cannot certify point displacement.
+
+The actual DINO law still fails some geometry-verified moving cases:
+case17 top motion >1px averages 3.682 px, production error 3.929 px;
+case05 wrist averages 2.504 px, production error 2.575 px.
+Wrist image motion includes camera ego-motion. These are image-plane
+correspondences, not world-space object velocities.
+Full oracle extension observed-match-rigid-full63-r1 is queued with its own
+receipt and immutable 434ad3b2 probe, runtime T1. The small audit_rigid_*
+arrays are prohibited as production sensor labels or policy inputs.
+
+
+Original B-v1 fresh qualification is now complete: 123 own-panel windows,
+same-image measurement zero and all 246 same-instruction repeats exactly zero.
+Natural color action RMS median is 0.000454 (max 0.001882); this magnitude
+does not certify correct physical selection. The separate four-window
+canonical atom/body supplement also completes: 15 supported body/view entries
+have joint ownership null 0.8415-0.999365. Unsupported bodies are excluded;
+real-K-normalized identity remains a different quantity. Artifacts:
+B-fresh-factual-short-r1/decision-summary.json and
+B-r1-null-object-factual-r1/decision-summary.json. Original broad qualification
+and its B-null supplement have exited; the v2 qualification has advanced to
+waiting_training_and_offline. All formal promotion gates remain active.
+
+#### 34.33.12 Independent motion qualification and completed v2 short (2026-10-07)
+
+**Rigid geometry closes the measurement cross-check, not the repair.** The
+18/63 oracle audit is complete: 643 top/1350 wrist visible interior points,
+camera roundtrip <=4.82e-11 px, 756 original sensor arrays exactly unchanged,
+and production null/pair-delta reproduction exactly zero. Labels are joined
+by (case, step), not repeated worker-local filenames. Simulator poses, body
+IDs and depth visibility remain scorer-only; no such arrays enter the policy
+or production identity labels. These are correlated image-plane measurements,
+including wrist camera motion, not independent trials or world velocities.
+
+| Moving >1px geometry subset | Top | Wrist |
+| --- | ---: | ---: |
+| Points / windows | 100 / 19 | 819 / 35 |
+| True displacement = zero-motion baseline EPE | 6.441 | 3.908 |
+| Production DINO measured displacement | 0.148 | 0.162 |
+| Production DINO displacement EPE | 6.454 | 3.828 |
+| Conditionalized DINO EPE | 9.879 | 12.333 |
+| Native16 actual-confidence EPE | 6.459 | 3.847 |
+
+Same-null top1 is exactly stationary in 12/19 top and 10/35 wrist moving
+windows. Near-static production EPE is 0.190/0.149 px. RGB-flow labels versus
+rigid geometry have mean EPE 0.199/0.785 px on 587/1160 common points, with
+maxima 5.89/6.90 px. Thus prior same-body flow admission is not pointwise
+motion truth. Artifact: A-observed-match-rigid-full63-r1/decision-summary.json;
+receipt observed-match-rigid-full63-r1, pinned probe 434ad3b2.
+
+**RGB candidates expose separate short-gap, long-gap and visibility limits.**
+The estimator receives only observed RGB pairs; geometry labels score its
+output afterward. OpenCV DIS medium uses a fixed forward/backward <0.75px
+and photometric <0.08 acceptance rule, without fitting audit thresholds.
+That rule is not a calibrated match probability. Report accepted EPE plus
+all-visible EPE with zero displacement at rejected points: abstention must not
+hide missed motion. Method references: [DIS paper](https://arxiv.org/abs/1603.03590)
+and [OpenCV API](https://docs.opencv.org/4.10.0/de/d4f/classcv_1_1DISOpticalFlow.html).
+
+On the old63 moving subset, DIS all-visible EPE is 2.139/1.539 px versus
+DINO 6.454/3.828; accepted support is 86/100 top and 717/819 wrist. On the
+distinct 16 fresh A12/B02-four windows, short-gap DIS EPE is 0.379/1.040 px,
+accepting 34/34 and 317/353 moving points. However, it also accepts 25/31
+geometrically occluded wrist points. Same-body endpoints cannot certify
+visibility. For current-to-instruction-start matching, DIS accepts 0/516
+visible moving wrist points; Farneback accepts only 29/516. Their wrist
+all-visible EPE remains 21.796/21.409 px. No blanket RGB replacement is admitted.
+
+Exact sensor-label reproduction has a runtime boundary: CALVIN replay uses
+OpenCV 4.11, training uses 5.0. Uint8 remap rounding changes the temporal
+photometric gate on 66/129024 old sampled pixels (five object pixels), despite
+common endpoints agreeing within 2.98e-8 normalized units. Thread count was
+not the cause in the checked case. Original sensor arrays remain unchanged;
+cross-runtime controls explicitly report support mismatches. Earlier r1 jobs
+and SCOPE_CORRECTION.json are retained. Do not claim the renderer's accepted
+32x32 set exactly equals production support. The cross-view depth/RGB path
+does not use this OpenCV remap. Artifacts: observed-rgb-candidate-old63-r2,
+observed-rgb-fresh16-{past4_current,current_start}-r2; receipt
+observed-rgb-candidate-fresh16-r2, immutable probe be4f529b.
+
+**Existing learned flow is informative but does not close the interface.**
+Capture the already computed raw84 forward flow and its actual coarse8
+conversion before observation cleanup; no new encoder pass or policy edit.
+The local SEA-RAFT-style implementation is not an official pretrained model.
+On A's fresh moving top/wrist points, DINO EPE 2.781/3.705 becomes
+1.018/2.892 for raw84; multiplying by predicted confidence*(1-occlusion)
+gives 1.954/3.642. B02 wrist raw84 EPE remains 4.544 versus true mean motion
+4.890. Raw-to-coarse reproduction is exactly zero in all 16 later checks.
+The raw/coarse conversion is flow_dino_evidence.py:9837-9849;
+source_measurement.py:27-43 instead computes DINO-law pair differences.
+These fixed-input measurements do not justify treating learned confidence as
+calibrated visibility. Artifacts: A/B-existing-flow-fresh-r2 (8502b60f).
+
+DINO global nearest matches used only as DIS initial flow improve some
+long-gap localization, but remain unqualified. A's wrist accepts 7/486 moving
+points, all-visible EPE 21.194 versus 21.378 zero-motion; B02 accepts 1/30,
+EPE 28.153 versus 28.563. B02 top accepts eight moving points, all >2px error;
+five exceed 5px. At true geometric endpoints, the existing photometric rule
+would accept 491/516 wrist points, so uniformly impossible brightness matching
+does not explain the candidate's low support. This oracle control is scoring
+only, never input initialization or a reason to relax unknown. Artifacts:
+A/B-reference-rgb-seed-fresh-r1 and
+observed-rgb-fresh16-reference-oracle-photometry.json; probe b2485755.
+All same-runtime paired repeats and parameter checks pass. Preserve the
+failed existing-flow r1 launcher (missing deterministic CUBLAS environment);
+r2 corrects the launcher, not production execution.
+
+**Conditional-v2 short and offline are complete; behavioral admission is pending.**
+Source 0e861f56 reaches epoch1/step12036 after 1024 BS8 updates from mature
+step11012 and 256 offline batches (2046 samples, 6/6 tasks). best.pt is
+2487524008 bytes, SHA256
+ee6271e67a1cbbc1bb038b9e63c3108677b665e9e7140d85df6dcaf4feed17fc.
+All 52 logged windows are finite, median 6.051s/batch; the maximum window
+preclip gradient is 3.288 at step12033. Sparse console samples must not replace
+this peak. Loss-ledger maximum error is 1.49e-8. Annotated-goal supervision
+is active. Offline native action/first8 RMSE is 0.263964/0.231610;
+arm/gripper RMSE 0.131082/0.620195. Decoded gripper event F1 is 0.3451,
+1049 predicted versus 765 target events. Finite logs do not close control.
+Payload/source/config hashes and audit receipts remain in
+B-nullv2-short-final-audit.json and B-nullv2-complete-log-audit.json.
+
+The completed 12-episode/24-window source control reproduces production loss
+within 2.98e-8 and common-K relabeling exactly. Other-episode whole-source
+replacement raises MSE only 0.56/1.77/4.01/1.04% in cross01/cross10/time0/time1,
+while mismatching K values raises it 27.1/39.6/44.9/16.8%. Low offline source/
+target ownership null (0.00177/0.00297) therefore does not establish physical
+identity or useful scene dependence. Artifact:
+B-nullv2-source-dependence-short-r1/decision-summary.json.
+
+At 22:22 UTC the existing v2 panel is running (four cases completed), broad
+qualification is processing old matched factual windows, and final VJP,
+object/source and deterministic-target receipts remain queued. Keep these
+existing jobs; do not duplicate them. Both formal experiments remain unstarted.
+Next resolve long-gap localization/visibility and physical object separation,
+then test ordinary consumers and own-trajectory behavior before changing the
+production graph. Do not replace the matcher, raise confidence, change
+controller or promote training based on the controls above.
+
+Reproduction: run probe_observed_rgb_motion_candidate.py with --plan,
+--labels and --output under the declared OpenCV runtime; labels come from
+probe_rgbd_object_admission.py --rigid-audit --export-labels --pair-mode
+past4_current or current_start. For model capture use
+probe_observed_match_calibration.py --label-source rigid_audit --existing-flow;
+add --reference-rgb-labels for DINO-seeded RGB refinement. Immutable receipts
+record complete commands, checkpoint identity and plan hashes. Large evidence
+stays in the experiment directory; no internal tensor archive is downloaded.
+
+At 22:28 UTC the panel has nine completed cases: six successes, failures
+02/03/09. This is not a final panel score. Case03 regresses relative to both
+A and B-v1; case09 regresses relative to B-v1. All compared initial robot and
+scene arrays are exactly equal. Case03 first records contact with the blue block
+at state195, reaches only 4.370cm displacement at state287 and finishes at
+2.790cm. Goal/TCP gap at its progress peak is 2.05mm (whole-trial max 2.09cm).
+Case09 first records red contact at 127, peaks at 4.235cm at 137 with a 4.40mm gap.
+These observations require contact/post-contact maintenance analysis; they do
+not attribute the regression uniquely to the identity-loss change or a
+controller mechanism. B-nullv2-short-r1-promotion-block.json prevents formal
+promotion pending full qualification and repair. All existing jobs continue.
+
+The first 25 matched old windows also retain a physical separation concern:
+32/39 supported object pairs share their dominant K, with per-camera median
+real-K TV 0.0774/0.0595. This partial audit is not the complete 60-window result,
+and dominant-K equality alone does not prove every downstream value identical.
+Retain the atom-null/source-support and natural-command chain alongside it.
+Artifact B-nullv2-matched-factual-partial-2230.json records its actual 22:25 UTC
+snapshot; B-nullv2-partial-panel-snapshot.json records the panel comparison.
+
+An additional read-only v2 audit now uses these own completed trajectories:
+success01 at112/120/128; regression03 at184/192/200 and272/280/288;
+regression09 at112/120/128/136/144. These are actual sampled target-contact
+and peak-progress replans, not reused A/B-v1 timestamps. The existing
+outcome/goal consumer removals and exact producer ledger run together under
+pinned b2485755/T2, deterministic paired controls, unchanged binding and
+parameters. Receipt B-nullv2-outcome-regressions-fresh-r1.receipt.json records
+the selection and script/plan hashes; job status has the -job directory suffix.
+It does not replace the full v2 fresh physical-mask/natural-command audit.
+
+#### 34.33.13 Completed v2 behavior and unresolved physical grouping (2026-10-07)
+
+**V2 is not promoted.** The standard stored-target/R8 panel finishes at 12/18,
+versus A 13/18, B-v1 17/18 and mature 11/18. Failures are 02/03/09/10/14/15;
+03/15 regress versus A, and 03/09/10/14/15 versus B-v1. All 18 NPZs are intact
+(212035263 bytes), finite, length checked and individually hashed. Initial
+robot/scene arrays and both RGB images exactly match the earlier panels;
+there are no infrastructure errors. Artifact:
+B-nullv2-short-closed-loop-final-audit.json. Neither formal training has begun.
+
+All six failures record correct-target contact, but that is not a pushing
+alignment or maintenance certificate. Maximum requested-direction progress is
+3.735/4.370/4.235/7.675/5.226/2.550 cm respectively. Recorded contact is sampled
+after env.step, not every physics substep: success01 already moves the target
+before its first nonzero sampled contact at 127. Earlier "first contact"
+wording means first recorded contact, not proof of absent earlier interaction.
+Keep the controller, finger configuration and loss of task maintenance separate
+from upstream identity defects. Phase evidence is in B-nullv2-fresh-phase-short-r1.
+
+**The low-null repair retains single-K concentration on real objects.** All
+qualification stages have completed, including own RGB-exact mask replay and
+130 own windows. Unsupported objects are excluded below; ownership null is
+reported separately from the real-K conditional distribution.
+
+| Supported-object audit | Old 60 top / wrist | Own 130 top / wrist |
+| --- | ---: | ---: |
+| Object observations | 124 / 56 | 268 / 139 |
+| Dominant K3 observations | 117 / 56 | 250 / 133 |
+| Object pairs sharing argmax | 67/78 / 9/9 | 143/166 / 23/26 |
+| Median between-object real-K TV | .0548 / .0653 | .0627 / .0502 |
+| Median canonical-atom ownership null | .00598 / .00192 | .00664 / .00229 |
+
+Same-image measurement is zero in both sets. All 120 old and 260 own
+same-instruction repeats are exact; own natural-color arm RMS difference has
+median .000428 and maximum .002332. This establishes a reproducible response,
+not correct color grounding. Four deterministic old-window probes retain a
+source-read bottleneck: blue-versus-red in05 and red-versus-pink in11 have
+actual target read share .03861/.01328. Under fixed G, any nonnegative K
+mixture is bounded by .04538/.02313 (area-normalized .1012/.0572). These are
+source-read convex bounds, not whole-model or semantic-information bounds.
+Artifacts: B-nullv2-{matched,fresh}-factual-short-r1/decision-summary.json,
+B-nullv2-deterministic-target-r1/source-read-ceilings.json.
+
+Four actual source-prediction loss decompositions assign only 4.14-6.70% to
+visible blocks. Their object source ownership null is now .0020-.0357, while
+whole other-episode source replacement still has small object prediction
+effects (one window improves). Low null does not repair background-dominated
+supervision or enforce different physical groups. Final BS8 ordinary VJP
+connects all23 new consumer parameters finitely; W identity/view-content L2
+is .00702/.00662, S identity .00388, outcome output .01533. Outcome image/view
+remain tiny nonzero at 2.96e-8/8.13e-9, not dead paths or proven effectiveness.
+Artifacts: B-nullv2-object-source-final-r1 and B-nullv2-module-vjp-short-r1.
+
+**The own-regression ledger preserves the earlier measurement defect.** All14
+windows complete with repeat/binding/parameter assertions and exact producer
+reproduction. Median native first8 arm change is .000360 for removing the
+observed outcome, .000382 for visual goal and .005584 for robot goal. None
+flips the original mean X/Z direction. Current-to-start correspondence real
+mass remains .00295-.01688; image contrast .0738-.1287 becomes
+.000161-.000339 after transport. These are fixed-input sensitivities and a
+shared preparation defect, not independent contribution percentages or a
+unique cause of the retreat. Artifact: B-nullv2-outcome-regressions-fresh-r1.
+
+**Candidate groups and chained flow also need admission.** Sensor-only RGB-D
+plane/connectivity proposals (PCL-style, probes/sensor_surface_groups.py)
+first select the floor in two old views; the explicit under-observed-TCP
+support-footprint rule corrects that ambiguity without a known table height.
+It covers 3875/4300 old and 8378/9303 fresh visible block pixels with pure
+groups in these samples, but splits one pink block in fresh01/112 and many
+robot/cabinet surfaces. Different groups therefore cannot directly label
+different physical objects. Oracle bodies only score proposals. Receipts:
+rgbd-surface-groups-pilot-r1 and rgbd-surface-groups-workspace-r2, pinned
+186e2815/93c588bf; this is probe code only.
+
+RGB-only DIS composition across four-step pairs does not close long-gap
+tracking. On older16/fresh-v2-14, both strict-chain and endpoint-only gates
+accept zero of516/225 moving wrist points. Zero-on-rejection EPE is
+21.796/30.863 px. Endpoint-only top accepts31/69 and8/33 moving points, but
+also4/7 geometrically occluded fresh points. Preserve missed motion and
+occlusion errors; do not just relax the gate. Receipt:
+rgb-reference-chain-qualification-r1, pinned2df3bc7f, probe_rgb_motion_chain.py.
+
+Next qualify an independent whole-instance prior and sensor-supported
+cross-view/time grouping before proposing different-group constraints; then
+revisit task-relative visual measurement with valid support. No segmentation
+teacher, matcher replacement, controller change or slot-balance rule has been
+admitted to production. Official SAM2.1-tiny weights were obtained only for an
+isolated proposal audit (revision de431c4043854a71d8101e17995dfe596bf101a5,
+model SHA256 48c14467e5cf9e51870511feb72c89688e82dd74523142c0538b663e193ac2a7).
+The official LFS digest matches; installed Transformers4.57.6 is unchanged.
+Reference: [Meta SAM2](https://github.com/facebookresearch/sam2). Prompts must
+be automatic RGB/sensor proposals, never oracle points/boxes. No raw tensor
+archive or feature cache is introduced. All large evidence stays outside Git.
+
+#### 34.33.14 Independent instance proposals and source-value controls (2026-10-07)
+
+**Frozen masks are useful evidence, not accepted identities.** SAM2.1-tiny
+uses automatic32x32 image-wide prompts and fixed pipeline settings (.88
+predicted IoU, .95 stability, .7 NMS), with no oracle prompts or named-object
+selection. All required image-model weights load without missing, unexpected
+or mismatched keys. Checkpoint model_type emits a sam2_video/sam2 warning;
+the actual image parameter coverage is checked. The source environment lacks
+torchvision; retain failed pilot-r1. Retry-r2 uses the official matching
+0.26.0+cu130 wheel on an isolated stage-only PYTHONPATH, SHA256
+0f030a9bd8ada1a31b7111ea1589c1ecb5fa0884fee700a203e731b4cf378a98.
+Production packages are unchanged. Paired pilot mask/score repeats are exact.
+
+The fixed-setting full190 audit is complete (60 old plus130 own windows).
+Median best-proposal IoU is .997 for top and1.0 for wrist in both sets, but
+best-IoU is an oracle scoring ceiling, never a mask selector. Native mask
+overlaps are unknown; actual exclusive-mask coverage is33581/34270 and
+13743/15488 old top/wrist pixels, and71550/72079 and32465/34711 own pixels.
+The old/new top audits contain107090/125783 wrong-object positive endpoint
+pairs within merged masks; the new top also has912 same-object endpoint pairs
+split across different masks. These are correlated pixel-pair counts, not
+independent errors/trials. Wrist has no observed split/merge among supported
+block pairs, but misses some objects. The full pipeline costs median1.33-1.36s
+per image on this3090; this is not an admitted online training/deployment cost.
+Artifacts: sam2-mask-proposal-{old60,own130}-r1/decision-summary.json;
+receipt sam2-mask-proposal-full190-r1, pinned506c27c7.
+
+This exposes complementary failure modes: geometric surface groups can split
+one block, while a whole-instance prior can merge touching blocks. A probe-only
+agreement rule now proposes positive pairs only when BOTH agree on sameness,
+negative pairs only when BOTH disagree on identity, and otherwise unknown.
+It uses no oracle point selection or fixed color/K identity. On old4/own7
+pilot windows it supports5130/6051 top and2637/2838 wrist block pixels, with
+no observed wrong positive/negative block pairs or positive block/background
+pairs. It provides741147 top negative endpoint pairs; wrist provides zero,
+so this is not a two-camera negative-label coverage claim. Background/robot
+identity, cross-view/time linking, training-distribution coverage and actual
+canonical-cell interpolation remain open gates. Artifact:
+mask-surface-agreement-pilot11-r1; probe68855ec2.
+
+Full190 agreement qualification is complete, receipt
+mask-surface-agreement-full190-r1.receipt.json. It independently replays each
+set for sensor-only groups and verifies both RGBs. Supported block pixels are
+29878/34270 and13046/15488 old top/wrist, and52622/72079 and27843/34711 own.
+There are no observed wrong negative block pairs. Old top11/96 has262 wrong
+positive endpoint pairs; old/new top04/24 has45/92 block/background positive
+pairs. The pilot's zero-error result does not generalize to the whole set.
+These errors remain in the ledger, rather than being removed with oracle masks.
+Artifacts: mask-surface-agreement-{old60,own130}-r1/decision-summary.json.
+
+A separate producer-only capacity check rejects assigning every proposed
+fragment an exclusive K. The maximum mutually negative group count is the
+maximum matching in the SAM/surface bipartite graph: top median6 old /5 own,
+exceeding4 in52/60 and91/130 windows. Four real slots cannot provide disjoint
+support for that many groups. This only rejects naive hard assignment or
+zero-affinity targets for every fragment; it does NOT prove that soft
+discrimination of more than4 regions is impossible. Do not enlarge K or
+arbitrarily discard groups to hide this mismatch. Whole-body and rigid-link
+scoring is complete under receipt mask-surface-allbody-full190-r2 (37174395).
+All120 old /260 own group arrays are exactly unchanged from r1; oracle UID/link
+masks were exported only after proposal construction. Whole-body negative-pair
+conflicts are common, including articulated parts. Even the stricter rigid-link
+check finds same-part negatives in13/60 old top and13/130 own top windows,
+and1/130 own wrist window (0/60 old wrist). Therefore block-only qualification
+cannot certify every proposed foreground region as an independent instance.
+Do not use oracle body filtering to manufacture a passing producer.
+Artifacts: mask-surface-agreement-capacity-r1.json and
+mask-surface-allbody-{old60,own130}-r2/decision-summary.json.
+
+Proposed next label-plane direction, conditional on admission: preserve existing
+sensor positive pairs, define compatible whole-instance/foreground semantics,
+add supported different-instance constraints, and test region-balanced source
+prediction. The current agreement positives and unrestricted negatives are not
+accepted training labels. Attribute the remaining non-block conflicts from
+the saved audit maps, then qualify a task-independent whole-instance/foreground
+rule, including known robot/self geometry when justified by observed kinematics.
+That is a proposed sensor-based repair, not permission to use simulator masks
+or body IDs as training/deployment inputs. Preserve unknown and original
+sensor-positive budgets; test actual canonical support and ordinary gradients.
+Do not prescribe a color to K, force equal slot occupancy, remove source labels,
+or put a frozen segmentation model into production without a resource/behavior
+qualification. Both formal experiments remain unstarted.
+
+**The explicit coordinate branch does not explain low scene dependence.**
+The actual B-v2 source objective is reproduced on the same12 validation episodes
+and24 windows, zero updates, maximum production gap4.47e-8 and exact common-K
+relabeling. In cross01/cross10/time0/time1, actual MSE is
+.34970/.24029/.27054/.36562. Removing all source prototypes and keeping only
+coordinates/background raises it to1.13667/1.05097/1.06643/1.13714. Removing
+coordinates alone changes MSE by-3.12/+13.95/+18.24/-.77%; replacing the whole
+source with another episode changes it only+.57/+1.77/+4.01/+1.05%.
+Thus the source-value route matters, but its dependence on the particular
+scene remains weak in these windows. This does not justify deleting legitimate
+coordinate conditioning or interpreting zero-input ablations as independent
+contribution percentages. Source prediction remains background dominated
+(34.33.13); next test instance-specific source targets and representation,
+not a blind coordinate-branch removal. Artifact:
+B-nullv2-source-components-r1/decision-summary.json, pinned93135060;
+source training/identity.py:96-105 and probe_identity_source_dependence.py.
+
+### 34.33.15 Negative-label boundaries, sampling and pretrained motion (2026-10-08 UTC)
+
+**No formal promotion or production change.** All v2 short/panel/qualification
+jobs are complete. The following are read-only candidates on fixed evidence.
+These190 windows have been used to develop the rules; a zero observed error
+here is not independent held-out certification or proof of downstream benefit.
+
+Whole-body attribution locates the remaining rigid-part conflicts at the
+playtable slide/base, not the blocks. Audit-only simulator inventory confirms
+UID5=playtable_8, link2=slide_link; UID0=panda. These identities never select
+producer pixels. Artifacts: mask-surface-allbody-attribution-r1.json and
+mask-surface-oracle-body-inventory-r1.json.
+
+The explicit geometry_only_v3 control removes the RGB-distance edge gate,
+retaining all plane/geometry settings. Slide fragmentation disappears; residual
+same-rigid-part negative windows are5/60 and4/130 top, plus1/130 wrist.
+Boundary contamination of block proposals includes1-5 scene pixels. Geometry
+alone can merge touching blocks, so its proposed positive pairs are NOT used.
+Receipt mask-surface-geometry-v3-full190-r1, pinned94ab15c3.
+
+A fixed one-native-pixel interior now requires the entire3x3 neighborhood to
+agree on both proposal identities; outside-image/overlap/disagreement is
+unknown. It never sees an oracle. Across old60/own130, mask+geometry interiors
+have zero observed wrong-negative block OR rigid-link pairs, and no positive
+block/background pairs. Supported block pixels are21042/34270 and9798/15488
+old top/wrist;36846/72079 and20725/34711 own. Coverage is51-63%, not100%.
+Merged masks still produce51052/57105 wrong-object positive endpoint pairs in
+top views: preserve existing RGB-D/temporal positives; only the new negative
+proposal is a candidate. Articulated whole-body identity is a separate issue
+from rigid-part equality. Artifacts mask-surface-interior-{old60,own130}-r1;
+receipt mask-surface-interior-full190-r1, pinnedaa7a5517.
+
+Removing the frozen mask prior is not an admitted speed shortcut. The same
+geometry-only interior yields wrong-rigid negatives in51/60 old top and80/130
+own top windows, and1/60 /3/130 wrist; own top also splits a block (528
+correlated negative endpoint pairs). Positive block/background contamination
+returns. Receipt sensor-only-interior-full190-r1, pinned7bb38b8d. Keep all
+failed controls. Geometry components are not whole-instance labels.
+
+**Actual sampler/support audit.** probe_identity_label_stencils.py uses the
+production IdentityLabelProducer._sample32x32 and exact align_corners=True
+16x16 interpolation. The stencils reproduce torch.grid_sample numerically.
+After the mask+geometry interior, sampled groups are203/392 top and101/213
+wrist (old/own);93/194 top groups have no canonical atom center inside their
+proposal. Mean read mass on own-region atom centers is .279/.256 top and
+.578/.576 wrist. This is a spatial support warning, not a semantic-information
+bound. Pairwise stencil-TV upper bounds on possible mean K-read TV have
+median1, minimum .513/.561 top: coarse resolution alone does not prove that
+the observed near-common K3 allocation is unavoidable. The bound concerns
+one read pair, not simultaneous realizability or the whole network. Sampled
+negative clique medians fall to3 top/2 wrist, maxima5/4; do not require hard
+exclusive assignment of every group to four K slots. At this sampler there
+are no observed wrong-rigid negative pairs. Artifacts:
+identity-label-stencils-{old60,own130}-r1; pinned a39ef1f7.
+
+**Official flow is a useful control, not the replacement.** Frozen Torchvision
+RAFT-small C_T_V2 uses strict loading, FP32,12 recurrent updates and fixed
+replicate padding to >=128/multiple8 without rescaling native pixels. Original
+FB<.75px/photo<.08 gates remain; no policy/label changes. Official weight SHA
+01064c6dba73b0fc9fc8edf772248560a00a3acfd62ac6677e9eeebad9680e27 is recorded;
+the official download publishes an8-character hash prefix, not a full external
+digest. Source: [Torchvision implementation](https://docs.pytorch.org/vision/main/_modules/torchvision/models/optical_flow/raft.html),
+[original RAFT paper](https://www.ecva.net/papers/eccv_2020/papers_ECCV/html/3526_ECCV_2020_paper.php).
+
+In old16 past4/current windows, moving-point raw EPE is .683/1.020px top/wrist;
+24/34 and248/353 pass gates, admitted EPE .736/.923px. Unknown-as-zero EPE is
+1.464/2.000px, and22/31 geometrically occluded wrist points are still accepted.
+Long current/start wrist fails in both old16 and own14:0/516 and0/225 moving
+points admitted; raw EPE25.474/32.987px versus zero-motion21.796/30.863px.
+This failure precedes gating. Same-image raw motion is not exactly zero
+(mean .04-.075px, some maxima .50px). Repeats are exact, weights unchanged;
+median bidirectional pair cost .031-.036s, peak allocated memory67.2MB.
+Thus local unpretrained flow is not the sole explanation, and reducing unknown
+or replacing the matcher with this control would still be unsupported.
+Receipt official-raft-motion-qualification-r1; results official-raft-{old16-past4,
+old16-reference,own14-reference}-r1; pinned56373092.
+
+Remaining gates: independent training-distribution label quality; declared
+whole-instance/foreground semantics and cross-view/time links; actual masked
+canonical support and ordinary gradients; source prediction with appropriate
+instance weighting without deleting original labels; natural target choice
+and first8 arm/gripper behavior. A negative objective must penalize a shared
+uniform/single-K solution without prescribing colors or equal slot occupancy.
+No candidate is admitted by a native-pixel error count alone. Long-gap observed
+measurement, controller state and action/task maintenance remain separate open
+repairs. Do not lose them while developing identity labels.
+
+Resource check is complete: sam2-full-budget-batching-pilot-r1, pinned716d74dc.
+Point minibatches128/256 retain32x32 prompts, all masks and acceptance gates.
+All22 image mask sets AND their order are exactly equal to the64 baseline;
+matched score differences are <=4.18e-7. Median time improves only from1.239s
+to1.176/1.174s per image; peak memory rises to5.62/10.99GB. This is insufficient
+to justify a serial full-image teacher in a BS8 training step. Do not claim
+budget cuts or lower teacher frequency as unchanged exposure. A practical
+label pipeline still needs an explicit cost/exposure design, and any stored
+small label annotations must remain distinct from forbidden RGB/DINO caches.
+Artifact sam2-full-budget-batching-pilot-summary.json. Formal training remains
+unstarted; mechanical checks and label quality do not authorize automatic
+promotion.
+
+The next independent label audit is prepared in
+identity-label-independent-val24-plan.json:12 admitted validation episodes,
+24 windows,48 checked raw-file hashes, selected identically to the source
+controls before this label rule. All raw sources are training/, as verified
+from each HDF source_split/context_start; admitted val does not imply raw
+validation/. Retain the invalid first preflight that assumed the latter.
+This is a plan only, not completed mask/geometry admission. Producer allowlist
+is RGB/depth/robot state; raw scene_obs can enter a separate exact-render oracle
+scorer only. Verify raw/render RGB identity before assigning audit masks.
+
+### 34.33.16 Motion-witnessed negatives and versioned region losses (2026-10-08 UTC)
+
+**Formal A/B remain unstarted.** This section supersedes the raw-val plan-only
+status above, not the v1/v2 promotion blocks. The new training candidate is
+`d009465f`, explicit `rgbd_temporal_regions_v3`; the actual first-loss audit
+script is `f3278513`. Production T1/T2 and their completed evidence are unchanged.
+
+**Raw replay is not fully admitted.** The 12-episode/24-window plan contains
+48 raw frames from scenes A/B. CALVIN's environment helper discards the result
+of its scene override merge; the initial scene-D pilot was wrong. Explicit
+scene assignment plus a separate process per scene fixes that setup error.
+`independent-val-raw-replay-r3` still reproduces both RGB images exactly for
+only 1/48 frames. Do not use the other rendered masks as full raw-frame truth.
+Residual diagnostics score only pixels with exact RGB, depth agreement <1e-6 m
+and a one-pixel rigid-part interior, and report the unscored population.
+The earlier r1/r2 failures remain recorded.
+
+Raw joint-FK and recorded TCP can differ by up to about 1.8 mm, but substituting
+the recorded TCP into the fixed camera mount worsens wrist RGB MAE: scene A
+.407 -> 1.577 and scene B .324 -> 1.357 (0-255 units). Bullet cached/FK timing
+differences exist, but they are not a proven complete explanation of this
+replay residual. No production camera geometry or controller is changed.
+Artifacts: `independent-val-raw-residual-calvin_scene_{A,B}-r1` and
+`independent-val-wrist-clock-calvin_scene_{A,B}-r1`; probes 817bcbe7/0e7d4b50.
+
+**The independent raw audit found a real counterexample.** Full-budget frozen
+SAM + geometry_only_v3 + one-pixel interiors split two visible pieces of one
+playtable base. The partially admitted scoring set contains 8,160 wrong
+rigid-part negative pixel pairs in raw frames 0319925/0319929. These are
+correlated pairs, not independent trials. Therefore the previous 190-window
+zero-error result does not qualify mask/surface difference alone. Simulator
+names/IDs are used only to explain this scoring counterexample; they do not
+filter producer pixels. Artifacts: `independent-val-regions-r1` and
+`independent-val-regions-partial-oracle-diagnostic-r1.json`.
+
+**Additional observed evidence, not a slot-balance target.**
+`probes/sensor_motion_groups.py` admits a negative edge only when both current
+SAM and sensor-surface groups differ AND their observed past-four/current
+motions contradict a common camera-local rigid transform. RGB flow uses the
+existing FB .75 px/photo .08 gates; metric points use observed depth. Fractional
+depth reads require all four corners valid with <=1 cm depth spread. Each fit
+requires >=12 points, second spatial spread >=3 mm, deterministic disjoint
+fit/check points, and held-out 90th-percentile residual <=2 mm. Both cross-fit
+median errors must exceed 6 mm. These fixed rules see no body ID, scene state,
+language, learned K or learned null. Static/co-moving, unsupported and
+inconsistent regions remain unknown. No new within-mask positive is asserted.
+
+Raw24 admits 41/233 top and 1/51 wrist candidate edges. On its partial oracle
+support there are 287,318/11,466 scored negative pixel pairs and zero observed
+same-rigid errors; 224,707 top pairs remain unscored. Real block-block support
+exists in 6/24 windows. This raw set has now influenced rule development and
+must not be advertised as a fresh holdout. Artifacts:
+`independent-val-motion-regions-r1`, `*-partial-audit-r1.json`; source 3e8be1f0.
+
+The fixed rule was then checked on all 190 exactly replayed old60/own130 panel
+windows, including current AND past RGB equality before exporting sensor-only
+depth. Motion fits run in the model OpenCV 5.0 runtime. Old top/wrist negative
+pixel pairs: 521,750/54,364; own: 1,535,641/160,433. All have zero observed
+same-rigid negative errors. Block-block pairs are 169,807/0 old and
+459,601/70,584 own, with no observed same-block negatives. This is correlated
+development evidence, not a universal certificate or behavioral improvement.
+Receipt `motion-negative-full190-r2`, pinned e6279a5a; results
+`motion-negative-{old60,own130}-r2`. The unstarted r1 watcher was rescheduled
+with a retained RESCHEDULED record; no existing experiment was stopped.
+
+**Implemented candidate boundary.** V3 retains every original sensor positive
+and full source-prediction MSE, plus v2's real-K conditioning before spatial
+interpolation and producer-only support. It adds two independently reported
+losses: a normalized JS margin on witnessed region means and an equal-region
+source-prediction MSE. Region means are negative operands only, never a claim
+that every pixel in a proposal is one object. Prediction regions are observed
+geometry strata for extra weighting. Unknown labels retain their original
+MSE and receive no extra stratum. No color-to-K targets, uniform occupancy,
+new selector, learned label gating, controller rule or online input is added.
+
+The JS margin permits soft distributions and more regions than K. A perfectly
+identical conditional law is still a stationary symmetry point; this objective
+alone is not a mathematical guarantee against collapse. Actual nonidentical
+laws must show separating ordinary gradients, then improved physical identity
+and natural instruction behavior in a meaningful short. Do not report larger
+S/JS statistics as that result. Source: training/identity_regions.py and
+training/identity.py; eight numerical/gradient tests pass (standard unittest).
+
+Compact annotations contain only integer groups, Boolean negative adjacency,
+prediction strata and source clocks. Manifest, labels and raw sensor bytes
+are hashed; missing exposure is an error, never resampling/skipping. Model
+RGB/DINO values remain uncached. The exposure planner uses the unchanged
+information sampler/epoch and task panel, separately declaring prefetched
+rows. Frozen SAM uses all 32x32 prompts on both current cameras; original
+past/current and cross-camera sensor labels are still generated live.
+Annotation time is part of experiment cost, not hidden in training throughput.
+
+`B-regions-v3-mechanical-labels-r1` generated all 76 declared pairs in
+204.21 s, peak allocated GPU 2,935,636,992 bytes. `B-regions-v3-original-positive-
+parity-r1.json` checks the first two real BS8 update exposures: all 16 samples'
+original label tensors are exactly equal to T2 in the same runtime. V2 config
+serialization/digest parity also passes. These are mechanical contracts only.
+The two-update/two-offline BS8 entry from the original mature a2 checkpoint
+is launched as `B-regions-v3-mechanical-r1` with separate .02/.02 extra weights
+and normalized-JS margin .1, fresh Adam/warmup and retained execution clock.
+Check its status, first-loss VJP/parity report and checkpoint before proceeding.
+The 1024-update/256-offline exposure plan is metadata preparation only;
+meaningful short training and formal promotion have not yet occurred.
+
+Reproduction: run `plan_identity_region_exposure.py` with the unchanged v2
+config and declared train/val limits; `build_identity_region_annotations.py`
+with that plan, pinned SAM receipt and raw root; then the pinned
+`train_identity_regions_mechanical.py` with `--reference-source` T2 and the
+explicit v3 config. External receipts retain exact commands, hashes and logs.
+
+Still open: raw-frame oracle coverage; new-data negative quality; actual masked
+online support and ordinary gradients; label-generation cost at full exposure;
+cross-view/time identity and correct natural target selection through the
+first eight arm/gripper commands. Long-gap observed matching, task maintenance
+and controller/action contracts remain separate unresolved repairs. Neither
+the new loss nor a successful mechanical checkpoint closes those questions.
+
+**Mechanical closure and a caught deployment boundary error.** R1 completed
+two BS8 updates and two offline batches at step11014, but cold loading failed:
+generic graph validation required a training annotation path which deployment
+correctly strips. Preserve `B-regions-v3-factual-mechanical-r1` and its failure
+log. Fix56c217d5 allows both annotation fields absent when validating a graph;
+the actual training/validation loader requires the pinned manifest before
+reading any dataset. Partial or malformed metadata still fails. Deployment
+continues to carry no training path or label input.
+
+Fresh `B-regions-v3-mechanical-r2` from mature a2, fixed production56c217d5,
+passed two BS8 updates/two offline batches. Its best.pt is epoch1/step11014,
+2,487,525,096 bytes, SHA256
+`5be49a2c1a4ebf654b4119043009d31d5235e6d11f3f0fac207fc18d5b86fef1`.
+All recorded numeric metrics are finite; preclip norms2.741/2.426; peak CUDA
+allocation21.012GiB. First-batch full original identity terms, pair counts and
+null/support diagnostics reproduce T2 exactly (max difference0). The actual
+masked BS8 loss has7 supported negative operands and117 prediction strata;
+raw new-loss ordinary G parameter VJP L2 is .05976/.89686. The second batch
+has zero separation loss; absence/satisfied edges are not filled with invented
+labels. First batch includes extra VJPs and is not a throughput measurement;
+the next single batch is8.26s, insufficient for a stable speed claim.
+
+Cold deployment `B-regions-v3-factual-mechanical-r2` completed all four factual
+windows from the new checkpoint: exact same-instruction repeats and exact
+same-image semantic/displacement zero. This only closes loading/numerical
+contracts; two updates do not establish physical identity or improved behavior.
+Actual payload/log identity is in `B-regions-v3-mechanical-r2-final-audit.json`.
+
+Full meaningful-short exposure resolves9,258 unique raw pairs across1,024 BS8
+updates,256 offline batches and separately declared prefetch rows. The pinned
+`B-regions-v3-short-pipeline-r1` (probe7ea854e8) waits for explicit mechanical
+admission, generates four full-prompt annotation shards on idle GPUs, verifies
+all source/label hashes and exact coverage, then starts the ordinary1024-update
+BS8 short from mature a2. No model is trained during annotation, and annotation
+cost remains in the receipt. The separate standard18/R8/stored_target watcher
+uses port18834. These are short-run continuations, never formal promotion.
+Check receipts/status before starting anything again.
+
+Source-control probes d06755d7 support an explicit `--common-objective-only`
+v3 audit: independent old factual/validation windows score the unchanged
+correspondence/source-MSE terms without inventing region labels. The model
+weights and online graph stay v3; only the loss probe selects the common v2
+subobjective. Its output explicitly excludes new region losses. Actual region
+ordinary gradients remain a separate full training-entry check. Do not call a
+common-only decomposition a complete v3 objective audit.
+
+The four-window v3 common-objective mechanical decomposition completed with
+maximum production reconstruction gap8.95e-8 and unchanged parameters
+(`B-regions-v3-object-source-mechanical-r1`). Mechanical admission-r2 is now
+written. At04:13UTC, annotation shards0/1 are running on idle GPUs4/6; shards2/3
+wait for an idle allowed card or a prior worker to finish. No old job was stopped.
+`B-regions-v3-short-qualification-r1` is also queued on GPU6 after the new short:
+12-episode/24-window common-source controls,60 old factual windows, four object
+source partitions, then its own18 phase/mask/factual audit. All natural-command
+measurements use deterministic controls; the official panel runtime is unchanged.
+Pinned probe200e38fd extends the separate module-VJP instrument to actual G
+ownership parameters for v3, since separation need not reach the value decoder.
+The final-short full training-entry VJP still needs scheduling with its resolved
+annotation config; it is not replaced by these common-source controls.
+
+
+### 34.33.17 Separating localization from unknown mass (2026-10-08 UTC)
+
+The new B-v3 short is still annotating, not training. At05:42UTC, 3,921/9,258
+declared pairs exist on GPUs4/6. The partial exposure has witnessed negative
+edges in25.5% of top frames and6.45% of wrist frames before training masking.
+These are label availability counts, not label accuracy or learned identity.
+Original full-prompt budgets and all ongoing jobs remain unchanged.
+
+**A confidence-only repair is now bounded directly.** Probe9ebfbf6e uses the
+actual frozen BF16 online encoder, fixed two-camera microbatch, full RGB
+preprocessing and native16x16 observed-correspondence function. All30 old16/
+own14 long-gap current-to-start windows complete with exact repeats and
+unchanged parameters. Simulator geometry is read only after image matching
+for scoring. No checkpoint policy is run or changed by this encoder-only test.
+
+For each independently visible point, bilinear source interpolation touches
+four rows. Hold each row's conditional destination law fixed, allow its real
+mass to be ANY value in[0,1], and compute the closest attainable displacement
+to the geometric endpoint. This is the convex hull of16 projected box
+vertices. It is an optimistic pointwise oracle bound (different points may
+choose incompatible masses), not a proposed matcher. Analytic degenerate/
+rectangle cases and100 independent bounded least-squares checks agree within
+3.71e-12. Reproducing the source-row displacement agrees within1e-10.
+
+| Long-gap moving wrist points | old16 | own14 |
+|---|---:|---:|
+| Visible points |516|225|
+| Actual motion, mean pixels |21.796|30.863|
+| Production measured motion |0.0705|0.0705|
+| Production displacement EPE |21.843|30.892|
+| Set all real masses to1, EPE |38.725|41.131|
+| Best possible confidence-only EPE |21.726|28.834|
+| Points whose best possible EPE exceeds2px |516/516|225/225|
+| Best candidate falls in the four true endpoint cells |415/516|207/225|
+| Conditional mass in those endpoint cells |0.03458|0.03440|
+
+Thus lowering null alone cannot repair these wrist displacement distributions.
+The best discrete cell often lies near the endpoint, but distant conditional
+mass pulls the mean elsewhere. This does not certify the correct physical
+object: four coarse cells can include other objects/background. Top-view
+matching is also imperfect: best-cell EPE10.008/35.470px, confidence-only
+bound4.699/9.566px. Neither a universally correct argmax nor an identity oracle
+has been found.
+
+Source: vision/observed_correspondence.py:31-46. Away from exact descriptor
+matches, with squared normalized distance d, real/null odds are
+mean((.05/d)^2). The independent algebra reproduces production mass.
+Changing that scalar confidence calibration does not itself concentrate the
+conditional destination law. Earlier same-null top1/RGB-seeded DIS failures
+remain valid; this result does not promote those candidates.
+
+Artifacts: descriptor-confidence-bound-{old16,own14}-r1/results.json,
+descriptor-confidence-bound-full30-summary-r1.json and full30-r1 receipt.
+Reproduce with probe_descriptor_transport_bound.py --config <actual short
+config> --plan <pinned fresh plan> --labels <exact current_start rigid labels>
+--output <new directory>, deterministic CUDA control. No tensors are downloaded.
+
+**Next measurement candidate.** The official RoMa v2 implementation separates
+global correspondence and local RGB refinement; its precise800+1280
+bidirectional setting is being prepared as an isolated read-only audit.
+Source95c9968145c8906b7b59383258e9f73b02853d89, paper
+https://arxiv.org/abs/2511.15706 and official code
+https://github.com/Parskatt/RoMaV2. No external matcher enters the policy or
+training. It must independently pass moving/static/visibility/long-gap and
+cost checks; published benchmark accuracy is not CALVIN qualification.
+The official1,095,883,548-byte weights now match the published GitHub asset
+SHA2561557dec0d21b62366465f7ff4d5fdf228cc695d0582e196ad2b80e05230828b7.
+The first transfer interrupted; a subsequent curl internal retry reused its
+initial resume offset. Both failures are retained; bounded external retries
+resuming the actual file size completed with full hash verification. This
+restarted only this turn's temporary download helper, no training/probe job.
+The model source and pinned DINO source are isolated under third_party; no
+weights are substituted from the policy checkpoint. The strict-constructor
+pilot receipt is romav2-precise-motion-pilot-r1 (PID2093554).
+Probe6fdc433c retains the full precise budget and scores both directions in
+native pixels. Analytic identity/translated fields at200x200 and84x84 verify
+the align_corners=False pixel-center conversion within5.69e-14; this is an
+adapter check, not matching qualification. Isolated dependencies do not change
+the production Python environment.
+
+**Final-short full VJP is scheduled.** B-regions-v3-module-vjp-short-r1
+(PID2034536, probea3e5c2a5) waits for this short's own standard18 panel and an
+idle GPU4. run_resolved_region_vjp.py requires the completed checkpoint's
+exact config/digest and pinned annotation manifest, then changes only output,
+unused fresh optimizer origin0 and one-batch limits. The saved execution clock
+is restored inside the actual masked BS8 forward, with zero updates. Both new
+region losses and ordinary G ownership parameters are included. The config
+adapter passed against the actual mechanical-r2 payload; the final VJP has
+NOT run and cannot be replaced by common-objective-only source controls.
+
+Formal A/B remain unstarted. The measurement confidence bound, v3 label
+availability, original controller/arm/gripper/maintenance questions and the
+new short behavior gate remain distinct. Preserve all receipts and prior
+promotion blocks.
+
+**The completed long30 RoMa qualification is mixed.** Strict loading, exact
+repeat0 and unchanged parameters pass. On old16/own14 moving wrist points,
+raw EPE is2.566/1.594px versus zero-motion21.796/30.863px. Fixed gates accept
+223/516 and154/225, with accepted EPE1.027/1.561px. When rejected displacement
+stays zero, all-visible EPE is13.463/13.041px. Thus the global/local method
+contains useful long-gap localization that the original feature kernel lacks.
+
+It is not an admitted production repair. Geometrically hidden wrist points
+are still accepted33/64 and31/38. Old wrist learned overlap averages.247 on
+visible points but.312 on hidden points; new values are.403/.368. A learned
+overlap score cannot be assumed calibrated visibility. Accepted endpoints
+all remaining on the same rigid body do not prove the same physical point:
+old/new accepted moving-wrist errors exceed5px at12/10 points. Own14 moving
+top-view raw EPE28.601px is slightly worse than zero-motion27.614px; the worst
+windows include successful case01/112,120,128. This is a shared measurement
+defect, not evidence identifying one failure's unique cause.
+
+Official precise matching takes about1.5s per bidirectional single-camera
+pair in this shared audit and peaks10,423,253,504 bytes. These timings are not
+an isolated end-to-end policy throughput benchmark. Full-budget direct
+insertion into each BS8 batch has not met the user's cost requirement.
+Same-image raw motion is small but nonzero (.017-.021px mean in the pilot).
+No production measurement or training graph was changed.
+
+Artifacts: romav2-long30-summary-r1.json, romav2-{old16,own14}-reference-r1,
+romav2-motion-source-identity-r1.json; three own14 trajectory SHA values still
+equal their original complete-panel receipts. Reproduce with pinned
+probe_romav2_motion.py and the full93 receipt's first two stages; the official
+precise budget and RGB-only model inputs must remain explicit.
+
+The full93 runner's old63 stage rejected legacy scoring labels missing the
+occlusion fields. The failure is retained, not converted to zero occlusions.
+romav2-short63-visibility-r2 (PID2120743) repeats the exact same18/63 RGB replay
+with the established be4f529b scorer, then completes only the missing short
+stage. All756 original sensor arrays remain exactly equal by(case,step);
+only five audit visibility/body-map fields were added. Its new label directory
+is observed-match-rigid-full63-visibility-labels-r2, result romav2-old63-past4-r2.
+The corrected short63 stage completed; the combined93-window evidence is
+romav2-full93-summary-r1.json. The earlier full93 job status remains failed
+to preserve its original schema error; it is not silently rewritten.
+The coarse8/coarse16 fields are a candidate resampling diagnostic, not an
+executed replacement of the production measurement interface.
+
+
+The completed short63 adds a useful limitation check. On100/819 moving
+top/wrist points, raw EPE is0.773/0.763px versus zero-motion6.441/3.908px;
+77/732 points are accepted. With rejected motion kept at zero, errors are
+1.406/1.009px. The diagnostic downsample-to8/read-back increases these to
+4.457/1.402px; native support must be audited before any future coarse-field
+replacement. This is not a test of an installed production replacement.
+The short wrist still accepts35/61 geometrically hidden points. On144 nearly
+static wrist points, raw EPE1.115px exceeds zero-motion.120px, and six accepted
+points exceed5px. Full93 therefore does not pass the visibility/static/cost
+gate even though moving-point localization improved substantially.
+
+Next A-side work should use these concrete remaining boundaries: global/local
+localization on failed top windows, visibility and point ambiguity within a
+body, and preservation of native support at the W/S read interface. Do not
+cycle back to null-only scaling or interpret these point-oracle scores as
+proof of better task completion. Follow the existing first8 arm/gripper and
+withdrawal/maintenance trajectory ledger in parallel with the B-v3 short.
+
+At06:17UTC, B-v3 annotation has5,263/9,258 pairs; shards0/1 completed and
+shards2/3 continue on GPUs4/6 (PID2093169/2116886). The short-training config
+has not yet been generated. Pipeline/panel/broad qualification/full-VJP
+watchers are alive and unchanged. Formal A/B remain subject to the complete
+short-run structural and behavior review.
+
+
+### 34.33.18 Command-preserving endpoint representation audit (2026-10-08)
+
+The endpoint head consumes the two arm representations before physical decoding:
+training/engine.py:1053, endpoint_supervision.py:60-74,
+runtime/sampling.py:263-292, model/components.py:1977,2097-2120 and
+model/action_codec.py:240-255. Clean labels have consistent value/difference
+coordinates; the integrated field need not. This is a narrower question than
+the different-arm exposure comparison in 34.22.
+
+probe_endpoint_arm_representation.py uses the actual outlet decode/encode,
+retains all six unused gripper lanes and holds the entire decoded arm plan fixed.
+It evaluates raw, halfway and consistent representations on the same coarse and
+refined W caches, with no additional integration or parameter update. Preflight
+samples are excluded. Actual codec CPU round trips have FP32 error below 7.16e-7;
+the complete B-v2 16-BS8 validation audit has maximum preservation error 4.77e-7,
+exact endpoint repeats and exact original-sampler logits. Consistent-label
+round trips change no command. This is an input sensitivity test, not a proof
+that a generated arm should receive the expert gripper.
+
+| B-v2 endpoint input (128 samples) | all 2536 observed rows agreement | first 958 prefix rows agreement | all-row mean CE |
+|---|---:|---:|---:|
+| labelled arm | 94.716% | 96.451% | 0.155942 |
+| generated arm, original representation | 87.855% | 91.858% | 0.523494 |
+| same generated arm, consistent representation | 88.289% | 93.006% | 0.527318 |
+
+The recoding changes 41 observed commands (26 closer to expert, 15 farther);
+prefix changes are 15 (13 closer, 2 farther). Changing coarse/refined W with
+the consistent arm changes zero commands here. Thus redundant representation
+sensitivity is real, but it does not close the larger generated-plan gap and
+all-row CE worsens slightly. No production endpoint, solver or gripper rule
+has changed. A's matched 16-BS8 panel is also complete, with exactly the
+same sample/episode IDs, zero repeats and maximum arm preservation error 4.77e-7.
+Its prefix agreement is 96.451% with labelled arm, 91.545% with the raw generated
+arm and 92.589% after command-preserving recoding. It changes 43/2536 commands
+(26 closer, 17 farther), including 18/958 prefix commands (14 closer, 4 farther);
+all-row CE rises from 0.531027 to 0.533131. Both models therefore retain the
+larger conditional-plan gap. Each checkpoint's own factual contact/withdrawal
+controls are separate evidence; offline agreement does not attribute a
+particular trajectory failure to this axis.
+
+Evidence: B-nullv2-endpoint-arm-representation-{smoke-r1,val16-r1} and
+endpoint-arm-representation-algebra-r1.json. Probe source d17db47a; factual
+replay source 02f89402. Reproduce with the pinned receipts using
+run_causal_identity_qualification.py --receipt <receipt>.
+The own-trajectory probe retains the original instruction-start reference,
+every actual executed command, the original noise sequence, complete arm plan
+and final W cache. Recomputed head logits must exactly repeat; differences
+from the original non-deterministic panel are reported separately.
+
+Annotation coverage is also measured rather than assumed: at 06:49 UTC,
+6555/9258 unique pairs existed. Of the 398 fully covered training batches,
+373 had at least one sampled negative edge; 1006/3184 exposed samples had an
+edge. This is BEFORE explicit training masks/model support and excludes
+incomplete batches. It is not a statement about learned identity or gradient
+coverage. See B-regions-v3-annotation-coverage-partial-0649.json.
+The B-v3 pipeline remains in annotation, and neither formal A/B run is started.
+
+
+Own-trajectory endpoint audits are complete: A has 12 windows (success 04,
+failures 10/14/17); B-v2 has 14 (success 01, regressions 03/09). Both retain exact
+head repeats and arm command error <=2.39e-7. Only one executed-prefix command
+changes per model: A10/state136 opens at row 5 instead of 6; B09/state128 closes
+at row 3 instead of 2. The unchanged-parameter deterministic replay differs from
+the original panel by up to 0.000721/0.000825 native arm RMS, with zero original
+gripper disagreement; this operator difference is separate from the controlled
+representation intervention. Results: A/B-nullv2-endpoint-arm-representation-fresh-r1.
+
+The two changed command rows were then physically branched in fresh simulator
+processes, from exactly reproduced original two-camera observations. All original
+arm controls and subsequent controls remain fixed for 32 steps. This is a local
+open-loop causal response, not a new policy rollout or the standard 18-case panel.
+Baseline and independent repeat states are exact; baseline ending RGBs also
+exactly match the recorded trajectory (robot/scene error <=1.14e-7/5.80e-8).
+
+| local branch | changed absolute command | original max signed progress | changed max signed progress |
+|---|---|---:|---:|
+| B-v2 09, state128-160 | step130 stays open, closing delayed one row | 4.2348 cm | -0.2155 cm |
+| A 10, state136-168 | step141 opens, release advanced one row | 8.1416 cm | 8.5216 cm |
+
+B09 ending progress changes from 4.2156 cm to -0.8388 cm; A10 gains only 3.80 mm
+of peak progress and remains short of the 10 cm criterion in this local window.
+This rejects direct inference-only recoding as an accepted repair. A small
+offline prefix improvement cannot substitute for arm/gripper compatibility at
+contact. It does not rule out every learned joint-conditioning repair, explain
+all failures, or prove the alternative policy's later replanning behavior.
+Keep the production endpoint untouched. Evidence:
+AB-endpoint-gripper-local-branch-r1, probe545d06f3, exact two-row plan/trajectory
+hashes and isolated baseline/repeat/changed logs retained in its receipt.
+
+
+### 34.33.19 Independent successor support under current augmentation (2026-10-08)
+
+A separate target-construction defect is now reproduced in the actual masked
+BS8 training entry. source_measurement.py copied the current source pixel mask
+onto every independently supplied future frame. Current support comes from
+restored_observation.py's inverse context mask; it limits which source cells
+G may read. Future teacher content is pooled and normalized from the complete
+future frames in flow_dino_evidence.py:11888-11941 and passed through
+policy.py:1055-1070. Availability there is per future frame, not a copy of the
+current spatial augmentation. A valid source that moves into a source-mask
+hole therefore loses a supplied target candidate for an unrelated reason.
+
+The read-only B-v2 audit uses four actual BS8 batches, explicit training_mask,
+the complete step12036 checkpoint and unchanged W predictions/loss reduction.
+Source support is0.625 in each batch; the excluded independently supplied
+future values are finite with RMS about0.999962. Removing only the copied
+target mask changes the actual future_dynamics objective by+5.31%,+3.15%,
++3.30%,+3.70% and a successor semantic component by up to0.044939. These are
+changed targets for a fixed prediction, not reduced loss or learned improvement.
+All unmasked executed-history measurement fields and current references remain
+exactly equal. The probe makes no backward or optimizer update.
+
+Evidence: B-nullv2-future-measurement-support-r1/{results,decision-summary}.json;
+probe c3b31263, production runtime0e861f56. Reproduce using that receipt and
+probe_future_measurement_support.py. Its descriptor-translation fixture
+separately shows a known visible point can move into a masked source location:
+correct target mass changes0 to1. This is an algebraic control, not a claim
+that natural-scene correspondences are exact.
+
+The explicit top.observation_measurement_mode=source_consistent_v2 repair
+(7899ec6b) keeps the source mask, source G restriction and actual target-frame
+availability; it never copies source augmentation to target coordinates.
+Missing future frames stay unknown. Hidden source values are not restored from
+future data. No new parameter, selector, online input, cached value, solver
+budget or learned confidence threshold is introduced. Fully observed calls
+are bitwise equal to source_consistent_v1. The instruction-start matcher and
+its diffuse long-gap destination distribution are unchanged and remain open.
+
+Six numerical/support tests pass, including moved endpoints, missing target
+NaN quarantine, hidden source, same-image/static and full-support parity.
+Old A, B-v2 and B-regions-v3 serialized config payloads/digests are exactly
+equal to their own original runtimes; the new selector has an explicit ABI
+and passes the mature-a2 migration configuration contract. These checks are
+recorded in independent-observation-support-regression-r1.json. Preserve v1
+for exact replay. Earlier test-harness tuple/list comparison failures and the
+float32 null-sum tolerance correction are retained separately; neither was a
+production failure.
+
+The A/B mechanical qualification is complete under fixed runtime7899ec6b:
+two ordinary BS8 updates plus two offline batches each, mature11012 to11014,
+followed by four cold factual windows per saved checkpoint. All32-node repeats
+and same-image measurements are exactly zero. Global preclip norms are
+A3.161/2.660 and B3.121/2.718; peak allocated memory is21.146/21.064GiB.
+The loss ledger gap is at most2.39e-7. B retains both region objectives and
+the complete pinned76-pair supervision manifest.
+
+Preserve the first runner's failed audit: its A training succeeded, but the
+audit expected an epoch phase field instead of the native nested train and
+validation dictionaries. Runner7b63c8c1 fixes that schema and audits the existing
+A checkpoint without retraining (checkpoint hash unchanged), then completes
+A-cold4/B-two-BS8/B-cold4 in AB-source-support-v2-mechanical-r2. Evidence and
+actual checkpoint hashes are in AB-source-support-v2-mechanical-admission-r2.json
+and each *-final-audit.json; the failed r1 job and AUDIT_SCHEMA_CORRECTION.json
+remain. This is mechanical admission only, not learned identity or behavior.
+
+The T3/56c217d5 short's source/configuration is preserved. The support repair
+must enter a future explicitly named combined candidate, never silently change
+this running experiment. Complete compact supervision labels can be reused
+for the same declared exposure. RGB/DINO value caches remain disabled.
+Both formal A/B runs still require meaningful short-run structural and
+behavior qualification.
+
+### 34.33.20 Flexible GPU placement and actual B-v3 short start (2026-10-08)
+
+At the user's request, training and evaluation no longer wait specifically
+for GPU4. All9258 auxiliary-label pairs completed at the original SAM prompt
+budget. The merged manifest SHA is
+030396047803702cef9980b07acb34311e55913b34205eab49c83060759266fc;
+all declared pairs, source identities and label hashes passed verification.
+Generation cost was15010.33 seconds wall time and28213.33 summed worker
+seconds (about4.17 and7.84 hours). This is supervision generation cost,
+not online RGB/DINO caching or trained identity evidence.
+
+The original four orchestration waiters were verified to own no model job
+and replaced; their original receipts/status/logs are retained. No training,
+annotation worker or model probe was stopped. See
+B-regions-v3-flexible-gpu-handoff-r1.json. The immutable f5c084ee runner,
+probes/run_ready_identity_short.py, checks source/config/manifest identity
+before launching and selects an idle24GiB card from the seven available GPUs.
+Each subsequent stage records its own GPU UUID and EGL index. A running stage
+is never migrated.
+
+B-regions-v3-ready-short-r1 actually launched the ordinary training entry at
+08:40:59UTC on GPU6. Training PID2444995 uses immutable source56c217d5 and the
+unchanged config SHA
+dbcb078aebadc4b4e3666de47cbe9fce1d2461e423c26a0a268f6587cdeb42f8:
+mature11012 initialization, fresh Adam/100warmup,1024BS8 updates and256offline
+batches, expected final12036. This remains source_consistent_v1; the newly
+qualified7899ec6b support repair is not silently merged into it.
+
+At08:49:45UTC, the first three logged windows cover60updates through11072.
+All numeric fields are finite, with no traceback/OOM/nonfinite console entry.
+Window time is7.255/6.842/6.990 seconds per batch; this is early throughput,
+not a final estimate. The two new weighted objectives contribute
+separation0.000842-0.001091 and region prediction0.02221-0.02349.
+After actual model support, each window averages4.8-5.6 supported negative
+operands and107.1-112.2 prediction strata per batch. These are supervision
+operands, not counts of correctly distinguished physical objects.
+Maximum preclip norm is3.161; absolute loss ledger/contribution mismatch is
+at most6.56e-8. The standard log utility flags only the known full-capacity
+condition; no budget is removed. Full evidence:
+B-regions-v3-training-start-{health,log-audit}-r1.json.
+
+The ready continuation serially preserves all previously authorized stages:
+training/offline, the unchanged standard18 seed0/max360/R8/stored_target panel,
+full masked-BS8 zero-update VJP, then common-source/old60/own-trajectory
+phase-mask-natural-command qualification. Every stage may select another idle
+card. New audit orchestration receipts use module-vjp-short-r2 and
+short-qualification-r2; actual evidence destinations stay the original r1
+names. Common-source controls still exclude the extra region objectives;
+the separate full VJP checks those objectives and G ownership.
+The ready receipt and status are the current scheduling authority, superseding
+the old waiting PIDs. None of these stages automatically promotes formal A/B.
+
+#### Research scope clarification: selected SAM components
+
+The user permits structural reuse from SAM when a component offers a verified,
+low-cost remedy for the actual ClearVLA failure. Current offline annotation
+placement is a run contract, not a permanent ban on useful internal mechanisms.
+Initial official-source candidates are token/image two-way interaction and
+mask/region-conditioned feature fusion:
+[TwoWayTransformer](https://github.com/facebookresearch/sam2/blob/main/sam2/modeling/sam/transformer.py)
+and [MemoryEncoder](https://github.com/facebookresearch/sam2/blob/main/sam2/modeling/memory_encoder.py).
+These are hypotheses, not measured low-cost or effective ClearVLA replacements.
+Before implementation, map the missing operation against existing G/K and
+history interfaces; then measure full BS8 throughput/memory and real-object,
+natural-command and closed-loop behavior at the same declared budget.
+Do not introduce a second visual backbone or persistent RGB/feature caching
+merely to imitate the reference design. The running T3 source and queues stay
+fixed. A borrowed mechanism can strengthen the native model; adoption remains
+conditional on evidence.
+
+### 34.33.21 Isolated SAM mechanism screening (2026-10-08)
+
+User-authorized branch codex/sam-structure-screen-20261008 starts at
+1dd5bfb929bf608ac80942116758c5e4caa342c3. It contains probe-only adapters;
+no SAM module, weight, selector or extra input has entered production.
+Existing G already reads images into K and iterates GRU/FFN, while its canonical
+candidate features stay fixed during that loop (canonical_grounding.py:35-64).
+The missing reverse operation is therefore a concrete screening candidate,
+rather than a reason to duplicate the entire SAM transformer.
+Official source references remain the TwoWayTransformer and MemoryEncoder
+linked in section34.33.20. These small adaptations are not official SAM
+implementations or evidence about all possible trained SAM designs.
+
+Two rank32 prototypes were screened on the complete B-v2 checkpoint
+ee6271e67a1cbbc1bb038b9e63c3108677b665e9e7140d85df6dcaf4feed17fc,
+using real causal observations at01/24,05/24,11/24,17/136. Actual G inputs
+are two16x16 camera maps with512 channels; no feature tensor is saved.
+CPU preprocessing uses the saved BF16 contract, followed by isolated FP32 G
+and adapter calculations. This is not a reproduction of official CUDA actions.
+Masks score existing supported atoms only and never enter either adapter,
+G, a loss or an optimizer. No optimizer was created and G weights are unchanged.
+
+* SlotToImageFeedback reuses the existing K ownership with shared low-rank
+  slot-value projection (32768 parameters). Its untrained projected feedback
+  has90.10-93.55% spatial-common energy across supported cells; even before
+  the random projection, the common fraction is86.47-91.62%.
+  These are activation-energy statistics, not independent contribution
+  fractions or proof of semantic failure. Spatially constant ownership
+  produces constant feedback, as the algebra requires. Deprioritize this
+  particular readback as the primary identity repair; it cannot by itself
+  supply independent object evidence when the ownership is the same.
+  This does not rule out a separately learned full two-way attention design.
+* RegionImageFusion keeps image features and a shared scalar-mask embedding
+  through a per-camera, per-K depthwise local operator (33088 parameters).
+  Its first naive zero-padded version produces centered RMS0.0503-0.0627
+  even with constant image and ownership: padding/support boundaries can
+  masquerade as additional spatial contrast. Preserve r1/r2 as evidence.
+  The corrected operator uses signed valid-neighbor differences
+  conv(z*valid)-z*conv(valid) before the residual/nonlinearity.
+  Constant-field centered RMS is then3.50e-8-5.21e-8, including real support.
+  The synthetic masked test's maximum pointwise error is5.96e-8.
+  However, on real observations the full centered RMS0.1258-0.1347 is close
+  to the image-only control0.1237-0.1315. Spatial variation is not evidence
+  that mask conditioning has improved object identity. Retain the corrected
+  prototype only as a conditional follow-up, not an admitted repair.
+
+Both prototypes pass exact zero-init address/ownership parity, shared-K
+renumbering, camera isolation, invalid-input gradient quarantine and finite
+all-unknown output. Random-cotangent VJPs reach the zero-initialized output
+projection; upstream adapter gradients are correctly zero at initialization
+and become finite after a nonzero projection. These are instrumentation
+checks, not action/identity objective VJPs or learning improvement.
+The original G candidate inputs repeat exactly between the controls.
+The canonical ownership producer is byte-identical to the B-v2 source;
+grounding.py's sole difference admits the explicit future-support-v2 selector,
+while this checkpoint retains v1.
+
+CPU FP32 forward-only replicated-BS8 timings are3.26ms for slot feedback,
+7.85ms for support-aware local fusion, and about103ms for the original
+isolated G ownership loop. These are one-observation operator microbenchmarks,
+not eight independent samples, GPU timings, backward cost or full training
+overhead. No GPU was taken from the active runs. Actual BS8 CUDA throughput,
+peak memory, ordinary training-objective VJPs and behavior remain unmeasured.
+The16x16 prototypes also do not recover missing subcell boundaries.
+
+Evidence lives under the existing experiment root:
+sam-structure-screen-cpu-four-r1, sam-structure-screen-cpu-controls-r2,
+sam-structure-screen-support-aware-r3, their receipts/logs, and
+sam-structure-screen-decision-summary-r1.json.
+Reproduce the final four-window probe with source6f325409ab36dcaf4a937361d3aa351461995f72
+and the exact command in the r3 receipt:
+probes/probe_sam_structure_screen.py --device cpu --checkpoint ... --plan ... --masks ... --output NEW_DIRECTORY.
+Only probes/sam_structure_adapters.py and this probe are added on the
+screening branch. No production module imports them.
+
+Mainline priority remains the existing immutable B-v3 meaningful short,
+its256-batch offline evaluation, standard18R8 panel, full masked-BS8 VJP,
+and real-object/natural-language qualification. The separate future-support-v2
+repair still requires its explicitly combined meaningful candidate.
+Both formal A/B trainings remain unpromoted. Screen results are not a reason
+to restart the active short or add every borrowed component. Only if its
+actual failure chain indicates a missing local operation should the retained
+prototype proceed to real-loss/cost qualification and meaningful training.
+
+
+
+### 34.33.22 SAM 结构探索另行授权（B-v2 底座）
+
+用户允许两项已筛选的轻量结构先长训探索，明确选择 B-v2 完整 checkpoint，
+主线 B-v3 及其标准18/完整VJP/对象资格继续独立推进。
+独立分支codex/sam-structure-screen-20261008，生产edbba48b：
+slot_to_image_v1（32768参数）与region_fusion_v1（33088参数），
+只改G寻址特征，原事实值、K/null分配、B-v2损失和source_consistent_v1保留。
+普通两步BS8+两离线均已完成；逐新参数总损失反传有限且第二步都有更新。
+额外逐损失VJP曾OOM，改普通backward hooks，失败记录保留。
+四窗口冷部署由独立接续检查，不以机械通过宣称身份改善。
+两条各11012次BS8更新/256离线/18R8，从B-v2 step12036到23048，
+属于用户授权探索，不能替代本节原有正式A/B准入。
+实验目录/data/senwang/clearvla/experiments/sam-structure-exploration-20261008；
+源/配置/权重/manifest与接续receipt见该目录。主线GPU6的已有接续受保护。
+
+
+10:53UTC接续：两支4真实窗口冷部署完成，同指令重复arm/gripper差为0，
+同图semantic/image/covariance测量为0。slot机械checkpoint SHA
+42bd18610a88aaabfbb98efb8d38147b5552b9138923262f5cb6428ceaefff6f；
+region机械SHA15e97457341f02ec6bb05c82c4c8fc2282cee3a7223834d8a8c0d95a53fd40de。
+各*-mechanical-admission-r1.json明确只证明可训练和冷部署，不证明任务收益。
+区域融合长训Bv2-region-fusion-long-bs8-r1在GPU3/PID2639003启动；
+Bv2-slot-feedback-long-bs8-r1已派发待空闲卡，两者都从原B-v2完整权重初始化，
+未从两步机械checkpoint继续。两个*-long-r1.receipt.json及*-long-r1-job/status.json
+记录实际阶段。标准闭环在各训练+256离线结束后自动接续。
+当前mainline B-v3已完成1024更新/8192样本，52窗口有限、
+batch中位6.3386秒、最大loss账本差6.56e-8，离线仍在继续；
+没有将SAM探索作为主线正式两实验已完成的依据。
+
+### 34.33.23 B-v3 完整标准闭环与真实训练监督去向（2026-10-08）
+
+T3 `56c217d5` 的 `B-regions-v3-short-bs8-1024-r1` 已完成全部
+1024 次 BS8 更新、8192 样本、256 批离线（2046 样本、6 任务各341）以及标准
+18例/R8/stored_target。最终 epoch1/step12036，best.pt 2487525096 字节，
+SHA `616ae4598f3190ea0a9dcb82a86aeffe82e11e04642b1fd0043bdc15d1904a5f`；
+实际 payload 源码、配置和 digest 已逐项核验。本次仍为 source_consistent_v1，
+不能把另已机械通过的未来支持域 v2 修复归入本次效果。
+
+**行为结果：12/18。** 失败02/03/09/10/14/17。相对 B-v2 同为12/18，
+恢复15、退化17；相对 A13/18只退化03，没有新增成功。
+18份NPZ全部完整/有限、24行计划到实际前8行的索引和原生命令逐项一致，
+与A/B-v1/B-v2的初始robot、scene及双RGB均完全相等，零基础设施错误。
+复用的 `probes/audit_standard_identity_panel.py` 另在历史B-v2上复现原分数/失败集合。
+结果见 `B-regions-v3-short-closed-loop-final-audit.json`。
+`B-regions-v3-short-r1-promotion-block.json` 阻止原主线正式推广，保留全部后续资格任务。
+
+六个失败均记录到正确目标接触，但最大沿请求方向位移仅
+1.286/0.895/3.261/7.120/4.923/6.200 cm。
+03/09/10/17最大进度时控制目标与TCP差约7.53/11.24/5.83/3.25 mm；
+不能将最终失败统归为大控制器累积误差。退化17在state104已有约5.75 cm进度、
+gap3.95 mm，随后前8行平均X转负、Z转正并在row2打开夹爪；
+这些是按本次真实轨迹定位的撤回窗口，尚非单独模块因果解释。
+成功05/11仍有先推异色近物的路径：首个机器人接触分别红63/粉44，
+采样遥测未记录直接接触所指蓝/红目标。保留官方成功，遥测不覆盖全部物理substep，
+不能以此断言从未瞬时接触。接触正确也不等于接触位置或任务维持正确。
+`B-regions-v3-maintenance-selected-plan-r1.json` 是按自身01/03/15/17轨迹挑选的23窗口计划，
+尚未另行启动；后续先结合已有全链资格定位具体待决边界，避免重复敏感性测试。
+
+**完整训练账本。** 52日志窗口全有限，batch中位6.3386秒，
+窗口累计器记录真实preclip峰3.3088（step11779）。
+窗口平均loss_ledger_gap绝对值最大1.79e-8；
+逐窗口贡献之和与loss_total最大差2.04e-7（不同于单批峰值）。
+34.33.22的6.56e-8是当时的部分账本口径，不应用作完整训练上界。
+离线native RMSE .264195、first8 .231240（B-v2 .231610），
+gripper事件F1 .345055、预测1055/目标765，几乎没有改善。
+annotated_goal仍激活。保留预期满预算和小覆盖hard-execution/proposal提示，
+这些不支持删除计算预算。完整身份/指标/审计：
+`B-regions-v3-short-final-audit.json`、`B-regions-v3-complete-log-audit-r1.json`。
+
+**新增监督主要训练到了哪个分支。** 全部声明训练曝光中，2533/8192样本
+具有32x32采样后负对，971/1024批具有至少一对；
+独立source分支共4759对，即4.64746对/批。
+训练epoch实际记录source+online合计5.04004对/批，据相同完整曝光推算，
+在线分支仅约.39258对/批，为source数量的8.45%。
+`B-regions-v3-annotation-coverage-full-r1.json` 是标签/采样账本；
+扣除法是epoch汇总推断，不能冒充逐个历史随机mask的重放或物体身份覆盖。
+
+为直接核验，固定最终checkpoint、完整manifest和首4个实际声明BS8批，
+`probes/probe_identity_region_operands.py` 捕获生产region_separation的每相机、
+source/online、样本、独立group负边和归约。CPU FP32，显式training_mask，
+32样本、零更新，参数不变；与GPU BF16完整普通损失VJP分开解释：
+
+| 操作数 | 开遮挡负对 | 关遮挡审计负对 | 关遮挡仍违反JS margin的对 |
+| --- | ---: | ---: | ---: |
+| 独立source | 24 | 24 | 3 |
+| 实际在线G | 2 | 24 | 11 |
+
+四批在线负对分别0/0/1/1，关遮挡为7/0/8/9。
+source两条件逐项完全相同，归约重现误差不超过7.45e-9。
+source有负对的13个样本/相机操作数平均hinge .14242，
+在线全观测相同13个操作数平均.29814；不能将包含大量无负对零项的
+总loss下降独自解释成对象分离改善。第二批确实无负对，未制造标签。
+结果在 `B-regions-v3-region-operands-cpu-r1/decision-summary.json`；
+该4批是局部诊断，不替代完整验证集、真实物块或普通参数梯度。
+
+源码边界：`training/identity.py:53–59` 的独立source只用
+content/coordinate key和共享owner转换；实际在线
+`model/canonical_grounding.py:85–101` 还消费typed semantic/appearance/geometry、
+context/history和生产者质量。`identity.py:131–139` 要求online双线性端点
+全部角支持后才保留group。当前结果确证了负监督通过遮挡/支持筛选到在线分支时的稀疏，
+不能说所有在线参数无梯度：共享参数、原正对、world/action仍能反传。
+也不能用去掉mask、降低支持阈值或扩大权重直接充当修复；被遮挡事实仍不得伪造。
+
+下一步由现有 `B-regions-v3-ready-short-r1` 顺序收齐GPU逐参数VJP与旧60/自身新轨迹的
+真实物体、自然指令、32节点全链资格。12:01UTC它仍等空闲整卡，stage full_module_vjp；
+已有GPU6其他授权作业继续运行，未抢占、未重复排程。
+重点核对online专属typed/context/history入口的region梯度，并把上述负对监督与实际物体链
+对应起来，再选择保持合法观测支持的训练接口修复。
+T4未来支持域修复仍需合并进后续显式候选并做有意义训练/行为检查；
+长间隔对应、任务维持、arm/gripper与controller独立问题仍未闭合。
+SAM B-v2结构长跑继续独立：region-fusion正在训练，slot-feedback仍排队，
+不能据此将原主线正式两实验报成已启动。
+
+复现（E为本实验根目录，生产runtime为T3）：
+
+- `python probes/audit_standard_identity_panel.py --panel E/B-regions-v3-short-bs8-1024-r1-closed-loop-replan8 --reference A=E/A-short-bs8-1024-r1-closed-loop-replan8 --reference B_v1=E/B-short-bs8-1024-r1-closed-loop-replan8 --reference B_v2=E/B-nullv2-short-bs8-1024-r1-closed-loop-replan8 --output NEW_AUDIT.json`
+- `python probes/probe_identity_region_operands.py --checkpoint E/B-regions-v3-short-bs8-1024-r1/checkpoints/best.pt --plan E/B-regions-v3-short-exposure-r1.json --output NEW_DIR --device cpu --batches 4`
+- 完整任务receipt、原始结果和NPZ保留E；本节仅记录决策统计，CPU操作数探针源为`74b56cbb`。
+
+### 34.33.24 Reconsidering the v1 -> v2 behavioral regression (2026-10-08)
+
+The user asks whether earlier repairs themselves damaged behavior. The strongest
+new evidence concerns the B-v1 -> B-v2 objective transition, before v3's added
+region losses. Both runs separately initialize from the same mature a2 step11012;
+B-v2 did NOT continue training the completed B-v1 weights. They declare the same
+1024BS8/8192 samples, fresh Adam/100warmup,256offline, and standard18-R8 setup.
+Their serialized configs differ only in output_dir and identity_supervision_mode.
+The actual3a843999 ->0e861f56 change affects training/identity.py and explicit
+mode admission/metadata; no online forward consumer or architecture is changed.
+
+The transition bundled three distinct changes:
+1. Exclude identity pairs outside the actual online producer's support.
+2. Replace joint K+null JS with conditional real-K JS before interpolation.
+3. Divide by the remaining supported-pair count instead of the original
+   sensor-admitted count.
+
+The invalid-support and null-escape defects remain established. However,
+removing a mathematical escape is not evidence that the replacement objective
+preserves task behavior. The conditional positive-only objective still permits
+different physical objects to share the same K law.
+
+**Matched physical and behavioral evidence.** The same60 recorded observations
+have identical physical masks and producer-supported pixels in the v1/v2 probe.
+Their physical-read implementation is unchanged; the later probe only adds
+canonical atom diagnostics. Eligible pair sets agree exactly.
+
+| Conditional real-K read statistic | B-v1 | B-v2 |
+| --- | ---: | ---: |
+| Different-object TV median, top78 pairs | .413323 | .054797 |
+| Different objects sharing dominant K, top | 55.13% | 85.90% |
+| Different-object TV median, wrist9 pairs | .114230 | .065316 |
+| Different objects sharing dominant K, wrist | 88.89% | 100% |
+
+These reads are conditioned on real allocation within supported physical-object
+pixels. They exclude absolute real/null mass and do not certify semantic identity
+in v1. The large top-view decrease nevertheless demonstrates that the same
+distinct visible objects have become less distinguishable through this K read.
+Cross-view agreement alone must not be treated as improved identity.
+
+The standard score falls17/18 ->12/18, losing03/09/10/14/15 and gaining none.
+The indirect successes05/11 occur in both versions and cannot explain these five
+lost cases. All five already differ in their first native-arm plan under the
+identical initial observation: first8 RMS .00232-.00307 in native action units,
+not meters. First recorded TCP differences above1mm occur at states14/13/21/35/12;
+first gripper disagreements at81/46/17/44/44. The1mm marker is audit-only.
+After the initial plan, same-clock differences contain changed state feedback
+and are not controlled module interventions. Later controller accumulation
+cannot account for the earliest learned-plan difference; the precise causal
+contribution of each later contact/gripper/withdrawal event is still unresolved.
+Reproducible comparator: probes/compare_identity_migration_evidence.py
+(source5b86bac6); result B-v1-v2-repair-regression-evidence-r1.json.
+Separate progress/contact details remain in
+B-v1-v2-regression-trajectory-comparison-r1.json.
+
+**Separate the objective changes on fixed real evidence.**
+probes/probe_identity_migration_components.py (fixed source52154e64) runs two
+identical real BS8 batches per completed checkpoint, explicit training_mask,
+clock12036, CPU FP32, and zero parameter/optimizer updates. The original live
+online/source encoders supply the evidence. Both actual v1/v2 production
+identity objectives reproduce with exactly zero scalar error in all four
+batch/checkpoint combinations; their unchanged source MSE is exactly identical.
+The independently reconstructed joint law differs by at most2.39e-7.
+The r1 proxy omitted the existing observation normalizer and failed; preserve
+its failed receipts/logs and LAUNCH_CORRECTION. The r2 fix only restores that
+reference in the read-only production replay.
+
+At the FINAL B-v1 checkpoint, online allocation-logit gradients are:
+
+| Controlled change | L2 ratio, two BS8 batches | Cosine with preceding gradient |
+| --- | ---: | ---: |
+| Support filter only, retain original denominator | .785 / .649 | .900 / .896 |
+| Then divide by supported count | 4.050 / 4.263 | .960 / .892 |
+| Then conditional real-K objective | 2.864 / 3.667 | .079 / .068 |
+| Complete v2 versus original v1 | 9.099 / 10.152 | .078 / .066 |
+
+The first batch keeps cross-camera207/899 and897/4946 pairs; its retained
+cross-camera pairs receive4.34x and5.51x reduction weights. Temporal pairs keep
+3934/7180 and2671/5491. This does not prove that retaining the old denominator is
+the right repair; it establishes an implicit supervision reweighting.
+At final B-v2 weights the complete online gradient ratio is2.98/2.57, cosine
+.743/.785. The conditional-versus-supported-joint gradients are now almost
+parallel (.999/.997), consistent with real mass already near one.
+
+These are derivatives of the raw identity loss with respect to final
+source/online K+null LOGITS, not parameter VJPs or Adam steps. They were measured
+at separately trained final checkpoints, not at the shared historical
+initialization. No claim of a10x full-model update or a causal five-case rescue
+is justified. The large local objective change, coupled with matched physical
+separation loss, prioritizes this transition for a controlled training split.
+Combined identity/limits/results:
+B-v1-v2-identity-migration-components-summary-r1.json; raw runs
+B-{v1,v2}-identity-migration-components-cpu-r2.
+Reproduce using runtimeT2 and fixed probe52154e64:
+`python probes/probe_identity_migration_components.py --checkpoint CHECKPOINT --plan E/B-regions-v3-short-exposure-r1.json --batches 2 --output NEW_DIR`.
+
+**v3 ordinary VJP continuation now complete.** At12:29UTC the existing ready
+runner acquired GPU6 without stopping another job and completed the full
+ordinary training-loss VJP, then began broad qualification. Same first declared
+BS8 sample IDs as the CPU audit, actual T3 checkpoint12036, explicit training
+mask, no optimizer update or parameter .grad write.
+New region-separation weighted loss .00054560 reaches slot_seed/content/coordinate
+(L2 .00423/.00248/.000307), while online-only semantic/appearance/geometry/context/
+history keys are connected but have exactly zero derivative on THIS batch.
+Their total-loss gradients are finite nonzero. Region prediction .00590976
+does not connect to these online-only keys by its source-only design.
+Thus this is not a dead entire G; it confirms the direct branch coverage gap
+from34.33.23 at the ordinary parameter-gradient boundary for one batch.
+Do not generalize one VJP to every historical update. Output remains
+B-regions-v3-module-vjp-short-r1/results.json; orchestration status is
+B-regions-v3-module-vjp-short-r2-job/status.json.
+
+The v3 common source controls also finished:12episodes/24windows, production
+reproduction <=2.98e-8, shared K-renumbering error0. Other-episode whole-source
+substitution increases directional MSE1.78/5.25/3.90/3.63%, K-value mismatch
+29.36/47.64/40.64/26.49%. These are equal means over6 actual four-window batches,
+not an audit of additional region objectives or proof of physical identity.
+See B-regions-v3-source-dependence-short-r1/decision-summary.json.
+At12:40UTC the preserved broad runner is processing matched60 factual windows;
+its own-trajectory stages remain queued, not complete.
+
+**Decision.** Retain17/18 as the behavioral reference, preserve the justified
+support fix, and separate conditional normalization from loss reduction before
+another mainline promotion. Candidate testing should explicitly compare original
+sensor-exposure and supported-pair reductions while retaining producer validity;
+the former is a hypothesis, not an admitted repair. Supported joint K+null can
+be an explanatory ablation only, because its null escape remains. Examine
+gradient competition with action/world and ensure independently justified
+different-object constraints reach the actual online G. Do not unmask policy
+inputs, restore the known escape as a final solution, force balanced occupancy,
+or enlarge S/P3 merely to improve a scalar. A causal training split from the
+same initialization/exposure and real natural-target/contact/maintenance evidence
+are still required. No new production mode or experiment was launched here.
+The existing v3 broad audit and separately authorized B-v2 SAM long trials
+continue. T4 future-support repair and other measurement/controller questions
+keep their separate scope.
+
+### 34.33.25 User-selected B-v1 structural improvement baseline (2026-10-08)
+
+The user directs subsequent mainline structural improvements to start from
+B-v1's complete17/18 checkpoint, not accumulated B-v2/v3 modifications.
+This checkout is codex/b-v1-structural-repair-20261008, created directly from
+3a84399926d50831470518e1b7f105131d3f1056. The model/training source is still
+byte-identical to that base. Baseline checkpoint:
+B-short-bs8-1024-r1/checkpoints/best.pt under causal-identity-ab-20261007,
+SHA ce5753bf98a5e17254e6bbdbdd93fa80d09003a8b9b47d38cf2c3ca76d12ed25,
+epoch1/step12036. Subsequent changes must use explicit new identities.
+
+Preserving this behavioral baseline does not declare v1's joint-null objective
+defect correct. Structural forward checks are prioritized; losses are unchanged
+during localization. Do not bulk-merge v2/v3 or assume every historical repair
+belongs in this candidate. Independently confirmed fixes such as future target
+support require explicit minimal integration and regression checks.
+The first scoped check follows actual current inputs through canonical feature
+construction, slot competition/read/GRU/FFN and final physical-object reads.
+It saves only summaries, compares no old architecture catalog, uses no optimizer,
+and does not treat slot cosine alone as health. Body masks only score outputs.
+A located boundary must lead to a concrete narrow candidate and matched
+behavior test; repeating historical audits is not the objective.
+
+The other branch's immutable v3 qualification and separately authorized B-v2
+SAM long explorations continue. Do not retarget their running jobs, checkpoint
+bases or evaluation setups. Their results remain auxiliary evidence.
+The sections below retain historical research context; they are not a statement
+that the corresponding later production features are present in this checkout.
