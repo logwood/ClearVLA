@@ -1716,8 +1716,15 @@ ordinary backward hooks. Both four-window deterministic cold-deployment checks h
 Each authorized long declares11012BS8 updates,256offline and18-R8/stored_target,
 initializing the same B-v2 step12036 with freshAdam/100warmup.
 The continuation preserves mainlineGPU6 for its existing full qualification.
-Region-fusion long PID2639003 started onGPU3 at10:53UTC; slot-feedback is
-queued for an idle whole GPU. Both standard18 continuations are attached.
+Region-fusion long PID2639003 continues onGPU3. Slot-feedback r1 failed
+during initial training when another process occupied13.77GiB on the claimed
+card; no saved periodic train window/checkpoint. The20-step logging cadence
+cannot establish an exact completed-update count. Preserve r1/failure-scope.
+Original edbba48b/BS8/11012+256/18-R8 is relaunched as slot-feedback-long-r2
+onGPU5 at14:13UTC (runner2921039, child2921404). Receipt/config differ only
+in output paths, GPU allowance and recovery metadata; original B-v2 weights,
+training/data/budget are unchanged. Both standard18 continuations are attached.
+Check the r2 status and actual update logs before claiming training health.
 
 These runs are exploratory, separate from mainline A/B qualification. Actual
 BS8 backward, per-adapter loss VJPs, save/cold-load and finite-state checks are

@@ -4093,3 +4093,19 @@ Bv2-slot-feedback-long-bs8-r1已派发待空闲卡，两者都从原B-v2完整�
 当前mainline B-v3已完成1024更新/8192样本，52窗口有限、
 batch中位6.3386秒、最大loss账本差6.56e-8，离线仍在继续；
 没有将SAM探索作为主线正式两实验已完成的依据。
+
+14:13UTC启动恢复：slot-feedback-long-r1启动阶段forward触发OOM，同卡其他
+进程已占13.77GiB，失败进程约9.12GiB；没有保存周期日志或checkpoint。
+原日志每20次更新才记录一次，因此不以日志为空断言精确完成0次更新。
+不能据此判定单独BS8装不下。原status、日志、receipt和
+Bv2-slot-feedback-long-r1-failure-scope.json完整保留，没有停止其他作业。
+检查GPU5空闲19MiB及共享flock后启动r2（runner2921039/child2921404）。
+生产仍edbba48b，B-v2初始化权重与模型/数据/损失/11012BS8/256离线/R8
+逐项不变；配置只改output_dir，新receipt固定原权重/新配置hash。
+输出Bv2-slot-feedback-long-bs8-r2，状态Bv2-slot-feedback-long-r2-job/status.json，
+原runner1a393530继续负责完整训练、最终权重身份与标准18/R8/NPZ。
+先核对实际训练更新，不将进程存在当有限日志或行为改善。
+
+At14:16UTC r2 has its first20-BS8 window atstep12056: finite logged metrics,
+loss0.517197/action-flow0.431014,6.523s per batch. It has passed the earlier launch
+failure point; this is startup evidence only, not completion or behavior gain.
