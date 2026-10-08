@@ -1712,10 +1712,12 @@ dataset/config except this selector, and exact inherited tensor inventory.
 Production is pinned at edbba48b. Both actual two-BS8/two-offline checks
 completed at step12038 with connected, finite, updated adapter parameters.
 An extra multi-loss VJP attempt OOMed and is retained; the completed checks use
-ordinary backward hooks. Cold deployment is still pending the GPU at this entry.
+ordinary backward hooks. Both four-window deterministic cold-deployment checks have now passed.
 Each authorized long declares11012BS8 updates,256offline and18-R8/stored_target,
 initializing the same B-v2 step12036 with freshAdam/100warmup.
 The continuation preserves mainlineGPU6 for its existing full qualification.
+Region-fusion long PID2639003 started onGPU3 at10:53UTC; slot-feedback is
+queued for an idle whole GPU. Both standard18 continuations are attached.
 
 These runs are exploratory, separate from mainline A/B qualification. Actual
 BS8 backward, per-adapter loss VJPs, save/cold-load and finite-state checks are
@@ -1743,10 +1745,10 @@ four real-window CPU controls (research section34.33.21).
 Existing-ownership slot feedback is deprioritized as the primary identity fix;
 support-aware local image/region fusion is retained as an untrained backup.
 The naive convolution's boundary-induced contrast was identified and corrected.
-Neither prototype is imported by production. Zero-init/ordinary mechanical
+At that CPU-screen stage neither prototype was imported by production. Zero-init/ordinary mechanical
 VJP checks and CPU microtimings do not establish actual-loss gradients,
-CUDA training cost, physical identity or behavior. Prioritize the running
-B-v3 short and its already scheduled full qualification before adding a module.
+CUDA training cost, physical identity or behavior. Keep the running B-v3 short and its full qualification independent of the
+subsequently user-authorized B-v2 structure long trials described above.
 
 
 

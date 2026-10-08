@@ -4079,3 +4079,17 @@ freshAdam/LR2e-5/100warmup、模型时钟12036→23048、同一B-v2 checkpoint�
 使用final latest.pt；保留全部NPZ。源码、初始化权重、配置、
 标准panel manifest全hash固定。队列保护主线GPU6直至其原接续全部结束。
 这些是用户授权的探索，不作为主线正式A/B根因闭合或行为改善证明。
+
+
+10:53UTC接续：两支4真实窗口冷部署完成，同指令重复arm/gripper差为0，
+同图semantic/image/covariance测量为0。slot机械checkpoint SHA
+42bd18610a88aaabfbb98efb8d38147b5552b9138923262f5cb6428ceaefff6f；
+region机械SHA15e97457341f02ec6bb05c82c4c8fc2282cee3a7223834d8a8c0d95a53fd40de。
+各*-mechanical-admission-r1.json明确只证明可训练和冷部署，不证明任务收益。
+区域融合长训Bv2-region-fusion-long-bs8-r1在GPU3/PID2639003启动；
+Bv2-slot-feedback-long-bs8-r1已派发待空闲卡，两者都从原B-v2完整权重初始化，
+未从两步机械checkpoint继续。两个*-long-r1.receipt.json及*-long-r1-job/status.json
+记录实际阶段。标准闭环在各训练+256离线结束后自动接续。
+当前mainline B-v3已完成1024更新/8192样本，52窗口有限、
+batch中位6.3386秒、最大loss账本差6.56e-8，离线仍在继续；
+没有将SAM探索作为主线正式两实验已完成的依据。
