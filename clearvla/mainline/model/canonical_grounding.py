@@ -131,16 +131,21 @@ def canonical_grounding(module, local, chart, history_context, *, collect_diagno
         rows=h,
         columns=w,
     )
-    source = conditional * chart.candidate_owner_prior.reshape(b, c, -1, 1).float()
+
+    # Rasterization already quarantined absent atoms. Reapplying an original
+    # prior must use the SAME producer validity; 0 * NaN would otherwise alter
+    # all cells downstream, even though the low-level rasterizer was finite.
+    def with_prior(prior):
+        safe = torch.where(chart.candidate_validity[..., 0] > 0, prior.float(), 0.0)
+        return conditional * safe.reshape(b, c, -1, 1)
+
+    source = with_prior(chart.candidate_owner_prior)
     mass = source.sum(-2)
     legal = (mass > 0) & observed
     mass = torch.where(legal, mass, 0.0)
     fields = {}
     for name in ("semantic", "appearance", "geometry"):
-        typed = (
-            conditional
-            * getattr(chart, "candidate_" + name + "_prior").reshape(b, c, -1, 1).float()
-        )
+        typed = with_prior(getattr(chart, "candidate_" + name + "_prior"))
         fields[name] = rasterize_value(
             typed, typed.sum(-2), getattr(chart, "candidate_" + name), chart.candidate_validity
         )

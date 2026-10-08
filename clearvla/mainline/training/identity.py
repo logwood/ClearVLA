@@ -177,18 +177,29 @@ def identity_terms(model, online, facts, labels):
             without.append(torch.where(valid, zero_error, 0.0).sum() / count.clamp_min(1))
     zero = state.sum() * 0
 
-    def mean(items):
-        return torch.stack(items).mean() if items else zero
+    def available_group_mean(items, support_counts):
+        """Equal weight per observed group, not per padded/unknown group.
+
+        Producer masks alone choose the denominator. We deliberately do not
+        use learned null/allocation/confidence or change the positive-pair
+        budget; source-prediction and correspondence have different support.
+        """
+        if not items:
+            return zero
+        active = torch.stack(support_counts) > 0
+        values = torch.stack(items)
+        numerator = torch.where(active, values, 0.0).sum()
+        return numerator / active.to(values.dtype).sum().clamp_min(1)
 
     def total(items):
         return torch.stack(items).sum() if items else zero.detach()
 
     result = dict(
-        identity_correspondence=mean(pair_losses),
-        identity_source_prediction=mean(prediction_losses),
+        identity_correspondence=available_group_mean(pair_losses, identity_counts),
+        identity_source_prediction=available_group_mean(prediction_losses, counts),
         identity_cross_admitted_pairs=total(counts_by_kind["cross"]),
         identity_temporal_admitted_pairs=total(counts_by_kind["temporal"]),
-        identity_source_removed_prediction_mse=mean(without),
+        identity_source_removed_prediction_mse=available_group_mean(without, counts),
     )
     if conditional_mode:
         result.update(
@@ -196,7 +207,7 @@ def identity_terms(model, online, facts, labels):
             identity_conditional_support_fraction=(
                 total(identity_counts) / total(counts).clamp_min(1)
             ).detach(),
-            identity_source_null_mass=mean(null_source).detach(),
-            identity_target_null_mass=mean(null_target).detach(),
+            identity_source_null_mass=available_group_mean(null_source, counts).detach(),
+            identity_target_null_mass=available_group_mean(null_target, counts).detach(),
         )
     return result

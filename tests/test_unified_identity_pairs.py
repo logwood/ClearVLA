@@ -109,3 +109,36 @@ def test_training_loss_rejects_label_clock_from_another_history(production):
     bad = replace(source, source_frames=source.source_frames + torch.tensor([[-1, 0]]))
     with pytest.raises(ValueError, match="source span"):
         identity_terms(model, batch.online, state.top.facts, bad)
+
+
+def test_unobserved_group_does_not_dilute_real_label_loss_or_backward(production):
+    model, _, batch, _, _ = production
+    if model.config.top.entity_ownership_mode != "canonical_image_v1":
+        pytest.skip("canonical-only identity branch")
+    model.zero_grad(set_to_none=True)
+    _, state, _ = model.encode_online(batch.online)
+    raw = legacy_labels(batch.online)
+    one = raw.pair_groups()[0]
+    empty = replace(
+        raw.pair_groups()[1],
+        valid=torch.zeros_like(one.valid),
+        source=torch.full_like(one.source, float("nan")),
+        target=torch.full_like(one.target, float("nan")),
+    )
+    one_batch = IdentityPairBatch(raw.camera_names, raw.source_frames, (one,))
+    padded_batch = replace(one_batch, groups=(one, empty))
+    a = identity_terms(model, batch.online, state.top.facts, one_batch)
+    b = identity_terms(model, batch.online, state.top.facts, padded_batch)
+    for name in (
+        "identity_correspondence",
+        "identity_source_prediction",
+        "identity_source_removed_prediction_mse",
+    ):
+        torch.testing.assert_close(a[name], b[name], atol=0, rtol=0)
+    key = model.grounding.grounder.content_key[1].weight
+    ga = torch.autograd.grad(
+        a["identity_correspondence"] + a["identity_source_prediction"], key, retain_graph=True
+    )[0]
+    gb = torch.autograd.grad(b["identity_correspondence"] + b["identity_source_prediction"], key)[0]
+    torch.testing.assert_close(ga, gb, atol=2e-7, rtol=2e-5)
+    assert ga.abs().sum() > 0

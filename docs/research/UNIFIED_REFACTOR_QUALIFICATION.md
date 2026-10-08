@@ -1,0 +1,71 @@
+# Unified refactor continuation — source and test qualification
+
+Branch: `codex/causal-unified-refactor-20261008`.
+Continuation input tree: `c88b6ca9ba1103b97a8937c4c2ce7fd98e51baad`
+(remote source `6fe0a5d8`; inherited implementation `be48d7fd`,
+fixture correction `0644e694`).
+
+## Production corrections
+
+1. `model/canonical_grounding.py`: use producer validity before multiplying
+   owner/typed priors into a rasterized measure. The integrated ordinary backward
+   test checks finite output/gradients, zero unavailable-prior gradient and
+   nonzero valid-prior gradient.
+2. `model/observation_association.py` and `model/source_measurement.py`:
+   measured successor images own their spatial support. The current mask limits
+   the source only. Explicit per-successor cell support is validated and
+   quarantined before finite checks; unavailable destinations remain unknown.
+   A known descriptor move into a currently masked cell is the positive control.
+3. `training/identity.py`: exclude all-unobserved groups from group means using
+   the producer's support counts. Correspondence and source prediction have
+   different valid sets and keep separate denominators. No new identity label,
+   multiplier, learned-confidence mask or negative-pair proposal is introduced.
+
+Before these fixes, the focused regression produced seven failures, including
+zero measured displacement for a known +2 chart-coordinate displacement and a
+halving of identity loss after adding an all-unknown group. These are component
+counterexamples, not learned-checkpoint behavior or physical-motion accuracy.
+
+## Complementary test repair
+
+The first complementary run on `6fe0a5d8` retained nine failures. Three minimal
+candidate-reuse fixtures omitted the production context-selector method; a
+multitask fixture omitted the action target's `row_valid`; one optional T5
+asset was absent; four older decoder expectations described an obsolete graph.
+
+The tests now call the real context selector, supply explicit true action-row
+support, and distinguish the external asset test from a synthetic file-format
+test. Decoder checks retain common-parameter equality, fixed-graph evaluation
+and seeded-training repeatability, while distinguishing different execution
+graphs. A single reader family has zero across-family diversity; an actual
+two-family test still requires positive diversity. Configuration rejection
+calls its public `validate()` method. Neutral legacy update logits match the
+existing compatibility constant 20, not the unrelated depth initialization.
+No legacy production output was changed to satisfy these tests, no tolerance
+was widened, and original failing artifacts remain in Actions.
+
+## Audit routes
+
+`run_unified_refactor_checks.py` defaults to all tracked test files; the previous
+primary subset remains explicitly selectable. Each selected file is executed
+in an isolated process. Syntax and explicit detach locations are inventoried,
+not advertised as a formal proof of dynamic autograd.
+
+`check_unified_model_flow.py` performs ordinary optimizer updates and complete
+proposal/W-rebuild/refined sampling, recording each trainable parameter's
+missing/zero/nonzero gradient and actual update. A nonzero aggregate norm does
+not certify every parameter. Inputs to this gate are artificial, with no
+pretrained DINO/T5 loading or real-data behavior claim.
+
+`run_unified_real_data_check.py` must separately admit actual CUDA, source
+dataset, language/visual assets and source checkpoint before executing the
+training CLI. An admission failure is not a passed real-data training test.
+
+## Remaining scientific gates
+
+Instance-level physical identity, natural target choice, long-gap observed
+motion, task maintenance, arm/gripper compatibility, native controller state,
+cross-dataset learned behavior and resource qualification remain unresolved
+until their actual source-specific tests pass. Keep the detailed research
+ledger and original A/B promotion blocks; these numerical/interface repairs
+do not override them.

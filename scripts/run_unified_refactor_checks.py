@@ -79,6 +79,12 @@ def main() -> int:
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)
     parser.add_argument("--timeout-per-file", type=float, default=600.0)
+    parser.add_argument(
+        "--inventory",
+        choices=("all", "primary"),
+        default="all",
+        help="all includes tracked adapter/legacy/nested solver tests",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     out = args.output.resolve()
@@ -117,10 +123,31 @@ def main() -> int:
             for p in (root / "tests").glob(pattern)
         }
     )
+    primary = files
+    if args.inventory == "all":
+        tracked = (
+            subprocess.check_output(["git", "ls-files", "-z", "*test_*.py"], cwd=root)
+            .decode()
+            .split("\0")
+        )
+        files = sorted(
+            name
+            for name in tracked
+            if name and Path(name).name.startswith("test_") and (root / name).is_file()
+        )
+    if not files:
+        raise ValueError("no tracked regression tests selected")
     selected = files[args.shard :: args.shards]
     write(
         out / "inventory.json",
-        dict(total_inventory=files, shard=args.shard, shards=args.shards, selected=selected),
+        dict(
+            scope=args.inventory,
+            primary_inventory=primary,
+            total_inventory=files,
+            shard=args.shard,
+            shards=args.shards,
+            selected=selected,
+        ),
     )
     result = run_inventory(root, selected, out, "current", args.timeout_per_file)
     after = source_fingerprint(root)

@@ -62,8 +62,10 @@ class _CandidateHarness:
     blocks = (object(), object(), object())
     terminal_controller = _TerminalHarness()
     config = SimpleNamespace(physical_action_dim=2)
-    _select_scale_rows = staticmethod(
-        EvidenceLatentMMDiTActionDecoder._select_scale_rows
+    _select_scale_rows = staticmethod(EvidenceLatentMMDiTActionDecoder._select_scale_rows)
+
+    _select_prepared_contexts = staticmethod(
+        EvidenceLatentMMDiTActionDecoder._select_prepared_contexts
     )
 
     def __init__(self) -> None:
@@ -79,9 +81,7 @@ class _CandidateHarness:
     ) -> tuple[Tensor, dict[str, Tensor], list[dict[str, Tensor]]]:
         result = action
         for repeat_index in range(self.max_dwell):
-            rows = torch.nonzero(
-                repeat_count > repeat_index, as_tuple=False
-            ).flatten()
+            rows = torch.nonzero(repeat_count > repeat_index, as_tuple=False).flatten()
             if int(rows.numel()) == 0:
                 continue
             self.operation_calls += 1
@@ -102,9 +102,7 @@ def _candidate_inputs(
 ) -> dict[str, object]:
     batch = int(action.shape[0])
     depth = len(harness.blocks)
-    blocks = torch.arange(depth, dtype=torch.long).repeat_interleave(
-        harness.max_dwell
-    )
+    blocks = torch.arange(depth, dtype=torch.long).repeat_interleave(harness.max_dwell)
     repeats = torch.arange(harness.max_dwell, dtype=torch.long).repeat(depth)
     blocks = torch.cat((blocks, torch.tensor([depth], dtype=torch.long)))
     repeats = torch.cat((repeats, torch.zeros(1, dtype=torch.long)))
@@ -456,9 +454,7 @@ def _online_input(config: ExperimentConfig) -> OnlinePolicyInput:
             state=torch.randn(batch, dims.state_dim),
             action_state=torch.randn(batch, dims.action_dim),
             codec_gripper_boundary=torch.randn(batch, 1),
-            state_history=torch.randn(
-                batch, dims.state_history_length, dims.state_dim
-            ),
+            state_history=torch.randn(batch, dims.state_history_length, dims.state_dim),
             executed_action_history=torch.randn(
                 batch,
                 dims.executed_history_length,
@@ -519,11 +515,7 @@ def test_full_two_pass_action_parity_and_default_opt_in_boundary(
             deployment_fastpath=True,
         )
 
-    expected_dynamic_decisions = (
-        2
-        * (config.runtime.inference_steps + 1)
-        * len(decoder.blocks)
-    )
+    expected_dynamic_decisions = 2 * (config.runtime.inference_steps + 1) * len(decoder.blocks)
     assert fastpath.call_count == expected_dynamic_decisions
     for expected, actual in (
         (authoritative.action, optimized.action),

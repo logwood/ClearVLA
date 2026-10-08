@@ -6536,8 +6536,23 @@ def test_precomputed_t5_condition_avoids_a_resident_text_encoder(tmp_path) -> No
     assert metadata["source"] == "precomputed_t5_condition"
 
 
+def test_rdt_tensor_shape_is_accepted_without_external_assets(tmp_path) -> None:
+    # A format fixture, not a pretrained embedding or model-quality assertion.
+    condition = tmp_path / "rdt_tensor_shape.pt"
+    torch.save(torch.linspace(-1, 1, 4096).reshape(1, 4096), condition)
+    tokens, mask, metadata = load_precomputed_t5_condition(
+        condition_path=condition, max_tokens=32
+    )
+    assert tokens.shape == (1, 1, 4096)
+    assert mask.shape == (1, 1) and mask.all()
+    assert metadata["original_shape"] == [1, 4096]
+    torch.testing.assert_close(tokens[0], torch.linspace(-1, 1, 4096).reshape(1, 4096))
+
+
 def test_repository_rdt_t5_tensor_format_is_accepted() -> None:
     condition = Path(__file__).parents[1] / "clearvla" / "assets" / "rdt_empty_lang_embed.pt"
+    if not condition.is_file():
+        pytest.skip("Optional pretrained RDT asset is not distributed in this source checkout")
     tokens, mask, metadata = load_precomputed_t5_condition(
         condition_path=condition,
         max_tokens=32,

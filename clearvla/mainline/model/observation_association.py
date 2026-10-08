@@ -70,8 +70,7 @@ class ObjectObservationAssociation(nn.Module):
         self.current_reference_mode = str(current_reference_mode)
         if self.current_reference_mode not in self.CURRENT_REFERENCE_MODES:
             raise ValueError(
-                "unknown Teacher current-reference mode: "
-                f"{self.current_reference_mode!r}"
+                f"unknown Teacher current-reference mode: {self.current_reference_mode!r}"
             )
         if self.flow_reference_frames <= 0:
             raise ValueError("teacher flow reference frames must be positive")
@@ -158,13 +157,21 @@ class ObjectObservationAssociation(nn.Module):
         observations: Tensor,
         relative_offsets: Tensor,
         observed: Tensor | None = None,
+        target_cell_observed: Tensor | None = None,
     ) -> ObjectObservationMeasurement:
+        """Measure a declared image stream with its OWN spatial support.
+
+        ``observed`` owns frame availability. In source-consistent mode an
+        omitted cell mask declares the full measured image, as produced by the
+        frozen target encoder; it never borrows the current training mask.
+        """
         with torch.autocast(device_type=observations.device.type, enabled=False):
             return self._measure_fp32(
                 facts=facts,
                 observations=observations,
                 relative_offsets=relative_offsets,
                 observed=observed,
+                target_cell_observed=target_cell_observed,
             )
 
     def _measure_fp32(
@@ -174,6 +181,7 @@ class ObjectObservationAssociation(nn.Module):
         observations: Tensor,
         relative_offsets: Tensor,
         observed: Tensor | None,
+        target_cell_observed: Tensor | None = None,
     ) -> ObjectObservationMeasurement:
         facts.validate()
         if observations.ndim != 6:
@@ -182,9 +190,27 @@ class ObjectObservationAssociation(nn.Module):
         if batch != facts.batch or width != self.content_dim:
             raise ValueError("future supports do not match current object content")
         if observed is not None:
-            if tuple(observed.shape) != (batch, supports) or observed.dtype != torch.bool:
-                raise ValueError("Teacher source support must be bool [B,F]")
+            if (
+                tuple(observed.shape) != (batch, supports)
+                or observed.dtype != torch.bool
+                or observed.device != observations.device
+            ):
+                raise ValueError("Teacher source support must be bool [B,F] on the image device")
             observations = quarantine(observations, observed)
+        if target_cell_observed is not None:
+            if self.observation_measurement_mode != "source_consistent_v1":
+                raise ValueError(
+                    "explicit target cell support requires source-consistent measurement"
+                )
+            if (
+                target_cell_observed.shape != observations.shape[:-1]
+                or target_cell_observed.dtype != torch.bool
+                or target_cell_observed.device != observations.device
+            ):
+                raise ValueError(
+                    "measured cell support must be bool [B,F,C,Y,X] on the image device"
+                )
+            observations = quarantine(observations, target_cell_observed)
         if not bool(torch.isfinite(observations).all()):
             raise ValueError("Teacher future supports contain non-finite values")
         offsets = self._offsets(
@@ -196,7 +222,10 @@ class ObjectObservationAssociation(nn.Module):
             raise ValueError("Teacher future offsets contain non-finite values")
         if self.observation_measurement_mode == "source_consistent_v1":
             from .source_measurement import source_consistent_measurement
-            return source_consistent_measurement(self, facts, observations, offsets, observed)
+
+            return source_consistent_measurement(
+                self, facts, observations, offsets, observed, target_cell_observed
+            )
         objects = facts.objects
 
         # ``DenseObjectGrounder`` quarantines invalid candidate rows before its
@@ -250,9 +279,7 @@ class ObjectObservationAssociation(nn.Module):
                 posinf=0.0,
                 neginf=0.0,
             ).clamp_min(0.0)
-            address = torch.where(
-                chart_support[:, None], address, torch.zeros_like(address)
-            )
+            address = torch.where(chart_support[:, None], address, torch.zeros_like(address))
             address = address.flatten(2)
             address = address / address.sum(dim=-1, keepdim=True).clamp_min(1.0e-6)
             current_reference = torch.einsum(

@@ -126,12 +126,8 @@ def test_task_selection_filters_internal_lanes_and_preserves_external_test(tmp_p
 
 
 def test_shared_normalizer_artifact_is_recomputed_and_train_bound(tmp_path) -> None:
-    action = ArrayNormalizer.fit_zscore(
-        [np.asarray([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32)]
-    )
-    state = ArrayNormalizer.fit_zscore(
-        [np.asarray([[4.0, 5.0], [6.0, 7.0]], dtype=np.float32)]
-    )
+    action = ArrayNormalizer.fit_zscore([np.asarray([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32)])
+    state = ArrayNormalizer.fit_zscore([np.asarray([[4.0, 5.0], [6.0, 7.0]], dtype=np.float32)])
     train_ids = ["rdt_data/task_a/episode_0"]
     payload = {
         "schema": SHARED_NORMALIZER_SCHEMA,
@@ -295,6 +291,7 @@ def test_multitask_validation_reports_micro_macro_and_missing_coverage() -> None
             current_raw_units=current,
             gripper_transition_boundary=current,
             gripper_transition_boundary_raw_units=current,
+            row_valid=torch.ones(batch_size, horizon, dtype=torch.bool),
         ),
         online=SimpleNamespace(
             history=SimpleNamespace(
@@ -327,12 +324,8 @@ def test_multitask_validation_reports_micro_macro_and_missing_coverage() -> None
     assert report["physical_metric_semantics"] == "compatibility_alias_of_source_native"
     assert report["missing_tasks"] == ["missing"]
     assert set(report["tasks"]) == {"a", "b"}
-    assert report["tasks"]["a"]["validation_action_rmse_normalized"] == pytest.approx(
-        1.0
-    )
-    assert report["tasks"]["a"][
-        "validation_action_rmse_source_native"
-    ] == pytest.approx(1.0)
+    assert report["tasks"]["a"]["validation_action_rmse_normalized"] == pytest.approx(1.0)
+    assert report["tasks"]["a"]["validation_action_rmse_source_native"] == pytest.approx(1.0)
     assert report["tasks"]["a"]["validation_action_rmse_physical"] == pytest.approx(1.0)
     assert report["tasks"]["b"]["validation_action_rmse_physical"] == pytest.approx(3.0)
     assert report["micro"]["validation_action_rmse_physical"] == pytest.approx(5**0.5)

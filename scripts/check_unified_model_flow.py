@@ -140,8 +140,14 @@ def run(shape: str, variant: str, updates: int, raw_side: int) -> dict:
         device=torch.device("cpu"),
     )
     rows = []
+    parameter_ledger = []
     for step in range(updates):
         started = time.monotonic()
+        before = {
+            name: parameter.detach().clone()
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        }
         result = engine.train_step(batch, collect_diagnostics=True)
         assert torch.isfinite(result.loss) and torch.isfinite(result.gradient_norm)
         gradients = {}
@@ -168,6 +174,28 @@ def run(shape: str, variant: str, updates: int, raw_side: int) -> dict:
             gradients=gradients,
             seconds=time.monotonic() - started,
         )
+        # Per-parameter finite/gradient/update accounting supplements aggregate
+        # module magnitudes. A dormant/zero-initialized path is not fabricated
+        # into a nonzero gradient, and a missing path remains explicitly listed.
+        entries = []
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            grad = parameter.grad
+            changed = (parameter.detach().float() - before[name].float()).square().sum().sqrt()
+            entries.append(
+                dict(
+                    name=name,
+                    shape=list(parameter.shape),
+                    gradient_status="missing"
+                    if grad is None
+                    else ("zero" if not grad.count_nonzero() else "nonzero"),
+                    gradient_l2=None if grad is None else float(grad.detach().float().norm()),
+                    update_l2=float(changed),
+                )
+            )
+        parameter_ledger.append(dict(update=step + 1, entries=entries))
+        del before
         rows.append(row)
         print(json.dumps(row), flush=True)
     assert engine.global_step == updates and optimizer.state
@@ -192,6 +220,8 @@ def run(shape: str, variant: str, updates: int, raw_side: int) -> dict:
         scope="full production topology, ordinary training loss backward and AdamW updates, complete two-pass action generation",
         parameter_count=sum(p.numel() for p in model.parameters()),
         updates=rows,
+        parameter_ledger=parameter_ledger,
+        audit_caveat="Per-parameter paths are reported, not inferred from aggregate nonzero norms.",
         peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         real_data_passed=False,
         behavior_passed=False,

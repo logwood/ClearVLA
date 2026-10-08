@@ -1723,6 +1723,27 @@ scores and every physical-identity/motion/phase limitation remain unchanged unti
 fresh qualified training and matched closed loops establish otherwise.
 
 
+### Unified source-support continuation (2026-10-08; not a behavior promotion)
+
+The isolated unified branch fixes three independently reproduced producer-support
+defects. Canonical G must quarantine every owner/typed prior before reweighting
+the already rasterized source; an invalid original prior cannot re-enter as
+`0 * NaN`. Source-consistent successor measurement owns its frame/cell mask and
+must not inherit the current image's training mask. The optional measured-cell
+mask is Boolean `[B,F,C,Y,X]`; legacy measurement explicitly rejects that option.
+Identity loss group means count only groups with producer-admitted support.
+Correspondence and source prediction keep their separate support denominators;
+no learned null/allocation selects label support and no positive budget is cut.
+
+The regression runner now defaults to every tracked test file, including old
+adapters and nested solvers. A missing external pretrained asset remains an
+explicit asset-test skip, with a separate artificial format-only unit test.
+Full-topology diagnostics also record per-parameter ordinary gradient and
+actual-update status instead of treating module norm as universal connectivity.
+These changes do not qualify a physical long-gap matcher, new instance labels,
+controller state or task maintenance. Real-data and learned behavior remain
+separate required gates; synthetic topology tests cannot promote A/B.
+
 ### A/B repair qualification (2026-10-07; formal promotion pending)
 
 See audit section 34.33. A now connects ordinary normalized transport,
