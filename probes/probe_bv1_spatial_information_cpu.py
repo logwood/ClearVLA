@@ -114,6 +114,10 @@ def main():
     alpha = torch.tensor(0., requires_grad=True)
     law = (pa + pb) / 2 + alpha * delta
     derivative = torch.autograd.grad((relation(model, law) * cotangent).sum(), alpha)[0]
+    # Strictly positive laws exclude a hard-zero/support artefact.
+    soft_a, soft_b = .95 * pa + .05 / 256, .95 * pb + .05 / 256
+    with torch.no_grad(): sa, sb = relation(model, soft_a), relation(model, soft_b)
+    assert soft_a.min() > 0 and soft_b.min() > 0
 
     # Low-cost candidate mechanism; kept strictly inside this CPU experiment.
     shifted = copy.deepcopy(model)
@@ -182,6 +186,10 @@ def main():
             expectation_max_abs=float((pooled_a-pooled_b).abs().max()),
             relation_max_abs=float((va-vb).abs().max()), relation_rms=float((va-vb).square().mean().sqrt()),
             exact_repeat=True, signed_law_directional_vjp=float(derivative)),
+        positive_support_control=dict(min_probability=float(soft_a.min()),
+            tv=float((soft_a-soft_b).abs().sum()/2),
+            relation_max_abs=float((sa-sb).abs().max()),
+            relation_rms=float((sa-sb).square().mean().sqrt())),
         centered_offset_audit=dict(zero_init_exact=True, inherited_parameter_vjp_max_error=inherited_vjp_error,
             contrast_new_offset_vjp_l2=float(offset_pull.norm()), added_parameters=hidden,
             zero_coordinate_exact_zero=True, fixed_offset_controls=offset_rows,
