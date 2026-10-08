@@ -4328,3 +4328,34 @@ SAM long explorations continue. Do not retarget their running jobs, checkpoint
 bases or evaluation setups. Their results remain auxiliary evidence.
 The sections below retain historical research context; they are not a statement
 that the corresponding later production features are present in this checkout.
+
+#### First scoped B-v1 structural check completed
+
+Fixed probe dc43b1b1, B-v1-forward-structure-r1, completed01/24,05/24,11/24,
+17/136 with actual causal history and the selected complete checkpoint.
+Upstream preprocessing keeps its BF16 contract; isolated canonical G is FP32.
+All four owner replays are exact and parameters unchanged. No loss, optimizer,
+body-mask input or policy-action intervention is involved; these are not official
+CUDA action results. The original model code remains unchanged.
+
+Slot reads across the full two-camera chart remain different (mean pair-TV
+.92-.97); globally uniform reads are not the measured failure at these windows.
+This does not prove their physical identity. Their pooled update vectors have
+83-90% common energy, an activation statistic rather than independent causal
+contribution. The actual physical-object read tells a more specific story:
+case11's one supported top-view object pair changes TV
+.369 -> .372 -> .188 -> .078 through successive competitions; the final bounded
+G3 residual changes only .078 -> .077. Case05 likewise loses separation in the
+later transitions (for one pair .561 -> .506 -> .315). In case01, later
+iterations improve the supported physical distinctions. Therefore global removal
+of iteration/averaging or interpreting every mean as a bug is not supported.
+
+The next correction should target the recurrent address/value boundary and
+verify that object-specific evidence survives it while retaining successful
+windows. It is not yet justified to prescribe a particular gate, detach, skipped
+iteration or replacement loss. No structural repair is claimed from these four
+diagnostic windows. The source-mask/future-target support defect remains a
+separate confirmed, selectively integrable fix; it does not explain this
+v1-to-v2 regression because both completed runs used the same measurement mode.
+Small statistics and exact reproduction command/identity live in the receipt and
+B-v1-forward-structure-r1/decision-summary.json; no feature tensors were saved.
