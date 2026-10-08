@@ -1695,6 +1695,33 @@ execution adaptation from being accidentally disabled by a short repair test.
 ## Agent quick contract
 
 
+### CPU structural findings during GPU interruption (2026-10-08)
+
+Research34.33.27 / probe141a84ae strictly loads complete B-v1 weights on CPU.
+Selected S is joint_object_scene_v1. Its bias-free coordinate feature obeys
+phi(x)-phi(-x)=W2 W1 x: odd zero-first-moment probability differences are
+lost before task interaction. Legal reflected laws with TV1 (or.95 with
+every cell positive) yield S differences at FP32 roundoff. This is a
+spatial-feature limitation at fixed other facts, not whole-policy
+equivalence or proof of the17->12 training regression.
+
+ObjectWorldBelief/FutureObjectDynamics discard the current image law;
+explicit W/P2 geometry reads centers/mean transport/covariance. The same
+laws give identical P2 context/centroid score but distinct full-law scores.
+Read-only current maniskill commit26a6bf6f suggests a full-law interface;
+its StackCube RED-target objective is not valid CALVIN target supervision.
+No message or mutation to that active task.
+
+Two candidate mechanisms exist ONLY inside the CPU probe: zero-start
+centered coordinate offsets (512params, exact inherited forward/VJP
+parity) and a full-law geometry integral. Neither is in production or
+behaviorally qualified. A global spatial-v2 toggle also changes P2;
+do not present it as an isolated S repair. Preserve B-v1 objectives,
+shared K/null/support, ordinary gradients and the pending G address
+memory qualification. Actual BS8 cost and standard18/R8 remain required.
+
+
+
 The scoped B-v1 forward probe dc43b1b1 is complete (four real windows, exact
 isolated-FP32 G repeat, no parameter changes). Global K reads differ, but05/11
 lose supported physical-object separation during later recurrent transitions;
@@ -1704,16 +1731,19 @@ mean removal, skipped iterations or any new gate. See34.33.25 before editing.
 
 ### Live B-v1 address continuations
 
-The user now requires both checkpoints' standard18/R8 panels on physicalGPU1
-to release one card for others. Existing training continues unchanged onGPU0
-(candidate2911284) andGPU2 (control2903424), with1024BS8/256offline from
-B-v1 step12036 to13060. GPU0 remains reserved after its training/offline ends;
-later audits use idleGPU2. Do not reclaimGPU0 for probes or a new training job
-without further user instruction. BS4 remains the authorized fallback only if
-needed; neither these running jobs nor closed-loopR8 changed.
+The user requires both checkpoints' standard18/R8 panels on physicalGPU1
+to release one card for others. At16:46UTC, after1024BS8 updates from B-v1
+step12036, BOTH original jobs failed in offline validation with CUDA unknown
+error in the pin-memory thread. Their two continuation statuses are failed
+(FileNotFoundError), not waiting. Do not infer a complete256-offline/final
+checkpoint/panel from the training update count. Preserve failure logs;
+check saved checkpoint identity and missing stages after GPU recovery before
+resuming. GPU0 remains reserved for others after existing work; later audits
+useGPU2. Do not reclaimGPU0 without further user instruction.
+BS4 remains an authorized fallback; closed-loop execute_rows remains8.
 
 Old scheduling parents2882377/2882378 have exited and must not be restarted.
-Active GPU1 continuations in E=causal-identity-ab-20261007 are
+Recorded GPU1 continuations in E=causal-identity-ab-20261007 are
 B-v1-address-memory-gpu1-evaluation-r2 PID3046434 (fixed probee1c98582) and
 B-v1-continuation-control-gpu1-evaluation-r1 PID3040278 (probe1f75fd0a).
 Read their .receipt.json and -job/status.json. The candidate r1 scheduling-lock

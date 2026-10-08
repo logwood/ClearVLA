@@ -4520,3 +4520,128 @@ B-v1-gpu1-handoff-verified-r2.json. Helpers in /home/sen.wang/mysh:
 clearvla-bv1-gpu1-evaluation-20261008.sh control and
 clearvla-bv1-gpu1-evaluation-recovery-20261008.sh for the candidate.
 Do not rerun the original memory helper after the recorded r1 failure.
+
+## 34.33.27 CPU structural localization during GPU interruption (2026-10-08)
+
+The user requests source research while remote GPUs are faulty, with a
+read-only comparison to the active current maniskill conversation. No message
+was sent to that conversation; its worktree and jobs were not changed.
+Our production remains e4be3be6 and the base remains original B-v1.
+
+### Two distinct information boundaries in the selected graph
+
+The actual meaningful short configuration selects joint_object_scene_v1,
+coordinate_role_v1 W, and view_conditioned_transport_v1 P2. Historical
+spatial-v2 documentation must not be mistaken for this selected graph.
+
+1. model/task_execution.py:56-59 defines phi(x)=W2 SiLU(W1 x), both biases
+   disabled. Lines191-197 first form E_p phi(x), before task interaction.
+   SiLU(z)-SiLU(-z)=z implies phi(x)-phi(-x)=W2 W1 x, exactly.
+   Any odd signed probability difference with zero first moment is therefore
+   invisible to this spatial feature, for ANY W1/W2. Later conditioning
+   cannot recover that component from its pooled feature. This is a specific
+   structural nullspace, beyond the generic claim that pooling loses detail.
+2. G produces a full current K/view image law, but model/types.py:764-789
+   compacts it into ObjectWorldBelief with centers and typed content, without
+   that raster. ObjectWorldBelief and FutureObjectDynamics omit the current
+   probability. model/compiler.py:652-684 scores current/future geometry from
+   centers and mean transport/covariance; model/view_geometry.py:46-66 also
+   constructs explicit P2 context from center/covariance/view role. Equal
+   centers at fixed W covariance thus give identical explicit P2 geometry
+   despite different supported spatial laws.
+
+These results hold other facts fixed. G content, per-view attributes, P1 and
+other policy routes can still differ on natural images. They do not prove
+whole-policy equivalence, nor the cause of17/18 ->12/18: both boundaries
+already exist in B-v1, before the training-objective change.
+
+### Complete B-v1 weights, CPU reproduction and limits
+
+Probe141a84ae435c8047122883349f0a3f3679aacff0 is pinned at
+b-v1-spatial-audit-141a84ae, runtime e4be3be6. It strictly loads actual S/P2
+weights from B-short-bs8-1024-r1/checkpoints/best.pt, step12036/source3a843999,
+SHA ce5753bf98a5e17254e6bbdbdd93fa80d09003a8b9b47d38cf2c3ca76d12ed25.
+CPU FP32, FP64 algebra check, CUDA_VISIBLE_DEVICES empty, zero optimizer
+updates, module weights unchanged.
+
+Two reflected16x16 laws have disjoint positive mass, TV1, identical centers
+and second moments (FP32 second-moment residual2.98e-8). Actual S relation
+max difference1.1921e-7/RMS2.2271e-8; pooled coordinate max9.686e-8.
+Same-input repeat is exact. FP64 algebra identity residual1.22e-15.
+Adding5% uniform mass makes every cell strictly positive (minimum.0001953);
+TV.95 still yields S max1.1921e-7. This excludes a hard-zero support artifact.
+
+Actual P2 context and centroid score differences are both0. A diagnostic
+full-law kernel using the actual covariance metric,
+log E_p exp(clamp(-.25*distance(query,x),-1,0)), differs by up to.05849.
+It is a capability control, not a policy edit or trained success. Merely
+adding second moments would still fail this particular constructed pair.
+
+Inside the probe ONLY, a minimal alternative uses
+W2[SiLU(W1 x+b)-SiLU(b)] with H512 learned offsets initialized to0.
+Initial forward and inherited-parameter VJPs are exact; phi(0) stays0.
+The synthetic contrast VJP into b is L2.002906. Fixed, untrained +/-0.1 RMS
+offset controls yield relation max9.76e-6/9.91e-6. They are not accepted
+inference gains and do not establish ordinary training or action improvement.
+The existing contextual spatial-v2 S operator also distinguishes the pair
+(max2.916e-5) with inherited weights plus untrained context projection.
+It adds1,048,576 parameters versus512 offsets. Its global selector ALSO
+changes P2 effect comparison; toggling it is not an isolated S experiment.
+
+Artifacts in E: B-v1-spatial-information-cpu-r2/results.json, .receipt.json,
+.log; r1 retained. Reproduce with CUDA_VISIBLE_DEVICES empty and
+PYTHONPATH=/data/senwang/clearvla/checkouts/b-v1-address-memory-training-e4be3be6:
+
+    /data/senwang/envs/clearvla-sim/bin/python -B -u /data/senwang/clearvla/checkouts/b-v1-spatial-audit-141a84ae/probes/probe_bv1_spatial_information_cpu.py --checkpoint /data/senwang/clearvla/experiments/causal-identity-ab-20261007/B-short-bs8-1024-r1/checkpoints/best.pt --output /data/senwang/clearvla/experiments/causal-identity-ab-20261007/B-v1-spatial-information-cpu-new-reproduction
+
+### Transferable insight from current maniskill
+
+Read-only source: codex/maniskill-spatial-policy-repair-20261008,
+26a6bf6f9411125b41c621e808e90b8bece5e8d6. Its saved moment-collision audit
+confirms W/P2 centroid alias; S distinguished its horizontal/vertical example
+(RMS.01624). That is a different example from our reflection/zero-moment
+nullspace. Do not merge the two measurements.
+
+Its candidate carries current conditional K/view16x16 laws into W/P2, and
+performs task-conditioned spatial reads before pooling. The probability
+tensor alone is64KiB at BS8/K4/C2/FP32; this does not bound query-space
+activations, gradients or runtime. Its new graph lacked complete behavior
+results in the reviewed conversation. An earlier localization repair
+improved pixels while StackCube stayed0/18; spatial accuracy alone is not
+behavioral admission.
+
+Do not import its objective wholesale. The actual function
+training/spatial_supervision.py:matched_identity_binding_terms explicitly
+uses StackCube's operated RED object and a joint two-object camera assignment.
+CALVIN's red/blue/pink language-conditioned target contract differs. The
+useful lesson is evidence retention before querying, not transferring those
+labels or treating the new code as proven physical identity.
+
+### Narrow next repair sequence
+
+Keep B-v1 objectives and the pending G address-memory experiment identities.
+Qualify an explicit S-only symmetry-breaking feature option with zero-start
+migration and original K/null/support semantics. Separately qualify carrying
+the already available current per-view law through W/P2 and reading it before
+marginalization. No second K owner, online future label or new visual encoder
+is needed. Current-law retention alone does not recover multimodal future
+transport or calibrated visibility.
+
+For each candidate, check natural target changes at the same observation,
+known contact/withdrawal windows through S/P1/P2/detail/P3/action, repeat
+floor, support/unknown, K relabeling, initial parity and ordinary gradients.
+Then measure actual BS8 memory/runtime and standard18/R8 behavior onGPU1.
+The offset and integral in this audit are not production implementations.
+No GPU experiment or formal long run was launched by this CPU study.
+
+### Separate infrastructure status
+
+At16:46UTC both original1024-update job logs end during offline validation
+with CUDA unknown error from the pin-memory thread; both GPU1 continuations
+subsequently record FileNotFoundError. Snapshot in E:
+B-v1-gpu-fault-source-audit-20261008-r1.json. Complete256-offline/final
+checkpoint/panel is not established by those failed continuations.
+Preserve logs and existing work. After GPU recovery, check saved checkpoint
+identity and missing stages before resuming, rather than rerunning training
+or assuming a watcher is still waiting. GPU0 remains reserved for others
+after existing work; final panels remain onGPU1.
