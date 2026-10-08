@@ -1,0 +1,19 @@
+{
+  "schema": "clearvla-reviewed-source-v1",
+  "parent": "905b0b8cf4e8ef80f279e008fc16882f25ea0894",
+  "parent_tree": "1e43bf45bb1b9b166968f33de891914d1ee94a0f",
+  "formatted_base_tree": "1e43bf45bb1b9b166968f33de891914d1ee94a0f",
+  "source_tree": "b442ebba69ee04db03ca63d9f230c1472e5d843a",
+  "format_existing_python": [],
+  "patch_bytes": 49628,
+  "patch_sha256": "c6393cec44f06449c46f189529fb6a69b7362a149b39595dd81e6db9fd70321b",
+  "message": "fix: keep producer support authoritative across G, measurement and identity losses",
+  "compressed_blobs": [
+    {"sha":"7dd50d8c732649ec4668508823da019023ce6ee8","size":4500},
+    {"sha":"07575c32487901de941509fa3b4ee25c077a1f8c","size":2250},
+    {"sha":"730c42b4b98f77edf07c3336e6e5defea97f352f","size":2250},
+    {"sha":"9b6db745837f65d5580c4bc653353a2865f2d457","size":2250},
+    {"sha":"0b567e7f398c28ff6bd853a8151c6867fed0a408","size":2250},
+    {"sha":"9faf9dbb54416ce1d82e47b8b1bc2e9d34b65e54","size":1242}
+  ]
+}
