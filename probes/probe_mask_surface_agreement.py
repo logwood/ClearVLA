@@ -12,7 +12,7 @@ import json
 import numpy as np
 
 
-def proposal_partition(masks, surface):
+def proposal_partition(masks, surface, *, interior_radius=0):
     if masks.shape[1:] != surface.shape:
         raise ValueError('native observation grids differ')
     legal = (masks.sum(0) == 1) & (surface >= 0)
@@ -21,6 +21,21 @@ def proposal_partition(masks, surface):
     values, inverse = np.unique(pairs, axis=0, return_inverse=True)
     partition = np.full(surface.shape, -1, np.int64)
     partition[legal] = inverse
+    if interior_radius not in (0, 1):
+        raise ValueError('undeclared native-pixel interior rule')
+    if interior_radius:
+        # Confidence comes from proposal boundaries, never from oracle masks.
+        # Outside the image is unknown. Keep a point only when its complete
+        # 3x3 neighborhood agrees on both independent proposal identities.
+        padded = np.pad(partition, 1, constant_values=-1)
+        keep = partition >= 0
+        for dy in range(3):
+            for dx in range(3):
+                keep &= padded[dy:dy+surface.shape[0],dx:dx+surface.shape[1]] == partition
+        partition[~keep] = -1
+        alive, inverse = np.unique(partition[keep], return_inverse=True)
+        values = values[alive]
+        partition[keep] = inverse
     return partition, values
 
 
@@ -80,6 +95,8 @@ def main():
     p.add_argument('--groups', type=Path, nargs='+', required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--audit-all-bodies', action='store_true')
+    p.add_argument('--interior-radius', type=int, choices=(0,1), default=0,
+                   help='Optional fixed one-native-pixel confidence interior; oracle independent')
     args = p.parse_args(); args.output.mkdir(exist_ok=False)
     sam = json.loads(args.sam.read_text()); assert sam['complete']
     if hashlib.sha256(args.plan.read_bytes()).hexdigest() != sam['identity']['plan_sha256']:
@@ -93,7 +110,9 @@ def main():
             if key in surface:
                 raise ValueError('duplicate surface key; use separate physical audit sets')
             surface[key] = r
-    result = dict(complete=False, records=[], production_changed=False, scope=__doc__)
+    result = dict(complete=False, records=[], production_changed=False, scope=__doc__,
+                  interior_radius=args.interior_radius,
+                  training_use='unqualified negative proposals only; existing sensor positives unchanged')
     for row in sam['records']:
         key = (row['case_id'], row['step']); group = surface[key]; plan = plans[key]
         if Path(row['case']).resolve() != Path(plan['case']).resolve():
@@ -104,7 +123,7 @@ def main():
                 raise ValueError('proposal file identity changed')
         # Construct labels without accessing any physical identity mask.
         with np.load(row['proposal_path'], allow_pickle=False) as a, np.load(group['groups_path'], allow_pickle=False) as b:
-            partitions = [proposal_partition(a[name],b[other]) for name,other in
+            partitions = [proposal_partition(a[name],b[other],interior_radius=args.interior_radius) for name,other in
                           [('masks_top','group_static'),('masks_wrist','group_gripper')]]
         truth_path = Path(plan['masks'])/Path(plan['case']).name/('state_%03d.npz'%row['step'])
         if hashlib.sha256(truth_path.read_bytes()).hexdigest()!=row['audit_mask_sha256']:
