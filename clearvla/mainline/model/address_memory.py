@@ -33,9 +33,59 @@ def retain_address(competition, previous: Tensor, gain: Tensor, prior: Tensor,
 
 
 def competition_with_memory(module, slots, candidates, valid, prior, log_prior,
-                            legal, previous, index):
+                            legal, previous, index, *, diagnostics=None):
     result = module._competition(slots, candidates, valid, prior, log_prior, legal)
     if previous is not None:
+        baseline = result
         result = retain_address(result, previous, module.address_memory_gain[index - 1],
                                 prior, log_prior, legal)
+        if diagnostics is not None:
+            diagnostics.update(address_boundary_metrics(baseline, result, prior, legal, index))
     return result
+
+
+@torch.no_grad()
+def address_boundary_metrics(baseline, updated, prior, legal, index):
+    """Immediate same-input routing change; not object identity or downstream gain.
+
+    No extra competition/encoder call. Producer mass weights only legal cells.
+    Empty support contributes zero and its mass is reported explicitly.
+    """
+    with torch.autocast(device_type=prior.device.type, enabled=False):
+        weight = torch.where(legal, prior.detach().float()[..., 0], 0.)
+        total = weight.sum()
+        def conditional(value):
+            logits = torch.where(legal[..., None], value[4].detach().float()[..., :-1], 0.)
+            return torch.softmax(logits, -1)
+        tv = .5 * (conditional(updated) - conditional(baseline)).abs().sum(-1)
+        read_tv = .5 * (updated[3].detach().float() - baseline[3].detach().float()).abs().sum(-1)
+        read_support = legal.any(-1, keepdim=True).expand_as(read_tv).float()
+        prefix = f"object_grounding_address_step{index}_"
+        return {
+            prefix + "conditional_tv": (tv * weight).sum() / total.clamp_min(torch.finfo(weight.dtype).tiny),
+            prefix + "read_tv": (read_tv * read_support).sum() / read_support.sum().clamp_min(1),
+            prefix + "producer_mass": total.clone(),
+            prefix + "null_change_max": (updated[0][..., -1].detach() - baseline[0][..., -1].detach()).abs().max(),
+            prefix + "real_mass_change_max": (updated[0][..., :-1].detach().sum(-1) - baseline[0][..., :-1].detach().sum(-1)).abs().max(),
+        }
+
+
+@torch.no_grad()
+def address_parameter_metrics(parameter):
+    """Snapshot ordinary preclip gradients; disconnected is distinct from zero.
+
+    Clone before optimizer.step so archived values cannot alias live parameters.
+    """
+    value = parameter.detach().float().clone()
+    gradient = None if parameter.grad is None else parameter.grad.detach().float().clone()
+    metrics = {
+        "gradient_parameter_address_memory_connected": value.new_tensor(float(gradient is not None)),
+    }
+    for index in range(value.numel()):
+        metrics[f"object_grounding_address_gain{index + 1}"] = value[index].clone()
+        metrics[f"object_grounding_address_effective_gain{index + 1}"] = value[index].tanh()
+        if gradient is not None:
+            metrics[f"gradient_parameter_address_gain{index + 1}_raw"] = gradient[index].clone()
+    if gradient is not None:
+        metrics["gradient_parameter_address_memory_raw_l2"] = gradient.norm()
+    return metrics

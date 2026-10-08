@@ -557,8 +557,12 @@ def save_checkpoint(
     best_metric: float | None,
     data_state: Mapping[str, object] | None = None,
     generators: Mapping[str, torch.Generator] | None = None,
+    validation_pending: bool = False,
 ) -> None:
-    """Write one recoverable checkpoint without serializing runtime caches."""
+    """Write an atomic checkpoint; pending snapshots are not validated bests."""
+
+    if not isinstance(validation_pending, bool):
+        raise ValueError("checkpoint validation_pending must be Boolean")
 
     config.validate()
     identity.validate()
@@ -598,6 +602,9 @@ def save_checkpoint(
             name: generator.get_state() for name, generator in sorted((generators or {}).items())
         },
     }
+    if validation_pending:
+        # Omit for ordinary checkpoints to retain their existing payload contract.
+        payload["validation_pending"] = True
     handle, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.",
         suffix=".tmp",
@@ -626,6 +633,14 @@ def load_checkpoint_exact(
     payload = torch.load(Path(path), map_location="cpu", weights_only=False)
     if not isinstance(payload, Mapping):
         raise ValueError("exact resume payload must be a mapping")
+    pending = payload.get("validation_pending", False)
+    if not isinstance(pending, bool):
+        raise ValueError("checkpoint validation_pending must be Boolean")
+    if pending:
+        raise ValueError(
+            "checkpoint validation is pending; use read-only validation first, "
+            "not exact resume that would skip the incomplete epoch"
+        )
     if payload.get("schema") != CHECKPOINT_SCHEMA:
         raise ValueError(
             "exact resume requires a v4 mainline checkpoint with complete input identity"

@@ -451,6 +451,9 @@ class MainlineTrainingEngine:
                 if gradient is None
                 else gradient.detach().float().square().mean().sqrt()
             )
+        if self.config.top.entity_address_memory_mode == "conditional_logits_v1":
+            from ..model.address_memory import address_parameter_metrics
+            metrics.update(address_parameter_metrics(parameters["top.grounder.address_memory_gain"]))
         return metrics
 
     def _world_gradient_route_probe(self, ledger: LossLedger) -> dict[str, Tensor]:

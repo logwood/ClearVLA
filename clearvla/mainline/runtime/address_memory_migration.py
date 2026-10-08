@@ -3,7 +3,7 @@ import torch
 
 B_V1_ADDRESS_MEMORY_V1 = "b_v1_address_memory_v1"
 SOURCE_DIGEST = '15eb1669daa33fab4559ee9f88a978bc572b65033d336af809da6ea8b628e328'
-SOURCE_PATHS = frozenset(['clearvla/mainline/config.py', 'clearvla/mainline/causal_identity.py', 'clearvla/mainline/model/grounding.py', 'clearvla/mainline/model/top.py', 'clearvla/mainline/model/policy.py', 'clearvla/mainline/model/canonical_grounding.py', 'clearvla/mainline/model/address_memory.py', 'clearvla/mainline/runtime/address_memory_migration.py', 'clearvla/mainline/runtime/checkpoints.py', 'clearvla/mainline/train.py'])
+SOURCE_PATHS = frozenset(['clearvla/mainline/config.py', 'clearvla/mainline/causal_identity.py', 'clearvla/mainline/model/grounding.py', 'clearvla/mainline/model/top.py', 'clearvla/mainline/model/policy.py', 'clearvla/mainline/model/canonical_grounding.py', 'clearvla/mainline/model/address_memory.py', 'clearvla/mainline/runtime/address_memory_migration.py', 'clearvla/mainline/runtime/checkpoints.py', 'clearvla/mainline/train.py', 'clearvla/mainline/training/engine.py'])
 KEY = "grounding.grounder.address_memory_gain"
 
 

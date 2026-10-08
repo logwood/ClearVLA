@@ -3018,6 +3018,37 @@ def main() -> None:
         train_values["runtime_seconds_per_batch"] = epoch_seconds / max(epoch_batches, 1)
         train_values["runtime_samples_per_second"] = epoch_samples / max(epoch_seconds, 1e-8)
         train_task_mix = _task_sample_mix(bundle, task_sample_counts)
+        # Persist completed updates before offline validation can fail. This
+        # separate artifact is neither latest.pt nor a validated/best model.
+        checkpoint_dir = output_dir / "checkpoints"
+        training_checkpoint = checkpoint_dir / "training_complete.pt"
+        save_checkpoint(
+            training_checkpoint,
+            model=model,
+            optimizer=optimizer,
+            schedule=schedule,
+            config=config,
+            identity=identity,
+            epoch=epoch,
+            global_step=engine.global_step,
+            best_metric=best_metric,
+            data_state=data_state,
+            generators={
+                "train_loader": train_loader_generator,
+                "train_flow": train_flow_generator,
+                "train_condition": train_condition_generator,
+            },
+            validation_pending=True,
+        )
+        logger.write(
+            "training_complete",
+            epoch=epoch,
+            step=engine.global_step,
+            checkpoint=str(training_checkpoint),
+            validation_pending=True,
+            train={**train_values, **_cuda_memory_metrics(device)},
+            train_task_mix=train_task_mix,
+        )
         validation_report = _validate(
             engine=engine,
             loader=val_loader,

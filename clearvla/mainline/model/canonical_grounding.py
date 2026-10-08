@@ -32,7 +32,7 @@ class SharedIdentityViewDecoder(nn.Module):
         return value,self.background(role)
 
 
-def encode_owners(module,candidates,mass,legal):
+def encode_owners(module,candidates,mass,legal,*,diagnostics=None):
     """One shared slot transition and one K+null competition on canonical cells."""
     b,n,h=candidates.shape
     prior=mass.float()[...,None]
@@ -44,7 +44,7 @@ def encode_owners(module,candidates,mass,legal):
     for index in range(module.iterations):
         if memory:
             from .address_memory import competition_with_memory
-            _,_,_,read,address,_=competition_with_memory(module,slots,candidates,valid,prior,log_prior,legal,previous,index)
+            _,_,_,read,address,_=competition_with_memory(module,slots,candidates,valid,prior,log_prior,legal,previous,index,diagnostics=diagnostics)
             previous=address[...,:module.objects]
         else:
             _,_,_,read,_,_=module._competition(slots,candidates,valid,prior,log_prior,legal)
@@ -57,7 +57,7 @@ def encode_owners(module,candidates,mass,legal):
             scale=torch.linalg.vector_norm((nxt+ffn).float(),dim=-1,keepdim=True).detach().clamp_min(1e-6)
         slots=nxt+ffn+(.5*scale*identity).to(nxt)
     if memory:
-        _,_,_,_,parent_log,_=competition_with_memory(module,slots,candidates,valid,prior,log_prior,legal,previous,module.iterations)
+        _,_,_,_,parent_log,_=competition_with_memory(module,slots,candidates,valid,prior,log_prior,legal,previous,module.iterations,diagnostics=diagnostics)
     else:
         _,_,_,_,parent_log,_=module._competition(slots,candidates,valid,prior,log_prior,legal)
     pair=torch.cat((slots[:,None].expand(-1,n,-1,-1),candidates[:,:,None].expand(-1,-1,module.objects,-1)),-1)
@@ -108,7 +108,8 @@ def canonical_grounding(module,local,chart,history_context,*,collect_diagnostics
         history=rasterize_value(source,mass,history_context,chart.candidate_validity)
         value=value+module.history_key(history.to(value))
     candidates=torch.where(legal[...,None],module.candidate_norm(value),0.).reshape(b,c*u,-1)
-    identity,owner_log=encode_owners(module,candidates,mass.reshape(b,-1),legal.reshape(b,-1))
+    address_metrics = {} if collect_diagnostics else None
+    identity,owner_log=encode_owners(module,candidates,mass.reshape(b,-1),legal.reshape(b,-1),diagnostics=address_metrics)
     owner_log=owner_log.reshape(b,c,h,w,k+1).permute(0,4,1,2,3)
     log_mass=torch.where(mass>0,mass,1.).log().reshape(b,1,c,h,w)
     supported=legal.reshape(b,1,c,h,w).expand(-1,k,-1,-1,-1)
@@ -171,4 +172,5 @@ def canonical_grounding(module,local,chart,history_context,*,collect_diagnostics
         object_grounding_null_mass=(null[:,0]*mass).sum().detach()/total.detach(),
         object_grounding_mass_conservation_error=conserved.detach().abs().max(),
         object_grounding_slot_pair_cosine=module._pair_cosine(identity),object_grounding_object_content_pair_cosine=module._pair_cosine(content))
+    metrics.update(address_metrics)
     return facts,metrics
