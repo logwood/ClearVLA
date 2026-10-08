@@ -116,7 +116,8 @@ def main():
                 with np.load(args.masks/Path(row['case']).name/('state_%03d.npz'%t),allow_pickle=False) as z:
                     masks=[z['top_masks'],z['wrist_masks']];names=z['object_names'].tolist()
                 record=dict(case_id=row['case_id'],step=t,shape=list(x.shape),camera_grid=list(shape),
-                    input=contrast(x,legal),input_body=body_scores(x,legal,shape,masks,names),variants={})
+                    input=contrast(x,legal),input_body=body_scores(x,legal,shape,masks,names),
+                    unprojected_slot_feedback=contrast(q@slots,legal),variants={})
                 for cls in (SlotToImageFeedback,RegionImageFusion):
                     torch.manual_seed(1729);adapter=cls(x.shape[-1],32).to(device)
                     with torch.no_grad():
@@ -132,6 +133,25 @@ def main():
                             zero_init_features_and_ownership_exact=True,latent=contrast(latent,legal),
                             latent_body=body_scores(latent,legal,shape,masks,names),
                             spatially_constant_ownership_control=contrast(collapsed,legal))
+                        # Retain spatially varying real/null mass; remove only
+                        # spatial differences in conditional real-K identity.
+                        real=q.sum(-1,keepdim=True)
+                        kmean=q.sum(1,keepdim=True)/q.sum((1,2),keepdim=True).clamp_min(1e-12)
+                        no_identity=adapter.latent(x,slots,real*kmean,legal,shape)
+                        item['constant_conditional_K_preserved_null']=contrast(no_identity,legal)
+                        item['conditional_K_dependent_difference']=contrast(latent-no_identity,legal)
+                        if isinstance(adapter,RegionImageFusion):
+                            weight=adapter.mask.weight.detach().clone()
+                            adapter.mask.weight.zero_()
+                            no_mask=adapter.latent(x,slots,q,legal,shape)
+                            adapter.mask.weight.copy_(weight)
+                            item['no_mask_embedding_control']=contrast(no_mask,legal)
+                            item['mask_embedding_difference']=contrast(latent-no_mask,legal)
+                            item['no_mask_embedding_body']=body_scores(no_mask,legal,shape,masks,names)
+                            # Spatially constant x and q expose convolution
+                            # padding/support-boundary effects, not object facts.
+                            xc=((x*legal[...,None]).sum(1,keepdim=True)/legal.sum(1,keepdim=True)[...,None].clamp_min(1)).expand_as(x)
+                            item['constant_image_and_ownership_control']=contrast(adapter.latent(xc,slots,qc,legal,shape),legal)
                         # Same real input replicated to BS8: operator microbenchmark only.
                         if not records:
                             xb=x.expand(8,-1,-1).contiguous();sb=slots.expand(8,-1,-1).contiguous();qb=q.expand(8,-1,-1).contiguous();lb=legal.expand(8,-1).contiguous();mb=mass.expand(8,-1).contiguous()
