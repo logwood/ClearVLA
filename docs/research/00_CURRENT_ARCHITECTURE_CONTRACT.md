@@ -1845,6 +1845,17 @@ Production source d009465f is immutable; B-regions-v3-mechanical-r1 is only a
 two-update BS8 entry check. Formal A/B remain unstarted. Long-gap measurement,
 controller state, arm/gripper and task maintenance remain separately open.
 
+Latest production is56c217d5: r1's cold load exposed a training-manifest
+requirement at the deployment graph boundary. Graph validation now accepts
+both label fields absent; the training data loader still requires them.
+No training path or annotation is imported by deployment. Fresh mechanical-r2
+and its four cold factual windows pass (step11014; all repeats/static changes0).
+Original identity terms reproduce T2 exactly in actual masked BS8; new ordinary
+VJPs are finite/nonzero. These do not prove an identity improvement. The pinned
+short-pipeline-r1 prepares9,258 pairs at the full frozen teacher budget, then
+runs1024 BS8 updates/256 offline and the separate18/R8 panel, subject to the
+recorded mechanical gate. No formal experiment is automatically promoted.
+
 For causal-repair decisions, use G_SLOT_IDENTITY_BINDING_REVIEW.md sections
 34.26–34.32 alongside the admitted source/config. Full a2d597d2 behavior is
 11/18; the 512-update repair is 7/18 and retained-Adam 64-update diagnostics are

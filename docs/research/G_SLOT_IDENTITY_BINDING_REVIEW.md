@@ -3500,3 +3500,49 @@ cross-view/time identity and correct natural target selection through the
 first eight arm/gripper commands. Long-gap observed matching, task maintenance
 and controller/action contracts remain separate unresolved repairs. Neither
 the new loss nor a successful mechanical checkpoint closes those questions.
+
+**Mechanical closure and a caught deployment boundary error.** R1 completed
+two BS8 updates and two offline batches at step11014, but cold loading failed:
+generic graph validation required a training annotation path which deployment
+correctly strips. Preserve `B-regions-v3-factual-mechanical-r1` and its failure
+log. Fix56c217d5 allows both annotation fields absent when validating a graph;
+the actual training/validation loader requires the pinned manifest before
+reading any dataset. Partial or malformed metadata still fails. Deployment
+continues to carry no training path or label input.
+
+Fresh `B-regions-v3-mechanical-r2` from mature a2, fixed production56c217d5,
+passed two BS8 updates/two offline batches. Its best.pt is epoch1/step11014,
+2,487,525,096 bytes, SHA256
+`5be49a2c1a4ebf654b4119043009d31d5235e6d11f3f0fac207fc18d5b86fef1`.
+All recorded numeric metrics are finite; preclip norms2.741/2.426; peak CUDA
+allocation21.012GiB. First-batch full original identity terms, pair counts and
+null/support diagnostics reproduce T2 exactly (max difference0). The actual
+masked BS8 loss has7 supported negative operands and117 prediction strata;
+raw new-loss ordinary G parameter VJP L2 is .05976/.89686. The second batch
+has zero separation loss; absence/satisfied edges are not filled with invented
+labels. First batch includes extra VJPs and is not a throughput measurement;
+the next single batch is8.26s, insufficient for a stable speed claim.
+
+Cold deployment `B-regions-v3-factual-mechanical-r2` completed all four factual
+windows from the new checkpoint: exact same-instruction repeats and exact
+same-image semantic/displacement zero. This only closes loading/numerical
+contracts; two updates do not establish physical identity or improved behavior.
+Actual payload/log identity is in `B-regions-v3-mechanical-r2-final-audit.json`.
+
+Full meaningful-short exposure resolves9,258 unique raw pairs across1,024 BS8
+updates,256 offline batches and separately declared prefetch rows. The pinned
+`B-regions-v3-short-pipeline-r1` (probe7ea854e8) waits for explicit mechanical
+admission, generates four full-prompt annotation shards on idle GPUs, verifies
+all source/label hashes and exact coverage, then starts the ordinary1024-update
+BS8 short from mature a2. No model is trained during annotation, and annotation
+cost remains in the receipt. The separate standard18/R8/stored_target watcher
+uses port18834. These are short-run continuations, never formal promotion.
+Check receipts/status before starting anything again.
+
+Source-control probes d06755d7 support an explicit `--common-objective-only`
+v3 audit: independent old factual/validation windows score the unchanged
+correspondence/source-MSE terms without inventing region labels. The model
+weights and online graph stay v3; only the loss probe selects the common v2
+subobjective. Its output explicitly excludes new region losses. Actual region
+ordinary gradients remain a separate full training-entry check. Do not call a
+common-only decomposition a complete v3 objective audit.
