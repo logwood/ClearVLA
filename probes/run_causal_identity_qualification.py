@@ -85,8 +85,15 @@ def main():
                     raise ValueError('full standard panel is incomplete or has another identity')
             status('waiting_gpu', stage=stage['name'], gpu=receipt['gpu'])
             while True:
-                used = int(subprocess.check_output(['nvidia-smi', '-i', receipt['gpu'], '--query-gpu=memory.used', '--format=csv,noheader,nounits'], text=True))
-                if used < 512:
+                memory = subprocess.check_output(['nvidia-smi', '-i', receipt['gpu'], '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'], text=True)
+                used,total=(int(v.strip()) for v in memory.split(','))
+                # Default remains an exclusive model audit. A declared CPU or
+                # small EGL-only replay may instead request bounded free RAM;
+                # this never admits a formal model job to a shared card.
+                required=stage.get('gpu_free_mib')
+                if required is not None and (not isinstance(required,int) or required<4096 or required>total):
+                    raise ValueError('invalid explicit audit GPU headroom')
+                if (required is None and used<512) or (required is not None and total-used>=required):
                     break
                 if time.monotonic() > deadline:
                     raise TimeoutError('qualification GPU stayed occupied')
