@@ -4477,3 +4477,46 @@ This does not replace or merge either B-v1 short.
 At14:16UTC r2 has its first20-BS8 window atstep12056: finite logged metrics,
 loss0.517197/action-flow0.431014,6.523s per batch. It has passed the earlier launch
 failure point; this is startup evidence only, not completion or behavior gain.
+
+#### 34.33.26 GPU1 panel placement (2026-10-08 user clarification)
+
+The user requests both completed short checkpoints to run closed-loop on
+physical GPU1, sharing its available memory, so one card remains available
+to other people. GPU0 is reserved for others after its existing candidate
+training and offline validation finish. Do not schedule later probes/training
+on that released card without a new user instruction. Existing training PIDs
+2911284 (GPU0) and2903424 (GPU2) continue unchanged; no training process,
+optimizer, source, configuration or sample exposure was restarted.
+
+The old scheduling parents2882377/2882378 were replaced only after exact
+PID/start-time/UID/command/parent checks. A real dummy-process handoff confirms
+the child completes while the obsolete parent cannot start its old panel.
+The candidate's first watcher successfully adopted the child but failed while
+reacquiring the old GPU0 scheduling lock; its failed status/log and
+FAILURE_SCOPE.json remain. Recovery observes the same surviving child without
+requesting a GPU lease just to wait. This is scheduling recovery, not a failed
+training or a new experiment.
+
+Use these current continuations, not the obsolete parent PIDs:
+- candidate B-v1-address-memory-gpu1-evaluation-r2, PID3046434,
+  fixed probe e1c985828cad9a6215277d47327ddee68b502e1c;
+- control B-v1-continuation-control-gpu1-evaluation-r1, PID3040278,
+  fixed probe1f75fd0a770a471b84fe4b25cdc2db8510d3d0b9.
+Their .receipt.json/-job.json/-job/status.json and -watcher.log live in E.
+The original short job status points to the new continuation. Production
+e4be3be6 and the original training wrapper8d79c5cc remain immutable.
+
+After the original wrapper's1024-update/256-offline completion, each continuation
+verifies the saved latest.pt epoch1/step13060, source/config identity, exposure
+and finite weights. Both standard18/R8/stored_target panels use physicalGPU1
+UUID GPU-24cf9b56-d67a-4e35-6761-225b0d4383b5, EGL1, and original ports18840/18841.
+They serialize through E/B-v1-gpu1-closed-loop.lock. GPU1 need not be empty.
+Panel manifests, outputs, all18 NPZ and checkpoint identities are unchanged.
+Later factual/source/old60/own-trajectory audits run serially on idleGPU2;
+they never reclaim GPU0. No automatic formal-long promotion is introduced.
+
+Evidence: gpu1-scheduler-handoff-mechanical-r1/results.json and
+B-v1-gpu1-handoff-verified-r2.json. Helpers in /home/sen.wang/mysh:
+clearvla-bv1-gpu1-evaluation-20261008.sh control and
+clearvla-bv1-gpu1-evaluation-recovery-20261008.sh for the candidate.
+Do not rerun the original memory helper after the recorded r1 failure.

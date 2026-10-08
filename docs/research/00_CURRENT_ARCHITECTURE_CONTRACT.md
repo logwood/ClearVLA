@@ -1704,23 +1704,28 @@ mean removal, skipped iterations or any new gate. See34.33.25 before editing.
 
 ### Live B-v1 address continuations
 
-B-v1-address-memory-short-r1 PID2882377 and no-memory control PID2882378
-have both passed actual2BS8/2offline plus cold4 and entered the1024BS8 short.
-Candidate child2911284 usesGPU0; control2903424 usesGPU2. At14:10UTC
-they completed35/83 updates; the first35 sample-ID batches match exactly.
-Check their receipt and -job/status.json in causal-identity-ab-20261007.
-The user clarified that "r4 short" means batch size4 as a fallback, not replan4.
-That permission supersedes the earlier blanket BS8 restriction when needed.
-These BS8 jobs currently fit; no fallback switch occurred. Keep closed-loopR8.
-Any later BS4 trial must explicitly declare sample/update/optimizer-clock
-changes and preserve the intended exposure, rather than silently reuse BS8 IDs.
-Fixed production e4be3be6, runner8d79c5cc. They automatically perform
-2BS8/cold4 ->1024BS8/256offline ->standard18 R8 ->source/own-trajectory
-audits; no formal long promotion. Original initialization is the complete
-B-v1 checkpoint step12036; actual short ends13060. Do not duplicate.
-Read34.33.26 for the implementation and admitted scope. Full actual loader
-and loaded-encoder identity also matches B-v1 (2165train/280val, RGB LRU0);
-all1584 inherited model tensors match exactly, with only3 new scalar gains.
+The user now requires both checkpoints' standard18/R8 panels on physicalGPU1
+to release one card for others. Existing training continues unchanged onGPU0
+(candidate2911284) andGPU2 (control2903424), with1024BS8/256offline from
+B-v1 step12036 to13060. GPU0 remains reserved after its training/offline ends;
+later audits use idleGPU2. Do not reclaimGPU0 for probes or a new training job
+without further user instruction. BS4 remains the authorized fallback only if
+needed; neither these running jobs nor closed-loopR8 changed.
+
+Old scheduling parents2882377/2882378 have exited and must not be restarted.
+Active GPU1 continuations in E=causal-identity-ab-20261007 are
+B-v1-address-memory-gpu1-evaluation-r2 PID3046434 (fixed probee1c98582) and
+B-v1-continuation-control-gpu1-evaluation-r1 PID3040278 (probe1f75fd0a).
+Read their .receipt.json and -job/status.json. The candidate r1 scheduling-lock
+failure is retained; actual training survived and recovery only observes that
+same child. Both standard18 panels shareGPU1 via a dedicated serial lock,
+then preserve all source/object/own-trajectory audits onGPU2. No formal
+promotion is automatic. See34.33.26 GPU1 placement and its handoff evidence.
+
+Fixed productione4be3be6 and original training wrapper8d79c5cc are unchanged.
+Both had already passed2BS8/2offline and cold4; complete short behavior remains
+pending. The actual loader matches B-v1 (2165train/280val, RGB LRU0);
+all1584 inherited tensors were exact at initialization, with only3 new gains.
 
 ### Current optional candidate: dense address memory
 
