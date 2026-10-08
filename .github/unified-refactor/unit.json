@@ -1,0 +1,43 @@
+{
+  "schema": "clearvla-reviewed-source-v1",
+  "parent": "f8052d7086279044254481337d1b9a7e6e836535",
+  "parent_tree": "a1e3e62823f10a217fe66c1c678aac3a36a517b7",
+  "formatted_base_tree": "0260912936fe3ba7133d78115d0a555fe06530b5",
+  "source_tree": "32d1c503d57ee5d96966dbbd3520b1cb20c72f96",
+  "format_existing_python": [
+    "clearvla/data/action_chart.py",
+    "clearvla/data/hdf5_episode.py",
+    "clearvla/data/physical_chart.py",
+    "clearvla/experiments/observed_state_lab/policy_runtime_v39.py",
+    "clearvla/mainline/identity_supervision.py",
+    "clearvla/mainline/interfaces.py",
+    "clearvla/mainline/model/canonical_grounding.py",
+    "clearvla/mainline/model/dynamics.py",
+    "clearvla/mainline/model/intent.py",
+    "clearvla/mainline/model/robot_execution.py",
+    "clearvla/mainline/model/task_execution.py",
+    "clearvla/mainline/model/types.py",
+    "clearvla/mainline/robot_execution.py",
+    "clearvla/mainline/runtime/causal_identity_migration.py",
+    "clearvla/mainline/runtime/checkpoints.py",
+    "clearvla/mainline/train.py",
+    "clearvla/mainline/training/identity.py",
+    "clearvla/vision/canonical_transport.py",
+    "clearvla/vision/observed_correspondence.py",
+    "tests/test_identity_supervision.py",
+    "tests/test_mainline_global_task.py"
+  ],
+  "patch_bytes": 141928,
+  "patch_sha256": "168803aa1e854495241a3a2573f24e81917e019ae353e002fba84e6b09710fdd",
+  "message": "refactor: harden source ownership, native contracts and qualification routes",
+  "compressed_blobs": [
+    {"sha":"c978cb547dfb3c0bf920dad32943dc3bd244c0dd","size":4500},
+    {"sha":"fafc73b313366828481865afa01907bade6ae7c1","size":4500},
+    {"sha":"1c04429ee8406cdad61d323887277c70b66b150c","size":4500},
+    {"sha":"400ebbce19f461c2d79241b34c9e35c8f4cc5b72","size":4500},
+    {"sha":"a958107cc18e7ae1feb06a75a50131a663c3254c","size":4500},
+    {"sha":"3a8776defd9c247174441ed722bf602fe86839a3","size":4500},
+    {"sha":"ae32155e5937a27e94378878e15f5464f9837ac2","size":4500},
+    {"sha":"b82bb248d0f9930bd666a77b9226a198cf937847","size":2674}
+  ]
+}
