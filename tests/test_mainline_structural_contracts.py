@@ -143,9 +143,7 @@ def test_zero_preserving_variance_std_has_exact_zero_and_finite_vjp() -> None:
 
 def test_masked_softmax_all_invalid_is_exact_zero_with_finite_vjp() -> None:
     logits = torch.randn(2, 4, requires_grad=True)
-    support = torch.tensor(
-        [[False, False, False, False], [True, False, True, False]]
-    )
+    support = torch.tensor([[False, False, False, False], [True, False, True, False]])
     probability = _safe_masked_softmax(logits, support, dim=-1)
     assert probability.dtype == torch.float32
     assert torch.equal(probability[0], torch.zeros_like(probability[0]))
@@ -320,16 +318,14 @@ def test_camera_reduction_uses_validity_times_support() -> None:
         iterations=2,
     )(_local_facts(cameras=2, content=8, route=4, hidden=16))
     batch, objects = facts.content.shape[:2]
-    coordinates = torch.tensor(
-        [[[-0.75, -0.25], [0.75, 0.25]]], dtype=torch.float32
-    ).expand(batch, objects, -1, -1)
-    transport = torch.tensor(
-        [[[[-0.40, 0.10], [0.60, -0.20]]]], dtype=torch.float32
-    ).expand(batch, objects, -1, -1)
+    coordinates = torch.tensor([[[-0.75, -0.25], [0.75, 0.25]]], dtype=torch.float32).expand(
+        batch, objects, -1, -1
+    )
+    transport = torch.tensor([[[[-0.40, 0.10], [0.60, -0.20]]]], dtype=torch.float32).expand(
+        batch, objects, -1, -1
+    )
     validity = torch.ones(batch, objects, 2, 1, dtype=torch.float32)
-    support = torch.tensor(
-        [[[[0.02], [0.20]]]], dtype=torch.float32
-    ).expand(batch, objects, -1, -1)
+    support = torch.tensor([[[[0.02], [0.20]]]], dtype=torch.float32).expand(batch, objects, -1, -1)
     facts = replace(
         facts,
         camera_coordinates=coordinates,
@@ -349,9 +345,9 @@ def test_camera_reduction_uses_validity_times_support() -> None:
 
     # Support is a producer-owned geometric measure, so changing it changes
     # the normalized cross-camera vote rather than acting as metadata only.
-    widened_support = torch.tensor(
-        [[[[0.20], [0.02]]]], dtype=torch.float32
-    ).expand(batch, objects, -1, -1)
+    widened_support = torch.tensor([[[[0.20], [0.02]]]], dtype=torch.float32).expand(
+        batch, objects, -1, -1
+    )
     widened = replace(
         facts,
         camera_support=widened_support,
@@ -440,15 +436,9 @@ def test_w_validity_is_applied_at_typed_ingress_and_camera_boundaries() -> None:
         rtol=0.0,
     )
 
-    full_carrier = top.dynamics._camera_geometry_carrier(
-        full, full_common[..., 2, :]
-    )
-    half_carrier = top.dynamics._camera_geometry_carrier(
-        half, full_common[..., 2, :]
-    )
-    zero_carrier = top.dynamics._camera_geometry_carrier(
-        zero, full_common[..., 2, :]
-    )
+    full_carrier = top.dynamics._camera_geometry_carrier(full, full_common[..., 2, :])
+    half_carrier = top.dynamics._camera_geometry_carrier(half, full_common[..., 2, :])
+    zero_carrier = top.dynamics._camera_geometry_carrier(zero, full_common[..., 2, :])
     torch.testing.assert_close(
         half_carrier,
         0.5 * full_carrier,
@@ -684,8 +674,7 @@ def test_dense_chart_uses_fp32_producer_logs_after_bf16_probability_underflow() 
     assert chart.candidate_owner_prior[..., 1].item() > 0.0
     assert chart.candidate_owner_prior[..., 2].item() > 0.0
     torch.testing.assert_close(
-        chart.candidate_owner_log_prior[..., 2]
-        - chart.candidate_owner_log_prior[..., 1],
+        chart.candidate_owner_log_prior[..., 2] - chart.candidate_owner_log_prior[..., 1],
         torch.ones_like(chart.candidate_owner_log_prior[..., 1]),
     )
 
@@ -721,9 +710,7 @@ def test_legacy_zero_candidate_prior_cannot_reenter_the_final_binder_read() -> N
 def test_future_observable_measures_and_logs_require_finite_fp32() -> None:
     dynamics = _future_dynamics(
         chart_availability=torch.tensor([[[0.0], [0.25]]]),
-        camera_chart_availability=torch.tensor(
-            [[[[0.0], [0.0]], [[0.125], [0.25]]]]
-        ),
+        camera_chart_availability=torch.tensor([[[[0.0], [0.0]], [[0.125], [0.25]]]]),
     )
     dynamics.validate()
     assert dynamics.chart_availability.dtype == torch.float32
@@ -813,9 +800,14 @@ def test_grounder_invalid_candidates_leave_only_finite_null_owner_mass() -> None
     assert bool(torch.isfinite(object_mass).all())
     assert bool(torch.isfinite(null_mass).all())
     assert bool(torch.isfinite(read).all())
-    torch.testing.assert_close(owner[0, 1:, : grounder.objects], torch.zeros_like(owner[0, 1:, : grounder.objects]))
+    torch.testing.assert_close(
+        owner[0, 1:, : grounder.objects], torch.zeros_like(owner[0, 1:, : grounder.objects])
+    )
     torch.testing.assert_close(null_mass[0, 1:], torch.ones_like(null_mass[0, 1:]))
-    torch.testing.assert_close(owner_log_probability[0, 1:, : grounder.objects], torch.full_like(owner_log_probability[0, 1:, : grounder.objects], -torch.inf))
+    torch.testing.assert_close(
+        owner_log_probability[0, 1:, : grounder.objects],
+        torch.full_like(owner_log_probability[0, 1:, : grounder.objects], -torch.inf),
+    )
     (owner[0, 0].sum() + null_mass.sum() + read.sum()).backward()
     assert candidates.grad is not None
     assert torch.isfinite(candidates.grad).all()
@@ -838,9 +830,7 @@ def test_grounder_reconstructs_only_the_independent_observed_dino_target() -> No
         rtol=0.0,
     )
     assert not chart.dino_content.requires_grad
-    self_mixture = (
-        local.content_slots * local.semantic_owner_probs[..., None]
-    ).sum(dim=-2)
+    self_mixture = (local.content_slots * local.semantic_owner_probs[..., None]).sum(dim=-2)
     assert not torch.equal(chart.dino_content, self_mixture)
 
     grounder = DenseObjectGrounder(
@@ -1071,9 +1061,7 @@ def test_g02_retains_all_schema25_physical_binder_inputs() -> None:
         objects=4,
         iterations=1,
     )
-    chart = dense_chart_from_local_facts(
-        _local_facts(cameras=2, content=8, route=4, hidden=16)
-    )
+    chart = dense_chart_from_local_facts(_local_facts(cameras=2, content=8, route=4, hidden=16))
     baseline = grounder._candidate_tokens(chart)
     perturbations = {
         "candidate_content": torch.randn_like(chart.candidate_content),
@@ -1083,9 +1071,7 @@ def test_g02_retains_all_schema25_physical_binder_inputs() -> None:
         "candidate_coordinates": 0.25 * torch.randn_like(chart.candidate_coordinates),
     }
     for name, delta in perturbations.items():
-        changed = grounder._candidate_tokens(
-            replace(chart, **{name: getattr(chart, name) + delta})
-        )
+        changed = grounder._candidate_tokens(replace(chart, **{name: getattr(chart, name) + delta}))
         assert not torch.equal(changed, baseline), name
 
 
@@ -1291,18 +1277,14 @@ def test_teacher_quarantines_nan_invalid_object_camera_rows() -> None:
     camera_validity = facts.camera_validity.clone()
     camera_validity[:, 0] = 0.0
     invalid_camera = torch.full_like(facts.camera_coordinates[:, 0], float("nan"))
-    invalid_transport = torch.full_like(
-        facts.camera_transport_prior[:, 0], float("nan")
-    )
+    invalid_transport = torch.full_like(facts.camera_transport_prior[:, 0], float("nan"))
     invalid_support = torch.full_like(facts.camera_support[:, 0], float("nan"))
     invalid_log = torch.full_like(facts.log_camera_validity[:, 0], float("nan"))
     invalid_object_log = torch.full_like(facts.log_validity[:, 0], float("nan"))
     poisoned = replace(
         facts,
         validity=validity,
-        log_validity=torch.cat(
-            (invalid_object_log[:, None], facts.log_validity[:, 1:]), dim=1
-        ),
+        log_validity=torch.cat((invalid_object_log[:, None], facts.log_validity[:, 1:]), dim=1),
         camera_validity=camera_validity,
         camera_coordinates=torch.cat(
             (invalid_camera[:, None], facts.camera_coordinates[:, 1:]), dim=1
@@ -1310,9 +1292,7 @@ def test_teacher_quarantines_nan_invalid_object_camera_rows() -> None:
         camera_transport_prior=torch.cat(
             (invalid_transport[:, None], facts.camera_transport_prior[:, 1:]), dim=1
         ),
-        camera_support=torch.cat(
-            (invalid_support[:, None], facts.camera_support[:, 1:]), dim=1
-        ),
+        camera_support=torch.cat((invalid_support[:, None], facts.camera_support[:, 1:]), dim=1),
         log_camera_validity=torch.cat(
             (invalid_log[:, None], facts.log_camera_validity[:, 1:]), dim=1
         ),
@@ -1614,9 +1594,7 @@ def test_causal_dino_history_changes_owner_evidence_without_changing_current_tar
     baseline, _ = compiler(CurrentObservation(dino_history=dino, raw_rgb=raw))
     changed_history = dino.clone()
     changed_history[:, 0, :, :8] += 2.0
-    changed, _ = compiler(
-        CurrentObservation(dino_history=changed_history, raw_rgb=raw)
-    )
+    changed, _ = compiler(CurrentObservation(dino_history=changed_history, raw_rgb=raw))
     # The supervised current DINO target is still the same final frame, while
     # causal history changes G's owner evidence through an aligned innovation.
     torch.testing.assert_close(
@@ -1782,14 +1760,11 @@ def test_grounder_does_not_reinject_public_chart_into_object_candidates() -> Non
         objects=4,
         iterations=1,
     )
-    first = dense_chart_from_local_facts(
-        _local_facts(cameras=2, content=8, route=4, hidden=16)
-    )
+    first = dense_chart_from_local_facts(_local_facts(cameras=2, content=8, route=4, hidden=16))
     second = replace(
         first,
-        public_scene_base=first.public_scene_base + 1000.0 * torch.randn_like(
-            first.public_scene_base
-        ),
+        public_scene_base=first.public_scene_base
+        + 1000.0 * torch.randn_like(first.public_scene_base),
     )
     first_candidate = grounder._candidate_tokens(first)
     second_candidate = grounder._candidate_tokens(second)
@@ -2147,9 +2122,7 @@ def test_w_successor_innovation_has_no_detach_minus_current_ghost_gradient() -> 
         iterations=1,
     )(_local_facts(cameras=2, content=8, route=4, hidden=16))
     facts.content.retain_grad()
-    dynamics = ObjectFutureDynamicsCompiler(
-        hidden=16, content_dim=8, route_dim=4, heads=4
-    )
+    dynamics = ObjectFutureDynamicsCompiler(hidden=16, content_dim=8, route_dim=4, heads=4)
     typed_common = torch.zeros(1, 4, 3, 16, requires_grad=True)
     typed_interval = torch.zeros(1, 2, 4, 3, 16, requires_grad=True)
     field = dynamics._field(
@@ -2177,12 +2150,8 @@ def test_w_reads_only_the_explicit_physical_action_condition() -> None:
         collect_diagnostics=False,
     )
     coarse = top.coarse_action(intent.action_dock())
-    zero_action = _physical_action_condition(
-        torch.zeros_like(coarse.action_prediction)
-    )
-    signal_action = _physical_action_condition(
-        torch.randn_like(coarse.action_prediction)
-    )
+    zero_action = _physical_action_condition(torch.zeros_like(coarse.action_prediction))
+    signal_action = _physical_action_condition(torch.randn_like(coarse.action_prediction))
 
     zero_base, _, _, _ = top.dynamics._base(
         facts,
@@ -2225,14 +2194,17 @@ def test_w_is_goal_and_s_invariant_when_physical_action_is_fixed() -> None:
     )
     fixed_coarse = top.coarse_action(intent.action_dock())
     fixed_action_state = torch.randn(1, 7)
-    with mock.patch.object(
-        top.grounder,
-        "forward",
-        return_value=(facts, {}),
-    ), mock.patch.object(
-        top.coarse_action,
-        "forward",
-        return_value=fixed_coarse,
+    with (
+        mock.patch.object(
+            top.grounder,
+            "forward",
+            return_value=(facts, {}),
+        ),
+        mock.patch.object(
+            top.coarse_action,
+            "forward",
+            return_value=fixed_coarse,
+        ),
     ):
         first, _ = top.build_online_context(
             local_facts=local,
@@ -2270,9 +2242,7 @@ def test_w_common_is_written_once_and_zero_innovation_returns_common() -> None:
         collect_diagnostics=False,
     )
     coarse = top.coarse_action(intent.action_dock())
-    action = _physical_action_condition(
-        torch.zeros_like(coarse.action_prediction)
-    )
+    action = _physical_action_condition(torch.zeros_like(coarse.action_prediction))
     facts = replace(
         facts,
         semantic=torch.randn_like(facts.semantic),
@@ -2639,12 +2609,8 @@ def test_p2_transport_conditions_only_semantic_k_address_with_zero_identities() 
 
     no_camera = replace(
         dynamics,
-        camera_chart_availability=torch.zeros_like(
-            dynamics.camera_chart_availability
-        ),
-        log_camera_chart_availability=torch.zeros_like(
-            dynamics.log_camera_chart_availability
-        ),
+        camera_chart_availability=torch.zeros_like(dynamics.camera_chart_availability),
+        log_camera_chart_availability=torch.zeros_like(dynamics.log_camera_chart_availability),
     )
     _, no_camera_metrics = reader.spatial_select(
         action_query,
@@ -2694,15 +2660,9 @@ def test_p2_policy_dock_exposes_existing_typed_metadata_by_identity() -> None:
         executed_history=torch.randn(1, 3, 7),
     )
     dock = context.intent.policy_dock()
-    assert (
-        dock.target_object_address_logit
-        is context.intent.target_object_address_logit
-    )
+    assert dock.target_object_address_logit is context.intent.target_object_address_logit
     assert dock.typed_common_value is context.intent.typed_common_value
-    assert (
-        dock.typed_interval_residual_value
-        is context.intent.typed_interval_residual_value
-    )
+    assert dock.typed_interval_residual_value is context.intent.typed_interval_residual_value
 
 
 def test_p2_spatial_selection_retains_interval_and_s_cannot_select_w() -> None:
@@ -2758,9 +2718,7 @@ def test_p2_spatial_selection_retains_interval_and_s_cannot_select_w() -> None:
         dock,
         interval_key=torch.randn_like(dock.interval_key),
         typed_common_value=torch.randn_like(dock.typed_common_value),
-        typed_interval_residual_value=torch.randn_like(
-            dock.typed_interval_residual_value
-        ),
+        typed_interval_residual_value=torch.randn_like(dock.typed_interval_residual_value),
     )
     changed, _ = reader.spatial_select(
         action_query,
@@ -2807,9 +2765,7 @@ def test_p2_physical_terminal_has_no_null_or_type_competition() -> None:
     semantic_only = replace(
         both,
         transport_mean=torch.zeros_like(transport),
-        camera_chart_availability=torch.zeros_like(
-            both.camera_chart_availability
-        ),
+        camera_chart_availability=torch.zeros_like(both.camera_chart_availability),
     )
     geometry_only = replace(
         both,
@@ -2861,9 +2817,7 @@ def test_p2_physical_terminal_has_no_null_or_type_competition() -> None:
             dock,
             interval_key=torch.randn_like(dock.interval_key),
             typed_common_value=torch.randn_like(dock.typed_common_value),
-            typed_interval_residual_value=torch.randn_like(
-                dock.typed_interval_residual_value
-            ),
+            typed_interval_residual_value=torch.randn_like(dock.typed_interval_residual_value),
         ),
         collect_diagnostics=False,
     )
@@ -2918,9 +2872,7 @@ def test_p2_temporal_diagnostics_retain_band_type_and_interval_axes() -> None:
         for band_name, selected_interval in bands.items():
             mass = torch.stack(
                 [
-                    metrics[
-                        f"object_p2_{type_name}_band_{band_name}_interval_{index}_mass"
-                    ]
+                    metrics[f"object_p2_{type_name}_band_{band_name}_interval_{index}_mass"]
                     for index in range(4)
                 ]
             )
@@ -2932,11 +2884,8 @@ def test_p2_temporal_diagnostics_retain_band_type_and_interval_axes() -> None:
                     num_classes=4,
                 ).float(),
             )
-            assert (
-                metrics[
-                    f"object_p2_{type_name}_band_{band_name}_expected_interval"
-                ]
-                == float(selected_interval)
+            assert metrics[f"object_p2_{type_name}_band_{band_name}_expected_interval"] == float(
+                selected_interval
             )
         assert metrics[f"object_p2_{type_name}_band_pair_total_variation"] == 1.0
 
@@ -2948,12 +2897,13 @@ def test_p2_temporal_diagnostics_retain_band_type_and_interval_axes() -> None:
         assert unsupported[f"object_p2_{type_name}_temporal_support_fraction"] == 0.0
         assert unsupported[f"object_p2_{type_name}_band_pair_total_variation"] == 0.0
         for band_name in ("1_4", "5_12", "13_24"):
-            assert sum(
-                unsupported[
-                    f"object_p2_{type_name}_band_{band_name}_interval_{index}_mass"
-                ]
-                for index in range(4)
-            ) == 0.0
+            assert (
+                sum(
+                    unsupported[f"object_p2_{type_name}_band_{band_name}_interval_{index}_mass"]
+                    for index in range(4)
+                )
+                == 0.0
+            )
 
 
 def test_p2_temporal_diagnostics_do_not_change_output_or_state() -> None:
@@ -3000,9 +2950,7 @@ def test_p2_temporal_diagnostics_do_not_change_output_or_state() -> None:
     assert torch.equal(training_output.semantic, quiet.semantic)
     assert torch.equal(training_output.geometry, quiet.geometry)
     assert not any("_band_" in name for name in training_metrics)
-    assert not any(
-        name.endswith("_temporal_support_fraction") for name in training_metrics
-    )
+    assert not any(name.endswith("_temporal_support_fraction") for name in training_metrics)
 
 
 def test_p2_eval_intervention_preserves_posterior_and_localizes_values() -> None:
@@ -3067,10 +3015,7 @@ def test_p2_eval_intervention_preserves_posterior_and_localizes_values() -> None
         for type_name in ("semantic", "geometry"):
             for band_name in ("1_4", "5_12", "13_24"):
                 for interval in range(4):
-                    name = (
-                        f"object_p2_{type_name}_band_{band_name}_interval_"
-                        f"{interval}_mass"
-                    )
+                    name = f"object_p2_{type_name}_band_{band_name}_interval_{interval}_mass"
                     torch.testing.assert_close(metrics[name], primary_metrics[name])
         reader.clear_eval_intervention()
         restored, _ = reader.temporal_terminal(
@@ -3111,9 +3056,7 @@ def test_p2_reverse_path_reaches_each_legal_w_s_and_action_owner() -> None:
     )
     dock = context.intent.policy_dock()
     typed_common = dock.typed_common_value.detach().clone().requires_grad_(True)
-    typed_residual = (
-        dock.typed_interval_residual_value.detach().clone().requires_grad_(True)
-    )
+    typed_residual = dock.typed_interval_residual_value.detach().clone().requires_grad_(True)
     action_query = torch.randn(1, 24, 2, 32, requires_grad=True)
     value, _ = top.effect_reader(
         action_query,
@@ -3171,10 +3114,7 @@ def test_p2_spatial_and_terminal_queries_start_equal_and_own_separate_stages() -
         context.intent.policy_dock(),
         collect_diagnostics=False,
     )
-    (
-        selected.semantic_value.square().mean()
-        + selected.geometry_value.square().mean()
-    ).backward()
+    (selected.semantic_value.square().mean() + selected.geometry_value.square().mean()).backward()
     for projection in reader.source_query:
         assert isinstance(projection, torch.nn.Linear)
         assert projection.weight.grad is not None
@@ -3355,14 +3295,10 @@ def test_consequence_keeps_typed_interactions_until_one_parameter_free_fusion() 
     consequence.eval()
     calls = {"semantic": 0, "geometry": 0}
     semantic_hook = consequence.semantic_interaction.register_forward_hook(
-        lambda _module, _args, _output: calls.__setitem__(
-            "semantic", calls["semantic"] + 1
-        )
+        lambda _module, _args, _output: calls.__setitem__("semantic", calls["semantic"] + 1)
     )
     geometry_hook = consequence.geometry_interaction.register_forward_hook(
-        lambda _module, _args, _output: calls.__setitem__(
-            "geometry", calls["geometry"] + 1
-        )
+        lambda _module, _args, _output: calls.__setitem__("geometry", calls["geometry"] + 1)
     )
     consequence.set_eval_intervention("effect_neutral")
     try:
@@ -3383,18 +3319,8 @@ def test_consequence_keeps_typed_interactions_until_one_parameter_free_fusion() 
     assert torch.count_nonzero(intervened.interaction.geometry) == 0
     assert torch.equal(intervened.protected_consequence, factual)
     assert intervention_metrics["object_consequence_intervention_active"] == 1
-    assert (
-        intervention_metrics[
-            "object_consequence_intervention_first_boundary_delta_rms"
-        ]
-        > 0
-    )
-    assert (
-        intervention_metrics[
-            "object_consequence_intervention_factual_identity_max_abs"
-        ]
-        == 0
-    )
+    assert intervention_metrics["object_consequence_intervention_first_boundary_delta_rms"] > 0
+    assert intervention_metrics["object_consequence_intervention_factual_identity_max_abs"] == 0
     assert tuple(consequence.state_dict()) == tuple(state_before)
     for name, value in consequence.state_dict().items():
         assert torch.equal(value, state_before[name])
@@ -3565,9 +3491,7 @@ def test_transport_objective_is_unweighted_raw_coordinate_error() -> None:
             current_loss_support=support,
         )
         active_by_scale.append(float(scaled_terms["future_transport"].detach()))
-        raw_by_scale.append(
-            float(scaled_terms["future_transport_raw_coordinate"].detach())
-        )
+        raw_by_scale.append(float(scaled_terms["future_transport_raw_coordinate"].detach()))
         # The active objective is the archival raw-coordinate error at every
         # target magnitude, not only when all supported rows share one scale.
         torch.testing.assert_close(
@@ -3788,8 +3712,10 @@ def test_teacher_track_is_equivariant_to_global_object_relabeling() -> None:
     expected = target.permute(permutation)
     for field in fields(FutureObjectDynamics):
         _assert_close_typed(
-            getattr(relabeled, field.name), getattr(expected, field.name),
-            atol=1e-6, rtol=1e-6,
+            getattr(relabeled, field.name),
+            getattr(expected, field.name),
+            atol=1e-6,
+            rtol=1e-6,
         )
 
 
@@ -3800,12 +3726,15 @@ def test_teacher_camera_relabeling_permutes_the_physical_geometry_axis(current_i
     torch.manual_seed(261)
     local = _local_facts(cameras=2, content=8, route=4, hidden=16)
     if current_image:
-        local = replace(local, current_image_support=CurrentImageSupport(
-            local.slot_coordinates[..., None, :],
-            torch.ones_like(local.slot_validity),
-            local.slot_validity.bool(),
-            torch.zeros_like(local.slot_validity),
-        ))
+        local = replace(
+            local,
+            current_image_support=CurrentImageSupport(
+                local.slot_coordinates[..., None, :],
+                torch.ones_like(local.slot_validity),
+                local.slot_validity.bool(),
+                torch.zeros_like(local.slot_validity),
+            ),
+        )
     facts, _ = DenseObjectGrounder(
         hidden=16,
         content_dim=8,
@@ -3827,12 +3756,16 @@ def test_teacher_camera_relabeling_permutes_the_physical_geometry_axis(current_i
     # Every dense tensor owns camera axis 1; optional provenance is not a
     # tensor and must retain its typed support rather than be indexed blindly.
     spatial = chart.current_image_support
-    permuted_spatial = None if spatial is None else replace(
-        spatial,
-        coordinates=spatial.coordinates[:, camera_permutation],
-        probability=spatial.probability[:, camera_permutation],
-        valid=spatial.valid[:, camera_permutation],
-        log_probability=spatial.log_probability[:, camera_permutation],
+    permuted_spatial = (
+        None
+        if spatial is None
+        else replace(
+            spatial,
+            coordinates=spatial.coordinates[:, camera_permutation],
+            probability=spatial.probability[:, camera_permutation],
+            valid=spatial.valid[:, camera_permutation],
+            log_probability=spatial.log_probability[:, camera_permutation],
+        )
     )
     permuted_chart = replace(
         chart,
@@ -3846,11 +3779,15 @@ def test_teacher_camera_relabeling_permutes_the_physical_geometry_axis(current_i
     permuted_facts = replace(
         facts,
         dense_chart=permuted_chart,
-        current_image_measure=(None if facts.current_image_measure is None else replace(
-            facts.current_image_measure,
-            log_mass=facts.current_image_measure.log_mass[:, :, camera_permutation],
-            supported=facts.current_image_measure.supported[:, :, camera_permutation],
-        )),
+        current_image_measure=(
+            None
+            if facts.current_image_measure is None
+            else replace(
+                facts.current_image_measure,
+                log_mass=facts.current_image_measure.log_mass[:, :, camera_permutation],
+                supported=facts.current_image_measure.supported[:, :, camera_permutation],
+            )
+        ),
         log_camera_validity=facts.log_camera_validity[:, :, camera_permutation],
         camera_coordinates=facts.camera_coordinates[:, :, camera_permutation],
         camera_transport_prior=facts.camera_transport_prior[:, :, camera_permutation],
@@ -3880,10 +3817,17 @@ def test_teacher_camera_relabeling_permutes_the_physical_geometry_axis(current_i
         expected = getattr(target, field.name)
         if field.name in ("transport_mean", "transport_covariance"):
             expected = expected[:, :, :, camera_permutation]
-        elif field.name in ("camera_coordinates", "camera_chart_availability", "log_camera_chart_availability"):
+        elif field.name in (
+            "camera_coordinates",
+            "camera_chart_availability",
+            "log_camera_chart_availability",
+        ):
             expected = expected[:, :, camera_permutation]
         _assert_close_typed(
-            getattr(relabeled, field.name), expected, atol=2e-6, rtol=2e-6,
+            getattr(relabeled, field.name),
+            expected,
+            atol=2e-6,
+            rtol=2e-6,
         )
 
 
@@ -3927,9 +3871,7 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
         rtol=2e-5,
     )
     action = _physical_action_condition(coarse.action_prediction)
-    relabeled_action = _physical_action_condition(
-        relabeled_coarse.action_prediction
-    )
+    relabeled_action = _physical_action_condition(relabeled_coarse.action_prediction)
 
     _, w1, _ = top.dynamics.forward_w1(
         facts=facts,
@@ -3954,8 +3896,10 @@ def test_global_object_axis_survives_s_w_and_p_without_order_dependence() -> Non
     expected_dynamics = dynamics.permute(permutation)
     for field in fields(FutureObjectDynamics):
         _assert_close_typed(
-            getattr(relabeled_dynamics, field.name), getattr(expected_dynamics, field.name),
-            atol=2e-5, rtol=2e-5,
+            getattr(relabeled_dynamics, field.name),
+            getattr(expected_dynamics, field.name),
+            atol=2e-5,
+            rtol=2e-5,
         )
 
     batch, horizon, basis, hidden = 1, 24, 2, 32
@@ -4247,9 +4191,7 @@ def test_s_lone_object_and_type_keep_fixed_owner_means_and_rms_contract() -> Non
     # K uses a fixed mean, each type owns its own RMS boundary, and the three
     # type owners are combined through the fixed sqrt(3) contract.
     selected = relevance_value[..., 0, :].mean(dim=2)
-    semantic_component, _ = smooth_rms_contract(
-        top.intent.object_semantic(selected), 0.35
-    )
+    semantic_component, _ = smooth_rms_contract(top.intent.object_semantic(selected), 0.35)
     raw_context = semantic_component / (3.0**0.5)
     _, context_scale = smooth_rms_contract(raw_context, 0.35)
     expected = semantic_component * context_scale
@@ -4445,8 +4387,7 @@ def test_w_gradients_reach_facts_and_physical_head_but_not_s_typed_values() -> N
         physical,
         collect_diagnostics=False,
     )
-    semantic_grad, action_prediction_grad, s_common_grad, s_residual_grad = (
-        torch.autograd.grad(
+    semantic_grad, action_prediction_grad, s_common_grad, s_residual_grad = torch.autograd.grad(
         (
             generic.float().square().mean()
             + common.float().square().mean()
@@ -4459,7 +4400,6 @@ def test_w_gradients_reach_facts_and_physical_head_but_not_s_typed_values() -> N
             intent.typed_interval_residual_value,
         ),
         allow_unused=True,
-        )
     )
     assert semantic_grad is not None and semantic_grad.abs().sum() > 0
     assert action_prediction_grad is not None and action_prediction_grad.abs().sum() > 0
@@ -4812,8 +4752,7 @@ def test_p3_zero_private_sources_are_exact_zero_and_fact_is_not_reprojected() ->
         collect_diagnostics=False,
     )
     gradients = torch.autograd.grad(
-        active_plan.temporal.square().mean()
-        + active_plan.state_change.square().mean(),
+        active_plan.temporal.square().mean() + active_plan.state_change.square().mean(),
         (
             active_semantic_effect,
             active_geometry_effect,
@@ -5025,15 +4964,40 @@ def test_deployment_cache_has_only_declared_causal_sources_and_no_future_labels(
     # The new top-level cache value is an already-observed causal record, not
     # a renamed FutureSupervision or a reference to Teacher target state.
     assert {field.name for field in fields(ExecutedWorldWindow)} == {
-        "dino_history", "raw_rgb", "state", "action_state", "commands",
-        "observed", "visual_offsets",
+        "dino_history",
+        "raw_rgb",
+        "state",
+        "action_state",
+        "commands",
+        "observed",
+        "visual_offsets",
     }
     assert {field.name for field in fields(ExecutedWorldFeedback)} == {
-        "semantic", "image", "covariance", "null", "posterior", "past_content",
-        "view_observed", "window", "current_dino", "camera_names", "measurement_shape",
+        "semantic",
+        "image",
+        "covariance",
+        "null",
+        "posterior",
+        "past_content",
+        "view_observed",
+        "window",
+        "current_dino",
+        "camera_names",
+        "measurement_shape",
+        # Selected outcome mode retains measured and predicted PAST change,
+        # rather than conflating them with the innovation. These are not labels.
+        "observed_semantic",
+        "observed_image",
+        "predicted_semantic",
+        "predicted_image",
     }
     assert {field.name for field in fields(ExecutedWorldPlanValues)} == {
-        "value", "feedback", "current_content", "reader_identity", "binding",
+        "value",
+        "feedback",
+        "current_content",
+        "reader_identity",
+        "binding",
+        "status_features",
     }
     # Deployment owns one compact belief. The optional current_world_belief
     # is an OnlineTopContext source; it is not a second deployment belief.
@@ -5042,6 +5006,7 @@ def test_deployment_cache_has_only_declared_causal_sources_and_no_future_labels(
         "intent",
         "candidate_world",
     }
+
 
 def test_s_shared_target_address_is_zero_start_k_centered_and_appearance_reachable() -> None:
     torch.manual_seed(3151)
@@ -5141,9 +5106,7 @@ def test_s_shared_target_address_preserves_rng_and_uniform_rows_are_exact_zero()
     public_interval = torch.randn(1, 4, 32)
     with torch.no_grad():
         assert target.intent.target_object_address is not None
-        target.intent.target_object_address.weight.copy_(
-            torch.tensor([[0.1, -0.2, 0.3]])
-        )
+        target.intent.target_object_address.weight.copy_(torch.tensor([[0.1, -0.2, 0.3]]))
     for valid_objects in range(1, 5):
         validity = torch.zeros_like(facts.validity)
         validity[:, :valid_objects] = 1.0
@@ -5198,9 +5161,7 @@ def test_p2_shared_target_prior_binds_semantic_and_geometry_k_before_pooling() -
     dock = context.intent.policy_dock()
     neutral_dock = replace(
         dock,
-        target_object_address_logit=torch.zeros_like(
-            dock.target_object_address_logit
-        ),
+        target_object_address_logit=torch.zeros_like(dock.target_object_address_logit),
     )
     target_logit = torch.tensor([-6.0, -2.0, 2.0, 6.0]).reshape(1, 1, 4)
     target_dock = replace(
@@ -5229,9 +5190,7 @@ def test_p2_shared_target_prior_binds_semantic_and_geometry_k_before_pooling() -
     changed_typed = replace(
         target_dock,
         typed_common_value=torch.randn_like(target_dock.typed_common_value),
-        typed_interval_residual_value=torch.randn_like(
-            target_dock.typed_interval_residual_value
-        ),
+        typed_interval_residual_value=torch.randn_like(target_dock.typed_interval_residual_value),
     )
     typed_selected, _ = reader.spatial_select(
         action_query,
@@ -5320,9 +5279,7 @@ def test_p2_shared_target_prior_is_k_equivariant_masks_all_invalid_and_has_vjp()
     permutation = torch.tensor([3, 1, 0, 2])
     permuted_dock = replace(
         target_dock,
-        target_object_address_logit=target_dock.target_object_address_logit[
-            :, :, permutation
-        ],
+        target_object_address_logit=target_dock.target_object_address_logit[:, :, permutation],
         typed_common_value=target_dock.typed_common_value[:, permutation],
         typed_interval_residual_value=(
             target_dock.typed_interval_residual_value[:, :, permutation]
@@ -5357,13 +5314,9 @@ def test_p2_shared_target_prior_is_k_equivariant_masks_all_invalid_and_has_vjp()
     camera_permuted_dynamics = replace(
         dynamics,
         transport_mean=dynamics.transport_mean[:, :, :, camera_permutation],
-        transport_covariance=(
-            dynamics.transport_covariance[:, :, :, camera_permutation]
-        ),
+        transport_covariance=(dynamics.transport_covariance[:, :, :, camera_permutation]),
         camera_coordinates=dynamics.camera_coordinates[:, :, camera_permutation],
-        camera_chart_availability=(
-            dynamics.camera_chart_availability[:, :, camera_permutation]
-        ),
+        camera_chart_availability=(dynamics.camera_chart_availability[:, :, camera_permutation]),
         log_camera_chart_availability=(
             dynamics.log_camera_chart_availability[:, :, camera_permutation]
         ),
@@ -5420,7 +5373,9 @@ def test_p2_shared_target_prior_is_k_equivariant_masks_all_invalid_and_has_vjp()
     )
 
 
-def test_p2_shared_target_prior_quarantines_invalid_nonfinite_and_rejects_supported_nonfinite() -> None:
+def test_p2_shared_target_prior_quarantines_invalid_nonfinite_and_rejects_supported_nonfinite() -> (
+    None
+):
     torch.manual_seed(31531)
     top = _object_top(p2_spatial_intent_mode="shared_target_prior_v1").eval()
     context, _ = top.build_online_context(
@@ -5531,9 +5486,7 @@ def test_p2_shared_target_prior_opens_s_and_w_owners_from_the_existing_effect_lo
         dock_zero,
         interval_key=dock_zero.interval_key.detach(),
         typed_common_value=dock_zero.typed_common_value.detach(),
-        typed_interval_residual_value=(
-            dock_zero.typed_interval_residual_value.detach()
-        ),
+        typed_interval_residual_value=(dock_zero.typed_interval_residual_value.detach()),
     )
     effect_zero, _ = top.effect_reader(
         action_query,
@@ -5564,9 +5517,7 @@ def test_p2_shared_target_prior_opens_s_and_w_owners_from_the_existing_effect_lo
         dock_open,
         interval_key=dock_open.interval_key.detach(),
         typed_common_value=dock_open.typed_common_value.detach(),
-        typed_interval_residual_value=(
-            dock_open.typed_interval_residual_value.detach()
-        ),
+        typed_interval_residual_value=(dock_open.typed_interval_residual_value.detach()),
     )
     effect_open, _ = top.effect_reader(
         action_query,

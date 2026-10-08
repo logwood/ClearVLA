@@ -186,18 +186,12 @@ def test_restored_observation_keeps_consumed_v120_address_modules_trainable() ->
         "future_history_score.",
         "future_transition.",
     ):
-        rows = [
-            parameter
-            for name, parameter in parameters.items()
-            if name.startswith(prefix)
-        ]
+        rows = [parameter for name, parameter in parameters.items() if name.startswith(prefix)]
         assert rows, prefix
         assert all(parameter.requires_grad for parameter in rows), prefix
     # The G3 block remains active, while the parallel generic route query is
     # absent from the exported object-intent GroundedFactSet.
-    assert not parameters[
-        "progressive_grounding_address.query_projections.2.weight"
-    ].requires_grad
+    assert not parameters["progressive_grounding_address.query_projections.2.weight"].requires_grad
 
 
 def test_calvin_velocity_is_invariant_to_compatibility_gripper_field() -> None:
@@ -224,9 +218,7 @@ def test_calvin_velocity_is_invariant_to_compatibility_gripper_field() -> None:
         first_field = torch.randn(1, 24, model.outlet_adapter.physical_dim)
         second_field = first_field.clone()
         arm_channels = 2 * model.outlet_adapter.arm_dim
-        second_field[..., arm_channels:] = torch.randn_like(
-            second_field[..., arm_channels:]
-        )
+        second_field[..., arm_channels:] = torch.randn_like(second_field[..., arm_channels:])
         time = torch.full((1,), 0.4)
         first = model.velocity(
             cache,
@@ -340,9 +332,7 @@ def _batch(config: ExperimentConfig, batch: int = 1) -> TrainingBatch:
             raw_units=torch.randn(batch, dims.action_horizon, dims.action_dim),
             current_raw_units=torch.randn(batch, dims.action_dim),
             gripper_transition_boundary=torch.zeros(batch, dims.action_dim),
-            gripper_transition_boundary_raw_units=torch.zeros(
-                batch, dims.action_dim
-            ),
+            gripper_transition_boundary_raw_units=torch.zeros(batch, dims.action_dim),
         ),
         future=FutureSupervision(
             dino_supports=torch.randn(
@@ -387,8 +377,12 @@ def test_recovered_training_uses_one_formal_forward_and_loss() -> None:
         condition_generator=torch.Generator().manual_seed(29001),
     )
     encoded = EncodedTrainingBatch.capture(
-        cache, training_state, static_metrics, source_online=batch.online,
-        model=model, global_step=engine.global_step,
+        cache,
+        training_state,
+        static_metrics,
+        source_online=batch.online,
+        model=model,
+        global_step=engine.global_step,
     )
 
     grad_modes: list[bool] = []
@@ -414,17 +408,21 @@ def test_recovered_training_uses_one_formal_forward_and_loss() -> None:
         return output
 
     torch.manual_seed(29002)
-    with mock.patch.object(
-        model,
-        "velocity",
-        side_effect=tracked_velocity,
-    ) as velocity, mock.patch(
-        "clearvla.mainline.training.engine.sample_flow_matching",
-        wraps=sample_flow_matching,
-    ) as sample_flow, mock.patch(
-        "clearvla.mainline.training.engine.compose_losses",
-        wraps=compose_losses,
-    ) as compose:
+    with (
+        mock.patch.object(
+            model,
+            "velocity",
+            side_effect=tracked_velocity,
+        ) as velocity,
+        mock.patch(
+            "clearvla.mainline.training.engine.sample_flow_matching",
+            wraps=sample_flow_matching,
+        ) as sample_flow,
+        mock.patch(
+            "clearvla.mainline.training.engine.compose_losses",
+            wraps=compose_losses,
+        ) as compose,
+    ):
         ledger, metrics = engine._forward_encoded(
             batch,
             encoded=encoded,
@@ -447,10 +445,7 @@ def test_recovered_training_uses_one_formal_forward_and_loss() -> None:
     assert cache.top.action_condition.interval_delta.requires_grad
     assert cache.top.predicted_dynamics.semantic_delta.requires_grad
     assert compose.call_args.kwargs["policy_output"] is velocity_outputs[0]
-    assert (
-        compose.call_args.kwargs["predicted_dynamics"]
-        is cache.top.predicted_dynamics
-    )
+    assert compose.call_args.kwargs["predicted_dynamics"] is cache.top.predicted_dynamics
     assert ledger.terms["action_flow"].requires_grad
     assert not any(name.startswith("training_self_conditioning_") for name in metrics)
 
@@ -525,11 +520,11 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         "gradient_tensor_p1_dynamic_query_residual_rms",
         "gradient_tensor_w2_semantic_common_rms",
         "gradient_tensor_w2_geometry_interval_rms",
-            "gradient_tensor_w_semantic_fact_ingress_rms",
-            "gradient_tensor_w_appearance_fact_ingress_rms",
-            "gradient_tensor_w_geometry_fact_ingress_rms",
-            "gradient_tensor_w_physical_action_condition_rms",
-            "gradient_tensor_w_physical_action_carrier_rms",
+        "gradient_tensor_w_semantic_fact_ingress_rms",
+        "gradient_tensor_w_appearance_fact_ingress_rms",
+        "gradient_tensor_w_geometry_fact_ingress_rms",
+        "gradient_tensor_w_physical_action_condition_rms",
+        "gradient_tensor_w_physical_action_carrier_rms",
         "gradient_tensor_p2_semantic_effect_rms",
         "gradient_tensor_p2_geometry_effect_rms",
         "gradient_tensor_p2_geometry_address_correction_rms",
@@ -551,10 +546,7 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
         assert torch.isfinite(result.metrics[name])
     assert result.metrics["object_w_typed_norm_denominator_min"] >= 0.25
     assert result.metrics["object_w_typed_norm_gain_max"] <= 4.000001
-    assert (
-        result.metrics["object_w_typed_norm_output_input_rms_ratio_max"]
-        <= 4.000001
-    )
+    assert result.metrics["object_w_typed_norm_output_input_rms_ratio_max"] <= 4.000001
     assert result.metrics["gradient_tensor_p2_semantic_effect_rms"] > 0
     assert result.metrics["gradient_tensor_p2_geometry_effect_rms"] > 0
     assert result.metrics["gradient_tensor_w_physical_action_condition_rms"] == 0
@@ -583,9 +575,7 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     archived = archival_metrics(result.materialize())
     assert "loss_action_flow_v120_comparable" in archived
     assert "loss_action_flow_event_balance_delta" in archived
-    assert archived["loss_action_gripper_flow"] == archived[
-        "loss_action_gripper_flow_unweighted"
-    ]
+    assert archived["loss_action_gripper_flow"] == archived["loss_action_gripper_flow_unweighted"]
     assert "loss_action_gripper_flow_event_balanced_audit" in archived
     assert "loss_action_flow_event_balanced_audit_first" in archived
     assert "loss_action_flow_event_balanced_audit_band_1_4" in archived
@@ -597,7 +587,6 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     assert "loss_contrib_future_transition" in archived
     assert "loss_contrib_object_reconstruction" in archived
     assert "loss_contrib_execution_value" in archived
-
 
     for name in (
         "loss_execution_value_target_spread",
@@ -659,10 +648,10 @@ def test_full_mainline_has_complete_gradient_ownership() -> None:
     # already supervised during this interval.
     assert missing
     assert all(
-            name.startswith("execution_bottom.decoder.operator_contractions.")
-            or name.startswith("execution_bottom.decoder.execution_controller.operation_")
-            or name == "execution_bottom.decoder.execution_controller.block_queries"
-            or name.startswith("execution_bottom.decoder.execution_controller.capacity_head.")
+        name.startswith("execution_bottom.decoder.operator_contractions.")
+        or name.startswith("execution_bottom.decoder.execution_controller.operation_")
+        or name == "execution_bottom.decoder.execution_controller.block_queries"
+        or name.startswith("execution_bottom.decoder.execution_controller.capacity_head.")
         for name in missing
     ), missing
     dormant = [
@@ -722,10 +711,7 @@ def test_bspine_zero_init_preserves_the_complete_baseline_output_and_rng() -> No
     candidate_parameters = dict(candidate.named_parameters())
     extra_parameters = set(candidate_parameters).difference(baseline_parameters)
     assert len(extra_parameters) == 10
-    assert all(
-        name.startswith("execution_bottom.decoder.spine.")
-        for name in extra_parameters
-    )
+    assert all(name.startswith("execution_bottom.decoder.spine.") for name in extra_parameters)
     for name, parameter in baseline_parameters.items():
         torch.testing.assert_close(
             candidate_parameters[name],
@@ -806,9 +792,7 @@ def test_bspine_has_one_optimizer_owner_without_moving_baseline_groups() -> None
     }
     spine_group = candidate_groups.pop("bottom_spine/decay")
     assert candidate_groups == baseline_groups
-    assert set(baseline_ownership.role_counts) == set(ownership.role_counts) - {
-        "bottom_spine"
-    }
+    assert set(baseline_ownership.role_counts) == set(ownership.role_counts) - {"bottom_spine"}
     assert ownership.role_counts["bottom_spine"] == 10
     assert spine_group[0] == bspine_config.optimizer.learning_rate * 0.7
     assert spine_group[1] == bspine_config.optimizer.weight_decay
@@ -866,19 +850,23 @@ def test_bspine_full_loss_reaches_raw_coarse_and_detail_once() -> None:
     assert bool(torch.isfinite(raw_jvp).all())
     assert float(raw_jvp.abs().sum()) > 0.0
 
-    with mock.patch.object(
-        model.outlet_adapter.codec,
-        "encode",
-        wraps=model.outlet_adapter.codec.encode,
-    ) as codec_encode, mock.patch.object(
-        decoder.noisy_lift,
-        "forward",
-        wraps=decoder.noisy_lift.forward,
-    ) as raw_forward, mock.patch.object(
-        spine,
-        "forward",
-        wraps=spine.forward,
-    ) as spine_forward:
+    with (
+        mock.patch.object(
+            model.outlet_adapter.codec,
+            "encode",
+            wraps=model.outlet_adapter.codec.encode,
+        ) as codec_encode,
+        mock.patch.object(
+            decoder.noisy_lift,
+            "forward",
+            wraps=decoder.noisy_lift.forward,
+        ) as raw_forward,
+        mock.patch.object(
+            spine,
+            "forward",
+            wraps=spine.forward,
+        ) as spine_forward,
+    ):
         result = engine.train_step(_batch(config), collect_diagnostics=True)
 
     assert codec_encode.call_count == raw_forward.call_count == spine_forward.call_count == 1
@@ -976,8 +964,7 @@ def test_bspine_zero_is_a_matched_learned_output_intervention() -> None:
             collect_diagnostics=True,
         )
         learned_weights = {
-            name: parameter.detach().clone()
-            for name, parameter in spine.named_parameters()
+            name: parameter.detach().clone() for name, parameter in spine.named_parameters()
         }
         for parameter in spine.parameters():
             parameter.zero_()
@@ -1033,11 +1020,14 @@ def test_bspine_deployment_keeps_exactly_twelve_bottom_calls() -> None:
     batch = _batch(config)
     spine = model.execution_bottom.decoder.spine
     assert spine is not None
-    with mock.patch.object(model, "velocity", wraps=model.velocity) as velocity, mock.patch.object(
-        spine,
-        "forward",
-        wraps=spine.forward,
-    ) as spine_forward:
+    with (
+        mock.patch.object(model, "velocity", wraps=model.velocity) as velocity,
+        mock.patch.object(
+            spine,
+            "forward",
+            wraps=spine.forward,
+        ) as spine_forward,
+    ):
         result = sample_action(
             model,
             batch.online,
@@ -1071,10 +1061,7 @@ def test_bspine_full_lifecycle_intervention_reaches_both_ode_passes() -> None:
 
     expected_calls = 2 * (config.runtime.inference_steps + 1)
     assert velocity.call_count == expected_calls == 12
-    assert all(
-        call.kwargs["execution_mode"] == "spine_zero"
-        for call in velocity.call_args_list
-    )
+    assert all(call.kwargs["execution_mode"] == "spine_zero" for call in velocity.call_args_list)
     torch.testing.assert_close(
         result.initial_physical_noise,
         initial_noise,
@@ -1136,7 +1123,7 @@ def test_bspine_validation_archives_matched_band_and_channel_surfaces() -> None:
         maximum=unit,
         mode="identity",
     )
-    bundle = SimpleNamespace(action_normalizer=normalizer, goal=None)
+    bundle = SimpleNamespace(action_normalizer=normalizer, goal=None, visual_encoder=None)
     with mock.patch(
         "clearvla.mainline.train.to_training_batch",
         return_value=batch,
@@ -1152,9 +1139,7 @@ def test_bspine_validation_archives_matched_band_and_channel_surfaces() -> None:
 
     assert report["validation_execution_ablation_coverage"] == 1.0
     for mode in ("spine_zero_refined_pass", "spine_zero_full_lifecycle"):
-        assert report[
-            f"validation_execution_{mode}_action_delta_rmse_normalized"
-        ] > 0.0
+        assert report[f"validation_execution_{mode}_action_delta_rmse_normalized"] > 0.0
         for band in ("1_4", "5_12", "13_24"):
             for owner in ("arm", "gripper"):
                 stem = f"validation_execution_{mode}_{owner}_band_{band}"
@@ -1363,13 +1348,16 @@ def test_finite_spike_audit_is_preclip_read_only_and_skips_ordinary_scan() -> No
     )
 
     ordinary_model, ordinary_engine = build_engine(threshold=1.0e9)
-    with mock.patch.object(
-        ordinary_engine,
-        "_forward",
-        side_effect=lambda *args, **kwargs: (ledger(ordinary_model), {}),
-    ), mock.patch(
-        "clearvla.mainline.training.engine.build_finite_gradient_spike_report"
-    ) as scanner:
+    with (
+        mock.patch.object(
+            ordinary_engine,
+            "_forward",
+            side_effect=lambda *args, **kwargs: (ledger(ordinary_model), {}),
+        ),
+        mock.patch(
+            "clearvla.mainline.training.engine.build_finite_gradient_spike_report"
+        ) as scanner,
+    ):
         ordinary_engine.train_step(
             object(),  # type: ignore[arg-type]
             gradient_spike_handler=lambda report: None,
@@ -1438,9 +1426,7 @@ def test_gripper_private_state_is_exact_zero_and_local_to_deployed_heads() -> No
     assert not torch.equal(changed_state, tokens)
     assert float(changed_gate.detach().abs().amax()) < 1.0
 
-    parseval_head = type(head)(
-        replace(decoder.config, gripper_field_mode="parseval_temporal")
-    )
+    parseval_head = type(head)(replace(decoder.config, gripper_field_mode="parseval_temporal"))
     assert parseval_head.arm_abs is not None and parseval_head.arm_delta is not None
     assert parseval_head.grip_native is not None
     parseval_base = parseval_head.norm(tokens)
@@ -1448,15 +1434,11 @@ def test_gripper_private_state_is_exact_zero_and_local_to_deployed_heads() -> No
         (
             parseval_head.arm_abs(parseval_base),
             parseval_head.arm_delta(parseval_base),
-            parseval_head.codec.encode_gripper_tangent(
-                parseval_head.grip_native(parseval_base)
-            ),
+            parseval_head.codec.encode_gripper_tangent(parseval_head.grip_native(parseval_base)),
         ),
         dim=-1,
     )
-    parseval_field, parseval_state, parseval_gate = (
-        parseval_head.forward_with_gripper_state(tokens)
-    )
+    parseval_field, parseval_state, parseval_gate = parseval_head.forward_with_gripper_state(tokens)
     assert torch.equal(parseval_field, parseval_expected)
     assert torch.equal(parseval_state, tokens)
     assert torch.count_nonzero(parseval_gate) == 0
@@ -1631,7 +1613,11 @@ def test_first_step_release_auxiliary_targets_only_row_zero_openings() -> None:
     target_physical = model.outlet_adapter.encode(target_action, action_state)
     zero_physical = torch.zeros_like(target_physical)
     tokens = torch.randn(2, 24, 32, requires_grad=True)
-    physical, _, _ = model.execution_bottom.decoder.terminal_controller.velocity_head.forward_with_gripper_state(tokens)
+    physical, _, _ = (
+        model.execution_bottom.decoder.terminal_controller.velocity_head.forward_with_gripper_state(
+            tokens
+        )
+    )
     terms = action_terms(
         config,
         model.outlet_adapter.codec,
@@ -1710,7 +1696,11 @@ def test_stackcube_first_step_hold_auxiliary_targets_no_event_row_zero() -> None
     target_physical = model.outlet_adapter.encode(target_action, action_state)
     zero_physical = torch.zeros_like(target_physical)
     tokens = torch.randn(2, 24, 32, requires_grad=True)
-    physical, _, _ = model.execution_bottom.decoder.terminal_controller.velocity_head.forward_with_gripper_state(tokens)
+    physical, _, _ = (
+        model.execution_bottom.decoder.terminal_controller.velocity_head.forward_with_gripper_state(
+            tokens
+        )
+    )
     terms = action_terms(
         config,
         model.outlet_adapter.codec,
@@ -1879,9 +1869,7 @@ def test_formal_eight_row_history_proposal_is_preserved_and_supervised() -> None
     )
     model = ClearVLAMainlinePolicy(config)
     batch = _batch(config)
-    proposal = model.conditioning.history_proposal(
-        batch.online.history.executed_action_history
-    )
+    proposal = model.conditioning.history_proposal(batch.online.history.executed_action_history)
     assert proposal.tokens.shape == (
         1,
         config.dimensions.action_horizon,
@@ -1920,9 +1908,7 @@ def test_formal_condition_dropout_is_exact_null_only_on_the_policy_path() -> Non
 
     handles = [
         model.intent.organizer.register_forward_pre_hook(capture("intent"), with_kwargs=True),
-        model.p1.factual_reader.register_forward_pre_hook(
-            capture("factual"), with_kwargs=True
-        ),
+        model.p1.factual_reader.register_forward_pre_hook(capture("factual"), with_kwargs=True),
     ]
 
     def zero_random(*size, **kwargs):
@@ -1995,15 +1981,18 @@ def test_progressive_grounding_executes_g1_g2_g3_and_rematerializes_n49_once() -
     model = ClearVLAMainlinePolicy(config).eval()
     batch = _batch(config)
     compiler = model.observation.compiler.encoder.soft_address_compiler
-    with mock.patch.object(
-        compiler,
-        "progressive_fine_candidates",
-        wraps=compiler.progressive_fine_candidates,
-    ) as rematerialize, mock.patch.object(
-        model.observation,
-        "advance_progressive_grounding",
-        wraps=model.observation.advance_progressive_grounding,
-    ) as advance:
+    with (
+        mock.patch.object(
+            compiler,
+            "progressive_fine_candidates",
+            wraps=compiler.progressive_fine_candidates,
+        ) as rematerialize,
+        mock.patch.object(
+            model.observation,
+            "advance_progressive_grounding",
+            wraps=model.observation.advance_progressive_grounding,
+        ) as advance,
+    ):
         _, training_state, metrics = model.encode_online(
             batch.online,
             collect_diagnostics=True,
@@ -2062,9 +2051,7 @@ def test_grounding_canvas_structurally_excludes_forbidden_conditions() -> None:
     assert slices["state"].stop - slices["state"].start == 1
     assert slices["rollout"].stop > slices["rollout"].start
     assert slices["registers"].stop > slices["registers"].start
-    assert canvas.shape[1] == sum(
-        current.stop - current.start for current in slices.values()
-    )
+    assert canvas.shape[1] == sum(current.stop - current.start for current in slices.values())
 
 
 def test_v120_p1_query_chunking_preserves_output_and_parameter_gradients() -> None:
@@ -2250,9 +2237,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     finally:
         transition_hook.remove()
     expected_transition_action = model.transition.trajectory_norm(
-        query
-        + compiled.plan.protected_base
-        + compiled.plan.protected_policy_precision
+        query + compiled.plan.protected_base + compiled.plan.protected_policy_precision
     ).flatten(1, 2)
     torch.testing.assert_close(
         captured_transition["action_tokens"],
@@ -2271,8 +2256,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         config.dimensions.action_horizon * config.dimensions.action_basis_tokens
     )
     transition_state_before = {
-        name: value.detach().clone()
-        for name, value in model.transition.state_dict().items()
+        name: value.detach().clone() for name, value in model.transition.state_dict().items()
     }
     model.transition.train()
     try:
@@ -2312,24 +2296,11 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     assert neutral_transition.selector is cache.transition_source.selector
     assert neutral_metrics["controlled_transition_intervention_active"] == 1
     assert neutral_metrics["controlled_transition_intervention_network_executed"] == 1
+    assert neutral_metrics["controlled_transition_intervention_first_boundary_delta_rms"] > 0
     assert (
-        neutral_metrics[
-            "controlled_transition_intervention_first_boundary_delta_rms"
-        ]
-        > 0
+        neutral_metrics["controlled_transition_intervention_action_neutral_identity_max_abs"] == 0
     )
-    assert (
-        neutral_metrics[
-            "controlled_transition_intervention_action_neutral_identity_max_abs"
-        ]
-        == 0
-    )
-    assert (
-        neutral_metrics[
-            "controlled_transition_intervention_selector_identity_max_abs"
-        ]
-        == 0
-    )
+    assert neutral_metrics["controlled_transition_intervention_selector_identity_max_abs"] == 0
     assert tuple(model.transition.state_dict()) == tuple(transition_state_before)
     for name, value in model.transition.state_dict().items():
         assert torch.equal(value, transition_state_before[name])
@@ -2353,9 +2324,9 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     )
     assert restored_metrics["controlled_transition_intervention_active"] == 0
     assert "p1_fact" not in inspect.signature(model.execution_bottom.step).parameters
-    assert "action_query" not in inspect.signature(
-        model.execution_bottom._layer_contracts
-    ).parameters
+    assert (
+        "action_query" not in inspect.signature(model.execution_bottom._layer_contracts).parameters
+    )
     assert "p1_fact" not in inspect.signature(model.execution_bottom._layer_contracts).parameters
     assert "plan" not in inspect.signature(model.execution_bottom._layer_contracts).parameters
     contract_inputs: list[tuple[torch.Tensor, dict[str, slice]]] = []
@@ -2448,9 +2419,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     )
     contract_loss = torch.stack(contract_terms).sum()
     adapter_parameters = tuple(
-        parameter
-        for head in contract_heads
-        for parameter in head.adapter.parameters()
+        parameter for head in contract_heads for parameter in head.adapter.parameters()
     )
     adapter_gradients = torch.autograd.grad(
         contract_loss,
@@ -2471,8 +2440,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         insertion = int(slices["trajectory"].start)
         fake_trajectory = torch.randn(
             int(canvas.shape[0]),
-            config.dimensions.action_horizon
-            * config.dimensions.action_basis_tokens,
+            config.dimensions.action_horizon * config.dimensions.action_basis_tokens,
             int(canvas.shape[-1]),
             device=canvas.device,
             dtype=canvas.dtype,
@@ -2505,9 +2473,7 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
     assert not trajectory_projection[0].weight.requires_grad
     assert any(parameter.requires_grad for parameter in trajectory_projection.parameters())
     rollout_start, rollout_stop = evidence.ranges["rollout"]
-    assert torch.count_nonzero(
-        evidence.tokens[:, rollout_start:rollout_stop]
-    ) > 0
+    assert torch.count_nonzero(evidence.tokens[:, rollout_start:rollout_stop]) > 0
     assert torch.count_nonzero(evidence.value_tokens[:, rollout_start:rollout_stop]) > 0
     role_bank = model.execution_bottom._role_bank(compiled.plan)
     assert role_bank.source_names == compiled.plan.source_names
@@ -2542,19 +2508,15 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         values=torch.zeros_like(role_bank.values),
         protected_detail=torch.zeros_like(protected_detail),
     )
-    dynamic_basis_read, _ = (
-        model.execution_bottom.decoder.protected_detail_basis_attnres(
-            bottom_query,
-            protected_policy_precision,
-            collect_diagnostics=False,
-        )
+    dynamic_basis_read, _ = model.execution_bottom.decoder.protected_detail_basis_attnres(
+        bottom_query,
+        protected_policy_precision,
+        collect_diagnostics=False,
     )
-    optional_update, consequence_update, _ = (
-        model.execution_bottom.decoder._read_policy_delta_bank(
-            bottom_query,
-            isolated_dynamic_bank,
-            collect_diagnostics=False,
-        )
+    optional_update, consequence_update, _ = model.execution_bottom.decoder._read_policy_delta_bank(
+        bottom_query,
+        isolated_dynamic_bank,
+        collect_diagnostics=False,
     )
     expected_optional = (
         float(model.execution_bottom.core_config.role_attnres_policy_to_mmdit_scale)
@@ -2578,12 +2540,10 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         isolated_dynamic_bank,
         protected_policy_precision=torch.zeros_like(protected_policy_precision),
     )
-    zero_optional, zero_consequence, _ = (
-        model.execution_bottom.decoder._read_policy_delta_bank(
-            bottom_query,
-            zero_dynamic_bank,
-            collect_diagnostics=False,
-        )
+    zero_optional, zero_consequence, _ = model.execution_bottom.decoder._read_policy_delta_bank(
+        bottom_query,
+        zero_dynamic_bank,
+        collect_diagnostics=False,
     )
     assert torch.count_nonzero(zero_optional) == 0
     assert torch.count_nonzero(zero_consequence) == 0
@@ -2610,10 +2570,9 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         lane_bank.values[:, 1],
         collect_diagnostics=False,
     )
-    expected_lane_update = (
-        float(model.execution_bottom.core_config.role_attnres_policy_to_mmdit_scale)
-        * (temporal_read + state_change_read)
-    )
+    expected_lane_update = float(
+        model.execution_bottom.core_config.role_attnres_policy_to_mmdit_scale
+    ) * (temporal_read + state_change_read)
     torch.testing.assert_close(lane_update, expected_lane_update)
     assert torch.count_nonzero(lane_consequence) == 0
     lane_gradient = torch.autograd.grad(
@@ -2632,12 +2591,8 @@ def test_controlled_transition_restores_v120_dynamic_action_and_bottom_lane() ->
         collect_diagnostics=True,
     )
     torch.testing.assert_close(
-        lane_metrics[
-            "evidence_policy_delta_attnres_null_mass_p3_state_change"
-        ],
-        changed_metrics[
-            "evidence_policy_delta_attnres_null_mass_p3_state_change"
-        ],
+        lane_metrics["evidence_policy_delta_attnres_null_mass_p3_state_change"],
+        changed_metrics["evidence_policy_delta_attnres_null_mass_p3_state_change"],
         atol=0.0,
         rtol=0.0,
     )
@@ -2747,7 +2702,9 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
             grounding_block_calls[index] += 1
 
         handles.append(block.register_forward_hook(count_grounding_block))
-    handles.append(model.conditioning.history_proposal.register_forward_hook(count_history_proposal))
+    handles.append(
+        model.conditioning.history_proposal.register_forward_hook(count_history_proposal)
+    )
     handles.append(model.p1.dynamic_policy_block.register_forward_hook(count_p1_host))
     handles.append(model.transition.register_forward_hook(count_transition))
     for index, block in enumerate(model.execution_bottom.blocks):
@@ -2756,19 +2713,23 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
             calls[index] += 1
 
         handles.append(block.register_forward_hook(count_call))
-    with mock.patch.object(
-        model.observation,
-        "prepare",
-        wraps=model.observation.prepare,
-    ) as observation_prepare, mock.patch.object(
-        model.observation.compiler.encoder.flow,
-        "forward",
-        wraps=model.observation.compiler.encoder.flow.forward,
-    ) as semantic_flow, mock.patch.object(
-        model.observation.compiler.encoder.raw_flow,
-        "forward",
-        wraps=model.observation.compiler.encoder.raw_flow.forward,
-    ) as raw_flow:
+    with (
+        mock.patch.object(
+            model.observation,
+            "prepare",
+            wraps=model.observation.prepare,
+        ) as observation_prepare,
+        mock.patch.object(
+            model.observation.compiler.encoder.flow,
+            "forward",
+            wraps=model.observation.compiler.encoder.flow.forward,
+        ) as semantic_flow,
+        mock.patch.object(
+            model.observation.compiler.encoder.raw_flow,
+            "forward",
+            wraps=model.observation.compiler.encoder.raw_flow.forward,
+        ) as raw_flow,
+    ):
         result = sample_action(
             model,
             batch.online,
@@ -2797,12 +2758,8 @@ def test_five_step_deployment_builds_static_evidence_once_and_no_teacher() -> No
         torch.tensor((0.0, 0.2, 0.4, 0.6, 0.8)),
     )
     torch.testing.assert_close(result.metrics["sampling_endpoint_head_time"], torch.tensor(1.0))
-    torch.testing.assert_close(
-        result.metrics["sampling_velocity_update_calls"], torch.tensor(5.0)
-    )
-    torch.testing.assert_close(
-        result.metrics["sampling_endpoint_head_calls"], torch.tensor(1.0)
-    )
+    torch.testing.assert_close(result.metrics["sampling_velocity_update_calls"], torch.tensor(5.0))
+    torch.testing.assert_close(result.metrics["sampling_endpoint_head_calls"], torch.tensor(1.0))
     assert tuple(result.action.shape) == tuple(batch.action_target.normalized.shape)
     assert torch.isfinite(result.action).all()
     assert not hasattr(result, "event_logits")
@@ -2865,9 +2822,7 @@ def test_clean_endpoint_head_forward_cannot_change_integrated_action() -> None:
                 output,
                 bottom=replace(
                     output.bottom,
-                    physical_velocity=torch.full_like(
-                        output.bottom.physical_velocity, 1.0e6
-                    ),
+                    physical_velocity=torch.full_like(output.bottom.physical_velocity, 1.0e6),
                 ),
             )
         return output
@@ -2894,9 +2849,7 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
     def capture_p1_g3_rollout(_module, args):
         captured["g3_rollout"] = args[1]
 
-    handle = model.p1.factual_reader.register_forward_pre_hook(
-        capture_p1_g3_rollout
-    )
+    handle = model.p1.factual_reader.register_forward_pre_hook(capture_p1_g3_rollout)
     try:
         cache, training_state, metrics = model.encode_online(
             batch.online,
@@ -2966,9 +2919,7 @@ def test_p1_refines_the_local_chart_per_query_and_returns_action_pressure_to_g()
     assert metrics["controlled_transition_source_spatial_variation"] >= 0
     assert metrics["controlled_transition_source_anchor_variation"] >= 0
     assert not hasattr(model.transition, "interval_identity")
-    assert cache.transition_source.selector.shape[1] == (
-        4 * config.dimensions.num_cameras * 8 * 8
-    )
+    assert cache.transition_source.selector.shape[1] == (4 * config.dimensions.num_cameras * 8 * 8)
 
 
 def test_controlled_transition_source_preserves_g3_rows_and_exact_zero() -> None:
@@ -3190,9 +3141,7 @@ def test_validation_action_estimator_is_one_call_lossless_observer() -> None:
             collect_diagnostics=False,
             dtype=torch.float32,
         )
-    state_before = {
-        name: value.detach().clone() for name, value in model.state_dict().items()
-    }
+    state_before = {name: value.detach().clone() for name, value in model.state_dict().items()}
     cpu_rng_before = torch.get_rng_state().clone()
     with mock.patch.object(model, "velocity", wraps=model.velocity) as velocity:
         metrics = _validation_action_estimator_match(
@@ -3249,7 +3198,7 @@ def test_core_attribution_full_one_batch_validation_smoke() -> None:
         maximum=unit,
         mode="identity",
     )
-    bundle = SimpleNamespace(action_normalizer=normalizer, goal=None)
+    bundle = SimpleNamespace(action_normalizer=normalizer, goal=None, visual_encoder=None)
     with mock.patch(
         "clearvla.mainline.train.to_training_batch",
         return_value=batch,
@@ -3267,19 +3216,12 @@ def test_core_attribution_full_one_batch_validation_smoke() -> None:
     assert metrics["validation_action_estimator_match_batches"] == 1.0
     assert metrics["validation_action_estimator_match_coverage"] == 1.0
     assert metrics["validation_action_estimator_endpoint_dynamic_calls"] == 1.0
-    assert math.isfinite(
-        metrics["validation_action_estimator_to_full_interval_action_rms"]
+    assert math.isfinite(metrics["validation_action_estimator_to_full_interval_action_rms"])
+    assert (
+        metrics["validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact"] == 1.0
     )
     assert (
-        metrics[
-            "validation_core_attribution_primary_vs_explicit_none_normalized_bit_exact"
-        ]
-        == 1.0
-    )
-    assert (
-        metrics[
-            "validation_core_attribution_world_vs_consequence_neutral_normalized_bit_exact"
-        ]
+        metrics["validation_core_attribution_world_vs_consequence_neutral_normalized_bit_exact"]
         == 1.0
     )
     assert (
@@ -3296,12 +3238,7 @@ def test_core_attribution_full_one_batch_validation_smoke() -> None:
         ]
         == 0.0
     )
-    assert (
-        metrics[
-            "validation_core_attribution_wrong_action_world_donor_valid_fraction"
-        ]
-        > 0.0
-    )
+    assert metrics["validation_core_attribution_wrong_action_world_donor_valid_fraction"] > 0.0
     assert model.policy_compiler.consequence._eval_intervention == "none"
     assert model.transition._eval_intervention == "none"
 
@@ -3344,21 +3281,17 @@ def test_validation_execution_interventions_match_the_native_v120_modes() -> Non
     assert no_updates.metrics["evidence_mmd_it_execution_eval_policy_code"] == 2
     assert outputs["hard"].metrics["evidence_mmd_it_execution_eval_policy_code"] == 1
     assert outputs["neutral"].metrics["evidence_mmd_it_execution_eval_policy_code"] == 2
-    assert outputs["full_capacity"].metrics[
-        "evidence_mmd_it_execution_eval_policy_code"
-    ] == 0
-    assert outputs["three_basis_reduction"].metrics[
-        "evidence_mmd_it_execution_eval_policy_code"
-    ] == 0
+    assert outputs["full_capacity"].metrics["evidence_mmd_it_execution_eval_policy_code"] == 0
+    assert (
+        outputs["three_basis_reduction"].metrics["evidence_mmd_it_execution_eval_policy_code"] == 0
+    )
     assert outputs["neutral"].metrics["evidence_mmd_it_capacity_ratio"] == 1
     assert outputs["full_capacity"].metrics["evidence_mmd_it_capacity_ratio"] == 1
     expected_reduction = max(config.bottom.operator_rank - 3, 1) / float(
         config.bottom.operator_rank
     )
     torch.testing.assert_close(
-        outputs["three_basis_reduction"].metrics[
-            "evidence_mmd_it_capacity_ratio"
-        ],
+        outputs["three_basis_reduction"].metrics["evidence_mmd_it_capacity_ratio"],
         torch.tensor(expected_reduction),
     )
     assert not torch.equal(
@@ -3367,9 +3300,7 @@ def test_validation_execution_interventions_match_the_native_v120_modes() -> Non
     )
     torch.testing.assert_close(
         no_updates.bottom.physical_velocity,
-        no_updates.bottom.decoder_tensors[
-            "evidence_mmd_it_prefix_pred_velocity"
-        ][:, 0],
+        no_updates.bottom.decoder_tensors["evidence_mmd_it_prefix_pred_velocity"][:, 0],
     )
     assert no_updates.metrics["bottom_execution_output_block_count"] == 0
     for mode in ("hard", "neutral", "full_capacity", "three_basis_reduction"):
@@ -3445,8 +3376,12 @@ def test_frame_progress_audit_is_detached_from_forward_and_reports_s_w_correlati
     audit_metrics = MainlineTrainingEngine._audit_progress_metrics(
         batch,
         EncodedTrainingBatch.capture(
-            cache, training_state, metrics, source_online=batch.online,
-            model=model, global_step=0,
+            cache,
+            training_state,
+            metrics,
+            source_online=batch.online,
+            model=model,
+            global_step=0,
         ),
         formal_cache=cache,
     )
@@ -3575,9 +3510,7 @@ def test_shared_target_prior_q5_keeps_two_passes_and_one_world_rebuild() -> None
     assert forward_w1.call_count == 1
     assert torch.equal(
         velocity.call_args_list[0].kwargs["noisy_action_field"],
-        velocity.call_args_list[config.runtime.inference_steps + 1].kwargs[
-            "noisy_action_field"
-        ],
+        velocity.call_args_list[config.runtime.inference_steps + 1].kwargs["noisy_action_field"],
     )
     torch.testing.assert_close(
         result.step_times,
@@ -3646,15 +3579,13 @@ def test_shared_target_prior_full_training_graph_has_one_owner_and_gradient() ->
     )
     ledger.total.backward()
 
-    assert ownership.trainable_names.count(
-        "top.intent.target_object_address.weight"
-    ) == 1
-    gradient = dict(model.named_parameters())[
-        "intent.organizer.target_object_address.weight"
-    ].grad
+    assert ownership.trainable_names.count("top.intent.target_object_address.weight") == 1
+    gradient = dict(model.named_parameters())["intent.organizer.target_object_address.weight"].grad
     assert gradient is not None
     assert torch.isfinite(gradient).all()
     assert torch.count_nonzero(gradient) > 0
+
+
 def test_sequence_condition_uses_24_row_online_and_training_abi() -> None:
     torch.manual_seed(2899)
     base = _config()
@@ -3743,9 +3674,7 @@ def test_sequence_constructor_preserves_target_prior_camera_baseline_state_and_r
     assert not set(target_prior_state) - set(sequence_state)
     for name, value in target_prior_state.items():
         torch.testing.assert_close(sequence_state[name], value, atol=0.0, rtol=0.0)
-    assert torch.count_nonzero(
-        sequence_state["intent.coarse_action.sequence_row_offset"]
-    ) == 0
+    assert torch.count_nonzero(sequence_state["intent.coarse_action.sequence_row_offset"]) == 0
     for name in expected_new:
         assert torch.isfinite(sequence_state[name]).all(), name
 
@@ -3891,9 +3820,7 @@ def test_sequence_q5_runs_exactly_two_passes_and_one_world_rebuild(
         if p2_spatial_intent_mode == "shared_target_prior_v1":
             target_address = model.intent.organizer.target_object_address
             assert target_address is not None
-            target_address.weight.copy_(
-                torch.tensor([[0.20, -0.10, 0.15]], dtype=torch.float32)
-            )
+            target_address.weight.copy_(torch.tensor([[0.20, -0.10, 0.15]], dtype=torch.float32))
     cache, _, _ = model.encode_online(
         _batch(config).online,
         collect_diagnostics=False,
@@ -3926,9 +3853,7 @@ def test_sequence_q5_runs_exactly_two_passes_and_one_world_rebuild(
     assert forward_w1.call_count == 1
     assert torch.equal(
         velocity.call_args_list[0].kwargs["noisy_action_field"],
-        velocity.call_args_list[config.runtime.inference_steps + 1].kwargs[
-            "noisy_action_field"
-        ],
+        velocity.call_args_list[config.runtime.inference_steps + 1].kwargs["noisy_action_field"],
     )
     torch.testing.assert_close(
         result.step_times,
@@ -3951,6 +3876,8 @@ def test_sequence_q5_runs_exactly_two_passes_and_one_world_rebuild(
         assert name in result.metrics
         assert torch.isfinite(result.metrics[name])
     assert not any("action_interval" in name for name in result.metrics)
+
+
 @pytest.mark.parametrize(
     "p2_spatial_intent_mode",
     ("post_pool_only", "shared_target_prior_v1"),
@@ -4001,9 +3928,7 @@ def test_sequence_full_training_graph_backpropagates_and_is_uniquely_owned(
         if p2_spatial_intent_mode == "shared_target_prior_v1":
             target_address = model.intent.organizer.target_object_address
             assert target_address is not None
-            target_address.weight.copy_(
-                torch.tensor([[0.20, -0.10, 0.15]], dtype=torch.float32)
-            )
+            target_address.weight.copy_(torch.tensor([[0.20, -0.10, 0.15]], dtype=torch.float32))
     optimizer, ownership = build_optimizer(model, config)
     schedule = WarmupCosineSchedule(
         optimizer,
@@ -4062,9 +3987,7 @@ def test_sequence_full_training_graph_backpropagates_and_is_uniquely_owned(
         assert torch.isfinite(gradient).all(), name
         assert torch.count_nonzero(gradient) > 0, name
     if p2_spatial_intent_mode == "shared_target_prior_v1":
-        target_gradient = live_parameters[
-            "intent.organizer.target_object_address.weight"
-        ].grad
+        target_gradient = live_parameters["intent.organizer.target_object_address.weight"].grad
         assert target_gradient is not None
         assert torch.isfinite(target_gradient).all()
         assert torch.count_nonzero(target_gradient) > 0
@@ -4150,9 +4073,7 @@ def test_calvin_sequence_real_cpu_bf16_encode_keeps_fp32_normalizer_identity() -
         runtime=replace(
             base.runtime,
             compute_dtype="bf16",
-            deployment_flow_schedule=(
-                DeploymentFlowSchedule.same_nfe_power_five().to_dict()
-            ),
+            deployment_flow_schedule=(DeploymentFlowSchedule.same_nfe_power_five().to_dict()),
         ),
     )
     model = ClearVLAMainlinePolicy(config).eval()
@@ -4162,9 +4083,7 @@ def test_calvin_sequence_real_cpu_bf16_encode_keeps_fp32_normalizer_identity() -
         assert camera_condition is not None
         assert target_address is not None
         camera_condition.weight.normal_(std=0.05)
-        target_address.weight.copy_(
-            torch.tensor([[0.20, -0.10, 0.15]], dtype=torch.float32)
-        )
+        target_address.weight.copy_(torch.tensor([[0.20, -0.10, 0.15]], dtype=torch.float32))
     offset = np.asarray(
         [[0.40, -0.20, 0.10, 0.30, -0.50, 0.25, 0.60]],
         dtype=np.float32,
@@ -4197,6 +4116,8 @@ def test_calvin_sequence_real_cpu_bf16_encode_keeps_fp32_normalizer_identity() -
     assert condition is training_state.top.action_condition
     model.outlet_adapter.validate_world_condition(condition)
     condition.assert_exact_contract()
+
+
 def test_sequence_validation_aggregates_estimator_and_closure_metrics() -> None:
     torch.manual_seed(2301)
     base = _config()
@@ -4241,7 +4162,7 @@ def test_sequence_validation_aggregates_estimator_and_closure_metrics() -> None:
         maximum=unit,
         mode="identity",
     )
-    bundle = SimpleNamespace(action_normalizer=normalizer, goal=None)
+    bundle = SimpleNamespace(action_normalizer=normalizer, goal=None, visual_encoder=None)
     with mock.patch(
         "clearvla.mainline.train.to_training_batch",
         return_value=batch,
