@@ -19,12 +19,14 @@ def main():
     q.add_argument('--output', type=Path, required=True)
     q.add_argument('--index', type=int)
     q.add_argument('--support-mode', choices=('dominant_v1','under_tcp_v2'), default='dominant_v1')
+    q.add_argument('--export-audit-masks', action='store_true', help='Store oracle body/link masks for a separate scorer only')
     a = q.parse_args(); a.output.mkdir(exist_ok=False)
     plan = json.loads(a.plan.read_text())
     identity = dict(script_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                     proposal_sha256=hashlib.sha256(Path(__file__).with_name('sensor_surface_groups.py').read_bytes()).hexdigest(),
                     plan_sha256=hashlib.sha256(a.plan.read_bytes()).hexdigest(), settings=SETTINGS,
                     support_mode=a.support_mode,
+                    oracle_masks_exported_for_scoring=a.export_audit_masks,
                     scope=__doc__, production_changed=False,
                     algorithm_source='https://pointclouds.org/documentation/tutorials/cluster_extraction.html')
     report = dict(identity=identity, records=[], complete=False)
@@ -32,7 +34,7 @@ def main():
         for i in range(len(plan)):
             folder = a.output/('worker_%02d'%i)
             with (a.output/('worker_%02d.log'%i)).open('x') as log:
-                child = subprocess.run([sys.executable, '-B', '-u', __file__, '--plan', str(a.plan), '--output', str(folder), '--index', str(i), '--support-mode', a.support_mode], stdout=log, stderr=subprocess.STDOUT)
+                child = subprocess.run([sys.executable, '-B', '-u', __file__, '--plan', str(a.plan), '--output', str(folder), '--index', str(i), '--support-mode', a.support_mode] + (['--export-audit-masks'] if a.export_audit_masks else []), stdout=log, stderr=subprocess.STDOUT)
             if child.returncode:
                 raise RuntimeError('surface replay failed; retained '+str(folder)+'.log')
             value = json.loads((folder/'results.json').read_text())
@@ -55,7 +57,7 @@ def main():
         for step in range(max(wanted)+1):
             if step: obs, *_ = env.step(data['executed'][step-1].copy())
             if step not in wanted: continue
-            depths, rgbs, body_maps, actual_views = [], [], [], []
+            depths, rgbs, body_maps, link_maps, actual_views = [], [], [], [], []
             for camera, key in zip(env.cameras, ('static','gripper')):
                 rgb, depth = camera.render()
                 np.testing.assert_array_equal(rgb, data['rgb_'+key][step])
@@ -65,6 +67,7 @@ def main():
                     physicsClientId=camera.cid,flags=p.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX)
                 label = np.asarray(frame[4]).reshape(camera.height,camera.width)
                 body_maps.append(np.where(label<0,-1,label&((1<<24)-1)))
+                link_maps.append(np.where(label<0,-2,(label>>24)-1))
                 depths.append(depth); rgbs.append(rgb); actual_views.append(matrix(camera,'view'))
             views = camera_views(data['robot_obs'][step], calibration)
             # Full body maps remain outside both calls to the sensor producer.
@@ -76,7 +79,11 @@ def main():
             if producer != other: raise ValueError('non-deterministic sensor grouping')
             audit = audit_groups(group_maps, body_maps, objects)
             path = a.output/('groups_%03d.npz'%step)
-            np.savez_compressed(path, group_static=group_maps[0], group_gripper=group_maps[1])
+            exported = dict(group_static=group_maps[0], group_gripper=group_maps[1])
+            if a.export_audit_masks:
+                exported.update(audit_body_static=body_maps[0], audit_body_gripper=body_maps[1],
+                                audit_link_static=link_maps[0], audit_link_gripper=link_maps[1])
+            np.savez_compressed(path, **exported)
             report['records'].append(dict(case=case.name, case_id=row.get('case_id'), step=step,
                 production_view_max_abs_error=max(float(np.abs(x-y).max()) for x,y in zip(views,actual_views)),
                 producer=producer,audit=audit,groups_path=str(path),groups_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),repeat_equal=True))

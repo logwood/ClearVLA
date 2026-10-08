@@ -54,12 +54,32 @@ def audit(partition, groups, truth):
         scope='Native pixel-pair counts are correlated. Robot/background identities, cross-view/time links and train-distribution coverage remain unqualified.')
 
 
+def negative_clique_size(groups):
+    # A pair is negative iff both labels differ. A maximum clique is therefore
+    # a maximum matching between SAM IDs and surface IDs, without oracle input.
+    neighbors = {}
+    for a, b in groups:
+        neighbors.setdefault(int(a), []).append(int(b))
+    assigned = {}
+    def augment(a, seen):
+        for b in neighbors[a]:
+            if b in seen:
+                continue
+            seen.add(b)
+            if b not in assigned or augment(assigned[b], seen):
+                assigned[b] = a
+                return True
+        return False
+    return sum(augment(a, set()) for a in neighbors)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--sam', type=Path, required=True)
     p.add_argument('--plan', type=Path, required=True)
     p.add_argument('--groups', type=Path, nargs='+', required=True)
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--audit-all-bodies', action='store_true')
     args = p.parse_args(); args.output.mkdir(exist_ok=False)
     sam = json.loads(args.sam.read_text()); assert sam['complete']
     if hashlib.sha256(args.plan.read_bytes()).hexdigest() != sam['identity']['plan_sha256']:
@@ -92,7 +112,27 @@ def main():
         with np.load(truth_path, allow_pickle=False) as z:
             scored = [audit(part, groups, z[name]) for (part,groups),name in
                       zip(partitions,('top_masks','wrist_masks'))]
-        result['records'].append(dict(case=row['case_id'], step=row['step'], cameras=scored))
+        record = dict(case=row['case_id'], step=row['step'], cameras=scored,
+                      negative_clique_sizes=[negative_clique_size(g) for _,g in partitions])
+        if args.audit_all_bodies:
+            # Reopen only AFTER proposal construction. These arrays are never
+            # used for foreground selection, masks, grouping or matching.
+            whole, rigid = [], []
+            with np.load(group['groups_path'], allow_pickle=False) as z:
+                for (part,groups), camera in zip(partitions,('static','gripper')):
+                    body, link = z['audit_body_'+camera], z['audit_link_'+camera]
+                    ids = np.unique(body[body>=0])
+                    truth = np.stack([body==i for i in ids]) if len(ids) else np.empty((0,*body.shape),bool)
+                    scored_body = {k.replace('block','entity'):v for k,v in audit(part,groups,truth).items()}
+                    scored_body['scope'] = 'Oracle whole-body identities score every proposed entity; never used by the producer.'
+                    whole.append(dict(ids=ids.tolist(), audit=scored_body))
+                    keys = np.unique(np.stack((body[body>=0],link[body>=0]),-1),axis=0)
+                    truth = np.stack([(body==i)&(link==j) for i,j in keys]) if len(keys) else np.empty((0,*body.shape),bool)
+                    scored_link = {k.replace('block','entity'):v for k,v in audit(part,groups,truth).items()}
+                    scored_link['scope'] = 'Oracle rigid-link identities distinguish articulated parts from fragments of one rigid part; scorer only.'
+                    rigid.append(dict(body_link_ids=keys.tolist(), audit=scored_link))
+            record.update(all_body_cameras=whole, rigid_link_cameras=rigid)
+        result['records'].append(record)
     result['complete'] = True
     result['inputs'] = {str(path):hashlib.sha256(path.read_bytes()).hexdigest()
                         for path in [args.sam,args.plan,*args.groups,Path(__file__)]}
