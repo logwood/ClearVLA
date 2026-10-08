@@ -4042,3 +4042,19 @@ to restart the active short or add every borrowed component. Only if its
 actual failure chain indicates a missing local operation should the retained
 prototype proceed to real-loss/cost qualification and meaningful training.
 
+
+
+### 34.33.22 SAM 结构探索另行授权（B-v2 底座）
+
+用户允许两项已筛选的轻量结构先长训探索，明确选择 B-v2 完整 checkpoint，
+主线 B-v3 及其标准18/完整VJP/对象资格继续独立推进。
+独立分支codex/sam-structure-screen-20261008，生产edbba48b：
+slot_to_image_v1（32768参数）与region_fusion_v1（33088参数），
+只改G寻址特征，原事实值、K/null分配、B-v2损失和source_consistent_v1保留。
+普通两步BS8+两离线均已完成；逐新参数总损失反传有限且第二步都有更新。
+额外逐损失VJP曾OOM，改普通backward hooks，失败记录保留。
+四窗口冷部署由独立接续检查，不以机械通过宣称身份改善。
+两条各11012次BS8更新/256离线/18R8，从B-v2 step12036到23048，
+属于用户授权探索，不能替代本节原有正式A/B准入。
+实验目录/data/senwang/clearvla/experiments/sam-structure-exploration-20261008；
+源/配置/权重/manifest与接续receipt见该目录。主线GPU6的已有接续受保护。

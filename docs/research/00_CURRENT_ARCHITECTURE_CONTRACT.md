@@ -1694,6 +1694,19 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### Separate B-v2 SAM-inspired long exploration (2026-10-08)
+
+The user explicitly authorized two exploratory long runs from the completed
+B-v2 checkpoint, before proven behavioral gain. See research34.33.22 and
+codex/sam-structure-screen-20261008, pinned production edbba48b.
+They keep the B-v2 objectives/source_consistent_v1 and each add only one small
+G address adapter. Ordinary two-BS8 backward/save tests completed; cold-load
+admission and whole-GPU long queues are separately recorded in
+sam-structure-exploration-20261008. Each declares11012BS8+256offline+18R8.
+This authorization does not promote mainline B-v3 or alter its immutable
+training/evaluation/qualification continuation; keep that workflow intact.
+
+
 
 ### SAM structure reuse remains an evidence-led option (2026-10-08)
 
