@@ -240,6 +240,7 @@ class DenseObjectGrounder(nn.Module):
         entity_transport_gradient_mode: str = "positive_corners_v1",
         entity_ownership_mode: str = "local_mixture_v1",
         entity_competition_scale_mode: str = "batch_global_v1",
+        entity_address_memory_mode: str = "none",
         observation_measurement_mode: str = "legacy_v1",
         camera_names: tuple[str,...] = (),
         entity_history_mode: str = NO_ENTITY_HISTORY,
@@ -254,6 +255,11 @@ class DenseObjectGrounder(nn.Module):
         if entity_competition_scale_mode not in {"batch_global_v1","per_observation_v1"}:
             raise ValueError("unknown entity competition scale scope")
         self.entity_competition_scale_mode = entity_competition_scale_mode
+        if entity_address_memory_mode not in {"none", "conditional_logits_v1"}:
+            raise ValueError("unknown entity address memory mode")
+        if entity_address_memory_mode != "none" and entity_ownership_mode != "canonical_image_v1":
+            raise ValueError("address memory requires actual canonical image cells")
+        self.entity_address_memory_mode = entity_address_memory_mode
         self.observation_measurement_mode = observation_measurement_mode
         self.camera_names = tuple(camera_names)
         self.per_camera_values = object_view_mode == "per_camera_values_v1"
@@ -347,6 +353,12 @@ class DenseObjectGrounder(nn.Module):
             self.decode_content_residual = None
         else:
             self.canonical_decoder = None
+        # No RNG draw or legacy state key. Three scalar gains for the three
+        # existing recurrent transitions; the retained tensor keeps every cell/K.
+        self.address_memory_gain = (
+            nn.Parameter(torch.zeros(self.iterations))
+            if entity_address_memory_mode == "conditional_logits_v1" else None
+        )
 
     def _candidate_tokens(self, chart: DenseFactChart, history_context: Tensor | None = None) -> Tensor:
         """Return the exact shared V120 key/value candidate representation."""

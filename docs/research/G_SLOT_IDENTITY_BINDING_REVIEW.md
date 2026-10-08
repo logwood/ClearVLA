@@ -4359,3 +4359,33 @@ separate confirmed, selectively integrable fix; it does not explain this
 v1-to-v2 regression because both completed runs used the same measurement mode.
 Small statistics and exact reproduction command/identity live in the receipt and
 B-v1-forward-structure-r1/decision-summary.json; no feature tensors were saved.
+
+### 34.33.26 B-v1 candidate: preserve dense addresses across recurrent G
+
+The user asks to proceed through implementation and behavior validation.
+The scoped forward evidence in34.33.25 motivates one explicit candidate:
+entity_address_memory_mode=conditional_logits_v1. The previous [B,N,K]
+conditional address remains available to the next competition; it is not reduced
+to a per-K content vector. Existing GRU/FFN/value reads and final G3 residual
+remain. Three zero-initialized tanh gains, one per existing transition, add the
+previous centered real-K log law to the new conditional law. At fixed inputs
+the current real total/null, source support and per-camera/cell axes are kept.
+Later slot changes can indirectly change null. No second target selector,
+new online sensor, cross-observation value cache, loss change or budget cut.
+
+This is an optional structural hypothesis, not a proven physical-identity repair.
+The default graph/config digest and RNG/state inventory remain exact B-v1.
+Initialization is restricted to the pinned B-v1 source digest, with unchanged
+dataset/config outside the new selector and training controls. The only new
+state is grounding.grounder.address_memory_gain. The same explicit migration
+allows a no-memory continuation control; original objectives stay unchanged.
+
+Seven numerical/gradient contracts pass (probes/test_bv1_address_memory.py):
+zero-init forward exact; inherited gradient parity; nonzero new-gain VJP;
+ordinary previous-address gradient; invalid/empty support finite; current
+null/real mass conserved; K and cell permutation; old config/digest; exact new
+state inventory and zero-init migration. The first test invocation used a
+nonexistent convenience config method; its failure scope is retained in E,
+then corrected to the actual config_from_mapping/as_dict API. No behavior
+claim follows from these checks. Actual-window, BS8 ordinary-backward, cold
+deployment and meaningful short/panel qualification remain required.

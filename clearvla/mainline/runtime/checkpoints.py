@@ -51,6 +51,7 @@ JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION = (
     "joint_task_object_binding_trajectory_v1"
 )
 from .causal_identity_migration import CAUSAL_IDENTITY_AB_V1
+from .address_memory_migration import B_V1_ADDRESS_MEMORY_V1
 
 CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION = "calvin_endpoint_trajectory_repair_v1"
 CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS = frozenset({
@@ -1199,6 +1200,7 @@ def load_checkpoint_for_initialization(
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
         CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
         CAUSAL_IDENTITY_AB_V1,
+        B_V1_ADDRESS_MEMORY_V1,
         DINOV3_DEEP_REPAIR_V1_MIGRATION,
         S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
         G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
@@ -1420,6 +1422,13 @@ def load_checkpoint_for_initialization(
             raise ValueError(
                 "G-slot identity source repair requires identical dataset identity"
             )
+    elif selected_model_migration == B_V1_ADDRESS_MEMORY_V1:
+        from .address_memory_migration import config_view, validate_selection
+        validate_selection(saved_config,config,saved_identity.source.digest)
+        if config_view(_initialization_config_view(saved_config)) != config_view(_initialization_config_view(config)):
+            raise ValueError("address-memory trial differs outside declared selector")
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError("address-memory trial requires identical B-v1 dataset")
     elif selected_model_migration == CAUSAL_IDENTITY_AB_V1:
         from .causal_identity_migration import config_view, validate_selection
         validate_selection(saved_config,config,saved_identity.source.digest)
@@ -1625,7 +1634,10 @@ def load_checkpoint_for_initialization(
             if saved_sources.get(source_path) != current_sources.get(source_path)
         )
     )
-    if selected_model_migration == CAUSAL_IDENTITY_AB_V1:
+    if selected_model_migration == B_V1_ADDRESS_MEMORY_V1:
+        from .address_memory_migration import SOURCE_PATHS
+        allowed_source_paths = SOURCE_PATHS
+    elif selected_model_migration == CAUSAL_IDENTITY_AB_V1:
         from .causal_identity_migration import SOURCE_PATHS
         allowed_source_paths = SOURCE_PATHS
     elif selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
@@ -1792,6 +1804,9 @@ def load_checkpoint_for_initialization(
             )
         mapped_model = dict(mapped_model)
         mapped_model[new_condition_key] = new_condition.detach().clone()
+    elif selected_model_migration == B_V1_ADDRESS_MEMORY_V1:
+        from .address_memory_migration import migrate_state
+        mapped_model=migrate_state(mapped_model,current_model,config)
     elif selected_model_migration == CAUSAL_IDENTITY_AB_V1:
         from .causal_identity_migration import migrate_state
         mapped_model=migrate_state(mapped_model,current_model,config)

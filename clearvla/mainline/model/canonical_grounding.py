@@ -39,8 +39,15 @@ def encode_owners(module,candidates,mass,legal):
     log_prior=torch.where(prior>0,prior,1.).log()
     valid=legal.float()[...,None]
     slots=module.slot_seed.to(candidates).expand(b,-1,-1)
-    for _ in range(module.iterations):
-        _,_,_,read,_,_=module._competition(slots,candidates,valid,prior,log_prior,legal)
+    memory = module.entity_address_memory_mode == "conditional_logits_v1"
+    previous = None
+    for index in range(module.iterations):
+        if memory:
+            from .address_memory import competition_with_memory
+            _,_,_,read,address,_=competition_with_memory(module,slots,candidates,valid,prior,log_prior,legal,previous,index)
+            previous=address[...,:module.objects]
+        else:
+            _,_,_,read,_,_=module._competition(slots,candidates,valid,prior,log_prior,legal)
         update=read.to(candidates)@candidates
         update,_=smooth_rms_contract(update,module.maximum_update_rms)
         nxt=module.gru(update.reshape(-1,h).float(),slots.reshape(-1,h).float()).reshape(b,module.objects,h).to(slots)
@@ -49,7 +56,10 @@ def encode_owners(module,candidates,mass,legal):
             identity=F.normalize(module.slot_seed.float()-module.slot_seed.float().mean(1,keepdim=True),dim=-1,eps=1e-6)
             scale=torch.linalg.vector_norm((nxt+ffn).float(),dim=-1,keepdim=True).detach().clamp_min(1e-6)
         slots=nxt+ffn+(.5*scale*identity).to(nxt)
-    _,_,_,_,parent_log,_=module._competition(slots,candidates,valid,prior,log_prior,legal)
+    if memory:
+        _,_,_,_,parent_log,_=competition_with_memory(module,slots,candidates,valid,prior,log_prior,legal,previous,module.iterations)
+    else:
+        _,_,_,_,parent_log,_=module._competition(slots,candidates,valid,prior,log_prior,legal)
     pair=torch.cat((slots[:,None].expand(-1,n,-1,-1),candidates[:,:,None].expand(-1,-1,module.objects,-1)),-1)
     residual=.5*torch.tanh(module.g3_residual(pair).squeeze(-1).float())
     with torch.autocast(device_type=slots.device.type,enabled=False):

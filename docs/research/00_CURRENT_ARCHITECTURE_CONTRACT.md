@@ -1702,13 +1702,26 @@ lose supported physical-object separation during later recurrent transitions;
 mean removal, skipped iterations or any new gate. See34.33.25 before editing.
 
 
+### Current optional candidate: dense address memory
+
+Research34.33.26 records entity_address_memory_mode=conditional_logits_v1.
+It retains the full current-observation cell/K address across existing G
+iterations using three zero-initialized tanh gains. Do not pool N/camera here,
+detach the previous law, or alter current competition total-real/null/support.
+No persistent RGB/DINO cache or new online input is introduced. Default is
+exact B-v1; all original objectives remain unchanged. Seven numerical and
+gradient contracts pass; no behavioral admission yet. Use pinned B-v1 complete
+checkpoint with explicit b_v1_address_memory_v1 migration and fresh optimizer
+clock12036. Matched no-memory continuation is an explicit control, not a new
+objective repair. Existing experiments remain independent.
+
 ### Active improvement baseline: completed B-v1 (2026-10-08 user decision)
 
 The user directs subsequent mainline structural improvements to start from
 B-v1's complete17/18 checkpoint, not accumulated B-v2/v3 modifications.
 This checkout is codex/b-v1-structural-repair-20261008, created directly from
-3a84399926d50831470518e1b7f105131d3f1056. The model/training source is still
-byte-identical to that base. Baseline checkpoint:
+3a84399926d50831470518e1b7f105131d3f1056. The opt-in address-memory candidate described below now changes only its
+explicit G address transition; default graph/losses retain that base. Baseline checkpoint:
 B-short-bs8-1024-r1/checkpoints/best.pt under causal-identity-ab-20261007,
 SHA ce5753bf98a5e17254e6bbdbdd93fa80d09003a8b9b47d38cf2c3ca76d12ed25,
 epoch1/step12036. Subsequent changes must use explicit new identities.

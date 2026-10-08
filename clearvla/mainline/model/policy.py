@@ -401,6 +401,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             entity_transport_gradient_mode=top.entity_transport_gradient_mode,
             entity_ownership_mode=top.entity_ownership_mode,
             entity_competition_scale_mode=top.entity_competition_scale_mode,
+            entity_address_memory_mode=top.entity_address_memory_mode,
             entity_history_mode=top.entity_history_mode,
             entity_motion_mode=top.entity_motion_mode,
             p2_target_value_mode=top.p2_target_value_mode,

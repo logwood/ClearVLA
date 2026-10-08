@@ -18,7 +18,7 @@ def causal_identity_metadata(top):
     if any(modes[key] not in pair for key,pair in MODES.items()):
         raise ValueError('unknown causal identity graph selector')
     if all(modes[key]==pair[0] for key,pair in MODES.items()):return None
-    return {
+    result = {
         'schema':'clearvla-causal-identity-candidate-v1','selectors':modes,
         'normalized_transport':'ordinary-bilinear-coordinate-adjoint' if modes['entity_transport_gradient_mode']=='ordinary_bilinear_v1' else 'legacy-positive-corners',
         'competition_scope':modes['entity_competition_scale_mode'],
@@ -30,3 +30,15 @@ def causal_identity_metadata(top):
         'policy_inputs':'unchanged-RGB-language-observed-proprioception-and-executed-controls',
         'identity_claim':'candidate-learned-correspondence-not-certified-physical-objects',
     }
+    memory = top.get('entity_address_memory_mode','none') if isinstance(top,Mapping) else getattr(top,'entity_address_memory_mode','none')
+    if memory not in {'none','conditional_logits_v1'}:
+        raise ValueError('unknown address memory ABI')
+    if memory != 'none':
+        result['address_memory'] = {
+            'mode':memory, 'scope':'dense-canonical-cell-K-law;within-current-observation',
+            'update':'centered-real-K-log-residual;per-existing-transition-tanh-gain',
+            'mass':'fixed-input-real-total-and-null-preserved;producer-support-retained',
+            'initialization':'exact-zero-gains;no-RNG-draw',
+            'gradient':'ordinary-through-previous-address;no-detach',
+            'policy_inputs':'unchanged', 'losses':'unchanged-B-v1'}
+    return result
