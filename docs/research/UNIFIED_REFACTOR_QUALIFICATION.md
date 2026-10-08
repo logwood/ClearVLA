@@ -61,6 +61,22 @@ pretrained DINO/T5 loading or real-data behavior claim.
 dataset, language/visual assets and source checkpoint before executing the
 training CLI. An admission failure is not a passed real-data training test.
 
+## Read-only configuration contract follow-up
+
+The static gate correctly failed on the new optional-source fixture and on a
+renamed legacy check that exposed mutable configuration protocols against
+frozen dataclasses. The fixture now explicitly requires its image source;
+the decoder, codec, controller, evidence, intent and trunk configuration
+protocols expose read-only properties. Both the retained implementation and
+mainline consume these fields without mutation. No casts, ignores or reduced
+type-checking rules are used to hide the incompatibility.
+
+AST checks retain every executable calculation outside protocol declarations
+(module docstrings/import ordering excepted). Configuration validation, model
+weights, initialization order and optimizer updates are unchanged by this
+follow-up. Only the named unified source migration admits these additional
+type-only mainline paths; the original A/B migration is not broadened.
+
 ## Remaining scientific gates
 
 Instance-level physical identity, natural target choice, long-gap observed

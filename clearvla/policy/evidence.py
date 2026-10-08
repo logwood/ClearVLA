@@ -14,19 +14,45 @@ from .primitives import BiasFreeFFN
 
 
 class PolicyEvidenceConfig(Protocol):
-    hidden_size: int
-    num_heads: int
-    dropout: float
-    action_horizon: int
-    adaptive_cvae_refine_steps: int
-    latent_cvae_horizon_tokens: int
-    latent_cvae_stage_slots: int
-    latent_cvae_ffn_expansion: float
-    latent_cvae_causal_attention: int
-    latent_cvae_stage_promote_scale_init: float
-    hierarchical_mmdit_unified_controller: int
-    hierarchical_mmdit_controller_heads: int
-    hierarchical_mmdit_controller_ffn_expansion: float
+    @property
+    def hidden_size(self) -> int: ...
+
+    @property
+    def num_heads(self) -> int: ...
+
+    @property
+    def dropout(self) -> float: ...
+
+    @property
+    def action_horizon(self) -> int: ...
+
+    @property
+    def adaptive_cvae_refine_steps(self) -> int: ...
+
+    @property
+    def latent_cvae_horizon_tokens(self) -> int: ...
+
+    @property
+    def latent_cvae_stage_slots(self) -> int: ...
+
+    @property
+    def latent_cvae_ffn_expansion(self) -> float: ...
+
+    @property
+    def latent_cvae_causal_attention(self) -> int: ...
+
+    @property
+    def latent_cvae_stage_promote_scale_init(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_unified_controller(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_controller_heads(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_controller_ffn_expansion(self) -> float: ...
+
 
 
 @dataclass

@@ -22,6 +22,9 @@ from clearvla.mainline.training.optimizer import WarmupCosineSchedule
 
 
 def test_old_allowlist_is_not_broadened():
+    typed_only = "clearvla/mainline/v120_core/decoder.py"
+    assert typed_only not in allowed_source_paths(CAUSAL_IDENTITY_AB_V1)
+    assert typed_only in allowed_source_paths(CAUSAL_UNIFIED_SOURCE_V1)
     extra = "clearvla/vision/source_weights.py"
     assert extra not in SOURCE_PATHS
     assert extra not in allowed_source_paths(CAUSAL_IDENTITY_AB_V1)

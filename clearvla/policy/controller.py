@@ -15,19 +15,45 @@ from .primitives import BiasFreeFFN, sinusoidal_positions
 
 
 class UnifiedControllerConfig(Protocol):
-    hidden_size: int
-    action_horizon: int
-    num_heads: int
-    dropout: float
-    hierarchical_mmdit_depth: int
-    hierarchical_mmdit_operator_stages: int
-    hierarchical_mmdit_operator_depth_logit_init: float
-    hierarchical_mmdit_execution_contract: str
-    hierarchical_mmdit_control_tokens: int
-    hierarchical_mmdit_controller_depth: int
-    hierarchical_mmdit_controller_heads: int
-    hierarchical_mmdit_controller_ffn_expansion: float
-    hierarchical_mmdit_spectral_state: int
+    @property
+    def hidden_size(self) -> int: ...
+
+    @property
+    def action_horizon(self) -> int: ...
+
+    @property
+    def num_heads(self) -> int: ...
+
+    @property
+    def dropout(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_depth(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_operator_stages(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_operator_depth_logit_init(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_execution_contract(self) -> str: ...
+
+    @property
+    def hierarchical_mmdit_control_tokens(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_controller_depth(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_controller_heads(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_controller_ffn_expansion(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_spectral_state(self) -> int: ...
+
 
 
 @dataclass

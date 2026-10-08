@@ -14,12 +14,24 @@ from .contracts import scaled_contract_view as _scaled_contract_view
 
 
 class PolicyIntentConfig(Protocol):
-    hidden_size: int
-    depth: int
-    hierarchical_mmdit_consequence_scale_max: float
-    hierarchical_mmdit_consequence_scale_init: float
-    hierarchical_mmdit_source_grad_scale: float
-    hierarchical_mmdit_layer_grad_scale: float
+    @property
+    def hidden_size(self) -> int: ...
+
+    @property
+    def depth(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_consequence_scale_max(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_consequence_scale_init(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_source_grad_scale(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_layer_grad_scale(self) -> float: ...
+
 
 
 class PolicyConditionOrganizer(nn.Module):

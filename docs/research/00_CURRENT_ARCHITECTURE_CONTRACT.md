@@ -1694,6 +1694,18 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### Unified source support and read-only configuration (2026-10-08)
+
+The isolated unified branch keeps producer support authoritative in canonical
+G priors, successor observation measurement and identity-loss denominators.
+It also corrects configuration protocols to read-only fields matching the
+frozen production dataclasses. These are source/interface corrections, not
+a promotion of physical identity, long-gap correspondence or task behavior.
+See `UNIFIED_REFACTOR_QUALIFICATION.md` for the failing and repaired boundaries.
+Real-data/GPU admission and ordinary synthetic full-topology qualification
+remain separate; an unavailable asset is never a passed training check.
+
+
 ### Isolated unified source revision (2026-10-08; not promoted)
 
 `codex/causal-unified-refactor-20261008` starts at `2ab07178`, retaining the

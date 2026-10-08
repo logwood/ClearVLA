@@ -69,6 +69,12 @@ clearvla/data/physical_chart.py
 clearvla/mainline/identity_pairs.py
 clearvla/mainline/robot_execution.py
 clearvla/mainline/model/robot_execution.py
+clearvla/mainline/v120_core/codec.py
+clearvla/mainline/v120_core/controller.py
+clearvla/mainline/v120_core/decoder.py
+clearvla/mainline/v120_core/evidence.py
+clearvla/mainline/v120_core/intent.py
+clearvla/mainline/v120_core/trunk_primitives.py
 clearvla/vision/source_weights.py
 """.split()
 )

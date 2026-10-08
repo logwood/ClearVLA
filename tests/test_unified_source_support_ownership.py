@@ -88,6 +88,7 @@ def measured_case():
     chart = replace(chart, dino_content=current, cell_observed=observed)
     support = torch.zeros(1, 2, 1, 2, 2, dtype=torch.bool)
     support[..., 0, 0] = True
+    assert chart.current_image_support is not None
     src = CanonicalImageReadSource(
         torch.zeros_like(support).float(), support, chart.current_image_support
     )

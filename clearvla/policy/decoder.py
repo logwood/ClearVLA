@@ -34,58 +34,164 @@ from .refinement import NestedLowRankContractionBank
 
 
 class PolicyDecoderConfig(Protocol):
-    hidden_size: int
-    action_horizon: int
-    num_heads: int
-    dropout: float
-    arm_dim: int
-    arm_flow_mode: str
-    gripper_field_dim: int
-    gripper_field_mode: str
-    physical_action_dim: int
-    hierarchical_mmdit_depth: int
-    hierarchical_mmdit_refine_steps: int
-    hierarchical_mmdit_low_slots: int
-    hierarchical_mmdit_stage_slots: int
-    hierarchical_mmdit_ffn_expansion: float
-    hierarchical_mmdit_noisy_causal: int
-    hierarchical_mmdit_noisy_gate_min: float
-    hierarchical_mmdit_noisy_gate_power: float
-    hierarchical_mmdit_stage_promote_scale_init: float
-    hierarchical_mmdit_output_init_std: float
-    hierarchical_mmdit_operator_stages: int
-    hierarchical_mmdit_operator_rank: int
-    hierarchical_mmdit_operator_groups: int
-    hierarchical_mmdit_operator_depth_logit_init: float
-    hierarchical_mmdit_operator_contraction_warmup_steps: int
-    hierarchical_mmdit_operator_contraction_transition_steps: int
-    hierarchical_mmdit_unified_controller: int
-    hierarchical_mmdit_control_tokens: int
-    hierarchical_mmdit_controller_depth: int
-    hierarchical_mmdit_controller_heads: int
-    hierarchical_mmdit_controller_ffn_expansion: float
-    hierarchical_mmdit_spectral_state: int
-    hierarchical_mmdit_spectral_arm_start_fraction: float
-    hierarchical_mmdit_spectral_gripper_start_fraction: float
-    hierarchical_mmdit_spectral_temperature: float
-    hierarchical_mmdit_spectral_schedule_power: float
-    hierarchical_mmdit_spectral_controller_shift_limit: float
-    hierarchical_mmdit_spectral_competition_loss_weight: float
-    hierarchical_mmdit_spectral_competition_warmup_steps: int
-    hierarchical_mmdit_operation_candidate_probes: int
-    hierarchical_mmdit_operation_value_warmup_steps: int
-    hierarchical_mmdit_dwell_mode: str
-    hierarchical_mmdit_execution_contract: str
-    hierarchical_mmdit_schedule_mode: str
-    hierarchical_mmdit_random_prefix_probability: float
-    hierarchical_mmdit_exhaustion_mode: str
-    hierarchical_mmdit_action_response_thresholds: tuple[float, float, float]
-    hierarchical_mmdit_stage_pressure_thresholds: tuple[float, float, float]
-    hierarchical_mmdit_action_response_floor: float
-    hierarchical_mmdit_exhaustion_confirm_steps: int
-    hierarchical_mmdit_residual_scale_init: float
-    hierarchical_mmdit_residual_scale_max: float
-    hierarchical_mmdit_output_contract: int
+    """Read-only validated configuration; derived and frozen fields are legal."""
+
+    @property
+    def hidden_size(self) -> int: ...
+
+    @property
+    def action_horizon(self) -> int: ...
+
+    @property
+    def num_heads(self) -> int: ...
+
+    @property
+    def dropout(self) -> float: ...
+
+    @property
+    def arm_dim(self) -> int: ...
+
+    @property
+    def arm_flow_mode(self) -> str: ...
+
+    @property
+    def gripper_field_dim(self) -> int: ...
+
+    @property
+    def gripper_field_mode(self) -> str: ...
+
+    @property
+    def physical_action_dim(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_depth(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_refine_steps(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_low_slots(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_stage_slots(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_ffn_expansion(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_noisy_causal(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_noisy_gate_min(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_noisy_gate_power(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_stage_promote_scale_init(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_output_init_std(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_operator_stages(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_operator_rank(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_operator_groups(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_operator_depth_logit_init(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_operator_contraction_warmup_steps(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_operator_contraction_transition_steps(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_unified_controller(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_control_tokens(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_controller_depth(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_controller_heads(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_controller_ffn_expansion(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_spectral_state(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_spectral_arm_start_fraction(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_spectral_gripper_start_fraction(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_spectral_temperature(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_spectral_schedule_power(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_spectral_controller_shift_limit(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_spectral_competition_loss_weight(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_spectral_competition_warmup_steps(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_operation_candidate_probes(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_operation_value_warmup_steps(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_dwell_mode(self) -> str: ...
+
+    @property
+    def hierarchical_mmdit_execution_contract(self) -> str: ...
+
+    @property
+    def hierarchical_mmdit_schedule_mode(self) -> str: ...
+
+    @property
+    def hierarchical_mmdit_random_prefix_probability(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_exhaustion_mode(self) -> str: ...
+
+    @property
+    def hierarchical_mmdit_action_response_thresholds(self) -> tuple[float, float, float]: ...
+
+    @property
+    def hierarchical_mmdit_stage_pressure_thresholds(self) -> tuple[float, float, float]: ...
+
+    @property
+    def hierarchical_mmdit_action_response_floor(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_exhaustion_confirm_steps(self) -> int: ...
+
+    @property
+    def hierarchical_mmdit_residual_scale_init(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_residual_scale_max(self) -> float: ...
+
+    @property
+    def hierarchical_mmdit_output_contract(self) -> int: ...
+
 
 
 class ConditionNeutralActionInitializer(nn.Module):

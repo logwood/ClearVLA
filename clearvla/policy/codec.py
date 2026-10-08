@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Typed physical action coordinates shared by current and legacy policies."""
+
+from __future__ import annotations
 
 from typing import Protocol
 
@@ -439,18 +439,42 @@ class FrequencyPhysicalActionTokenLift(nn.Module):
 
 
 class PhysicalActionConfig(Protocol):
-    action_horizon: int
-    hidden_size: int
-    gripper_field_dim: int
-    gripper_field_mode: str
-    arm_flow_mode: str
-    arm_noise_temporal_rho: float
-    arm_source_mode: str
-    arm_source_scale: float
-    arm_source_innovation_weight: float
-    arm_source_velocity_weight: float
-    arm_source_acceleration_weight: float
-    physical_decode_delta_blend: float
+    @property
+    def action_horizon(self) -> int: ...
+
+    @property
+    def hidden_size(self) -> int: ...
+
+    @property
+    def gripper_field_dim(self) -> int: ...
+
+    @property
+    def gripper_field_mode(self) -> str: ...
+
+    @property
+    def arm_flow_mode(self) -> str: ...
+
+    @property
+    def arm_noise_temporal_rho(self) -> float: ...
+
+    @property
+    def arm_source_mode(self) -> str: ...
+
+    @property
+    def arm_source_scale(self) -> float: ...
+
+    @property
+    def arm_source_innovation_weight(self) -> float: ...
+
+    @property
+    def arm_source_velocity_weight(self) -> float: ...
+
+    @property
+    def arm_source_acceleration_weight(self) -> float: ...
+
+    @property
+    def physical_decode_delta_blend(self) -> float: ...
+
 
     @property
     def arm_dim(self) -> int: ...

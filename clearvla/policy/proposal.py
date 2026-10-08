@@ -9,17 +9,39 @@ from torch import Tensor, nn
 
 
 class ProposalConfig(Protocol):
-    action_dim: int
-    executed_history_length: int
-    action_horizon: int
-    hidden_size: int
-    num_heads: int
-    ffn_expansion: float
-    proposal_depth: int
-    action_history_enabled: int
-    action_history_recent_tokens: int
-    action_history_summary_tokens: int
-    executed_action_offsets: tuple[int, ...]
+    @property
+    def action_dim(self) -> int: ...
+
+    @property
+    def executed_history_length(self) -> int: ...
+
+    @property
+    def action_horizon(self) -> int: ...
+
+    @property
+    def hidden_size(self) -> int: ...
+
+    @property
+    def num_heads(self) -> int: ...
+
+    @property
+    def ffn_expansion(self) -> float: ...
+
+    @property
+    def proposal_depth(self) -> int: ...
+
+    @property
+    def action_history_enabled(self) -> int: ...
+
+    @property
+    def action_history_recent_tokens(self) -> int: ...
+
+    @property
+    def action_history_summary_tokens(self) -> int: ...
+
+    @property
+    def executed_action_offsets(self) -> tuple[int, ...]: ...
+
 
 
 class ProposalBlock(nn.Module):

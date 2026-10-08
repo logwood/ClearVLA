@@ -18,48 +18,132 @@ from .role_delta_attnres import (
 
 
 class TrunkPrimitiveConfig(Protocol):
-    action_basis_tokens: int
-    action_dim: int
-    action_horizon: int
-    action_history_enabled: int
-    action_history_token_count: int
-    arm_dim: int
-    base_effect_hidden: int
-    canvas_dropout: float
-    canvas_registers: int
-    controlled_base_mode: str
-    controlled_delta_dropout: float
-    controlled_delta_rank: int
-    dropout: float
-    executed_history_length: int
-    ffn_expansion: float
-    first_execution_steps: int
-    future_anchors: int
-    future_grid_size: int
-    flow_jepa_complete_numerical_contract: int
-    flow_jepa_routing_norm_floor: float
-    gripper_field_dim: int
-    gripper_field_mode: str
-    hidden_size: int
-    goal_conditioning_enabled: int
-    goal_token_count: int
-    latent_action_tokens: int
-    mid_execution_steps: int
-    neutral_action_tokens: int
-    num_cameras: int
-    num_heads: int
-    patches_per_camera: int
-    physical_action_dim: int
-    role_dropout: float
-    rollout_tail_full_step: int
-    rollout_tail_start_step: int
-    state_dim: int
-    visual_history_length: int
-    visual_memory_dropout: float
-    visual_token_dim: int
-    role_residual_amplitude_contract: int
-    role_residual_contract_after_gate: int
-    role_residual_max_update_rms: float
+    @property
+    def action_basis_tokens(self) -> int: ...
+
+    @property
+    def action_dim(self) -> int: ...
+
+    @property
+    def action_horizon(self) -> int: ...
+
+    @property
+    def action_history_enabled(self) -> int: ...
+
+    @property
+    def action_history_token_count(self) -> int: ...
+
+    @property
+    def arm_dim(self) -> int: ...
+
+    @property
+    def base_effect_hidden(self) -> int: ...
+
+    @property
+    def canvas_dropout(self) -> float: ...
+
+    @property
+    def canvas_registers(self) -> int: ...
+
+    @property
+    def controlled_base_mode(self) -> str: ...
+
+    @property
+    def controlled_delta_dropout(self) -> float: ...
+
+    @property
+    def controlled_delta_rank(self) -> int: ...
+
+    @property
+    def dropout(self) -> float: ...
+
+    @property
+    def executed_history_length(self) -> int: ...
+
+    @property
+    def ffn_expansion(self) -> float: ...
+
+    @property
+    def first_execution_steps(self) -> int: ...
+
+    @property
+    def future_anchors(self) -> int: ...
+
+    @property
+    def future_grid_size(self) -> int: ...
+
+    @property
+    def flow_jepa_complete_numerical_contract(self) -> int: ...
+
+    @property
+    def flow_jepa_routing_norm_floor(self) -> float: ...
+
+    @property
+    def gripper_field_dim(self) -> int: ...
+
+    @property
+    def gripper_field_mode(self) -> str: ...
+
+    @property
+    def hidden_size(self) -> int: ...
+
+    @property
+    def goal_conditioning_enabled(self) -> int: ...
+
+    @property
+    def goal_token_count(self) -> int: ...
+
+    @property
+    def latent_action_tokens(self) -> int: ...
+
+    @property
+    def mid_execution_steps(self) -> int: ...
+
+    @property
+    def neutral_action_tokens(self) -> int: ...
+
+    @property
+    def num_cameras(self) -> int: ...
+
+    @property
+    def num_heads(self) -> int: ...
+
+    @property
+    def patches_per_camera(self) -> int: ...
+
+    @property
+    def physical_action_dim(self) -> int: ...
+
+    @property
+    def role_dropout(self) -> float: ...
+
+    @property
+    def rollout_tail_full_step(self) -> int: ...
+
+    @property
+    def rollout_tail_start_step(self) -> int: ...
+
+    @property
+    def state_dim(self) -> int: ...
+
+    @property
+    def visual_history_length(self) -> int: ...
+
+    @property
+    def visual_memory_dropout(self) -> float: ...
+
+    @property
+    def visual_token_dim(self) -> int: ...
+
+    @property
+    def role_residual_amplitude_contract(self) -> int: ...
+
+    @property
+    def role_residual_contract_after_gate(self) -> int: ...
+
+    @property
+    def role_residual_max_update_rms(self) -> float: ...
+
 
 
 class HorizonRoleEmbedding(nn.Module):
