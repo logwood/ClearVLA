@@ -1711,6 +1711,17 @@ real-object/natural-instruction traces and standard closed loops. Keep useful
 components when the evidence supports them; no SAM component is mandatory.
 The immutable running T3 experiment and its evaluation sequence are unchanged.
 
+The isolated screening branch codex/sam-structure-screen-20261008 now has
+four real-window CPU controls (research section34.33.21).
+Existing-ownership slot feedback is deprioritized as the primary identity fix;
+support-aware local image/region fusion is retained as an untrained backup.
+The naive convolution's boundary-induced contrast was identified and corrected.
+Neither prototype is imported by production. Zero-init/ordinary mechanical
+VJP checks and CPU microtimings do not establish actual-loss gradients,
+CUDA training cost, physical identity or behavior. Prioritize the running
+B-v3 short and its already scheduled full qualification before adding a module.
+
+
 
 
 ### Independent future-frame support candidate (2026-10-08)

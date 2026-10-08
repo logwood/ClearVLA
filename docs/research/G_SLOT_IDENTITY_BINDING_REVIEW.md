@@ -3957,3 +3957,88 @@ Do not introduce a second visual backbone or persistent RGB/feature caching
 merely to imitate the reference design. The running T3 source and queues stay
 fixed. A borrowed mechanism can strengthen the native model; adoption remains
 conditional on evidence.
+
+### 34.33.21 Isolated SAM mechanism screening (2026-10-08)
+
+User-authorized branch codex/sam-structure-screen-20261008 starts at
+1dd5bfb929bf608ac80942116758c5e4caa342c3. It contains probe-only adapters;
+no SAM module, weight, selector or extra input has entered production.
+Existing G already reads images into K and iterates GRU/FFN, while its canonical
+candidate features stay fixed during that loop (canonical_grounding.py:35-64).
+The missing reverse operation is therefore a concrete screening candidate,
+rather than a reason to duplicate the entire SAM transformer.
+Official source references remain the TwoWayTransformer and MemoryEncoder
+linked in section34.33.20. These small adaptations are not official SAM
+implementations or evidence about all possible trained SAM designs.
+
+Two rank32 prototypes were screened on the complete B-v2 checkpoint
+ee6271e67a1cbbc1bb038b9e63c3108677b665e9e7140d85df6dcaf4feed17fc,
+using real causal observations at01/24,05/24,11/24,17/136. Actual G inputs
+are two16x16 camera maps with512 channels; no feature tensor is saved.
+CPU preprocessing uses the saved BF16 contract, followed by isolated FP32 G
+and adapter calculations. This is not a reproduction of official CUDA actions.
+Masks score existing supported atoms only and never enter either adapter,
+G, a loss or an optimizer. No optimizer was created and G weights are unchanged.
+
+* SlotToImageFeedback reuses the existing K ownership with shared low-rank
+  slot-value projection (32768 parameters). Its untrained projected feedback
+  has90.10-93.55% spatial-common energy across supported cells; even before
+  the random projection, the common fraction is86.47-91.62%.
+  These are activation-energy statistics, not independent contribution
+  fractions or proof of semantic failure. Spatially constant ownership
+  produces constant feedback, as the algebra requires. Deprioritize this
+  particular readback as the primary identity repair; it cannot by itself
+  supply independent object evidence when the ownership is the same.
+  This does not rule out a separately learned full two-way attention design.
+* RegionImageFusion keeps image features and a shared scalar-mask embedding
+  through a per-camera, per-K depthwise local operator (33088 parameters).
+  Its first naive zero-padded version produces centered RMS0.0503-0.0627
+  even with constant image and ownership: padding/support boundaries can
+  masquerade as additional spatial contrast. Preserve r1/r2 as evidence.
+  The corrected operator uses signed valid-neighbor differences
+  conv(z*valid)-z*conv(valid) before the residual/nonlinearity.
+  Constant-field centered RMS is then3.50e-8-5.21e-8, including real support.
+  The synthetic masked test's maximum pointwise error is5.96e-8.
+  However, on real observations the full centered RMS0.1258-0.1347 is close
+  to the image-only control0.1237-0.1315. Spatial variation is not evidence
+  that mask conditioning has improved object identity. Retain the corrected
+  prototype only as a conditional follow-up, not an admitted repair.
+
+Both prototypes pass exact zero-init address/ownership parity, shared-K
+renumbering, camera isolation, invalid-input gradient quarantine and finite
+all-unknown output. Random-cotangent VJPs reach the zero-initialized output
+projection; upstream adapter gradients are correctly zero at initialization
+and become finite after a nonzero projection. These are instrumentation
+checks, not action/identity objective VJPs or learning improvement.
+The original G candidate inputs repeat exactly between the controls.
+The canonical ownership producer is byte-identical to the B-v2 source;
+grounding.py's sole difference admits the explicit future-support-v2 selector,
+while this checkpoint retains v1.
+
+CPU FP32 forward-only replicated-BS8 timings are3.26ms for slot feedback,
+7.85ms for support-aware local fusion, and about103ms for the original
+isolated G ownership loop. These are one-observation operator microbenchmarks,
+not eight independent samples, GPU timings, backward cost or full training
+overhead. No GPU was taken from the active runs. Actual BS8 CUDA throughput,
+peak memory, ordinary training-objective VJPs and behavior remain unmeasured.
+The16x16 prototypes also do not recover missing subcell boundaries.
+
+Evidence lives under the existing experiment root:
+sam-structure-screen-cpu-four-r1, sam-structure-screen-cpu-controls-r2,
+sam-structure-screen-support-aware-r3, their receipts/logs, and
+sam-structure-screen-decision-summary-r1.json.
+Reproduce the final four-window probe with source6f325409ab36dcaf4a937361d3aa351461995f72
+and the exact command in the r3 receipt:
+probes/probe_sam_structure_screen.py --device cpu --checkpoint ... --plan ... --masks ... --output NEW_DIRECTORY.
+Only probes/sam_structure_adapters.py and this probe are added on the
+screening branch. No production module imports them.
+
+Mainline priority remains the existing immutable B-v3 meaningful short,
+its256-batch offline evaluation, standard18R8 panel, full masked-BS8 VJP,
+and real-object/natural-language qualification. The separate future-support-v2
+repair still requires its explicitly combined meaningful candidate.
+Both formal A/B trainings remain unpromoted. Screen results are not a reason
+to restart the active short or add every borrowed component. Only if its
+actual failure chain indicates a missing local operation should the retained
+prototype proceed to real-loss/cost qualification and meaningful training.
+
