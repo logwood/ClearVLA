@@ -3383,3 +3383,120 @@ validation/. Retain the invalid first preflight that assumed the latter.
 This is a plan only, not completed mask/geometry admission. Producer allowlist
 is RGB/depth/robot state; raw scene_obs can enter a separate exact-render oracle
 scorer only. Verify raw/render RGB identity before assigning audit masks.
+
+### 34.33.16 Motion-witnessed negatives and versioned region losses (2026-10-08 UTC)
+
+**Formal A/B remain unstarted.** This section supersedes the raw-val plan-only
+status above, not the v1/v2 promotion blocks. The new training candidate is
+`d009465f`, explicit `rgbd_temporal_regions_v3`; the actual first-loss audit
+script is `f3278513`. Production T1/T2 and their completed evidence are unchanged.
+
+**Raw replay is not fully admitted.** The 12-episode/24-window plan contains
+48 raw frames from scenes A/B. CALVIN's environment helper discards the result
+of its scene override merge; the initial scene-D pilot was wrong. Explicit
+scene assignment plus a separate process per scene fixes that setup error.
+`independent-val-raw-replay-r3` still reproduces both RGB images exactly for
+only 1/48 frames. Do not use the other rendered masks as full raw-frame truth.
+Residual diagnostics score only pixels with exact RGB, depth agreement <1e-6 m
+and a one-pixel rigid-part interior, and report the unscored population.
+The earlier r1/r2 failures remain recorded.
+
+Raw joint-FK and recorded TCP can differ by up to about 1.8 mm, but substituting
+the recorded TCP into the fixed camera mount worsens wrist RGB MAE: scene A
+.407 -> 1.577 and scene B .324 -> 1.357 (0-255 units). Bullet cached/FK timing
+differences exist, but they are not a proven complete explanation of this
+replay residual. No production camera geometry or controller is changed.
+Artifacts: `independent-val-raw-residual-calvin_scene_{A,B}-r1` and
+`independent-val-wrist-clock-calvin_scene_{A,B}-r1`; probes 817bcbe7/0e7d4b50.
+
+**The independent raw audit found a real counterexample.** Full-budget frozen
+SAM + geometry_only_v3 + one-pixel interiors split two visible pieces of one
+playtable base. The partially admitted scoring set contains 8,160 wrong
+rigid-part negative pixel pairs in raw frames 0319925/0319929. These are
+correlated pairs, not independent trials. Therefore the previous 190-window
+zero-error result does not qualify mask/surface difference alone. Simulator
+names/IDs are used only to explain this scoring counterexample; they do not
+filter producer pixels. Artifacts: `independent-val-regions-r1` and
+`independent-val-regions-partial-oracle-diagnostic-r1.json`.
+
+**Additional observed evidence, not a slot-balance target.**
+`probes/sensor_motion_groups.py` admits a negative edge only when both current
+SAM and sensor-surface groups differ AND their observed past-four/current
+motions contradict a common camera-local rigid transform. RGB flow uses the
+existing FB .75 px/photo .08 gates; metric points use observed depth. Fractional
+depth reads require all four corners valid with <=1 cm depth spread. Each fit
+requires >=12 points, second spatial spread >=3 mm, deterministic disjoint
+fit/check points, and held-out 90th-percentile residual <=2 mm. Both cross-fit
+median errors must exceed 6 mm. These fixed rules see no body ID, scene state,
+language, learned K or learned null. Static/co-moving, unsupported and
+inconsistent regions remain unknown. No new within-mask positive is asserted.
+
+Raw24 admits 41/233 top and 1/51 wrist candidate edges. On its partial oracle
+support there are 287,318/11,466 scored negative pixel pairs and zero observed
+same-rigid errors; 224,707 top pairs remain unscored. Real block-block support
+exists in 6/24 windows. This raw set has now influenced rule development and
+must not be advertised as a fresh holdout. Artifacts:
+`independent-val-motion-regions-r1`, `*-partial-audit-r1.json`; source 3e8be1f0.
+
+The fixed rule was then checked on all 190 exactly replayed old60/own130 panel
+windows, including current AND past RGB equality before exporting sensor-only
+depth. Motion fits run in the model OpenCV 5.0 runtime. Old top/wrist negative
+pixel pairs: 521,750/54,364; own: 1,535,641/160,433. All have zero observed
+same-rigid negative errors. Block-block pairs are 169,807/0 old and
+459,601/70,584 own, with no observed same-block negatives. This is correlated
+development evidence, not a universal certificate or behavioral improvement.
+Receipt `motion-negative-full190-r2`, pinned e6279a5a; results
+`motion-negative-{old60,own130}-r2`. The unstarted r1 watcher was rescheduled
+with a retained RESCHEDULED record; no existing experiment was stopped.
+
+**Implemented candidate boundary.** V3 retains every original sensor positive
+and full source-prediction MSE, plus v2's real-K conditioning before spatial
+interpolation and producer-only support. It adds two independently reported
+losses: a normalized JS margin on witnessed region means and an equal-region
+source-prediction MSE. Region means are negative operands only, never a claim
+that every pixel in a proposal is one object. Prediction regions are observed
+geometry strata for extra weighting. Unknown labels retain their original
+MSE and receive no extra stratum. No color-to-K targets, uniform occupancy,
+new selector, learned label gating, controller rule or online input is added.
+
+The JS margin permits soft distributions and more regions than K. A perfectly
+identical conditional law is still a stationary symmetry point; this objective
+alone is not a mathematical guarantee against collapse. Actual nonidentical
+laws must show separating ordinary gradients, then improved physical identity
+and natural instruction behavior in a meaningful short. Do not report larger
+S/JS statistics as that result. Source: training/identity_regions.py and
+training/identity.py; eight numerical/gradient tests pass (standard unittest).
+
+Compact annotations contain only integer groups, Boolean negative adjacency,
+prediction strata and source clocks. Manifest, labels and raw sensor bytes
+are hashed; missing exposure is an error, never resampling/skipping. Model
+RGB/DINO values remain uncached. The exposure planner uses the unchanged
+information sampler/epoch and task panel, separately declaring prefetched
+rows. Frozen SAM uses all 32x32 prompts on both current cameras; original
+past/current and cross-camera sensor labels are still generated live.
+Annotation time is part of experiment cost, not hidden in training throughput.
+
+`B-regions-v3-mechanical-labels-r1` generated all 76 declared pairs in
+204.21 s, peak allocated GPU 2,935,636,992 bytes. `B-regions-v3-original-positive-
+parity-r1.json` checks the first two real BS8 update exposures: all 16 samples'
+original label tensors are exactly equal to T2 in the same runtime. V2 config
+serialization/digest parity also passes. These are mechanical contracts only.
+The two-update/two-offline BS8 entry from the original mature a2 checkpoint
+is launched as `B-regions-v3-mechanical-r1` with separate .02/.02 extra weights
+and normalized-JS margin .1, fresh Adam/warmup and retained execution clock.
+Check its status, first-loss VJP/parity report and checkpoint before proceeding.
+The 1024-update/256-offline exposure plan is metadata preparation only;
+meaningful short training and formal promotion have not yet occurred.
+
+Reproduction: run `plan_identity_region_exposure.py` with the unchanged v2
+config and declared train/val limits; `build_identity_region_annotations.py`
+with that plan, pinned SAM receipt and raw root; then the pinned
+`train_identity_regions_mechanical.py` with `--reference-source` T2 and the
+explicit v3 config. External receipts retain exact commands, hashes and logs.
+
+Still open: raw-frame oracle coverage; new-data negative quality; actual masked
+online support and ordinary gradients; label-generation cost at full exposure;
+cross-view/time identity and correct natural target selection through the
+first eight arm/gripper commands. Long-gap observed matching, task maintenance
+and controller/action contracts remain separate unresolved repairs. Neither
+the new loss nor a successful mechanical checkpoint closes those questions.

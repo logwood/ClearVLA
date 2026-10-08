@@ -1820,6 +1820,31 @@ K count, loss or production graph has been promoted. Formal A/B remain pending.
 
 ### Current CALVIN audit constraint (2026-10-07)
 
+Section 34.33.16 supersedes the mask-only negative qualification: raw A/B
+training frames expose pieces of one playtable base incorrectly separated by
+SAM+surface interiors. Full raw RGB replay is exact in only 1/48 frames; the
+other oracle comparisons are explicitly partial. Recorded-TCP camera
+substitution worsens replay and is not a production geometry fix.
+
+The explicit training-only rgbd_temporal_regions_v3 candidate (d009465f)
+retains every v2 positive/source-MSE budget and adds negative JS-margin and
+equal-region source MSE. Negative edges require independent observed metric
+motion disagreement in addition to mask/surface disagreement. Unknown stays
+unknown. No new positive, K target, equal occupancy or online input is added.
+The fixed rule has no observed same-rigid negative errors on the 190 exact
+panel windows; this is development evidence, not general certification.
+A perfectly identical K law remains a stationary symmetry point, so numerical
+tests cannot certify restored identity. Ordinary gradients, meaningful BS8
+short behavior and full source/target-chain audit are still required.
+
+Compact pinned supervision annotations are allowed for this candidate; they
+contain no RGB/DINO values or simulator IDs. Raw/label/manifest hashes and exact
+sampler exposure are checked; missing labels fail rather than skip samples.
+Full SAM prompt cost is separately declared (76 pairs:204.21s/2.734GiB peak).
+Production source d009465f is immutable; B-regions-v3-mechanical-r1 is only a
+two-update BS8 entry check. Formal A/B remain unstarted. Long-gap measurement,
+controller state, arm/gripper and task maintenance remain separately open.
+
 For causal-repair decisions, use G_SLOT_IDENTITY_BINDING_REVIEW.md sections
 34.26–34.32 alongside the admitted source/config. Full a2d597d2 behavior is
 11/18; the 512-update repair is 7/18 and retained-Adam 64-update diagnostics are
