@@ -4058,3 +4058,17 @@ slot_to_image_v1（32768参数）与region_fusion_v1（33088参数），
 属于用户授权探索，不能替代本节原有正式A/B准入。
 实验目录/data/senwang/clearvla/experiments/sam-structure-exploration-20261008；
 源/配置/权重/manifest与接续receipt见该目录。主线GPU6的已有接续受保护。
+
+
+10:53UTC接续：两支4真实窗口冷部署完成，同指令重复arm/gripper差为0，
+同图semantic/image/covariance测量为0。slot机械checkpoint SHA
+42bd18610a88aaabfbb98efb8d38147b5552b9138923262f5cb6428ceaefff6f；
+region机械SHA15e97457341f02ec6bb05c82c4c8fc2282cee3a7223834d8a8c0d95a53fd40de。
+各*-mechanical-admission-r1.json明确只证明可训练和冷部署，不证明任务收益。
+区域融合长训Bv2-region-fusion-long-bs8-r1在GPU3/PID2639003启动；
+Bv2-slot-feedback-long-bs8-r1已派发待空闲卡，两者都从原B-v2完整权重初始化，
+未从两步机械checkpoint继续。两个*-long-r1.receipt.json及*-long-r1-job/status.json
+记录实际阶段。标准闭环在各训练+256离线结束后自动接续。
+当前mainline B-v3已完成1024更新/8192样本，52窗口有限、
+batch中位6.3386秒、最大loss账本差6.56e-8，离线仍在继续；
+没有将SAM探索作为主线正式两实验已完成的依据。

@@ -1700,8 +1700,9 @@ The user explicitly authorized two exploratory long runs from the completed
 B-v2 checkpoint, before proven behavioral gain. See research34.33.22 and
 codex/sam-structure-screen-20261008, pinned production edbba48b.
 They keep the B-v2 objectives/source_consistent_v1 and each add only one small
-G address adapter. Ordinary two-BS8 backward/save tests completed; cold-load
-admission and whole-GPU long queues are separately recorded in
+G address adapter. Ordinary two-BS8 backward/save and both four-window cold tests completed.
+Region-fusion started onGPU3 at10:53UTC, slot-feedback awaits an idle whole
+GPU. Their independent long queues and standard18 continuations are recorded in
 sam-structure-exploration-20261008. Each declares11012BS8+256offline+18R8.
 This authorization does not promote mainline B-v3 or alter its immutable
 training/evaluation/qualification continuation; keep that workflow intact.
@@ -1729,10 +1730,10 @@ four real-window CPU controls (research section34.33.21).
 Existing-ownership slot feedback is deprioritized as the primary identity fix;
 support-aware local image/region fusion is retained as an untrained backup.
 The naive convolution's boundary-induced contrast was identified and corrected.
-Neither prototype is imported by production. Zero-init/ordinary mechanical
+At that CPU-screen stage neither prototype was imported by production. Zero-init/ordinary mechanical
 VJP checks and CPU microtimings do not establish actual-loss gradients,
-CUDA training cost, physical identity or behavior. Prioritize the running
-B-v3 short and its already scheduled full qualification before adding a module.
+CUDA training cost, physical identity or behavior. Keep the running B-v3 short and its full qualification independent of the
+subsequently user-authorized B-v2 structure long trials described above.
 
 
 
