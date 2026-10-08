@@ -1,0 +1,164 @@
+name: Publish and qualify unified source
+on:
+  push:
+    branches: [codex/causal-unified-refactor-20261008]
+    paths: [.github/unified-refactor/unit.json]
+permissions:
+  contents: read
+concurrency:
+  group: unified-source-publish-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  preserve:
+    if: github.repository == 'logwood/ClearVLA' && github.ref == 'refs/heads/codex/causal-unified-refactor-20261008'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.publish.outputs.source }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'ruff==0.16.0'
+      - name: Verify exact style baseline, apply reviewed source and save before tests
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/unified-source"
+          python - <<'PY'
+          import base64,hashlib,json,os,pathlib,subprocess,zlib
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'unified-source'
+          path='.github/unified-refactor/unit.json'
+          unit=json.loads(pathlib.Path(path).read_text())
+          def git(*a):return subprocess.check_output(['git',*a],text=True).strip()
+          assert unit['schema']=='clearvla-reviewed-source-v1'
+          assert git('rev-parse','HEAD^')==unit['parent']
+          assert git('rev-parse','HEAD^^{tree}')==unit['parent_tree']
+          assert git('diff','--name-only','HEAD^','HEAD')==path
+          files=unit['format_existing_python']
+          for f in files:
+              p=pathlib.PurePosixPath(f)
+              assert not p.is_absolute() and '..' not in p.parts
+              assert p.parts[0] in {'clearvla','tests','scripts'} and p.suffix=='.py' and pathlib.Path(f).is_file()
+          subprocess.run(['git','rm','--',path],check=True)
+          if files:
+              r=subprocess.run(['ruff','check','--fix',*files])
+              assert r.returncode in (0,1)
+              subprocess.run(['ruff','format',*files],check=True)
+          subprocess.run(['git','add','--','clearvla','tests','scripts'],check=True)
+          assert git('write-tree')==unit['formatted_base_tree']
+          decoder=zlib.decompressobj()
+          patch=decoder.decompress(base64.b64decode(unit['patch_zlib_base64'],validate=True),3000000)
+          assert decoder.eof and not decoder.unused_data and not decoder.unconsumed_tail
+          assert len(patch)==unit['patch_bytes'] and hashlib.sha256(patch).hexdigest()==unit['patch_sha256']
+          for line in patch.decode('utf-8').splitlines():
+              if line.startswith('diff --git '):
+                  for raw in line.split()[2:]:
+                      p=pathlib.PurePosixPath(raw)
+                      assert not p.is_absolute() and '..' not in p.parts
+                      assert p.parts[0] in {'a','b'} and p.parts[1] in {'clearvla','tests','scripts','docs','configs'}
+          subprocess.run(['git','apply','--check','--index','-'],input=patch,check=True)
+          subprocess.run(['git','apply','--index','-'],input=patch,check=True)
+          assert git('write-tree')==unit['source_tree']
+          branch='refs/heads/codex/causal-unified-refactor-20261008'
+          assert git('ls-remote','origin',branch).split()[0]==os.environ['GITHUB_SHA']
+          subprocess.run(['git','config','user.name','github-actions[bot]'],check=True)
+          subprocess.run(['git','config','user.email','41898282+github-actions[bot]@users.noreply.github.com'],check=True)
+          subprocess.run(['git','commit','-m',unit['message'],'-m','Exact source tree verified before commit. Qualification follows; no GPU/private-data/behavior acceptance claim. No force push or master update.'],check=True)
+          subprocess.run(['git','push','origin','HEAD:'+branch],check=True)
+          source=git('rev-parse','HEAD')
+          (out/'published-source.txt').write_text(source+'\n')
+          (out/'reviewed.patch').write_bytes(patch)
+          (out/'manifest.json').write_text(json.dumps({k:v for k,v in unit.items() if k!='patch_zlib_base64'},indent=2)+'\n')
+          with (out/'source.tar.gz').open('wb') as f:subprocess.run(['git','archive','--format=tar.gz','HEAD'],stdout=f,check=True)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('source='+source+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: unified-reviewed-source-${{ github.sha }}
+          path: ${{ runner.temp }}/unified-source
+          retention-days: 14
+  regression:
+    needs: preserve
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.preserve.outputs.source }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install 'torch==2.11.0' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'pytest>=8,<10' 'numpy>=1.26,<3' 'h5py>=3.10,<4' 'pillow>=10,<13' 'rich>=13,<15' 'opencv-python-headless>=4.9,<5'
+      - run: python scripts/run_unified_refactor_checks.py --output "$RUNNER_TEMP/regression" --shards 4 --shard ${{ matrix.shard }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: unified-regression-${{ matrix.shard }}-${{ needs.preserve.outputs.source }}
+          path: ${{ runner.temp }}/regression
+          retention-days: 14
+  static-and-full-topology:
+    needs: preserve
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.preserve.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install 'torch==2.11.0' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'pytest>=8,<10' 'numpy>=1.26,<3' 'h5py>=3.10,<4' 'pillow>=10,<13' 'rich>=13,<15' 'opencv-python-headless>=4.9,<5' 'ruff==0.16.0' 'pyright==1.1.411'
+      - name: Source-relative static review
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/static" "$RUNNER_TEMP/baseline"
+          git archive 90427db452a947c21afe8c4ec827055766252829 | tar -x -C "$RUNNER_TEMP/baseline"
+          git diff --name-only 90427db452a947c21afe8c4ec827055766252829 HEAD -- '*.py' > "$RUNNER_TEMP/static/changed.txt"
+          python scripts/audit_structural_static.py --baseline "$RUNNER_TEMP/baseline" --current . --output "$RUNNER_TEMP/static" --files "$RUNNER_TEMP/static/changed.txt"
+      - name: Two ordinary updates and full two-pass sampler in each topology
+        run: |
+          python scripts/check_unified_model_flow.py --variant A --output "$RUNNER_TEMP/static/flow-A.json"
+          python scripts/check_unified_model_flow.py --variant B --output "$RUNNER_TEMP/static/flow-B.json"
+      - name: Record real-data admission without synthetic substitution
+        shell: bash
+        run: |
+          set +e
+          python scripts/run_unified_real_data_check.py --config configs/mainline/unified_source_b_calvin_check.json --checkpoint /data/senwang/clearvla/checkpoints/mature-source.pt --output-dir "$RUNNER_TEMP/not-a-real-run" --report "$RUNNER_TEMP/static/real-data-admission.json" --device cuda:0
+          code=$?
+          test "$code" -eq 2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: unified-static-and-flow-${{ needs.preserve.outputs.source }}
+          path: ${{ runner.temp }}/static
+          retention-days: 14
