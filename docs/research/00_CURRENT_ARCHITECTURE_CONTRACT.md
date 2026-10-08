@@ -1695,6 +1695,13 @@ execution adaptation from being accidentally disabled by a short repair test.
 ## Agent quick contract
 
 
+The scoped B-v1 forward probe dc43b1b1 is complete (four real windows, exact
+isolated-FP32 G repeat, no parameter changes). Global K reads differ, but05/11
+lose supported physical-object separation during later recurrent transitions;
+01 improves. This localizes a structural check without validating wholesale
+mean removal, skipped iterations or any new gate. See34.33.25 before editing.
+
+
 ### User-selected mainline improvement baseline (2026-10-08)
 
 The user redirects new mainline repairs to completed B-v1,17/18, checkpoint
