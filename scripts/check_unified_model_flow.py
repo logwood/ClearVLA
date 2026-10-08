@@ -84,6 +84,7 @@ def run(
     typed_object_values: str = "legacy_selected_v1",
     compute_dtype: str = "fp32",
     batch_size: int = 1,
+    reference_support: str = "full",
 ) -> dict:
     import torch
 
@@ -101,6 +102,8 @@ def run(
         raise ValueError("fixture completed step must be a nonnegative integer")
     if type(batch_size) is not int or batch_size < 1:
         raise ValueError("synthetic batch size must be a positive integer")
+    if reference_support not in {"full", "alternating"}:
+        raise ValueError("unknown synthetic reference support mode")
     torch.set_num_threads(1)
     torch.manual_seed(28431)
     config = configuration(shape, variant, typed_object_values, compute_dtype)
@@ -116,6 +119,20 @@ def run(
     batch, normalizer = synthetic_batch(
         fixture_config, count=batch_size, raw_side=raw_side, device=torch.device("cpu")
     )
+    reference = batch.online.instruction_reference
+    assert reference is not None
+    if reference_support == "alternating":
+        # A legal partial instruction-start observation, not a learned mask.
+        # Its unavailable payload is poisoned before the real S/goal paths.
+        # Current/future observations keep their OWN original source support.
+        support = reference.observed.clone()
+        support[..., ::2] = False
+        reference = replace(
+            reference,
+            observed=support,
+            dino=torch.where(support[..., None], reference.dino, torch.nan),
+        )
+        batch = replace(batch, online=replace(batch.online, instruction_reference=reference))
     if config.top.identity_supervision_mode != "none":
         xy = (
             torch.tensor([[-0.5, -0.5], [0.5, 0.5], [0.1, 0.1]]).expand(batch_size, 2, 3, 2).clone()
@@ -252,6 +269,10 @@ def run(
         variant=variant,
         dimensions=config.dimensions.__dict__,
         raw_rgb_side=raw_side,
+        reference_support_mode=reference_support,
+        reference_observed_cells=int(reference.observed.sum()),
+        reference_total_cells=reference.observed.numel(),
+        observation_measurement_mode=config.top.observation_measurement_mode,
         actual_batch_size=batch_size,
         optimizer_batch_size=config.optimizer.batch_size,
         compute_dtype=config.runtime.compute_dtype,
@@ -291,6 +312,7 @@ def main():
     )
     parser.add_argument("--compute-dtype", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--reference-support", choices=("full", "alternating"), default="full")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists() or args.updates < 1:
@@ -306,6 +328,7 @@ def main():
             args.typed_object_values,
             args.compute_dtype,
             args.batch_size,
+            args.reference_support,
         )
     except Exception as error:
         args.output.write_text(

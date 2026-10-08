@@ -239,3 +239,18 @@ Real-data command on an asset-owning CUDA host (use an actual source checkpoint)
 Missing private data/weights/CUDA is still blocked, not replaced with artificial
 features or relabelled as training success. Historical behavior scores remain
 unchanged until the corresponding newly trained policy is actually evaluated.
+
+
+## Combined candidate and partial-reference integration
+
+The default full-topology check remains its declared legacy typed-value fixture;
+that alone cannot qualify the selected conditional-value candidate with missing
+instruction-reference cells. An explicit `--reference-support alternating`
+fixture now leaves current/future support unchanged and marks half the start
+cells unavailable with NaN payload. It does not manufacture a displacement label
+or replace any online module. The full-width A/B regression selects conditional
+object values, source-consistent measurement, H512, 336px artificial RGB, gate
+clock 1200, two ordinary updates and full two-pass sampling. JUnit records the
+actual source configuration, support counts, batch/dtype and runtime. These are
+CPU BS1/FP32 checks; the separate small BS8/BF16 and all real-data/behavior gates
+retain their own scope and outcomes.
