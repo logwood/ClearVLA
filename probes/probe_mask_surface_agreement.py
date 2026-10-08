@@ -39,6 +39,13 @@ def proposal_partition(masks, surface, *, interior_radius=0):
     return partition, values
 
 
+def surface_partition(surface, *, interior_radius=0):
+    """Sensor-only control: no frozen mask, RGB class or oracle input."""
+    ids=np.unique(surface[surface>=0])
+    masks=np.stack([surface==i for i in ids]) if len(ids) else np.empty((0,*surface.shape),bool)
+    return proposal_partition(masks,surface,interior_radius=interior_radius)
+
+
 def audit(partition, groups, truth):
     counts = []
     for index in range(len(groups)):
@@ -97,6 +104,8 @@ def main():
     p.add_argument('--audit-all-bodies', action='store_true')
     p.add_argument('--interior-radius', type=int, choices=(0,1), default=0,
                    help='Optional fixed one-native-pixel confidence interior; oracle independent')
+    p.add_argument('--proposal-mode', choices=('mask_surface_agreement_v1','surface_only_v3'),
+                   default='mask_surface_agreement_v1')
     args = p.parse_args(); args.output.mkdir(exist_ok=False)
     sam = json.loads(args.sam.read_text()); assert sam['complete']
     if hashlib.sha256(args.plan.read_bytes()).hexdigest() != sam['identity']['plan_sha256']:
@@ -112,6 +121,7 @@ def main():
             surface[key] = r
     result = dict(complete=False, records=[], production_changed=False, scope=__doc__,
                   interior_radius=args.interior_radius,
+                  proposal_mode=args.proposal_mode,
                   training_use='unqualified negative proposals only; existing sensor positives unchanged')
     for row in sam['records']:
         key = (row['case_id'], row['step']); group = surface[key]; plan = plans[key]
@@ -122,9 +132,14 @@ def main():
             if hashlib.sha256(Path(field).read_bytes()).hexdigest() != expected:
                 raise ValueError('proposal file identity changed')
         # Construct labels without accessing any physical identity mask.
-        with np.load(row['proposal_path'], allow_pickle=False) as a, np.load(group['groups_path'], allow_pickle=False) as b:
-            partitions = [proposal_partition(a[name],b[other],interior_radius=args.interior_radius) for name,other in
-                          [('masks_top','group_static'),('masks_wrist','group_gripper')]]
+        with np.load(group['groups_path'], allow_pickle=False) as b:
+            if args.proposal_mode=='surface_only_v3':
+                partitions=[surface_partition(b[key],interior_radius=args.interior_radius)
+                            for key in ('group_static','group_gripper')]
+            else:
+                with np.load(row['proposal_path'], allow_pickle=False) as a:
+                    partitions = [proposal_partition(a[name],b[other],interior_radius=args.interior_radius) for name,other in
+                                  [('masks_top','group_static'),('masks_wrist','group_gripper')]]
         truth_path = Path(plan['masks'])/Path(plan['case']).name/('state_%03d.npz'%row['step'])
         if hashlib.sha256(truth_path.read_bytes()).hexdigest()!=row['audit_mask_sha256']:
             raise ValueError('scoring mask identity changed')
