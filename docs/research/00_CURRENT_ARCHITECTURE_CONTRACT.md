@@ -1694,6 +1694,36 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+
+### B-v3 completed panel and supervision routing (2026-10-08)
+
+Research34.33.23 records the immutable T3/56c217d5 short at epoch1/step12036:
+1024BS8/8192 samples,256offline/2046 samples and standard18-R8 are complete.
+Final checkpoint SHA616ae4598f3190ea0a9dcb82a86aeffe82e11e04642b1fd0043bdc15d1904a5f.
+Panel12/18 fails02/03/09/10/14/17: same total as B-v2, gain15/loss17;
+versus A13/18 it loses03. All18NPZ/prefix execution and initial robot/scene/bothRGB
+match checks pass. All six failures contact their target but reach only0.9-7.1cm.
+Success05/11 still includes an indirect other-block path. Keep the promotion block.
+
+New region supervision has a source/online exposure gap. Full label exposure plus
+the epoch pair count implies about.393 online negative pairs/batch versus4.647
+independent-source pairs/batch. This is an aggregate inference. A direct four-BS8
+CPU FP32 audit yields24 source pairs but only2 actual-online pairs under explicit
+training masking; the full-observation diagnostic restores24 online pairs, of
+which11 still violate the margin (source3). Exact source parity, reduction and
+parameter checks pass. This is not a production BF16 parameter VJP or a physical
+object/behavior qualification. Independent source keys omit the actual online
+typed/context/history branches; shared gradients remain possible.
+
+The existing ready-short runner is awaiting an idle GPU for full ordinary VJP
+and old/own physical-object/natural-command qualification. Do not duplicate jobs.
+Inspect online-specific parameter and factual evidence before selecting a repair;
+do not unmask hidden policy inputs, weaken support validity, or inflate the
+weight merely to raise pair counts. T4 source_consistent_v2 is separately
+mechanically qualified and NOT included in this T3 result. Original formal A/B
+are unstarted; separately authorized B-v2 SAM explorations retain their own scope.
+
+
 ### Separate B-v2 SAM-inspired long exploration (2026-10-08)
 
 The user explicitly authorized two exploratory long runs from the completed

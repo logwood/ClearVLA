@@ -4072,3 +4072,93 @@ Bv2-slot-feedback-long-bs8-r1已派发待空闲卡，两者都从原B-v2完整�
 当前mainline B-v3已完成1024更新/8192样本，52窗口有限、
 batch中位6.3386秒、最大loss账本差6.56e-8，离线仍在继续；
 没有将SAM探索作为主线正式两实验已完成的依据。
+
+### 34.33.23 B-v3 完整标准闭环与真实训练监督去向（2026-10-08）
+
+T3 `56c217d5` 的 `B-regions-v3-short-bs8-1024-r1` 已完成全部
+1024 次 BS8 更新、8192 样本、256 批离线（2046 样本、6 任务各341）以及标准
+18例/R8/stored_target。最终 epoch1/step12036，best.pt 2487525096 字节，
+SHA `616ae4598f3190ea0a9dcb82a86aeffe82e11e04642b1fd0043bdc15d1904a5f`；
+实际 payload 源码、配置和 digest 已逐项核验。本次仍为 source_consistent_v1，
+不能把另已机械通过的未来支持域 v2 修复归入本次效果。
+
+**行为结果：12/18。** 失败02/03/09/10/14/17。相对 B-v2 同为12/18，
+恢复15、退化17；相对 A13/18只退化03，没有新增成功。
+18份NPZ全部完整/有限、24行计划到实际前8行的索引和原生命令逐项一致，
+与A/B-v1/B-v2的初始robot、scene及双RGB均完全相等，零基础设施错误。
+复用的 `probes/audit_standard_identity_panel.py` 另在历史B-v2上复现原分数/失败集合。
+结果见 `B-regions-v3-short-closed-loop-final-audit.json`。
+`B-regions-v3-short-r1-promotion-block.json` 阻止原主线正式推广，保留全部后续资格任务。
+
+六个失败均记录到正确目标接触，但最大沿请求方向位移仅
+1.286/0.895/3.261/7.120/4.923/6.200 cm。
+03/09/10/17最大进度时控制目标与TCP差约7.53/11.24/5.83/3.25 mm；
+不能将最终失败统归为大控制器累积误差。退化17在state104已有约5.75 cm进度、
+gap3.95 mm，随后前8行平均X转负、Z转正并在row2打开夹爪；
+这些是按本次真实轨迹定位的撤回窗口，尚非单独模块因果解释。
+成功05/11仍有先推异色近物的路径：首个机器人接触分别红63/粉44，
+采样遥测未记录直接接触所指蓝/红目标。保留官方成功，遥测不覆盖全部物理substep，
+不能以此断言从未瞬时接触。接触正确也不等于接触位置或任务维持正确。
+`B-regions-v3-maintenance-selected-plan-r1.json` 是按自身01/03/15/17轨迹挑选的23窗口计划，
+尚未另行启动；后续先结合已有全链资格定位具体待决边界，避免重复敏感性测试。
+
+**完整训练账本。** 52日志窗口全有限，batch中位6.3386秒，
+窗口累计器记录真实preclip峰3.3088（step11779）。
+窗口平均loss_ledger_gap绝对值最大1.79e-8；
+逐窗口贡献之和与loss_total最大差2.04e-7（不同于单批峰值）。
+34.33.22的6.56e-8是当时的部分账本口径，不应用作完整训练上界。
+离线native RMSE .264195、first8 .231240（B-v2 .231610），
+gripper事件F1 .345055、预测1055/目标765，几乎没有改善。
+annotated_goal仍激活。保留预期满预算和小覆盖hard-execution/proposal提示，
+这些不支持删除计算预算。完整身份/指标/审计：
+`B-regions-v3-short-final-audit.json`、`B-regions-v3-complete-log-audit-r1.json`。
+
+**新增监督主要训练到了哪个分支。** 全部声明训练曝光中，2533/8192样本
+具有32x32采样后负对，971/1024批具有至少一对；
+独立source分支共4759对，即4.64746对/批。
+训练epoch实际记录source+online合计5.04004对/批，据相同完整曝光推算，
+在线分支仅约.39258对/批，为source数量的8.45%。
+`B-regions-v3-annotation-coverage-full-r1.json` 是标签/采样账本；
+扣除法是epoch汇总推断，不能冒充逐个历史随机mask的重放或物体身份覆盖。
+
+为直接核验，固定最终checkpoint、完整manifest和首4个实际声明BS8批，
+`probes/probe_identity_region_operands.py` 捕获生产region_separation的每相机、
+source/online、样本、独立group负边和归约。CPU FP32，显式training_mask，
+32样本、零更新，参数不变；与GPU BF16完整普通损失VJP分开解释：
+
+| 操作数 | 开遮挡负对 | 关遮挡审计负对 | 关遮挡仍违反JS margin的对 |
+| --- | ---: | ---: | ---: |
+| 独立source | 24 | 24 | 3 |
+| 实际在线G | 2 | 24 | 11 |
+
+四批在线负对分别0/0/1/1，关遮挡为7/0/8/9。
+source两条件逐项完全相同，归约重现误差不超过7.45e-9。
+source有负对的13个样本/相机操作数平均hinge .14242，
+在线全观测相同13个操作数平均.29814；不能将包含大量无负对零项的
+总loss下降独自解释成对象分离改善。第二批确实无负对，未制造标签。
+结果在 `B-regions-v3-region-operands-cpu-r1/decision-summary.json`；
+该4批是局部诊断，不替代完整验证集、真实物块或普通参数梯度。
+
+源码边界：`training/identity.py:53–59` 的独立source只用
+content/coordinate key和共享owner转换；实际在线
+`model/canonical_grounding.py:85–101` 还消费typed semantic/appearance/geometry、
+context/history和生产者质量。`identity.py:131–139` 要求online双线性端点
+全部角支持后才保留group。当前结果确证了负监督通过遮挡/支持筛选到在线分支时的稀疏，
+不能说所有在线参数无梯度：共享参数、原正对、world/action仍能反传。
+也不能用去掉mask、降低支持阈值或扩大权重直接充当修复；被遮挡事实仍不得伪造。
+
+下一步由现有 `B-regions-v3-ready-short-r1` 顺序收齐GPU逐参数VJP与旧60/自身新轨迹的
+真实物体、自然指令、32节点全链资格。12:01UTC它仍等空闲整卡，stage full_module_vjp；
+已有GPU6其他授权作业继续运行，未抢占、未重复排程。
+重点核对online专属typed/context/history入口的region梯度，并把上述负对监督与实际物体链
+对应起来，再选择保持合法观测支持的训练接口修复。
+T4未来支持域修复仍需合并进后续显式候选并做有意义训练/行为检查；
+长间隔对应、任务维持、arm/gripper与controller独立问题仍未闭合。
+SAM B-v2结构长跑继续独立：region-fusion正在训练，slot-feedback仍排队，
+不能据此将原主线正式两实验报成已启动。
+
+复现（E为本实验根目录，生产runtime为T3）：
+
+- `python probes/audit_standard_identity_panel.py --panel E/B-regions-v3-short-bs8-1024-r1-closed-loop-replan8 --reference A=E/A-short-bs8-1024-r1-closed-loop-replan8 --reference B_v1=E/B-short-bs8-1024-r1-closed-loop-replan8 --reference B_v2=E/B-nullv2-short-bs8-1024-r1-closed-loop-replan8 --output NEW_AUDIT.json`
+- `python probes/probe_identity_region_operands.py --checkpoint E/B-regions-v3-short-bs8-1024-r1/checkpoints/best.pt --plan E/B-regions-v3-short-exposure-r1.json --output NEW_DIR --device cpu --batches 4`
+- 完整任务receipt、原始结果和NPZ保留E；本节仅记录决策统计，CPU操作数探针源为`74b56cbb`。
