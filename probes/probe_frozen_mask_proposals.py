@@ -37,9 +37,9 @@ def dump(path, data):
     temporary.replace(path)
 
 
-def propose(generator, rgb):
+def propose(generator, rgb, settings=None):
     """Producer accepts only RGB; oracle information never enters this call."""
-    output = generator(Image.fromarray(rgb), **SETTINGS)
+    output = generator(Image.fromarray(rgb), **(SETTINGS if settings is None else settings))
     masks = np.stack([np.asarray(x, dtype=bool) for x in output['masks']]) if output['masks'] else np.empty((0, *rgb.shape[:2]), bool)
     scores = output['scores']
     if isinstance(scores, torch.Tensor):
@@ -92,6 +92,8 @@ def main():
     parser = argparse.ArgumentParser()
     for name in ('plan', 'weights', 'weight-receipt', 'output'):
         parser.add_argument('--'+name, type=Path, required=True)
+    parser.add_argument('--points-per-batch', type=int, choices=(64,128,256), default=64,
+                        help='Only batching changes; all 32x32 prompts, gates and masks remain required')
     args = parser.parse_args()
     args.output.mkdir(exist_ok=False)
     receipt = json.loads(args.weight_receipt.read_text())
@@ -105,14 +107,15 @@ def main():
     torch.backends.cudnn.benchmark = False
     model, loading = Sam2Model.from_pretrained(args.weights, local_files_only=True,
                                              output_loading_info=True)
-    if loading.get('missing_keys') or loading.get('mismatched_keys') or loading.get('error_msgs'):
+    if loading.get('missing_keys') or loading.get('unexpected_keys') or loading.get('mismatched_keys') or loading.get('error_msgs'):
         raise ValueError('Frozen image model has uninitialized or mismatched weights: '+str(loading))
     model = model.eval().cuda()
     model.requires_grad_(False)
     processor = Sam2Processor.from_pretrained(args.weights, local_files_only=True)
     generator = pipeline('mask-generation', model=model, image_processor=processor.image_processor, device=0)
+    settings=dict(SETTINGS,points_per_batch=args.points_per_batch)
     identity = dict(script_sha256=sha(__file__), plan_sha256=sha(args.plan),
-                    weights=receipt, settings=SETTINGS, input='raw RGB only',
+                    weights=receipt, settings=settings, input='raw RGB only',
                     loading=loading,
                     runtime={name: version(name) for name in ('torch', 'torchvision', 'transformers')},
                     mask_role='independent scorer only', production_changed=False,
@@ -120,6 +123,7 @@ def main():
     report = dict(identity=identity, records=[], complete=False)
     plan = json.loads(args.plan.read_text())
     checked_repeat = set()
+    torch.cuda.reset_peak_memory_stats()
     for row in plan:
         case = Path(row['case'])
         with np.load(case/'trajectory.npz', allow_pickle=False) as z:
@@ -129,11 +133,11 @@ def main():
             for view, images in enumerate(rgb):
                 torch.cuda.synchronize(); start = time.monotonic()
                 with torch.inference_mode():
-                    masks, scores = propose(generator, images[step])
+                    masks, scores = propose(generator, images[step],settings)
                 torch.cuda.synchronize(); elapsed = time.monotonic()-start
                 if view not in checked_repeat:
                     with torch.inference_mode():
-                        again, other = propose(generator, images[step])
+                        again, other = propose(generator, images[step],settings)
                     np.testing.assert_array_equal(masks, again)
                     np.testing.assert_array_equal(scores, other)
                     checked_repeat.add(view)
@@ -165,6 +169,7 @@ def main():
             print('MASK_PROPOSALS', row['case_id'], step, [r['proposals'] for r in camera_records], flush=True)
     report['complete'] = True
     report['repeat_cameras'] = sorted(checked_repeat)
+    report['peak_gpu_bytes']=torch.cuda.max_memory_allocated()
     dump(args.output/'results.json', report)
 
 
