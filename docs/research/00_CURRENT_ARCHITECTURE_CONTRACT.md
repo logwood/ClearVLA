@@ -1738,6 +1738,21 @@ qualified in closed loop. Original checkpoints remain evaluated from their
 original source closure. Reproduce diagnosis with `scripts/probe_maniskill_failure.py`
 and `scripts/probe_maniskill_expert_prefix.py`; raw artifacts stay outside this file.
 
+The bounded 256-update comparison did not qualify this candidate: control and
+candidate both score 0/6 on common seeds 5000000–5000005 (replan 8, 400 steps),
+with no red lift above 2 cm. Candidate partial-validation normalized RMSE is
+0.565655 versus control 0.505587 on the same 128/743 windows; candidate closes
+in only 3/6 episodes with median XY miss 14.17 cm. Do not promote or interpret
+this as a full retraining result. The frozen baseline remains 0/18, while
+6/6 expert replays succeed. Eighteen matched real training/deployment windows
+have identical inputs; repeated action parity is exact. The recorded spatial
+interventions point to weak localization/use of geometry, not total G content
+collapse. Teacher-reference choice, visual resolution and corrective-data
+coverage remain competing explanations; none is established as the sole cause.
+Evidence: remote `artifacts/maniskill-latest-train-20261007/trajectory-investigation`
+under `/data/senwang/clearvla`; probes also include `scripts/probe_maniskill_ingress.py`
+and `scripts/probe_maniskill_history.py`.
+
 ## Default and opt-in selections
 
 These are source/config selections, not claims about trained-model success.
