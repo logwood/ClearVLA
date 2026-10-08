@@ -271,6 +271,68 @@ class InformationBalancedBatchSampler(Sampler[list[int]]):
             yield batch
 
 
+class ColdStartInformationBatchSampler(InformationBalancedBatchSampler):
+    """Reserve early real observations from the motion quota, preserving uniform/event lanes.
+
+    The caller owns the causal episode-centre mask. This sampler never fabricates
+    observations, changes targets, or exposes episode time to the network.
+    """
+
+    def __init__(self, motion_score, is_event, cold_start, config, *, fraction):
+        super().__init__(motion_score, is_event, config)
+        mask = np.asarray(cold_start, dtype=bool)
+        if mask.shape != self.motion_score.shape:
+            raise ValueError("cold-start mask must align with real dataset windows")
+        self.cold_indices = np.flatnonzero(mask)
+        self.cold_fraction = float(fraction)
+        if not 0 < self.cold_fraction <= 1 - config.uniform_fraction - config.event_fraction:
+            raise ValueError("cold-start quota must fit inside the existing motion quota")
+        if not len(self.cold_indices):
+            raise ValueError("cold-start sampling requires real early episode windows")
+        if config.batch_size < 4 or config.batch_size % 4:
+            raise ValueError("cold-start sampling requires a batch size divisible by four")
+        if self.cold_fraction != .25:
+            raise ValueError("qualified cold-start sampler reserves exactly one quarter")
+
+    @property
+    def summary(self):
+        return {**super().summary, "schema": "cold-start-information-v1",
+                "cold_start_windows": int(len(self.cold_indices)),
+                "cold_start_fraction": self.cold_fraction,
+                "cold_start_rows_per_epoch_scheduled": len(self) * self.config.batch_size // 4,
+                "motion_fraction": 1 - self.config.uniform_fraction - self.config.event_fraction - self.cold_fraction,
+                "fallback_uniform": 0}
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.config.seed + self.epoch * 1_000_003)
+        permutation = self.all_indices.copy()
+        rng.shuffle(permutation)
+        size = self.config.batch_size
+        uniform = min(max(int(round(size * self.config.uniform_fraction)), 1), size)
+        event_target = min(size * self.config.event_fraction, size - uniform)
+        cold_count = size // 4
+        cursor = 0
+        for batch_index in range(len(self)):
+            event_count = math.floor((batch_index + 1) * event_target + 1e-10) - math.floor(batch_index * event_target + 1e-10)
+            motion_count = size - uniform - event_count - cold_count
+            if motion_count < 0:
+                raise ValueError("rounded quotas exceed the batch size")
+            if cursor + uniform > len(permutation):
+                rng.shuffle(permutation)
+                cursor = 0
+            batch = [int(x) for x in permutation[cursor:cursor + uniform]]
+            cursor += uniform
+            selected = set(batch)
+            for pool, count in ((self.event_indices, event_count), (self.cold_indices, cold_count), (self.motion_indices, motion_count)):
+                # The cold lane must remain cold even on tiny diagnostic pools.
+                fallback = self.cold_indices if pool is self.cold_indices else self.all_indices
+                rows = self._choice(rng, pool, count, selected, fallback)
+                batch.extend(rows)
+                selected.update(rows)
+            rng.shuffle(batch)
+            yield batch
+
+
 class BoundaryAwareInformationBatchSampler(Sampler[list[int]]):
     """Reserve exact prefix/tail slots around an information-balanced strict lane.
 

@@ -51,6 +51,16 @@ JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION = (
     "joint_task_object_binding_trajectory_v1"
 )
 CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION = "calvin_endpoint_trajectory_repair_v1"
+MANISKILL_COLD_START_REPAIR_V1_MIGRATION = "maniskill_cold_start_repair_v1"
+PARAMETER_PRESERVING_INITIALIZATION_MIGRATIONS = frozenset({
+    CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
+    MANISKILL_COLD_START_REPAIR_V1_MIGRATION,
+})
+MANISKILL_COLD_START_REPAIR_V1_SOURCE_PATHS = frozenset({
+    "clearvla/data/samplers.py", "clearvla/mainline/config.py",
+    "clearvla/mainline/data/loading.py", "clearvla/mainline/runtime/checkpoints.py",
+    "clearvla/mainline/train.py",
+})
 CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS = frozenset({
     "clearvla/benchmarks/calvin_raw.py",
     "clearvla/mainline/data/loading.py",
@@ -976,6 +986,27 @@ def _initialization_config_view(config: ExperimentConfig) -> dict[str, object]:
     return payload
 
 
+def _validate_maniskill_cold_start_repair(saved: ExperimentConfig, current: ExperimentConfig) -> None:
+    """Admit only the declared training sampler/dropout experiment, including its control.
+
+    Tensor ABI, RGB/state/action charts, objectives, labels and deployment solver
+    remain identical. A control with both selectors unchanged is intentional.
+    """
+    profile = "maniskill_pd_ee_delta_pose_7d_v2"
+    if saved.data.data_profile != profile or current.data.data_profile != profile:
+        raise ValueError("ManiSkill cold-start repair requires the v2 outlet on both sides")
+    if saved.data.cold_start_fraction != 0 or saved.top.action_history_condition_dropout != .1:
+        raise ValueError("ManiSkill cold-start repair requires the audited baseline selectors")
+    if current.data.cold_start_fraction not in (0., .25) or current.top.action_history_condition_dropout not in (.1, .5):
+        raise ValueError("ManiSkill cold-start repair selectors are outside the qualified panel")
+    left, right = _initialization_config_view(saved), _initialization_config_view(current)
+    for view in (left, right):
+        cast(dict[str, object], view["data"]).pop("cold_start_fraction", None)
+        cast(dict[str, object], view["top"]).pop("action_history_condition_dropout", None)
+    if left != right:
+        raise ValueError("ManiSkill cold-start repair differs outside sampler/history dropout")
+
+
 def _libero_boundary_migration_config_view(
     config: ExperimentConfig,
 ) -> dict[str, object]:
@@ -1196,6 +1227,7 @@ def load_checkpoint_for_initialization(
         JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
         CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
+        MANISKILL_COLD_START_REPAIR_V1_MIGRATION,
         DINOV3_DEEP_REPAIR_V1_MIGRATION,
         S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
         G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
@@ -1474,6 +1506,10 @@ def load_checkpoint_for_initialization(
             raise ValueError(
                 "joint task-object binding migration requires identical dataset identity"
             )
+    elif selected_model_migration == MANISKILL_COLD_START_REPAIR_V1_MIGRATION:
+        _validate_maniskill_cold_start_repair(saved_config, config)
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError("ManiSkill cold-start repair requires identical dataset/normalizers")
     elif selected_migration is None:
         if _initialization_config_view(saved_config) != _initialization_config_view(config):
             raise ValueError(
@@ -1613,7 +1649,9 @@ def load_checkpoint_for_initialization(
             if saved_sources.get(source_path) != current_sources.get(source_path)
         )
     )
-    if selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+    if selected_model_migration == MANISKILL_COLD_START_REPAIR_V1_MIGRATION:
+        allowed_source_paths = MANISKILL_COLD_START_REPAIR_V1_SOURCE_PATHS
+    elif selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
         allowed_source_paths = CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS
     elif selected_model_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION:
         allowed_source_paths = P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS

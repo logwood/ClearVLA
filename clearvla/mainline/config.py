@@ -180,6 +180,9 @@ class DataConfig:
     # legacy behavior; a positive value is serialized as an experiment
     # semantic so the effective trajectory/window budget is auditable.
     information_batches_per_epoch: int | None = None
+    # Training-only ManiSkill repair: reserve 1/4 of samples at true centres
+    # [0,8), taking quota from motion while retaining uniform/event coverage.
+    cold_start_fraction: float = 0.0
 
     def camera_key_map(self) -> dict[str, str]:
         if self.camera_key_overrides:
@@ -361,6 +364,10 @@ class DataConfig:
         if self.data_profile == "maniskill_pd_ee_delta_pose_7d_v2" and self.stride != 1:
             raise ValueError("ManiSkill v2 requires stride=1 for all-source first-action coverage")
         resolve_action_state_profile(self.data_profile).validate()
+        if self.cold_start_fraction not in (0.0, 0.25):
+            raise ValueError("cold_start_fraction must be 0 or the qualified 0.25")
+        if self.cold_start_fraction and self.data_profile != "maniskill_pd_ee_delta_pose_7d_v2":
+            raise ValueError("cold-start repair is qualified only for ManiSkill v2")
         if self.sampling_gripper_event_threshold is not None:
             threshold = float(self.sampling_gripper_event_threshold)
             if not math.isfinite(threshold) or threshold < 0.0:
@@ -1306,6 +1313,8 @@ class ExperimentConfig:
             CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
         } and self.optimizer.batch_size != 8:
             raise ValueError("controlled LIBERO boundary experiments require batch size 8")
+        if self.data.cold_start_fraction and (self.optimizer.batch_size < 4 or self.optimizer.batch_size % 4):
+            raise ValueError("cold-start sampling requires batch size divisible by four")
         if profile.name != "calvin_relative_7d_v1" and (
             self.objectives.calvin_frame_weight_mode != "uniform"
         ):
@@ -1554,6 +1563,8 @@ class ExperimentConfig:
                 "world_action_condition_mode"
             )
         data = cast(dict[str, object], payload["data"])
+        if self.data.cold_start_fraction == 0.0:
+            data.pop("cold_start_fraction", None)
         if self.data.visual_cache_read_backend == "mmap":
             data.pop("visual_cache_read_backend")
             data.pop("visual_pread_max_open_files")

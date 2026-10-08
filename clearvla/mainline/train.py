@@ -34,6 +34,8 @@ from .runtime.checkpoints import (
     LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION,
     JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
     CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
+    MANISKILL_COLD_START_REPAIR_V1_MIGRATION,
+    PARAMETER_PRESERVING_INITIALIZATION_MIGRATIONS,
     JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
     DINOV3_DEEP_REPAIR_V1_MIGRATION,
     S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
@@ -154,6 +156,7 @@ def _parser() -> argparse.ArgumentParser:
             JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
             JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
             CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
+            MANISKILL_COLD_START_REPAIR_V1_MIGRATION,
             DINOV3_DEEP_REPAIR_V1_MIGRATION,
             S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
             G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
@@ -165,13 +168,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--init-training-clock", choices=("fresh", "checkpoint"), default="fresh",
-        help=("For the parameter-preserving CALVIN endpoint/trajectory repair only, "
+        help=("For an explicitly admitted parameter-preserving repair only, "
               "explicitly retain completed model updates and mature execution phase. "
               "Optimizer moments are separately opt-in; RNG remains fresh. Not exact resume."),
     )
     parser.add_argument(
         "--init-optimizer-state", choices=("fresh", "checkpoint"), default="fresh",
-        help=("For the parameter-preserving CALVIN repair with retained training clock, "
+        help=("For a parameter-preserving repair with retained training clock, "
               "optionally retain verified named AdamW moments. Current schedule and "
               "fresh RNG/loader are retained; this is not exact resume."),
     )
@@ -433,15 +436,15 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         )
     if getattr(args, "init_training_clock", "fresh") == "checkpoint" and (
         args.init_checkpoint is None
-        or args.init_model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION
+        or args.init_model_contract_migration not in PARAMETER_PRESERVING_INITIALIZATION_MIGRATIONS
     ):
-        raise ValueError("checkpoint training clock requires the parameter-preserving CALVIN endpoint/trajectory migration")
+        raise ValueError("checkpoint training clock requires an admitted parameter-preserving migration")
     if getattr(args, "init_optimizer_state", "fresh") == "checkpoint" and (
         args.init_checkpoint is None
-        or args.init_model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION
+        or args.init_model_contract_migration not in PARAMETER_PRESERVING_INITIALIZATION_MIGRATIONS
         or args.init_training_clock != "checkpoint"
     ):
-        raise ValueError("checkpoint optimizer moments require the parameter-preserving CALVIN migration and retained training clock")
+        raise ValueError("checkpoint optimizer moments require an admitted parameter-preserving migration and retained training clock")
     return result
 
 
@@ -460,7 +463,7 @@ def _initialize_training_clock(
         engine.global_step = 0
         engine.model.set_training_step(0)
         return
-    if mode != "checkpoint" or initialization.model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+    if mode != "checkpoint" or initialization.model_contract_migration not in PARAMETER_PRESERVING_INITIALIZATION_MIGRATIONS:
         raise ValueError("retained training clock requires a parameter-preserving migration")
     step = initialization.global_step
     if not isinstance(step, int) or isinstance(step, bool) or step < 0:
@@ -489,7 +492,7 @@ def _initialize_optimizer_moments(
         return {"mode": mode, "loaded": False, "state_tensors": 0}
     if (
         mode != "checkpoint"
-        or initialization.model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION
+        or initialization.model_contract_migration not in PARAMETER_PRESERVING_INITIALIZATION_MIGRATIONS
         or engine.global_step != initialization.global_step
         or engine.schedule.step_index != initialization.global_step
     ):

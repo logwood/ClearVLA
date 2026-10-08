@@ -1722,6 +1722,22 @@ interchangeable. Configuration, manifest and deployment ABI are authoritative;
 never reinterpret a legacy checkpoint as the accumulated candidate by relabeling
 its tensors. Pen/RDT/LIBERO defaults are not implicitly changed.
 
+## ManiSkill cold-start / history-use training candidate (2026-10-08)
+
+The opt-in `data.cold_start_fraction=0.25` reserves real centres [0,8) from
+the motion quota, preserving 50% uniform and 12.5% event sampling. The matched
+candidate raises existing action-history condition dropout from 0.1 to 0.5;
+the unchanged-recipe control keeps both original selectors. Neither changes
+online inputs, physical time, labels, losses, G/S/W/P topology or the solver.
+The explicit `maniskill_cold_start_repair_v1` initializer permits only these
+training selectors on the identical v2 dataset/normalizers and exact tensor
+ABI. Retained update count and named Adam moments use the existing verified
+continuation path; loader/RNG start fresh. This is a bounded repair hypothesis,
+not a deployment promotion: reset, pickup and post-grasp placement must all be
+qualified in closed loop. Original checkpoints remain evaluated from their
+original source closure. Reproduce diagnosis with `scripts/probe_maniskill_failure.py`
+and `scripts/probe_maniskill_expert_prefix.py`; raw artifacts stay outside this file.
+
 ## Default and opt-in selections
 
 These are source/config selections, not claims about trained-model success.

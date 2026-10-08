@@ -36,6 +36,7 @@ from clearvla.data.multitask_selection import (
     load_rdt_multitask_selection_manifest,
 )
 from clearvla.data.samplers import (
+    ColdStartInformationBatchSampler,
     BoundaryAwareInformationBatchSampler,
     EvenlySpacedPanelBatchSampler,
     InformationBalancedBatchSampler,
@@ -174,6 +175,7 @@ class MainlineDataBundle:
     # Runtime-owned, never copied into Dataset/DataLoader workers.
     visual_encoder: OnlineVisionPipeline | None = None
     information_batches_per_epoch: int | None = None
+    cold_start_fraction: float = 0.0
     sampling_arm_motion: str = "adjacent_action_delta"
     sampling_gripper_event_scope: str = "window_any"
     release_first_action_fraction: float = 0.0
@@ -335,7 +337,13 @@ class MainlineDataBundle:
                 seed=self.sampling_seed,
                 event_scope=self.sampling_gripper_event_scope,
             )
-            if self.window_boundary_contract in {
+            if self.cold_start_fraction:
+                sampler = ColdStartInformationBatchSampler(
+                    motion_score, is_event,
+                    np.asarray([0 <= ref.center < 8 for ref in dataset.base.refs]),
+                    sampler_config, fraction=self.cold_start_fraction,
+                )
+            elif self.window_boundary_contract in {
                 CAUSAL_PREFIX_V1,
                 CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
             }:
@@ -1010,6 +1018,7 @@ def _load_mainline_data(
         information_event_fraction=data.information_event_fraction,
         information_motion_quantile=data.information_motion_quantile,
         information_batches_per_epoch=data.information_batches_per_epoch,
+        cold_start_fraction=data.cold_start_fraction,
         gripper_event_threshold=(
             config.objectives.gripper_event_threshold
             if profile.name == "identity_7d_pen" and data.sampling_gripper_event_threshold is None
