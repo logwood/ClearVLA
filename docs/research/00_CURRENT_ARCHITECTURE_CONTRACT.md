@@ -1711,7 +1711,9 @@ Fixed production e4be3be6, runner8d79c5cc. They automatically perform
 2BS8/cold4 ->1024BS8/256offline ->standard18 R8 ->source/own-trajectory
 audits; no formal long promotion. Original initialization is the complete
 B-v1 checkpoint step12036; actual short ends13060. Do not duplicate.
-Read34.33.26 for the implementation and admitted scope.
+Read34.33.26 for the implementation and admitted scope. Full actual loader
+and loaded-encoder identity also matches B-v1 (2165train/280val, RGB LRU0);
+all1584 inherited model tensors match exactly, with only3 new scalar gains.
 
 ### Current optional candidate: dense address memory
 

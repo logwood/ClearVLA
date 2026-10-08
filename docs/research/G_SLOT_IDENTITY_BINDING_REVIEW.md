@@ -4424,3 +4424,12 @@ The runner retains all NPZ, checks ordinary gain gradients and cold deployment
 before the meaningful short, then gathers actual source controls, old60 natural
 windows and its own fresh phase/mask/node chain. Its final status is evidence
 completion, never a claim that object identity or behavior is repaired.
+
+Actual loader identity is now separately verified in
+B-v1-address-actual-data-identity-r2.json:2165 train/280 validation episodes,
+dataset and language exact B-v1, actual online encoder loaded, RGB frame LRU0.
+The first read-only attempt omitted that encoder and the identity guard rejected
+it correctly; r1-scope is retained. No training output was created by this check.
+At the last inventory both new continuations remain waiting_idle_gpu; all seven
+GPUs are occupied. The original B-v3 own-trajectory qualification and independent
+SAM jobs remain active. Do not infer a training start from a live queue PID.
