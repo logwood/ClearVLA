@@ -1782,6 +1782,13 @@ signed native actions and full closed-loop trajectories must decide efficacy.
 The executable experiment specification is
 `configs/mainline/maniskill_spatial_repair_experiment_20261008.json`.
 
+The matched 256-update pilot qualifies improved G localization on validation,
+test and fixed states from all 18 original failed trajectories, but does not
+qualify a policy repair: both full common panels remain 0/18 stacks, with
+control/candidate grasped lifts 2/1. Keep this objective opt-in and unpromoted.
+The action/generalization, frozen-readout and reset-contact scoring evidence is
+recorded in `CURRENT_MAINLINE_ISSUES.md`; raw artifacts remain outside memory.
+
 ## Default and opt-in selections
 
 These are source/config selections, not claims about trained-model success.

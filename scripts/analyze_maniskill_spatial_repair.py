@@ -177,6 +177,8 @@ def episodes(folder,expected_count=18):
             # CPU PhysX reset can retain the preceding episode's contact cache.
             # No dynamics have occurred at row zero; retain it only as raw audit data.
             grasp[0]=False
+            edges=np.diff(np.r_[False,grasp,False].astype(int))
+            grasp_runs=np.flatnonzero(edges==-1)-np.flatnonzero(edges==1)
             grasp_steps=np.flatnonzero(grasp)
             lift_steps=np.flatnonzero((height>.02)&grasp)
             release=np.flatnonzero((command[:,-1]>0)&(state[:-1,-1]<0))
@@ -187,6 +189,8 @@ def episodes(folder,expected_count=18):
                 min_xy_cm=float(np.linalg.norm(tcp[:,:2]-red[:,:2],axis=-1).min()*100),
                 max_red_lift_cm=float(height.max()*100),grasped=bool(grasp.any()),
                 grasp_frames=int(grasp.sum()),
+                longest_grasp_run_frames=int(grasp_runs.max()) if len(grasp_runs) else 0,
+                gripper_command_transitions=int(np.count_nonzero(np.diff(command[:,-1]>0))),
                 raw_reset_grasp_flag=reset_grasp,raw_grasp_frames=raw_grasp_frames,
                 first_grasp_step=int(grasp_steps[0]) if len(grasp_steps) else None,
                 first_grasped_lift_step=int(lift_steps[0]) if len(lift_steps) else None,
@@ -210,6 +214,8 @@ def episode_summary(rows):
         ik_diagnostic_steps=sum(x['ik_diagnostic_steps'] for x in rows),
         closes=len(closed),grasp_episodes=sum(x['grasped'] for x in rows),
         reset_grasp_flags=sum(x['raw_reset_grasp_flag'] for x in rows),
+        median_gripper_command_transitions=float(np.median([x['gripper_command_transitions'] for x in rows])),
+        total_gripper_command_transitions=sum(x['gripper_command_transitions'] for x in rows),
         grasped_lifts=sum(x['grasped_lift_above_2cm'] for x in rows),
         median_first_close_xy_cm=float(np.median(closed)) if closed else None,
         median_min_xy_cm=float(np.median([x['min_xy_cm'] for x in rows])),
@@ -506,6 +512,24 @@ def main():
                 ac=p1['control']['summary'][split][stage];bc=p1['candidate']['summary'][split][stage]
                 p1_rows.append((split,stage,f"{100*ac['red_joint']:.2f}% / {100*bc['red_joint']:.2f}%",
                     f"{100*ac['green_joint']:.2f}% / {100*bc['green_joint']:.2f}%"))
+    mechanism=all(summary['grounding']['candidate'][s]['mean_conditional_region_mass']>summary['grounding']['control'][s]['mean_conditional_region_mass'] and summary['grounding']['candidate'][s]['mean_centroid_error_px']<summary['grounding']['control'][s]['mean_centroid_error_px'] for s in ('val','test'))
+    behavior_gain=summary['closed_loop']['candidate']['successes']>summary['closed_loop']['control']['successes']
+    summary['decision']=dict(grounding_mechanism_passed=mechanism,common_panel_stack_gain=behavior_gain,
+        checkpoint_promoted=False,fresh_seed_panel_required_if_behavior_improves=behavior_gain,
+        limits=['One training seed and 256 low-rate updates',
+            'Seven episodes per held-out split; scene-specific generalization remains uncertain',
+            'A linear readout is not a causal proof of how the policy uses a representation',
+            'Native reset contact-cache flags excluded from achieved grasp counts'],
+        next_factor_if_no_stack_gain='Keep this as an isolated grounding result. Next qualify native spatial-to-action learning and recovery supervision against a matched control; do not solve it by forcing red binding or supplying online color/pose pointers.')
+    visibility_path=out/'candidate_seed_5000004_visibility/summary.json'
+    visibility_html=''
+    if visibility_path.exists():
+        visibility=load(visibility_path)
+        assert visibility['complete'] and visibility['full_replayed_actions']==400
+        summary['illustrative_lift_failure_visibility']=visibility
+        visibility_html='''<details><summary>Example: lift succeeds with the cubes visible in different cameras, but placement fails</summary>
+<p>Seed 5000004 is an illustrative candidate lift failure, not a selected success-rate subset. At observation 135, the red cube has 0 visible global-camera pixels and 9548 wrist-camera pixels; the green cube has 141 global-camera pixels and 0 wrist-camera pixels. The policy lifts despite this split visibility. Its closest red/green XY separation while lifted is 4.36 cm, outside the installed task's 3.33 cm horizontal stacking threshold; correct height, stability and release are also required.</p>
+<img loading="lazy" src="candidate_seed_5000004_event_frames.png"><p><a href="candidate_seed_5000004_visibility/summary.json">Exact replay, positions and all seven visibility snapshots</a>. This is descriptive evidence from one trajectory, not proof that camera visibility alone caused failure. Every paired trajectory, including regressions, follows below.</p></details>'''
     (out/'comparison.json').write_text(json.dumps(summary,indent=2,allow_nan=False)+'\n')
     (out/'grounding_per_view.json').write_text(json.dumps(ground_rows,indent=2,allow_nan=False)+'\n')
     (out/'grounding_per_query.json').write_text(json.dumps(ground_cases,indent=2,allow_nan=False)+'\n')
@@ -571,10 +595,9 @@ def main():
         for arm in ('original','control','candidate'):
             e=trajectories[arm][i]
             milestones.append((arm,e['first_close'],e['first_grasp_step'],e['first_grasped_lift_step'],
-                e['first_release_after_grasp_step'],e['min_red_green_xy_while_lifted_cm']))
-        cases.append('<details><summary>Seed '+str(trajectories['control'][i]['seed'])+'</summary><p>'+'</p><p>'.join(links)+'</p>'+table(('Arm','First close','First native grasp','First grasped 2cm lift','First release after grasp','Closest red/green XY while lifted (cm)'),milestones)+'<p>None means the event never occurred. Close/release use pre-action indices; grasp/lift use observation indices.</p><img loading="lazy" src="'+figure+'"><p>Rows: complete TCP and cube XY paths; red-cube lift; all 400 applied XYZ commands; all 400 gripper commands. Green shading marks the native grasp flag.</p></details>')
-    mechanism=all(summary['grounding']['candidate'][s]['mean_conditional_region_mass']>summary['grounding']['control'][s]['mean_conditional_region_mass'] and summary['grounding']['candidate'][s]['mean_centroid_error_px']<summary['grounding']['control'][s]['mean_centroid_error_px'] for s in ('val','test'))
-    behavior_gain=summary['closed_loop']['candidate']['successes']>summary['closed_loop']['control']['successes']
+                e['first_release_after_grasp_step'],e['min_red_green_xy_while_lifted_cm'],
+                e['longest_grasp_run_frames'],e['gripper_command_transitions']))
+        cases.append('<details><summary>Seed '+str(trajectories['control'][i]['seed'])+'</summary><p>'+'</p><p>'.join(links)+'</p>'+table(('Arm','First close','First native grasp','First grasped 2cm lift','First release after grasp','Closest red/green XY while lifted (cm)','Longest grasp (frames)','Gripper flips'),milestones)+'<p>None means the event never occurred. Close/release use pre-action indices; grasp/lift use observation indices. One frame is 0.05 seconds.</p><img loading="lazy" src="'+figure+'"><p>Rows: complete TCP and cube XY paths; red-cube lift; all 400 applied XYZ commands; all 400 gripper commands. Green shading marks the native grasp flag.</p></details>')
     verdict=('Grounding improves on both held-out splits. ' if mechanism else 'The pilot does not qualify a consistent grounding improvement. ')+('The common panel also gains stack successes; fresh seeds are still required before promotion.' if behavior_gain else 'The common panel does not gain stack successes; the checkpoint is not a qualified policy repair.')
     action_change={s:100*(summary['teacher_forced_actions'][s]['candidate']['mean_query_translation_rmse_first8']/summary['teacher_forced_actions'][s]['control']['mean_query_translation_rmse_first8']-1) for s in ('val','test')}
     body=f'''<!doctype html><html><head><meta charset="utf-8"><title>ManiSkill spatial repair comparison</title><style>body{{font:16px/1.5 system-ui;max-width:1150px;margin:35px auto;padding:0 20px;color:#17212b}}img{{max-width:100%}}table{{border-collapse:collapse;width:100%}}td,th{{padding:9px;border:1px solid #cdd5de;text-align:left}}th{{background:#edf2f7}}details{{padding:12px;border:1px solid #ccd4dc;margin:10px 0}}a{{color:#1468a0}}</style></head><body>
@@ -606,6 +629,7 @@ def main():
 <p>On seven validation demonstrations, each existing shared binding is concentrated on the renderer-matched red or green slot while preserving its original real/null mass. G is numerically unchanged and every case has a no-op repeat. The slot remains a learned representation, not an oracle physical state. These fixed-observation probes are not deployment results and do not change either closed-loop policy. <a href="binding-counterfactual-r2/summary.json">Every probe and numerical admission</a>.</p></details>
 <h2>Physical outcomes</h2>{table(('Arm','Stacks any / at end (of 18)','Grasps / 18','Grasp + 2cm lift / 18','Episodes with close','Median first-close XY miss (cm)'),behavior)}
 <p>The close-error median includes only episodes that issue a close; compare its denominator and per-seed records. Grasp counts use post-action observations only: CPU PhysX can carry the previous episode's contact cache into reset row zero. Raw reset flags remain in the NPZ, telemetry and JSON audit; they do not count as achieved grasps. All episodes retain 400 actions and 401 observations. A better loss or heatmap alone cannot qualify the repair.</p>
+{visibility_html}
 <p><a href="comparison.json">Complete metrics, paired episode uncertainty and results</a> · <a href="grounding_per_view.json">Every grounding view</a> · <a href="grounding_per_query.json">Every binding/action query</a> · <a href="all_54_full_trajectories_npz.zip">All 54 full trajectory NPZ files</a> · <a href="../preflight-admission.json">Preflight and restored-output parity</a> · <a href="../label_audit.json">Training-label audit</a></p>
 <h2>Every paired trajectory</h2>{''.join(cases)}
 <p>Source and objective specification: <code>configs/mainline/maniskill_spatial_repair_experiment_20261008.json</code>. This is a bounded single-seed training pilot, not a statistically established deployment result.</p></body></html>'''

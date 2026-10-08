@@ -54,6 +54,82 @@ Reproduce with `scripts/probe_maniskill_spatial_*.py`,
 under remote `artifacts/maniskill-latest-train-20261007/spatial-grounding-20261008`
 in `/data/senwang/clearvla`; no raw probe data belongs in this ledger.
 
+## ManiSkill current-region repair pilot (2026-10-08)
+
+Training source `f3c4d1a` adds only the opt-in 0.01-weight current-region
+objective described in the architecture contract. Both arms retain epoch-8
+weights, named Adam moments and step 6392, then run 256 updates on the same
+native-v2 data/seed. The short schedule uses approximately 8e-6 learning rate;
+this is a low-rate continuation, not a full retraining or exact old-schedule
+resume. Fifty focused tests, actual producer/binder parameter VJPs, unchanged
+first-batch outputs and native saved-checkpoint reload checks pass.
+
+On the same 128 validation windows, normalized action RMSE changes from
+0.505017 (control) to 0.473286 (candidate); first-eight RMSE changes from
+0.332627 to 0.320608. Both logged loss ledgers close exactly and contain no
+nonfinite training scalars; pre-clip spikes above 5 increase from 10 to 15.
+All 98 fixed expert queries (seven stages in all seven validation and seven
+test demonstrations) have identical paired RGB, robot state, renderer masks,
+object positions and sampler noise. Test conditional cube-region mass improves
+from 0.213355 to 0.499064, joint mass from 0.207043 to 0.282016, and centroid
+error from 105.578 to 54.821 pixels; every test episode improves. On 72 fixed
+failed-policy states from all 18 original full trajectories, conditional mass
+improves from 0.140923 to 0.392119 and centroid error from 112.962 to 69.700
+pixels. Every original episode improves; replayed 7-D policy state and both
+cube XYZ match the archive, with identical paired observations and noise.
+
+The downstream action result is mixed: mean first-eight native XYZ command
+RMSE improves from 0.014317 to 0.013444 on validation but worsens from
+0.018874 to 0.019650 on test. Test X error decreases while Y error increases;
+the physical placement sweep retains a negative-X bias. These are expert-state
+command metrics, not closed-loop successes or calibrated 3-D poses.
+
+Frozen linear position readouts fit 59 training layouts, choose ridge strength
+on seven validation layouts and report seven test layouts. G-all red/green XY
+error improves from 7.712/7.576 cm to 6.754/6.383 cm, while P1-detail error
+worsens from 11.420/13.233 cm to 13.725/14.326 cm. Raw DINO/state baselines
+are identical. This is evidence of improved readable G information, not proof
+that downstream control uses it or that P1 loses it: P2 owns geometry separately.
+
+Concentrating the shared binding on the evaluator-matched red slot preserves
+the original null mass but worsens reset XYZ error in both arms and only
+slightly helps lift. A uniform stronger-red-binding intervention is therefore
+not established as a remedy. Every case records a no-op repeat; G agreement
+uses explicit 3e-6 absolute/3e-5 relative tolerance and the maximum candidate
+no-op action RMSE is 0.00011136. The initial bitwise-G audit failure is retained.
+
+Native reset contact forces can retain the preceding episode's final contact
+cache. Two control reset flags have exactly the previous episode's four finger
+force vectors despite TCP/cube separation of 18-21 cm; they disappear after the
+first action. Score achieved grasps on observation rows 1..400, preserving raw
+reset flags. This corrects control grasps from four to three; two grasped lifts
+remain. No oracle metric is a policy input, so the scoring correction does not
+change actions or replay. Both complete common panels score 0/18 stacks
+(any-time and final). Control/candidate have 3/4 post-action grasp episodes
+and 2/1 grasped lifts above 2 cm. Median first-close XY miss is 7.717/7.578 cm
+over 16 closing episodes each; median minimum XY distance is 4.103/6.007 cm.
+Gripper transitions total 179/234 over the same 7200 executed commands. Thus
+localization improves but task performance does not qualify; no checkpoint is
+promoted and no fresh-seed promotion panel or longer run is triggered.
+
+Candidate seed 5000004 gains a grasp/lift absent in its paired control, but
+closest red/green XY separation while lifted is 4.36 cm versus the installed
+task's 3.33 cm horizontal stack threshold. At observation 135, red has 0/9548
+global/wrist pixels and green 141/0: lifting works with split-camera visibility.
+This does not establish occlusion as the placement failure's cause. The next
+factor should qualify learned relative-geometry-to-native-action accuracy and
+recovery supervision, keeping one K+null owner and privileged labels outside
+online inputs. P1 read localization and P2 geometry consumption require separate
+causal checks; a stronger red binding or better heatmap alone is insufficient.
+Full results and volatile status belong in remote
+`experiments/maniskill/20261008-spatial-repair-ab` under `/data/senwang/clearvla`.
+Reproduce with `scripts/run_maniskill_spatial_repair.py`,
+`scripts/probe_maniskill_repaired_binding.py`,
+`scripts/probe_maniskill_repair_failed_states.py`,
+`scripts/probe_maniskill_spatial_readout.py` and
+`scripts/analyze_maniskill_spatial_repair.py`. Keep all trajectories and videos
+outside architecture memory.
+
 ## M7f–M7l local closure, not model-performance acceptance
 
 Source admission, adjacent-command consistency, ordinary source/weight mutation,
