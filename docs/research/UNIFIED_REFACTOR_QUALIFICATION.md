@@ -77,6 +77,24 @@ weights, initialization order and optimizer updates are unchanged by this
 follow-up. Only the named unified source migration admits these additional
 type-only mainline paths; the original A/B migration is not broadened.
 
+## Nondegenerate gradient qualification and training receipts
+
+The expanded legacy suite exposed four zero-gradient assertions in fixtures
+with only one older history key. A one-element softmax is identically one;
+query-normalization gradients are mathematically zero, and tiny older-kernel
+roundoff is not evidence of a live selector. Complete-model all-parameter
+checks now declare two distinct older keys, retain the strict no-missing/
+no-zero assertions, and separately preserve singleton and multi-key controls.
+No proposal calculation, source rule or loss coefficient is changed for this
+test correction.
+
+The real-data command does not turn a process exit code alone into training
+acceptance. Successful completion also requires matching source and BS8
+identity, finite train/validation epoch records, the declared optimizer-update
+count and nonempty archived artifacts. This receipt check does not validate
+checkpoint tensor contents or behavioral improvement. Missing real assets
+remain blocked before any training execution.
+
 ## Remaining scientific gates
 
 Instance-level physical identity, natural target choice, long-gap observed
@@ -85,3 +103,21 @@ cross-dataset learned behavior and resource qualification remain unresolved
 until their actual source-specific tests pass. Keep the detailed research
 ledger and original A/B promotion blocks; these numerical/interface repairs
 do not override them.
+
+## Typed S ordinary-gradient boundary
+
+The inherited typed value decomposition still used `preserve_common_grad=True`.
+Although its forward recombination is identity, its backward is `I+P` (P is
+interval averaging), doubling the common direction without adding interval
+information. This was not repaired by valid-source masking.
+
+`top.typed_interval_gradient_mode=ordinary_v1` now uses the true decomposition
+Jacobian. The historical `legacy_common_surrogate_v1` remains the omitted default
+for exact legacy replay; old A/B configs and weights are not relabelled.
+Only unified check configs select the new mode. The mode propagates through
+policy -> top -> S, enters config/ABI identity, and is admitted for initialization
+only by the explicit unified source migration. Forward values, parameter set,
+constructor RNG and initial sampling outputs remain unchanged; training updates
+will differ and require fresh qualification. No gain or binding distribution is
+changed. Direct VJP/JVP/gradcheck and actual online-S reconstruction tests exercise
+the difference, rather than certifying the lane from an aggregate gradient norm.

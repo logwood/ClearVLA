@@ -26,13 +26,13 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..annotation_goal import AnnotationEndpoint
-from ..global_task import PROPRIOCEPTIVE_GLOBAL
-from ..role_values import ADDRESS_ONLY_ROLE
 from ..feedback_values import INNOVATION_ONLY
 from ..future_time import LEGACY_FUTURE_TIME
+from ..global_task import PROPRIOCEPTIVE_GLOBAL
 from ..instruction_change import POSTERIOR_REFERENCE_CHANGE
 from ..instruction_reference import InstructionReference
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
+from ..role_values import ADDRESS_ONLY_ROLE
 from ..task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION
 from ..temporal import HistoryTiming
 from ..v120_core.flow_dino_evidence import ProgressiveGroundingAddressState
@@ -98,7 +98,9 @@ class OnlineTopContext:
 
     def deployment_cache(self) -> "DeploymentTopCache":
         return DeploymentTopCache(
-            belief=self.facts.world_belief() if self.current_world_belief is None else self.current_world_belief,
+            belief=self.facts.world_belief()
+            if self.current_world_belief is None
+            else self.current_world_belief,
             intent=self.intent,
             candidate_world=self.candidate_world,
         )
@@ -107,9 +109,20 @@ class OnlineTopContext:
         self.facts.validate()
         if self.current_world_belief is not None:
             self.current_world_belief.validate()
-            for name in ("content", "semantic", "appearance", "geometry", "camera_coordinates",
-                         "camera_transport_prior", "camera_support", "camera_validity",
-                         "log_camera_validity", "validity", "log_validity", "latest_flow_steps"):
+            for name in (
+                "content",
+                "semantic",
+                "appearance",
+                "geometry",
+                "camera_coordinates",
+                "camera_transport_prior",
+                "camera_support",
+                "camera_validity",
+                "log_camera_validity",
+                "validity",
+                "log_validity",
+                "latest_flow_steps",
+            ):
                 if getattr(self.current_world_belief, name) is not getattr(self.facts, name):
                     raise ValueError("online W belief must retain the same current G evidence")
         self.intent.validate(horizon=horizon, hidden=hidden)
@@ -134,13 +147,9 @@ class OnlineTopContext:
             raise ValueError("online context cannot carry a future action target")
         if self.coarse_action.loss.ndim != 0:
             raise ValueError("coarse action online placeholder loss must be scalar")
-        if tuple(self.coarse_action.action_prediction.shape) != tuple(
-            source_action.shape
-        ):
+        if tuple(self.coarse_action.action_prediction.shape) != tuple(source_action.shape):
             raise ValueError("coarse proposal and physical W condition do not align")
-        if (
-            source_action is not self.coarse_action.action_prediction
-        ):
+        if source_action is not self.coarse_action.action_prediction:
             raise ValueError("physical W condition must retain the exact proposal tensor")
 
 
@@ -185,9 +194,7 @@ class CompiledPolicyState:
     def validate(self) -> None:
         self.effect.validate()
         self.consequence.validate()
-        if tuple(self.effect.semantic.shape) != tuple(
-            self.consequence.factual_base.shape
-        ):
+        if tuple(self.effect.semantic.shape) != tuple(self.consequence.factual_base.shape):
             raise ValueError("P2 effect and consequence schemas do not align")
         self.plan.validate()
         if tuple(self.plan.protected_base.shape) != tuple(self.effect.semantic.shape):
@@ -243,6 +250,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         object_view_mode: str = "pooled_v1",
         target_binding_input_mode: str = "protected_pooled_v1",
         observed_outcome_mode: str = "none",
+        typed_interval_gradient_mode: str = "legacy_common_surrogate_v1",
         history_encoding_mode: str = "paired_rows_v1",
         entity_context_mode: str = "candidate_only_v1",
         entity_chart_mode: str = "query_lattice_v1",
@@ -270,10 +278,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         if int(role_host_depth) != 3:
             raise ValueError("the active progressive grounding path requires G1/G2/G3")
         self.grounding_blocks = nn.ModuleList(
-            [
-                TemporalDynamicsBoundDiTBlock(core_config, role="grounding")
-                for _ in range(3)
-            ]
+            [TemporalDynamicsBoundDiTBlock(core_config, role="grounding") for _ in range(3)]
         )
         self.grounding_content_mod = nn.Sequential(
             AffineVarianceFlooredCenteredNorm(
@@ -303,7 +308,10 @@ class ObjectIntentDynamicsTop(nn.Module):
             camera_names=camera_names,
             entity_history_mode=entity_history_mode,
             entity_motion_mode=entity_motion_mode,
-            retain_image_source=(instruction_change_mode == POSTERIOR_REFERENCE_CHANGE or task_execution_mode in JOINT_TASK_EXECUTION_MODES),
+            retain_image_source=(
+                instruction_change_mode == POSTERIOR_REFERENCE_CHANGE
+                or task_execution_mode in JOINT_TASK_EXECUTION_MODES
+            ),
             object_view_mode=object_view_mode,
         )
         self.intent = StatelessObjectIntentOrganizer(
@@ -321,12 +329,14 @@ class ObjectIntentDynamicsTop(nn.Module):
             instruction_reference_mode=instruction_reference_mode,
             operation_intent_mode=operation_intent_mode,
             annotation_goal_mode=annotation_goal_mode,
-            task_execution_mode=task_execution_mode, role_value_mode=task_role_value_mode,
+            task_execution_mode=task_execution_mode,
+            role_value_mode=task_role_value_mode,
             instruction_change_mode=instruction_change_mode,
             observation_measurement_mode=observation_measurement_mode,
             target_binding_input_mode=target_binding_input_mode,
             entity_ownership_mode=entity_ownership_mode,
             observed_outcome_mode=observed_outcome_mode,
+            typed_interval_gradient_mode=typed_interval_gradient_mode,
             object_view_mode=object_view_mode,
             camera_names=camera_names,
             history_encoding_mode=history_encoding_mode,
@@ -339,7 +349,8 @@ class ObjectIntentDynamicsTop(nn.Module):
             horizon=horizon,
             action_condition_mode=self.world_action_condition_mode,
             target_binding_mode=target_binding_mode,
-            task_execution_mode=task_execution_mode, role_value_mode=task_role_value_mode,
+            task_execution_mode=task_execution_mode,
+            role_value_mode=task_role_value_mode,
         )
         self.dynamics = ObjectFutureDynamicsCompiler(
             future_time_grid_mode=future_time_grid_mode,
@@ -348,9 +359,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             route_dim=route_dim,
             action_dim=action_dim,
             heads=heads,
-            normalization_floor=float(
-                core_config.flow_jepa_routing_norm_floor
-            ),
+            normalization_floor=float(core_config.flow_jepa_routing_norm_floor),
             camera_names=camera_names,
             camera_condition_mode=world_camera_condition_mode,
             action_condition_mode=self.world_action_condition_mode,
@@ -361,7 +370,9 @@ class ObjectIntentDynamicsTop(nn.Module):
             entity_ownership_mode=entity_ownership_mode,
         )
         self.teacher = ObjectFutureTeacher(
-            camera_names=tuple(camera_names) if operation_intent_mode == OBJECT_OUTCOME_INTENT else (),
+            camera_names=tuple(camera_names)
+            if operation_intent_mode == OBJECT_OUTCOME_INTENT
+            else (),
             future_time_grid_mode=future_time_grid_mode,
             content_dim=content_dim,
             key_dim=teacher_key_dim,
@@ -369,13 +380,17 @@ class ObjectIntentDynamicsTop(nn.Module):
             current_reference_mode=teacher_current_reference_mode,
             observation_measurement_mode=observation_measurement_mode,
         )
-        self.recognizer = OperationExpectationSupervisor() if operation_intent_mode == OBJECT_OUTCOME_INTENT else FuturePlanRecognizer(
-            future_time_grid_mode=future_time_grid_mode,
-            hidden=hidden,
-            action_dim=action_dim,
-            state_dim=state_dim,
-            content_dim=content_dim,
-            heads=heads,
+        self.recognizer = (
+            OperationExpectationSupervisor()
+            if operation_intent_mode == OBJECT_OUTCOME_INTENT
+            else FuturePlanRecognizer(
+                future_time_grid_mode=future_time_grid_mode,
+                hidden=hidden,
+                action_dim=action_dim,
+                state_dim=state_dim,
+                content_dim=content_dim,
+                heads=heads,
+            )
         )
         self.effect_reader = ObjectFutureEffectReader(
             future_time_grid_mode=future_time_grid_mode,
@@ -388,20 +403,27 @@ class ObjectIntentDynamicsTop(nn.Module):
             camera_names=tuple(camera_names or ()),
             world_control_mode=world_control_mode,
             target_binding_mode=target_binding_mode,
-            task_execution_mode=task_execution_mode, role_value_mode=task_role_value_mode, heads=heads,
+            task_execution_mode=task_execution_mode,
+            role_value_mode=task_role_value_mode,
+            heads=heads,
             target_value_mode=p2_target_value_mode,
         )
         self.consequence = ZeroPreservingObjectConsequence(hidden)
         self.plan_compiler = ObjectPolicyPlanCompiler(
             future_time_grid_mode=future_time_grid_mode,
-            coordination_mode=p3_coordination_mode, heads=heads,
-            robot_feedback_mode=robot_feedback_mode, world_feedback_mode=world_feedback_mode,
-            world_feedback_value_mode=world_feedback_value_mode, state_dim=state_dim, action_dim=action_dim,
+            coordination_mode=p3_coordination_mode,
+            heads=heads,
+            robot_feedback_mode=robot_feedback_mode,
+            world_feedback_mode=world_feedback_mode,
+            world_feedback_value_mode=world_feedback_value_mode,
+            state_dim=state_dim,
+            action_dim=action_dim,
             operation_intent_mode=operation_intent_mode,
             annotation_goal_mode=annotation_goal_mode,
             task_execution_mode=task_execution_mode,
             global_condition_mode=global_condition_mode,
-            instruction_change_mode=instruction_change_mode, content_dim=content_dim,
+            instruction_change_mode=instruction_change_mode,
+            content_dim=content_dim,
             camera_names=camera_names,
             hidden=hidden,
             horizon=horizon,
@@ -432,9 +454,7 @@ class ObjectIntentDynamicsTop(nn.Module):
                 if key in source:
                     values.append(source.pop(key))
             if values:
-                metrics[f"object_w_typed_norm_{suffix}"] = reduction(
-                    torch.stack(values)
-                )
+                metrics[f"object_w_typed_norm_{suffix}"] = reduction(torch.stack(values))
         metrics.update(merged_w1)
         metrics.update(merged_w2)
         return metrics
@@ -569,9 +589,7 @@ class ObjectIntentDynamicsTop(nn.Module):
         metrics = {
             **metrics,
             **action_metrics,
-            "object_action_world_refinement_count": reference.new_ones(
-                (), dtype=torch.float32
-            ),
+            "object_action_world_refinement_count": reference.new_ones((), dtype=torch.float32),
             "object_action_world_refinement_pre_semantic_delta_rms": old_semantic.square()
             .mean()
             .sqrt(),
@@ -580,7 +598,8 @@ class ObjectIntentDynamicsTop(nn.Module):
             .sqrt(),
             "object_action_world_refinement_semantic_delta_change_rms": (
                 new_semantic - old_semantic
-            ).square()
+            )
+            .square()
             .mean()
             .sqrt(),
             "object_action_world_refinement_pre_transport_rms": old_transport.square()
@@ -589,9 +608,8 @@ class ObjectIntentDynamicsTop(nn.Module):
             "object_action_world_refinement_post_transport_rms": new_transport.square()
             .mean()
             .sqrt(),
-            "object_action_world_refinement_transport_change_rms": (
-                new_transport - old_transport
-            ).square()
+            "object_action_world_refinement_transport_change_rms": (new_transport - old_transport)
+            .square()
             .mean()
             .sqrt(),
             "object_action_world_refinement_tag_identity_error": reference.new_zeros(
@@ -613,9 +631,7 @@ class ObjectIntentDynamicsTop(nn.Module):
     ) -> tuple[ProgressiveGroundingAddressState, Tensor, dict[str, Tensor]]:
         """Execute the literal V120 G1/G2/G3 block/update alternation."""
 
-        clean = torch.cat(
-            (canvas[:, slices["state"]], canvas[:, slices["registers"]]), dim=1
-        )
+        clean = torch.cat((canvas[:, slices["state"]], canvas[:, slices["registers"]]), dim=1)
         if int(clean.shape[1]) < 1:
             raise ValueError("grounding modulation requires state/register rows")
         summary = torch.cat((clean.mean(dim=1), visual_memory.mean(dim=1)), dim=-1)
@@ -646,17 +662,15 @@ class ObjectIntentDynamicsTop(nn.Module):
             )
             if collect_diagnostics:
                 metrics[f"grounding_g{stage}_update_rms"] = (
-                    rollout.detach().float() - before.detach().float()
-                ).square().mean().sqrt()
+                    (rollout.detach().float() - before.detach().float()).square().mean().sqrt()
+                )
                 metrics.update(
                     {f"grounding_g{stage}_{name}": value for name, value in block_metrics.items()}
                 )
         if state.stage != 3 or state.grounded_fact_set is None:
             raise RuntimeError("progressive grounding did not complete G3")
         if collect_diagnostics:
-            metrics["grounding_clean_endpoint_t_v120"] = canvas.new_zeros(
-                (), dtype=torch.float32
-            )
+            metrics["grounding_clean_endpoint_t_v120"] = canvas.new_zeros((), dtype=torch.float32)
         return state, canvas, metrics
 
     def build_online_context(
@@ -687,7 +701,8 @@ class ObjectIntentDynamicsTop(nn.Module):
             state=state,
             executed_history=executed_history,
             history_timing=history_timing,
-            instruction_reference=instruction_reference, current_dino=current_dino,
+            instruction_reference=instruction_reference,
+            current_dino=current_dino,
             facts=facts,
             collect_diagnostics=collect_diagnostics,
         )
@@ -781,8 +796,11 @@ class ObjectIntentDynamicsTop(nn.Module):
             if expectation is None:
                 raise ValueError("direct operation supervision lost S prediction")
             operation_terms = self.recognizer(
-                expectation=expectation, teacher=teacher, current_loss_support=current_loss_support,
-                future_state=future_state)
+                expectation=expectation,
+                teacher=teacher,
+                current_loss_support=current_loss_support,
+                future_state=future_state,
+            )
             online_intent_loss = operation_terms["operation_total"]
             recognition = None
             recognition_loss = online_intent_loss.new_zeros(())
@@ -822,7 +840,12 @@ class ObjectIntentDynamicsTop(nn.Module):
         if context.intent.annotated_goal is not None:
             if annotation_endpoint is None:
                 raise ValueError("selected endpoint intent requires explicit label support")
-            targets = replace(targets, annotated_goal_terms=supervise_annotated_goal(context.intent.annotated_goal.prediction, annotation_endpoint))
+            targets = replace(
+                targets,
+                annotated_goal_terms=supervise_annotated_goal(
+                    context.intent.annotated_goal.prediction, annotation_endpoint
+                ),
+            )
         elif annotation_endpoint is not None:
             raise ValueError("endpoint labels supplied to unselected top")
         if not collect_diagnostics:
@@ -886,7 +909,8 @@ class ObjectIntentDynamicsTop(nn.Module):
         # instead receives the original action query and all named owners,
         # so factual/effect content is not counted twice on its value ingress.
         p3_action_query = (
-            action_query if self.plan_compiler.coordinator is not None
+            action_query
+            if self.plan_compiler.coordinator is not None
             else action_query + consequence.protected_consequence
         )
         plan, plan_metrics = self.plan_compiler(
@@ -895,7 +919,8 @@ class ObjectIntentDynamicsTop(nn.Module):
             intent=context.intent.policy_dock(),
             task_execution=self.effect_reader.compile_task_execution(
                 p1_action_query + context.intent.temporal_queries[:, :, None],
-                candidate_world, context.intent.policy_dock(),
+                candidate_world,
+                context.intent.policy_dock(),
             ),
             action_query=p3_action_query,
             collect_diagnostics=collect_diagnostics,
@@ -914,12 +939,12 @@ class ObjectIntentDynamicsTop(nn.Module):
             **plan_metrics,
             "object_p2_effect_contract_min": effect_contract.detach().float().amin(),
             "object_p2_effect_contract_identity_error": (
-                effect.combined().detach().float()
-                - contracted_combined.detach().float()
+                effect.combined().detach().float() - contracted_combined.detach().float()
             )
             .abs()
             .amax(),
-            "object_p2_effect_postcontract_rms": effect.combined().detach()
+            "object_p2_effect_postcontract_rms": effect.combined()
+            .detach()
             .float()
             .square()
             .mean()

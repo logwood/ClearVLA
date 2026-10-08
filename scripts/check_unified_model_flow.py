@@ -41,6 +41,7 @@ def configuration(shape: str, variant: str):
         observation_measurement_mode="source_consistent_v1",
         target_binding_input_mode="full_tokens_views_v1",
         observed_outcome_mode="before_proposal_v1",
+        typed_interval_gradient_mode="ordinary_v1",
         object_view_mode="per_camera_values_v1",
         task_execution_mode=JOINT_TASK_EXECUTION,
         entity_context_mode="completed_g3_v1",

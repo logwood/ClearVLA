@@ -7,8 +7,12 @@ import pytest
 
 from clearvla.mainline.v120_core.config import V39PolicyConfig as MainlineConfig
 from clearvla.mainline.v120_core.decoder import PolicyDecoderConfig as MainlineRead
+from clearvla.mainline.v120_core.evidence import PolicyEvidenceConfig as MainlineEvidence
+from clearvla.mainline.v120_core.intent import PolicyIntentConfig as MainlineIntent
 from clearvla.policy.config import V39PolicyConfig as LegacyConfig
 from clearvla.policy.decoder import PolicyDecoderConfig as LegacyRead
+from clearvla.policy.evidence import PolicyEvidenceConfig as LegacyEvidence
+from clearvla.policy.intent import PolicyIntentConfig as LegacyIntent
 
 
 def legacy_dimensions(config: LegacyRead) -> tuple[int, int, int]:
@@ -69,3 +73,34 @@ def test_downstream_config_contracts_do_not_reintroduce_mutation(family, prefix)
     for name, prop in properties.items():
         assert prop.fset is None
         assert hasattr(native, name)
+
+
+@pytest.mark.parametrize("prefix", ["clearvla.policy", "clearvla.mainline.v120_core"])
+def test_decoder_admits_its_downstream_read_requirements_transitively(prefix):
+    decoder = import_module(prefix + ".decoder").PolicyDecoderConfig
+    native = LegacyConfig() if prefix == "clearvla.policy" else MainlineConfig()
+    for family, name in (("evidence", "PolicyEvidenceConfig"), ("intent", "PolicyIntentConfig")):
+        requirement = getattr(import_module(prefix + "." + family), name)
+        assert requirement in decoder.__mro__
+        for member in vars(requirement):
+            value = getattr(requirement, member)
+            if isinstance(value, property):
+                assert isinstance(getattr(decoder, member), property)
+                assert getattr(native, member) is not None
+
+
+def legacy_downstream(config: LegacyRead) -> tuple[LegacyEvidence, LegacyIntent]:
+    return config, config
+
+
+def mainline_downstream(config: MainlineRead) -> tuple[MainlineEvidence, MainlineIntent]:
+    return config, config
+
+
+def test_decoder_downstream_protocol_assignment_is_not_a_cast():
+    native_legacy = LegacyConfig()
+    a, b = legacy_downstream(native_legacy)
+    assert a is native_legacy and b is native_legacy
+    native_mainline = MainlineConfig()
+    c, d = mainline_downstream(native_mainline)
+    assert c is native_mainline and d is native_mainline

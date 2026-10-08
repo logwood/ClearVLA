@@ -88,9 +88,13 @@ def allowed_source_paths(mode: str) -> frozenset[str]:
     raise ValueError("unknown causal initialization source contract")
 
 
-def config_view(payload):
+def config_view(payload, *, mode=CAUSAL_IDENTITY_AB_V1):
     # The caller already removed run location/optimizer/diagnostic budgets.
     result = {**payload, "top": dict(payload["top"]), "objectives": dict(payload["objectives"])}
+    if mode not in CAUSAL_INITIALIZATION_MODES:
+        raise ValueError("unknown causal initialization source contract")
+    if mode == CAUSAL_UNIFIED_SOURCE_V1:
+        result["top"].pop("typed_interval_gradient_mode", None)
     for name in MODES:
         result["top"].pop(name, None)
     for name in (
@@ -107,9 +111,18 @@ def config_view(payload):
     return result
 
 
-def validate_selection(saved, current, source_digest):
+def validate_selection(saved, current, source_digest, *, mode=CAUSAL_IDENTITY_AB_V1):
     if source_digest != SOURCE_DIGEST:
         raise ValueError("causal identity migration requires the admitted a2d597d2 source identity")
+    if mode not in CAUSAL_INITIALIZATION_MODES:
+        raise ValueError("unknown causal initialization source contract")
+    if saved.top.typed_interval_gradient_mode != "legacy_common_surrogate_v1":
+        raise ValueError("causal identity migration requires the original interval VJP")
+    if (
+        current.top.typed_interval_gradient_mode != "legacy_common_surrogate_v1"
+        and mode != CAUSAL_UNIFIED_SOURCE_V1
+    ):
+        raise ValueError("ordinary interval VJP requires the explicit unified source migration")
     if (
         saved.data.data_profile != "calvin_relative_7d_v1"
         or current.data.data_profile != saved.data.data_profile

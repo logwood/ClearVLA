@@ -41,8 +41,9 @@ from .endpoint_supervision import (
     NO_ENDPOINT_SUPERVISION,
     validate_endpoint_mode,
 )
-from .global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
+from .feedback_values import FEEDBACK_VALUE_MODES, INNOVATION_AND_STATUS, INNOVATION_ONLY
 from .future_time import CONTROL_ALIGNED_FUTURE_TIME, LEGACY_FUTURE_TIME, resolve_future_time
+from .global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
 from .gripper_contract import (
     CALVIN_BINARY_GRIPPER_OUTPUT_MODE,
     CONTINUOUS_GRIPPER_OUTPUT_MODE,
@@ -57,11 +58,10 @@ from .instruction_change import (
 )
 from .manifest import ARCHITECTURE_MANIFEST
 from .operation_expectation import OBJECT_OUTCOME_INTENT, OPERATION_INTENT_MODES, POSTERIOR_INTENT
-from .role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, ROLE_VALUE_MODES
-from .feedback_values import INNOVATION_ONLY, INNOVATION_AND_STATUS, FEEDBACK_VALUE_MODES
-from .p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, P2_EFFECT_VALUE_MODES
 from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
+from .p2_values import CONTEXTUAL_EFFECT_VALUES, P2_EFFECT_VALUE_MODES, WORLD_EFFECT_VALUES
 from .p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
+from .role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, ROLE_VALUE_MODES
 from .task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION
 from .temporal import TIMED_HISTORY_ENCODING
 from .transition_condition import (
@@ -252,12 +252,13 @@ class DataConfig:
         if self.image_store_mode not in {"decoded-cache", "hdf5-direct"}:
             raise ValueError("data.image_store_mode must be decoded-cache or hdf5-direct")
         if self.cache_identity_mode not in CACHE_IDENTITY_MODES:
-            raise ValueError(
-                "data.cache_identity_mode must be fast or sha256"
-            )
+            raise ValueError("data.cache_identity_mode must be fast or sha256")
         if self.visual_cache_read_backend not in {"mmap", "pread"}:
             raise ValueError("data.visual_cache_read_backend must be mmap or pread")
-        if type(self.visual_pread_max_open_files) is not int or self.visual_pread_max_open_files <= 0:
+        if (
+            type(self.visual_pread_max_open_files) is not int
+            or self.visual_pread_max_open_files <= 0
+        ):
             raise ValueError("data.visual_pread_max_open_files must be a positive integer")
         if self.visual_cache_read_backend == "mmap" and self.visual_pread_max_open_files != 16:
             raise ValueError("a custom visual_pread_max_open_files requires the pread backend")
@@ -287,13 +288,9 @@ class DataConfig:
                     "LIBERO retarget overlay requires causal_prefix_terminal_suffix_v2"
                 )
         if self.calvin_raw_source.strip() and self.data_profile != "calvin_relative_7d_v1":
-            raise ValueError(
-                "data.calvin_raw_source is valid only for the CALVIN action profile"
-            )
+            raise ValueError("data.calvin_raw_source is valid only for the CALVIN action profile")
         if self.calvin_raw_source.strip() and self.split_mode != "episode-manifest":
-            raise ValueError(
-                "data.calvin_raw_source requires split_mode=episode-manifest"
-            )
+            raise ValueError("data.calvin_raw_source requires split_mode=episode-manifest")
         if self.split_mode == "ordered-counts":
             if self.split_manifest or self.task_selection_manifest or self.normalizer_artifact:
                 raise ValueError(
@@ -339,8 +336,7 @@ class DataConfig:
         if self.information_batches_per_epoch is not None:
             if (
                 isinstance(self.information_batches_per_epoch, bool)
-                or int(self.information_batches_per_epoch)
-                != self.information_batches_per_epoch
+                or int(self.information_batches_per_epoch) != self.information_batches_per_epoch
                 or int(self.information_batches_per_epoch) <= 0
             ):
                 raise ValueError(
@@ -350,9 +346,7 @@ class DataConfig:
             self.window_boundary_contract not in {STRICT_COMPLETE_V1, OBSERVED_TAIL_V1}
             and self.data_profile != "libero_relative_7d_v1"
         ):
-            raise ValueError(
-                "causal prefix/terminal boundary contracts are valid only for LIBERO"
-            )
+            raise ValueError("causal prefix/terminal boundary contracts are valid only for LIBERO")
         if self.window_boundary_contract == OBSERVED_TAIL_V1:
             if self.data_profile not in {"calvin_relative_7d_v1", "libero_relative_7d_v1"}:
                 raise ValueError("observed-tail requires a verified real terminal observation")
@@ -366,21 +360,15 @@ class DataConfig:
             if not math.isfinite(threshold) or threshold < 0.0:
                 raise ValueError("sampling gripper event threshold must be finite and non-negative")
         if self.sampling_gripper_event_scope not in {"window_any", "first_action"}:
-            raise ValueError(
-                "sampling_gripper_event_scope must be window_any or first_action"
-            )
+            raise ValueError("sampling_gripper_event_scope must be window_any or first_action")
         release_fraction = float(self.release_first_action_fraction)
         if not math.isfinite(release_fraction) or not 0.0 <= release_fraction <= 1.0:
-            raise ValueError(
-                "data.release_first_action_fraction must be finite and in [0,1]"
-            )
+            raise ValueError("data.release_first_action_fraction must be finite and in [0,1]")
         if release_fraction > 0.0 and (
             self.data_profile != "libero_relative_7d_v1"
             or self.window_boundary_contract != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
         ):
-            raise ValueError(
-                "release-first sampling is valid only for LIBERO terminal-suffix v2"
-            )
+            raise ValueError("release-first sampling is valid only for LIBERO terminal-suffix v2")
         if (
             self.information_uniform_fraction != 0.50
             or self.information_event_fraction != 0.125
@@ -461,7 +449,10 @@ class ObservationConfig:
     def validate(self) -> None:
         if self.local_ownership_mode not in {"independent_typed_v1", "coupled_observation_v1"}:
             raise ValueError("unknown observation local_ownership_mode")
-        if self.local_ownership_mode == "coupled_observation_v1" and self.candidate_support_mode != "full_posterior_lattice_v1":
+        if (
+            self.local_ownership_mode == "coupled_observation_v1"
+            and self.candidate_support_mode != "full_posterior_lattice_v1"
+        ):
             raise ValueError("coupled local identity requires complete candidate support")
         if self.candidate_support_mode not in {"moment_local_v1", "full_posterior_lattice_v1"}:
             raise ValueError("unknown observation candidate_support_mode")
@@ -553,6 +544,9 @@ class TopConfig:
     instruction_change_mode: str = MIXED_REFERENCE_CHANGE
     observation_measurement_mode: str = "legacy_v1"
     observed_outcome_mode: str = "none"
+    # Legacy snapshots replay their historical surrogate VJP. New training
+    # selects the ordinary derivative explicitly; forward values are equal.
+    typed_interval_gradient_mode: str = "legacy_common_surrogate_v1"
     operation_intent_mode: str = POSTERIOR_INTENT
     object_view_mode: str = "pooled_v1"
     target_binding_input_mode: str = "protected_pooled_v1"
@@ -567,6 +561,8 @@ class TopConfig:
     p2_target_value_mode: str = "none"
 
     def validate(self) -> None:
+        if self.typed_interval_gradient_mode not in {"legacy_common_surrogate_v1", "ordinary_v1"}:
+            raise ValueError("unknown typed interval gradient contract")
         if self.annotation_goal_mode not in {"none", "annotated_endpoint_relation_v1"}:
             raise ValueError("unknown annotation_goal_mode")
         if self.annotation_goal_mode != "none" and (
@@ -574,7 +570,9 @@ class TopConfig:
             or self.target_binding_mode != "shared_operation_v1"
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
         ):
-            raise ValueError("annotated goal requires native soft instruction evidence and typed P3")
+            raise ValueError(
+                "annotated goal requires native soft instruction evidence and typed P3"
+            )
         if self.teacher_current_reference_mode not in {
             "g_assignment_v1",
             "raw_chart_v1",
@@ -582,15 +580,19 @@ class TopConfig:
             raise ValueError("unknown top teacher_current_reference_mode")
         if self.p2_target_value_mode not in {"none", "bounded_zero_start_v1"}:
             raise ValueError("unknown top p2_target_value_mode")
-        if self.p2_target_value_mode != "none" and self.target_binding_mode != "shared_operation_v1":
-            raise ValueError(
-                "the bounded P2 target-value carrier requires the shared K binding"
-            )
+        if (
+            self.p2_target_value_mode != "none"
+            and self.target_binding_mode != "shared_operation_v1"
+        ):
+            raise ValueError("the bounded P2 target-value carrier requires the shared K binding")
         if self.world_feedback_value_mode not in FEEDBACK_VALUE_MODES:
             raise ValueError("unknown world feedback value mode")
-        if self.world_feedback_value_mode == INNOVATION_AND_STATUS and self.world_feedback_mode != "executed_four_step_world_v1":
+        if (
+            self.world_feedback_value_mode == INNOVATION_AND_STATUS
+            and self.world_feedback_mode != "executed_four_step_world_v1"
+        ):
             raise ValueError("comparison status requires the observed executed-world source")
-        if self.world_feedback_mode not in {"none","executed_four_step_world_v1"}:
+        if self.world_feedback_mode not in {"none", "executed_four_step_world_v1"}:
             raise ValueError("unknown world_feedback_mode")
         if self.world_feedback_mode != "none" and (
             self.future_time_grid_mode != "control_aligned_24_v1"
@@ -600,8 +602,11 @@ class TopConfig:
             or self.entity_chart_mode != "current_image_support_v1"
             or self.target_binding_mode != "shared_operation_v1"
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
-            or self.history_encoding_mode != TIMED_HISTORY_ENCODING):
-            raise ValueError("executed world feedback requires aligned sequence W, current-image G3, shared target and typed P3")
+            or self.history_encoding_mode != TIMED_HISTORY_ENCODING
+        ):
+            raise ValueError(
+                "executed world feedback requires aligned sequence W, current-image G3, shared target and typed P3"
+            )
         if self.task_execution_mode not in {NO_TASK_EXECUTION, *JOINT_TASK_EXECUTION_MODES}:
             raise ValueError("unknown task_execution_mode")
         if self.task_execution_mode in JOINT_TASK_EXECUTION_MODES and (
@@ -614,7 +619,9 @@ class TopConfig:
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
             or self.entity_chart_mode != "current_image_support_v1"
         ):
-            raise ValueError("joint task execution requires shared target, current-image G3, matched known sequence W and typed P3")
+            raise ValueError(
+                "joint task execution requires shared target, current-image G3, matched known sequence W and typed P3"
+            )
         if self.operation_intent_mode not in OPERATION_INTENT_MODES:
             raise ValueError("unknown operation_intent_mode")
         if self.operation_intent_mode == OBJECT_OUTCOME_INTENT and (
@@ -622,14 +629,22 @@ class TopConfig:
             or self.future_time_grid_mode != "control_aligned_24_v1"
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
         ):
-            raise ValueError("object operation outcomes require shared target, aligned time and typed P3")
+            raise ValueError(
+                "object operation outcomes require shared target, aligned time and typed P3"
+            )
         if self.observed_outcome_mode not in {"none", "before_proposal_v1"}:
             raise ValueError("unknown observed outcome placement")
-        if self.observed_outcome_mode != "none" and (self.world_feedback_mode == "none" or self.observation_measurement_mode != "source_consistent_v1"):
+        if self.observed_outcome_mode != "none" and (
+            self.world_feedback_mode == "none"
+            or self.observation_measurement_mode != "source_consistent_v1"
+        ):
             raise ValueError("S outcome requires source-consistent existing executed replay")
         if self.observation_measurement_mode not in {"legacy_v1", "source_consistent_v1"}:
             raise ValueError("unknown observed measurement mode")
-        if self.observation_measurement_mode != "legacy_v1" and self.instruction_change_mode != POSTERIOR_REFERENCE_CHANGE:
+        if (
+            self.observation_measurement_mode != "legacy_v1"
+            and self.instruction_change_mode != POSTERIOR_REFERENCE_CHANGE
+        ):
             raise ValueError("source-consistent measurements require the posterior source graph")
         if self.instruction_change_mode not in INSTRUCTION_CHANGE_MODES:
             raise ValueError("unknown instruction_change_mode")
@@ -638,20 +653,27 @@ class TopConfig:
             or self.target_binding_mode != "shared_operation_v1"
             or self.p3_coordination_mode != TYPED_HORIZON_PLAN
         ):
-            raise ValueError("typed instruction change requires reference, shared target and typed P3")
-        if self.instruction_change_mode == POSTERIOR_REFERENCE_CHANGE and self.entity_chart_mode != "current_image_support_v1":
+            raise ValueError(
+                "typed instruction change requires reference, shared target and typed P3"
+            )
+        if (
+            self.instruction_change_mode == POSTERIOR_REFERENCE_CHANGE
+            and self.entity_chart_mode != "current_image_support_v1"
+        ):
             raise ValueError("posterior instruction change requires the current-image G3 chart")
         if self.robot_feedback_mode not in {"none", "one_step_proprioceptive_v1"}:
             raise ValueError("unknown robot_feedback_mode")
         if self.robot_feedback_mode != "none" and (
-            self.p3_coordination_mode != TYPED_HORIZON_PLAN or self.history_encoding_mode != TIMED_HISTORY_ENCODING
+            self.p3_coordination_mode != TYPED_HORIZON_PLAN
+            or self.history_encoding_mode != TIMED_HISTORY_ENCODING
         ):
             raise ValueError("robot feedback requires typed P3 and physical history")
         grid = resolve_future_time(self.future_time_grid_mode)
         if self.p3_coordination_mode not in P3_COORDINATION_MODES:
             raise ValueError("unknown top p3_coordination_mode")
         if self.p3_coordination_mode == TYPED_HORIZON_PLAN and (
-            not grid.aligned or self.p2_geometry_mode != VIEW_CONDITIONED_TRANSPORT
+            not grid.aligned
+            or self.p2_geometry_mode != VIEW_CONDITIONED_TRANSPORT
             or self.target_binding_mode != "shared_operation_v1"
         ):
             raise ValueError("typed P3 requires aligned, shared-target, named-view P2 context")
@@ -667,9 +689,12 @@ class TopConfig:
         if self.p2_effect_value_mode == CONTEXTUAL_EFFECT_VALUES and (
             self.task_execution_mode not in JOINT_TASK_EXECUTION_MODES
             or self.target_binding_mode != "shared_operation_v1"
-            or not grid.aligned or self.p2_geometry_mode != VIEW_CONDITIONED_TRANSPORT
+            or not grid.aligned
+            or self.p2_geometry_mode != VIEW_CONDITIONED_TRANSPORT
         ):
-            raise ValueError("S-conditioned P2 values require joint shared-target aligned named views")
+            raise ValueError(
+                "S-conditioned P2 values require joint shared-target aligned named views"
+            )
         if self.p2_geometry_mode not in P2_GEOMETRY_MODES:
             raise ValueError("unknown top p2_geometry_mode")
         if self.p2_geometry_mode == VIEW_CONDITIONED_TRANSPORT and (
@@ -677,9 +702,16 @@ class TopConfig:
             or self.world_robot_condition_mode != "observed_state_views_v1"
             or not grid.aligned
         ):
-            raise ValueError("view-conditioned P2 requires shared target, named observed W views and aligned time")
-        if grid.aligned and (self.world_control_mode != "known_prefix_v1" or self.world_supervision_mode != "matched_observed_sequence_v1"):
-            raise ValueError("aligned future time requires known sequence controls and matched supervision")
+            raise ValueError(
+                "view-conditioned P2 requires shared target, named observed W views and aligned time"
+            )
+        if grid.aligned and (
+            self.world_control_mode != "known_prefix_v1"
+            or self.world_supervision_mode != "matched_observed_sequence_v1"
+        ):
+            raise ValueError(
+                "aligned future time requires known sequence controls and matched supervision"
+            )
         if self.world_robot_condition_mode not in {"implicit_g_only_v1", "observed_state_views_v1"}:
             raise ValueError("unknown top world_robot_condition_mode")
         if self.world_robot_condition_mode == "observed_state_views_v1" and (
@@ -687,7 +719,9 @@ class TopConfig:
             or self.world_camera_condition_mode != "coordinate_role_v1"
             or self.entity_motion_mode != "current_entity_support_v1"
         ):
-            raise ValueError("robot-object W requires known controls and named current-entity view geometry")
+            raise ValueError(
+                "robot-object W requires known controls and named current-entity view geometry"
+            )
         if self.world_control_mode not in {"legacy_extrapolation_v1", "known_prefix_v1"}:
             raise ValueError("unknown top world_control_mode")
         if self.world_control_mode == "known_prefix_v1" and (
@@ -695,19 +729,30 @@ class TopConfig:
             or self.world_supervision_mode != "matched_observed_sequence_v1"
         ):
             raise ValueError("known-prefix W requires sequence actions and matched supervision")
-        if self.world_supervision_mode not in {"candidate_legacy_v1", "matched_observed_sequence_v1"}:
+        if self.world_supervision_mode not in {
+            "candidate_legacy_v1",
+            "matched_observed_sequence_v1",
+        }:
             raise ValueError("unknown top world_supervision_mode")
-        if self.world_supervision_mode == "matched_observed_sequence_v1" and self.world_action_condition_mode != "sequence_prefix_v1":
+        if (
+            self.world_supervision_mode == "matched_observed_sequence_v1"
+            and self.world_action_condition_mode != "sequence_prefix_v1"
+        ):
             raise ValueError("matched W supervision requires sequence-prefix physical actions")
         if self.instruction_reference_mode not in {"none", "instruction_start_observation_v1"}:
             raise ValueError("unknown top instruction_reference_mode")
-        if self.instruction_reference_mode != "none" and self.target_binding_mode != "shared_operation_v1":
+        if (
+            self.instruction_reference_mode != "none"
+            and self.target_binding_mode != "shared_operation_v1"
+        ):
             raise ValueError("instruction reference requires one shared operated-object binding")
         if self.target_binding_mode not in {"reader_local_v1", "shared_operation_v1"}:
             raise ValueError("unknown top target_binding_mode")
         if self.target_binding_mode == "shared_operation_v1":
             if self.p2_spatial_intent_mode != "post_pool_only":
-                raise ValueError("shared target binding replaces, not duplicates, the P2 target prior")
+                raise ValueError(
+                    "shared target binding replaces, not duplicates, the P2 target prior"
+                )
             if self.history_encoding_mode != "timestamped_streams_v1":
                 raise ValueError("shared target binding requires timestamped history")
         if self.entity_motion_mode not in {"query_anchor_v1", "current_entity_support_v1"}:
@@ -718,11 +763,25 @@ class TopConfig:
             raise ValueError("unknown entity competition scale scope")
         if self.entity_ownership_mode not in {"local_mixture_v1", "canonical_image_v1"}:
             raise ValueError("unknown global entity ownership law")
-        if self.entity_ownership_mode == "canonical_image_v1" and (self.entity_chart_mode != "current_image_support_v1" or self.entity_context_mode != "completed_g3_v1" or self.object_view_mode != "per_camera_values_v1" or self.target_binding_input_mode != "full_tokens_views_v1" or self.observation_measurement_mode != "source_consistent_v1"):
-            raise ValueError("canonical identity requires complete source/view/binder/measurement migration")
-        if self.entity_transport_gradient_mode not in {"positive_corners_v1", "ordinary_bilinear_v1"}:
+        if self.entity_ownership_mode == "canonical_image_v1" and (
+            self.entity_chart_mode != "current_image_support_v1"
+            or self.entity_context_mode != "completed_g3_v1"
+            or self.object_view_mode != "per_camera_values_v1"
+            or self.target_binding_input_mode != "full_tokens_views_v1"
+            or self.observation_measurement_mode != "source_consistent_v1"
+        ):
+            raise ValueError(
+                "canonical identity requires complete source/view/binder/measurement migration"
+            )
+        if self.entity_transport_gradient_mode not in {
+            "positive_corners_v1",
+            "ordinary_bilinear_v1",
+        }:
             raise ValueError("unknown entity transport gradient contract")
-        if self.entity_transport_gradient_mode != "positive_corners_v1" and self.entity_chart_mode != "current_image_support_v1":
+        if (
+            self.entity_transport_gradient_mode != "positive_corners_v1"
+            and self.entity_chart_mode != "current_image_support_v1"
+        ):
             raise ValueError("ordinary bilinear transport requires a current-image source")
         if self.entity_chart_mode not in {"query_lattice_v1", "current_image_support_v1"}:
             raise ValueError("unknown top entity_chart_mode")
@@ -737,24 +796,21 @@ class TopConfig:
             "coordinate_role_v1",
         }:
             raise ValueError(
-                "top world_camera_condition_mode must be motion_prior_only "
-                "or coordinate_role_v1"
+                "top world_camera_condition_mode must be motion_prior_only or coordinate_role_v1"
             )
         if self.world_action_condition_mode not in {
             "interval_mean_v1",
             "sequence_prefix_v1",
         }:
             raise ValueError(
-                "top world_action_condition_mode must be interval_mean_v1 "
-                "or sequence_prefix_v1"
+                "top world_action_condition_mode must be interval_mean_v1 or sequence_prefix_v1"
             )
         if self.p2_spatial_intent_mode not in {
             "post_pool_only",
             "shared_target_prior_v1",
         }:
             raise ValueError(
-                "top p2_spatial_intent_mode must be post_pool_only "
-                "or shared_target_prior_v1"
+                "top p2_spatial_intent_mode must be post_pool_only or shared_target_prior_v1"
             )
         if self.object_slots != ARCHITECTURE_MANIFEST.object_slots:
             raise ValueError("top object count must match the manifest")
@@ -838,14 +894,26 @@ class BottomConfig:
     def validate(self) -> None:
         validate_global_condition_mode(self.global_condition_mode)
         validate_endpoint_mode(self.endpoint_supervision_mode)
-        if self.endpoint_supervision_mode == CLEAN_ENDPOINT_SUPERVISION and self.gripper_output_mode not in {"calvin_binary_command", "maniskill_binary_command"}:
+        if (
+            self.endpoint_supervision_mode == CLEAN_ENDPOINT_SUPERVISION
+            and self.gripper_output_mode
+            not in {"calvin_binary_command", "maniskill_binary_command"}
+        ):
             raise ValueError("clean endpoint supervision requires a binary command outlet")
         validate_controller_value_mode(self.controller_value_mode)
-        if self.controller_value_mode == RAW_CONTROLLER_VALUES and self.evidence_value_mode != MAGNITUDE_EVIDENCE:
+        if (
+            self.controller_value_mode == RAW_CONTROLLER_VALUES
+            and self.evidence_value_mode != MAGNITUDE_EVIDENCE
+        ):
             raise ValueError("separate controller values require magnitude-preserving evidence")
         validate_transition_condition_mode(self.transition_condition_mode)
-        if self.transition_condition_mode == TYPED_TRANSITION and self.controlled_delta_dropout != 0.0:
-            raise ValueError("typed transition uses deterministic per-ODE attention; dropout must be zero")
+        if (
+            self.transition_condition_mode == TYPED_TRANSITION
+            and self.controlled_delta_dropout != 0.0
+        ):
+            raise ValueError(
+                "typed transition uses deterministic per-ODE attention; dropout must be zero"
+            )
         validate_evidence_value_mode(self.evidence_value_mode)
         if self.flow_time_distribution != "v120_mirrored_beta_1_5_1":
             raise ValueError("formal training uses the mirrored V120 beta_1_5_1 flow time")
@@ -902,8 +970,7 @@ class BottomConfig:
             "relative_command_adapter",
         }:
             raise ValueError(
-                "bottom.arm_flow_mode must be legacy_independent or "
-                "relative_command_adapter"
+                "bottom.arm_flow_mode must be legacy_independent or relative_command_adapter"
             )
         if self.gripper_output_mode not in VALID_GRIPPER_OUTPUT_MODES:
             raise ValueError(
@@ -937,8 +1004,7 @@ class BottomConfig:
             )
             if actual != expected:
                 raise ValueError(
-                    "B-spine-0 must use the frozen cubic K=12 basis digest and "
-                    "spec fingerprint"
+                    "B-spine-0 must use the frozen cubic K=12 basis digest and spec fingerprint"
                 )
             if self.bspine_action_group_mask:
                 raise ValueError(
@@ -1073,13 +1139,9 @@ class ObjectiveConfig:
             or self.calvin_frame_event_radius != 0
             or self.calvin_frame_max_weight != 1.0
         ):
-            raise ValueError(
-                "uniform CALVIN frame weighting cannot carry non-default gains"
-            )
+            raise ValueError("uniform CALVIN frame weighting cannot carry non-default gains")
         if self.phase_control_mode not in {"none", "stackcube_phase_v1"}:
-            raise ValueError(
-                "objective.phase_control_mode must be none or stackcube_phase_v1"
-            )
+            raise ValueError("objective.phase_control_mode must be none or stackcube_phase_v1")
         if self.phase_control_mode == "none" and (
             self.phase_arm_flow != 0.0 or self.phase_gripper_hold != 0.0
         ):
@@ -1089,23 +1151,15 @@ class ObjectiveConfig:
         if self.phase_control_mode == "stackcube_phase_v1" and (
             self.phase_arm_flow <= 0.0 and self.phase_gripper_hold <= 0.0
         ):
-            raise ValueError(
-                "stackcube_phase_v1 requires a positive phase objective weight"
-            )
+            raise ValueError("stackcube_phase_v1 requires a positive phase objective weight")
         if self.phase_control_mode == "stackcube_phase_v1" and (
-            self.phase_approach_arm_gain <= 0.0
-            or self.phase_transport_arm_gain <= 0.0
+            self.phase_approach_arm_gain <= 0.0 or self.phase_transport_arm_gain <= 0.0
         ):
-            raise ValueError(
-                "stackcube_phase_v1 requires positive approach and transport gains"
-            )
+            raise ValueError("stackcube_phase_v1 requires positive approach and transport gains")
         if self.calvin_frame_weight_mode == "motion_event_v1" and (
-            self.calvin_frame_motion_gain <= 0.0
-            and self.calvin_frame_event_gain <= 0.0
+            self.calvin_frame_motion_gain <= 0.0 and self.calvin_frame_event_gain <= 0.0
         ):
-            raise ValueError(
-                "motion_event_v1 requires a positive motion or event gain"
-            )
+            raise ValueError("motion_event_v1 requires a positive motion or event gain")
         if self.future_dynamics <= 0.0 or self.intent_structure <= 0.0:
             raise ValueError("W and G/S require active future/structure budgets")
         if self.arm_motion_threshold != 0.02:
@@ -1231,36 +1285,67 @@ class ExperimentConfig:
             or self.top.future_time_grid_mode != CONTROL_ALIGNED_FUTURE_TIME
             or self.bottom.evidence_value_mode != MAGNITUDE_EVIDENCE
         ):
-            raise ValueError("compiled global task requires joint task, aligned typed P3 and magnitude values")
+            raise ValueError(
+                "compiled global task requires joint task, aligned typed P3 and magnitude values"
+            )
         if self.bottom.transition_condition_mode == TYPED_TRANSITION and (
             self.bottom.evidence_value_mode != MAGNITUDE_EVIDENCE
             or self.top.p3_coordination_mode != TYPED_HORIZON_PLAN
             or self.top.future_time_grid_mode != CONTROL_ALIGNED_FUTURE_TIME
         ):
-            raise ValueError("typed transition requires magnitude evidence and control-aligned typed P3")
+            raise ValueError(
+                "typed transition requires magnitude evidence and control-aligned typed P3"
+            )
         grid = resolve_future_time(self.top.future_time_grid_mode)
         if self.dimensions.future_supports != len(grid.support_offsets):
             raise ValueError("future support count and time grid disagree")
         if self.observation.visual_chart_mode not in {"legacy_v1", "full_rgb_endpoint_v1"}:
             raise ValueError("unknown visual chart")
-        if self.top.identity_supervision_mode not in {"none", "rgbd_temporal_v1", "rgbd_temporal_conditional_v2"}:
+        if self.top.identity_supervision_mode not in {
+            "none",
+            "rgbd_temporal_v1",
+            "rgbd_temporal_conditional_v2",
+        }:
             raise ValueError("unknown identity supervision source")
-        if self.top.identity_supervision_mode != "none" and (self.top.entity_ownership_mode != "canonical_image_v1" or self.top.entity_competition_scale_mode != "per_observation_v1" or self.data.visual_feature_mode != "dinov3_online_v1" or self.objectives.identity_correspondence <= 0 or self.objectives.identity_source_prediction <= 0):
-            raise ValueError("identity supervision requires canonical online CALVIN and explicit objectives")
-        if self.top.identity_supervision_mode == "none" and (self.objectives.identity_correspondence != 0 or self.objectives.identity_source_prediction != 0):
+        if self.top.identity_supervision_mode != "none" and (
+            self.top.entity_ownership_mode != "canonical_image_v1"
+            or self.top.entity_competition_scale_mode != "per_observation_v1"
+            or self.data.visual_feature_mode != "dinov3_online_v1"
+            or self.objectives.identity_correspondence <= 0
+            or self.objectives.identity_source_prediction <= 0
+        ):
+            raise ValueError(
+                "identity supervision requires canonical online CALVIN and explicit objectives"
+            )
+        if self.top.identity_supervision_mode == "none" and (
+            self.objectives.identity_correspondence != 0
+            or self.objectives.identity_source_prediction != 0
+        ):
             raise ValueError("identity objective has no admitted source")
-        if self.top.target_binding_input_mode not in {"protected_pooled_v1", "full_tokens_views_v1"}:
+        if self.top.target_binding_input_mode not in {
+            "protected_pooled_v1",
+            "full_tokens_views_v1",
+        }:
             raise ValueError("unknown target binding input contract")
-        if self.top.target_binding_input_mode == "full_tokens_views_v1" and (self.top.object_view_mode != "per_camera_values_v1" or self.top.target_binding_mode != "shared_operation_v1"):
-            raise ValueError("full-token view binding requires shared binding and observed view values")
+        if self.top.target_binding_input_mode == "full_tokens_views_v1" and (
+            self.top.object_view_mode != "per_camera_values_v1"
+            or self.top.target_binding_mode != "shared_operation_v1"
+        ):
+            raise ValueError(
+                "full-token view binding requires shared binding and observed view values"
+            )
         if self.top.object_view_mode not in {"pooled_v1", "per_camera_values_v1"}:
             raise ValueError("unknown object view content mode")
         online_visual = self.data.visual_feature_mode == "dinov3_online_v1"
         if online_visual != (self.observation.visual_chart_mode == "full_rgb_endpoint_v1"):
             raise ValueError("online DINOv3 and full-frame spatial chart must be selected together")
-        if online_visual and (self.data.cache_side != 336 or tuple(self.data.camera_names) != ("top", "wrist")):
+        if online_visual and (
+            self.data.cache_side != 336 or tuple(self.data.camera_names) != ("top", "wrist")
+        ):
             raise ValueError("online visual chart requires 336px RGB and ordered top,wrist sources")
-        if online_visual and (self.dimensions.visual_token_dim != 768 or self.dimensions.patches_per_camera != 256):
+        if online_visual and (
+            self.dimensions.visual_token_dim != 768 or self.dimensions.patches_per_camera != 256
+        ):
             raise ValueError("DINOv3 ViT-B/16 requires 256 spatial tokens of width 768")
         if self.top.object_view_mode == "per_camera_values_v1" and (
             self.top.task_execution_mode not in JOINT_TASK_EXECUTION_MODES
@@ -1280,14 +1365,19 @@ class ExperimentConfig:
         if profile.output_dim != self.dimensions.action_dim:
             raise ValueError("data profile width must align with dimensions.action_dim")
         validate_state_feature_profile(self.top.state_feature_mode, profile.name)
-        if state_feature_width(self.top.state_feature_mode, len(profile.state_indices)) != self.dimensions.state_dim:
+        if (
+            state_feature_width(self.top.state_feature_mode, len(profile.state_indices))
+            != self.dimensions.state_dim
+        ):
             raise ValueError("state feature chart must align with dimensions.state_dim")
         if self.top.entity_motion_mode == "current_entity_support_v1" and (
             self.top.entity_history_mode != "flow_pulled_history_v1"
             or self.top.entity_chart_mode != "current_image_support_v1"
             or self.observation.source_time_mode != "source_history_steps_v1"
         ):
-            raise ValueError("current-entity motion requires the actual causal history and image chart")
+            raise ValueError(
+                "current-entity motion requires the actual causal history and image chart"
+            )
         if self.top.entity_history_mode == "flow_pulled_history_v1" and (
             self.top.entity_chart_mode != "current_image_support_v1"
             or self.observation.source_time_mode != "source_history_steps_v1"
@@ -1299,12 +1389,16 @@ class ExperimentConfig:
             or self.observation.local_ownership_mode != "coupled_observation_v1"
         ):
             raise ValueError("current-image entities require completed G3 and coupled full support")
-        if self.top.entity_context_mode == "completed_g3_v1" and self.observation.candidate_support_mode != "full_posterior_lattice_v1":
+        if (
+            self.top.entity_context_mode == "completed_g3_v1"
+            and self.observation.candidate_support_mode != "full_posterior_lattice_v1"
+        ):
             raise ValueError("completed G3 context requires actual full posterior coordinates")
         if self.top.world_feedback_mode != "none" and (
             self.data.data_profile != "calvin_relative_7d_v1"
             or self.top.state_feature_mode != CALVIN_ROTATION6D_STATE
-            or self.observation.source_time_mode != "source_history_steps_v1"):
+            or self.observation.source_time_mode != "source_history_steps_v1"
+        ):
             raise ValueError("executed world feedback needs declared CALVIN source-time producer")
         if self.top.annotation_goal_mode != "none":
             # Deployment reconstructs the graph without training-only data fields.
@@ -1317,41 +1411,59 @@ class ExperimentConfig:
         elif self.objectives.annotated_goal != 0:
             raise ValueError("annotated goal weight requires the selected graph")
         if self.top.robot_feedback_mode != "none":
-            if self.data.data_profile != "calvin_relative_7d_v1" or self.top.state_feature_mode != CALVIN_ROTATION6D_STATE:
-                raise ValueError("robot response needs the declared CALVIN feature/command producer")
+            if (
+                self.data.data_profile != "calvin_relative_7d_v1"
+                or self.top.state_feature_mode != CALVIN_ROTATION6D_STATE
+            ):
+                raise ValueError(
+                    "robot response needs the declared CALVIN feature/command producer"
+                )
             if self.objectives.robot_response <= 0:
-                raise ValueError("robot response predictor requires its own observed-response objective")
+                raise ValueError(
+                    "robot response predictor requires its own observed-response objective"
+                )
         elif self.objectives.robot_response != 0:
             raise ValueError("robot response objective requires the selected response graph")
-        if self.top.instruction_reference_mode != "none" and self.data.data_profile != "calvin_relative_7d_v1":
-            raise ValueError("instruction reference requires a declared CALVIN instruction-start producer")
-        if self.observation.source_time_mode == "source_history_steps_v1" and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING:
+        if (
+            self.top.instruction_reference_mode != "none"
+            and self.data.data_profile != "calvin_relative_7d_v1"
+        ):
+            raise ValueError(
+                "instruction reference requires a declared CALVIN instruction-start producer"
+            )
+        if (
+            self.observation.source_time_mode == "source_history_steps_v1"
+            and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING
+        ):
             raise ValueError("source-timed vision requires source-owned history clocks")
-        if self.top.state_feature_mode == CALVIN_ROTATION6D_STATE and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING:
+        if (
+            self.top.state_feature_mode == CALVIN_ROTATION6D_STATE
+            and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING
+        ):
             raise ValueError("rotation feature state requires source-timed history")
         if self.objectives.phase_control_mode != "none" and profile.name not in {
             "maniskill_pd_ee_delta_pose_7d_v1",
             "maniskill_pd_ee_delta_pose_7d_v2",
         }:
-            raise ValueError(
-                "StackCube phase control is valid only for a ManiSkill outlet"
-            )
+            raise ValueError("StackCube phase control is valid only for a ManiSkill outlet")
         if (
             self.data.window_boundary_contract == OBSERVED_TAIL_V1
             and self.top.history_encoding_mode != TIMED_HISTORY_ENCODING
         ):
             raise ValueError("observed-tail windows require explicit source history timing")
-        if self.data.window_boundary_contract in {
-            CAUSAL_PREFIX_V1,
-            CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
-        } and self.optimizer.batch_size != 8:
+        if (
+            self.data.window_boundary_contract
+            in {
+                CAUSAL_PREFIX_V1,
+                CAUSAL_PREFIX_TERMINAL_SUFFIX_V2,
+            }
+            and self.optimizer.batch_size != 8
+        ):
             raise ValueError("controlled LIBERO boundary experiments require batch size 8")
         if profile.name != "calvin_relative_7d_v1" and (
             self.objectives.calvin_frame_weight_mode != "uniform"
         ):
-            raise ValueError(
-                "selective CALVIN frame weighting is valid only for the CALVIN outlet"
-            )
+            raise ValueError("selective CALVIN frame weighting is valid only for the CALVIN outlet")
         sampling_threshold = self.data.sampling_gripper_event_threshold
         if profile.name == "identity_7d_pen":
             if self.objectives.gripper_event_threshold != 0.10:
@@ -1397,13 +1509,10 @@ class ExperimentConfig:
                     "gripper_first_step_release is valid only for the LIBERO continuous outlet"
                 )
             if float(self.objectives.gripper_first_step_hold) != 0.0:
-                raise ValueError(
-                    "gripper_first_step_hold is invalid for the CALVIN binary outlet"
-                )
+                raise ValueError("gripper_first_step_hold is invalid for the CALVIN binary outlet")
             if mode != CALVIN_BINARY_GRIPPER_OUTPUT_MODE:
                 raise ValueError(
-                    "CALVIN profile requires bottom.gripper_output_mode="
-                    "calvin_binary_command"
+                    "CALVIN profile requires bottom.gripper_output_mode=calvin_binary_command"
                 )
             if profile_grippers != (6,):
                 raise ValueError("CALVIN's binary command must own native action dimension 7")
@@ -1439,9 +1548,7 @@ class ExperimentConfig:
             "maniskill_pd_ee_delta_pose_7d_v2",
         }:
             if profile.gripper_transition_boundary != "previous_command":
-                raise ValueError(
-                    "ManiSkill requires a previous-command gripper boundary"
-                )
+                raise ValueError("ManiSkill requires a previous-command gripper boundary")
             if arm_mode != "relative_command_adapter":
                 raise ValueError(
                     "ManiSkill relative-command profile requires bottom.arm_flow_mode="
@@ -1450,8 +1557,7 @@ class ExperimentConfig:
             if mode == CONTINUOUS_GRIPPER_OUTPUT_MODE:
                 if float(self.objectives.gripper_command) != 0.0:
                     raise ValueError(
-                        "objective.gripper_command must be zero for the continuous "
-                        "ManiSkill outlet"
+                        "objective.gripper_command must be zero for the continuous ManiSkill outlet"
                     )
             elif mode == MANISKILL_BINARY_GRIPPER_OUTPUT_MODE:
                 if profile.name != "maniskill_pd_ee_delta_pose_7d_v2":
@@ -1459,9 +1565,7 @@ class ExperimentConfig:
                         "ManiSkill binary command mode requires the repaired v2 data profile"
                     )
                 if profile_grippers != (6,):
-                    raise ValueError(
-                        "ManiSkill binary command must own native action dimension 7"
-                    )
+                    raise ValueError("ManiSkill binary command must own native action dimension 7")
                 if float(self.objectives.gripper_command) <= 0.0:
                     raise ValueError(
                         "ManiSkill binary command mode requires a positive "
@@ -1474,8 +1578,7 @@ class ExperimentConfig:
                     )
                 if float(self.objectives.phase_gripper_hold) != 0.0:
                     raise ValueError(
-                        "continuous phase_gripper_hold is invalid for the "
-                        "ManiSkill binary outlet"
+                        "continuous phase_gripper_hold is invalid for the ManiSkill binary outlet"
                     )
             else:
                 raise ValueError(
@@ -1515,7 +1618,13 @@ class ExperimentConfig:
         if self.objectives.annotated_goal == 0:
             cast(dict[str, object], payload["objectives"]).pop("annotated_goal")
         if self.data.visual_feature_mode == "dinov2_cached_v1":
-            for name in ("visual_feature_mode", "dinov3_model", "dinov3_revision", "dinov3_local_files_only", "dinov3_microbatch"):
+            for name in (
+                "visual_feature_mode",
+                "dinov3_model",
+                "dinov3_revision",
+                "dinov3_local_files_only",
+                "dinov3_microbatch",
+            ):
                 cast(dict[str, object], payload["data"]).pop(name)
         if self.observation.visual_chart_mode == "legacy_v1":
             cast(dict[str, object], payload["observation"]).pop("visual_chart_mode")
@@ -1536,7 +1645,7 @@ class ExperimentConfig:
         if self.top.world_feedback_value_mode == INNOVATION_ONLY:
             cast(dict[str, object], payload["top"]).pop("world_feedback_value_mode")
         if self.top.world_feedback_mode == "none":
-            cast(dict[str,object],payload["top"]).pop("world_feedback_mode")
+            cast(dict[str, object], payload["top"]).pop("world_feedback_mode")
         if self.top.robot_feedback_mode == "none":
             cast(dict[str, object], payload["top"]).pop("robot_feedback_mode")
         if self.objectives.robot_response == 0:
@@ -1573,6 +1682,8 @@ class ExperimentConfig:
             cast(dict[str, object], payload["objectives"]).pop("identity_correspondence")
         if self.objectives.identity_source_prediction == 0:
             cast(dict[str, object], payload["objectives"]).pop("identity_source_prediction")
+        if self.top.typed_interval_gradient_mode == "legacy_common_surrogate_v1":
+            cast(dict[str, object], payload["top"]).pop("typed_interval_gradient_mode")
         if self.top.entity_competition_scale_mode == "batch_global_v1":
             cast(dict[str, object], payload["top"]).pop("entity_competition_scale_mode")
         if self.top.entity_ownership_mode == "local_mixture_v1":
@@ -1597,22 +1708,16 @@ class ExperimentConfig:
             # Keep legacy checkpoint identities exact unless opted in.
             cast(dict[str, object], payload["top"]).pop("p2_spatial_intent_mode")
         if self.top.world_camera_condition_mode == "motion_prior_only":
-            cast(dict[str, object], payload["top"]).pop(
-                "world_camera_condition_mode"
-            )
+            cast(dict[str, object], payload["top"]).pop("world_camera_condition_mode")
         if self.top.teacher_current_reference_mode == "g_assignment_v1":
-            cast(dict[str, object], payload["top"]).pop(
-                "teacher_current_reference_mode"
-            )
+            cast(dict[str, object], payload["top"]).pop("teacher_current_reference_mode")
         if self.top.p2_target_value_mode == "none":
             cast(dict[str, object], payload["top"]).pop("p2_target_value_mode")
         if self.top.world_action_condition_mode == "interval_mean_v1":
             # The sequence condition is an explicit model-contract change;
             # keep old config/checkpoint identities byte-compatible by
             # omitting the accepted legacy selector.
-            cast(dict[str, object], payload["top"]).pop(
-                "world_action_condition_mode"
-            )
+            cast(dict[str, object], payload["top"]).pop("world_action_condition_mode")
         data = cast(dict[str, object], payload["data"])
         if self.data.visual_cache_read_backend == "mmap":
             data.pop("visual_cache_read_backend")

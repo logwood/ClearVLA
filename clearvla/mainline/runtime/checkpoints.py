@@ -1366,10 +1366,12 @@ def load_checkpoint_for_initialization(
     elif selected_model_migration in CAUSAL_INITIALIZATION_MODES:
         from .causal_identity_migration import config_view, validate_selection
 
-        validate_selection(saved_config, config, saved_identity.source.digest)
-        if config_view(_initialization_config_view(saved_config)) != config_view(
-            _initialization_config_view(config)
-        ):
+        validate_selection(
+            saved_config, config, saved_identity.source.digest, mode=selected_model_migration
+        )
+        if config_view(
+            _initialization_config_view(saved_config), mode=selected_model_migration
+        ) != config_view(_initialization_config_view(config), mode=selected_model_migration):
             raise ValueError(
                 "causal identity repair differs outside its declared graph/objective selectors"
             )

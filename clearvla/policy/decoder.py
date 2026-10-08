@@ -20,6 +20,7 @@ from .codec import (
 from .controller import UnifiedControllerOutput, UnifiedHierarchicalController
 from .evidence import (
     HierarchicalEvidenceWorkspace,
+    PolicyEvidenceConfig,
     PreparedEvidenceMemory,
     WorkspaceControlOverride,
 )
@@ -28,12 +29,17 @@ from .gauges import (
     fp32_diagnostic,
     time_stratified_attention,
 )
-from .intent import IndependentIntentFusion, IntentContractCompiler, PolicyConditionOrganizer
+from .intent import (
+    IndependentIntentFusion,
+    IntentContractCompiler,
+    PolicyConditionOrganizer,
+    PolicyIntentConfig,
+)
 from .primitives import BiasFreeFFN, TimeEmbedding, sinusoidal_positions
 from .refinement import NestedLowRankContractionBank
 
 
-class PolicyDecoderConfig(Protocol):
+class PolicyDecoderConfig(PolicyEvidenceConfig, PolicyIntentConfig, Protocol):
     """Read-only validated configuration; derived and frozen fields are legal."""
 
     @property
@@ -191,7 +197,6 @@ class PolicyDecoderConfig(Protocol):
 
     @property
     def hierarchical_mmdit_output_contract(self) -> int: ...
-
 
 
 class ConditionNeutralActionInitializer(nn.Module):
@@ -2683,14 +2688,14 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
                 if control_operation_index is None or control_operation_candidates is None:
                     raise RuntimeError("unified execution contract did not resolve an operation")
                 (
-                stage_raw_depth_ratios,
-                stage_update_keeps,
-                selected_depth_keeps,
+                    stage_raw_depth_ratios,
+                    stage_update_keeps,
+                    selected_depth_keeps,
                 ) = self._controller_operator_controls(
                     unified_output,
                     operation_index=control_operation_index,
-                operation_candidates=control_operation_candidates,
-            )
+                    operation_candidates=control_operation_candidates,
+                )
                 workspace_control = WorkspaceControlOverride(
                     control_tokens=unified_output.memory.content,
                     control_addresses=unified_output.memory.address,
@@ -3729,9 +3734,7 @@ class HierarchicalMMDiTActionDecoder(nn.Module):
             "hierarchical_mmdit_duplicate_amplitude_owner": torch.zeros((), device=device),
             "hierarchical_mmdit_unified_update_amplitude_owner": torch.zeros((), device=device),
             "hierarchical_mmdit_host_update_amplitude_owner": torch.ones((), device=device),
-            "hierarchical_mmdit_unified_relative_update_keep_owner": torch.zeros(
-                (), device=device
-            ),
+            "hierarchical_mmdit_unified_relative_update_keep_owner": torch.zeros((), device=device),
             "hierarchical_mmdit_structured_control_width": torch.tensor(
                 float(
                     self.control_operation_count * len(OwnedHierarchicalActionBlock._BRANCH_NAMES)

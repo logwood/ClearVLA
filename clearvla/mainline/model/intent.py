@@ -79,9 +79,11 @@ def _interval_common_residual(
 ) -> tuple[Tensor, Tensor]:
     """Express four interval rows as one common value plus exact residuals.
 
-    ``preserve_common_grad`` is opt-in for a downstream value lane that must
-    train its common carrier separately.  The default keeps the historical
-    algebraic VJP, so generic callers still see the exact source gradient.
+    ``preserve_common_grad`` replays a historical surrogate backward: after
+    common/residual recombination its Jacobian is I + P, not I (P averages
+    interval rows). It is NOT an ordinary derivative or a diagnostic-only
+    option. New training should select ``ordinary_v1`` at the producer.
+    The default helper derivative is the true derivative of its forward.
     """
 
     if value.ndim < 2 or int(value.shape[1]) != 4:
@@ -354,6 +356,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         object_view_mode: str = "pooled_v1",
         target_binding_input_mode: str = "protected_pooled_v1",
         observed_outcome_mode: str = "none",
+        typed_interval_gradient_mode: str = "legacy_common_surrogate_v1",
         entity_ownership_mode: str = "local_mixture_v1",
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
@@ -386,6 +389,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.target_binding_mode = target_binding_mode
         self.per_camera_values = object_view_mode == "per_camera_values_v1"
         self.target_binding_input_mode = target_binding_input_mode
+        if typed_interval_gradient_mode not in {"legacy_common_surrogate_v1", "ordinary_v1"}:
+            raise ValueError("unknown typed interval gradient contract")
+        self.typed_interval_gradient_mode = typed_interval_gradient_mode
         self.camera_names = tuple(camera_names)
         self.target_object_address_mode = target_object_address_mode
         self.hidden = int(hidden)
@@ -1292,7 +1298,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
             typed_relevance_mass
         )
         typed_common_value, typed_interval_residual_value = _interval_common_residual(
-            typed_relevance_value, preserve_common_grad=True
+            typed_relevance_value,
+            preserve_common_grad=self.typed_interval_gradient_mode == "legacy_common_surrogate_v1",
         )
         typed_policy_context = typed_policy_components.sum(dim=2) / (3.0**0.5)
         policy_intervals = public_intervals + typed_policy_context

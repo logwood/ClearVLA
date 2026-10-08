@@ -616,9 +616,7 @@ def _complete_v115_trainer(**overrides: object) -> V39PolicyTrainerConfig:
     return replace(_complete_v113_trainer(), **values)
 
 
-def _raw_visual(
-    config: V39PolicyConfig, batch: int = 1, side: int = 64
-) -> torch.Tensor:
+def _raw_visual(config: V39PolicyConfig, batch: int = 1, side: int = 64) -> torch.Tensor:
     return torch.rand(
         batch,
         config.visual_history_length,
@@ -632,17 +630,19 @@ def _raw_visual(
 def test_early_raw_mask_hides_pixels_before_any_learned_spatial_mixing() -> None:
     torch.manual_seed(109)
     grid = 4
-    encoder = _EarlyMaskedRawContextEncoder(
-        16, 32, grid, activation_checkpoint=False
-    ).eval()
+    encoder = _EarlyMaskedRawContextEncoder(16, 32, grid, activation_checkpoint=False).eval()
     raw = torch.rand(1, 2, 1, 3, 64, 64)
     mask = torch.zeros(1, 2, 1, grid, grid, dtype=torch.bool)
     mask[..., 1:3, 1:3] = True
-    pixel_mask = F.interpolate(
-        mask.reshape(2, 1, grid, grid).float(),
-        size=(64, 64),
-        mode="nearest",
-    ).bool().reshape(1, 2, 1, 1, 64, 64)
+    pixel_mask = (
+        F.interpolate(
+            mask.reshape(2, 1, grid, grid).float(),
+            size=(64, 64),
+            mode="nearest",
+        )
+        .bool()
+        .reshape(1, 2, 1, 1, 64, 64)
+    )
     changed = torch.where(pixel_mask, 10.0 * torch.randn_like(raw), raw)
     with torch.no_grad():
         first = encoder(raw, mask)
@@ -660,13 +660,9 @@ def test_predictive_change_loss_uses_delta_not_absolute_scene_copy() -> None:
     target = current[:, None] + target_delta
     perfect = target_delta.reshape(batch, horizons * cells, hidden).clone()
     common = {
-        "flow_jepa_future_target": target.reshape(
-            batch, horizons * cells, hidden
-        ),
+        "flow_jepa_future_target": target.reshape(batch, horizons * cells, hidden),
         "flow_jepa_current_target": current,
-        "flow_jepa_future_target_mask": torch.ones(
-            batch, horizons * cells, dtype=torch.bool
-        ),
+        "flow_jepa_future_target_mask": torch.ones(batch, horizons * cells, dtype=torch.bool),
     }
     perfect_output = {
         **common,
@@ -679,12 +675,8 @@ def test_predictive_change_loss_uses_delta_not_absolute_scene_copy() -> None:
         "flow_jepa_future_pred": zero,
         "flow_jepa_future_delta_pred": zero,
     }
-    perfect_loss = flow_jepa_future_prediction_loss(
-        perfect_output, balance_horizons=True
-    )
-    zero_loss = flow_jepa_future_prediction_loss(
-        zero_output, balance_horizons=True
-    )
+    perfect_loss = flow_jepa_future_prediction_loss(perfect_output, balance_horizons=True)
+    zero_loss = flow_jepa_future_prediction_loss(zero_output, balance_horizons=True)
     assert float(perfect_loss) < 1e-6
     assert float(zero_loss.detach()) > float(perfect_loss.detach()) + 1e-3
     zero_loss.backward()
@@ -710,9 +702,7 @@ def test_predictive_change_reuses_one_online_mask_for_context_and_targets() -> N
         config.flow_jepa_grid_size,
         config.flow_jepa_grid_size,
     )
-    latest_context_mask = pack.context_dropout_mask[:, -1][:, None].expand_as(
-        future_mask
-    )
+    latest_context_mask = pack.context_dropout_mask[:, -1][:, None].expand_as(future_mask)
     assert torch.equal(future_mask, latest_context_mask)
     assert torch.equal(
         future_mask[:, 1:],
@@ -737,11 +727,7 @@ def test_predictive_change_reuses_one_online_mask_for_context_and_targets() -> N
             _visual(config, batch=2),
             raw_visual=_raw_visual(config, batch=2),
         )
-        rollout_count = (
-            config.future_anchors
-            * config.num_cameras
-            * config.flow_jepa_grid_size**2
-        )
+        rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
         encoder.refine_raw_evidence(
             masked_eval_pack,
             torch.randn(2, rollout_count + 1, config.hidden_size),
@@ -754,21 +740,13 @@ def test_predictive_change_reuses_one_online_mask_for_context_and_targets() -> N
         config.flow_jepa_grid_size,
         config.flow_jepa_grid_size,
     )
-    masked_latest = masked_eval_pack.context_dropout_mask[:, -1][
-        :, None
-    ].expand_as(masked_future)
+    masked_latest = masked_eval_pack.context_dropout_mask[:, -1][:, None].expand_as(masked_future)
     assert torch.equal(masked_latest, masked_future)
     assert bool(masked_latest.any())
-    assert float(
-        masked_eval_pack.metrics["flow_jepa_deploy_context_unmasked"]
-    ) == 0.0
+    assert float(masked_eval_pack.metrics["flow_jepa_deploy_context_unmasked"]) == 0.0
     current_mask_metrics = encoder.raw_address_eval_metrics()
-    assert current_mask_metrics[
-        "flow_jepa_raw_address_intervention_code"
-    ] == pytest.approx(12.0)
-    assert current_mask_metrics[
-        "flow_jepa_current_context_mask_intervention_delta"
-    ] > 0.0
+    assert current_mask_metrics["flow_jepa_raw_address_intervention_code"] == pytest.approx(12.0)
+    assert current_mask_metrics["flow_jepa_current_context_mask_intervention_delta"] > 0.0
     encoder.clear_raw_address_eval_intervention()
 
     try:
@@ -779,9 +757,7 @@ def test_predictive_change_reuses_one_online_mask_for_context_and_targets() -> N
     except ValueError as error:
         assert "teacher-balanced target selection disabled" in str(error)
     else:
-        raise AssertionError(
-            "predictive-change config accepted a future-teacher-selected mask"
-        )
+        raise AssertionError("predictive-change config accepted a future-teacher-selected mask")
 
 
 def test_v101_action_anchor_weights_are_mild_normalized_and_tail_aware() -> None:
@@ -850,18 +826,14 @@ def test_v101_teacher_mask_has_exact_disjoint_per_horizon_quota() -> None:
 def test_v101_per_horizon_change_gradient_is_invariant_to_far_scale() -> None:
     def gradient(far_scale: float, *, balanced: bool) -> torch.Tensor:
         pred = torch.full((1, 4, 2), 0.2, requires_grad=True)
-        target = torch.tensor(
-            [[[1.0, 0.0], [0.8, 0.2], [far_scale, 0.0], [0.0, far_scale]]]
-        )
+        target = torch.tensor([[[1.0, 0.0], [0.8, 0.2], [far_scale, 0.0], [0.0, far_scale]]])
         output = {
             "flow_jepa_future_pred": pred,
             "flow_jepa_future_target": target,
             "flow_jepa_current_target": torch.zeros(1, 2, 2),
             "flow_jepa_future_target_mask": torch.ones(1, 4, dtype=torch.bool),
         }
-        flow_jepa_future_change_loss(
-            output, balance_horizons=balanced
-        ).backward()
+        flow_jepa_future_change_loss(output, balance_horizons=balanced).backward()
         assert pred.grad is not None
         return pred.grad[:, :2].detach()
 
@@ -900,9 +872,7 @@ def test_v101_zero_information_weight_preserves_exact_legacy_sample_scale() -> N
         "policy_action": torch.randn(3, config.action_horizon, config.action_dim),
         "action_state": torch.randn(3, config.action_dim),
     }
-    weight, score = trajectory_information_weights(
-        sample, trainer, device=torch.device("cpu")
-    )
+    weight, score = trajectory_information_weights(sample, trainer, device=torch.device("cpu"))
     torch.testing.assert_close(weight, torch.ones_like(weight))
     assert bool(torch.isfinite(score).all())
 
@@ -970,8 +940,7 @@ def test_raw_grounding_preserves_high_resolution_until_grounded_reader() -> None
     assert values.shape == selector.shape
     assert int(metrics["flow_jepa_raw_detail_token_count"]) == raw_count
     torch.testing.assert_close(
-        metrics["flow_jepa_raw_address_flow_mass"]
-        + metrics["flow_jepa_raw_address_fallback_mass"],
+        metrics["flow_jepa_raw_address_flow_mass"] + metrics["flow_jepa_raw_address_fallback_mass"],
         torch.ones(()),
     )
     objective = values.float().square().mean() + sum(pack.losses.values())
@@ -987,9 +956,7 @@ def test_raw_grounding_preserves_high_resolution_until_grounded_reader() -> None
 
 def test_identity_centered_dino_seed_has_no_uniform_center_drift() -> None:
     config = _raw_role_config(flow_jepa_raw_activation_checkpoint=0)
-    flow = LatentSeaRaft(
-        config, identity_centered_initialization=True
-    ).eval()
+    flow = LatentSeaRaft(config, identity_centered_initialization=True).eval()
     with torch.no_grad():
         for parameter in flow.parameters():
             parameter.zero_()
@@ -1029,13 +996,9 @@ def test_smooth_flow_chart_cannot_escape_supervision_and_keeps_gradients() -> No
     bounded.square().mean().backward()
     assert flow.grad is not None and torch.isfinite(flow.grad).all()
 
-    identity, identity_compression = _smooth_bound_flow_to_image(
-        torch.zeros(2, 2, 4, 4)
-    )
+    identity, identity_compression = _smooth_bound_flow_to_image(torch.zeros(2, 2, 4, 4))
     assert torch.equal(identity, torch.zeros_like(identity))
-    assert torch.equal(
-        identity_compression, torch.zeros_like(identity_compression)
-    )
+    assert torch.equal(identity_compression, torch.zeros_like(identity_compression))
 
 
 def test_bounded_raw_refiner_preserves_valid_coordinates_for_large_seed() -> None:
@@ -1167,9 +1130,7 @@ def test_fixed_motion_evidence_rewards_correct_translation_but_not_static_motion
 
 def test_v99_identity_advantage_is_zero_for_static_and_backpropagates_on_motion() -> None:
     torch.manual_seed(973)
-    config = _raw_role_config(
-        flow_jepa_zero_flow_guard=1, flow_jepa_raw_activation_checkpoint=0
-    )
+    config = _raw_role_config(flow_jepa_zero_flow_guard=1, flow_jepa_raw_activation_checkpoint=0)
     encoder = FlowDINOEvidenceEncoder(config).train()
     visual_frame = torch.randn(
         1, 1, config.num_cameras, config.patches_per_camera, config.visual_token_dim
@@ -1224,9 +1185,7 @@ def test_guarded_raw_reader_fallback_is_not_a_duplicate_local_candidate_bank() -
     assert selector.shape == value.shape == (1, 4, 4, 16)
     assert int(metrics["candidate_count"]) == 10
     assert float(metrics["lane_value_difference"]) > 0.0
-    torch.testing.assert_close(
-        metrics["flow_mass"] + metrics["fallback_mass"], torch.ones(())
-    )
+    torch.testing.assert_close(metrics["flow_mass"] + metrics["fallback_mass"], torch.ones(()))
 
 
 def test_complementary_raw_reader_adds_base_and_flow_addressed_detail() -> None:
@@ -1254,9 +1213,7 @@ def test_complementary_raw_reader_adds_base_and_flow_addressed_detail() -> None:
     assert selector.shape == value.shape == (1, 4, 4, 16)
     assert float(metrics["additive_detail_path"]) == 1.0
     assert int(metrics["candidate_count"]) == 10
-    torch.testing.assert_close(
-        metrics["flow_mass"] + metrics["fallback_mass"], torch.ones(())
-    )
+    torch.testing.assert_close(metrics["flow_mass"] + metrics["fallback_mass"], torch.ones(()))
     assert 0.0 < float(metrics["flow_mass"]) < 1.0
     value.float().square().mean().backward()
     assert flow.grad is not None and torch.isfinite(flow.grad).all()
@@ -1374,11 +1331,7 @@ def test_v102_raw_detail_bank_is_observation_only_and_reusable() -> None:
             _visual(config, batch=1),
             raw_visual=_raw_visual(config, batch=1),
         )
-        rollout_count = (
-            config.future_anchors
-            * config.num_cameras
-            * config.flow_jepa_grid_size**2
-        )
+        rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
         slices = {"rollout": slice(1, 1 + rollout_count)}
         first = encoder.refine_raw_evidence(
             pack,
@@ -1402,17 +1355,10 @@ def test_v102_raw_detail_bank_is_observation_only_and_reusable() -> None:
     torch.testing.assert_close(first_value, pack.value_tokens)
     torch.testing.assert_close(second_selector, pack.selector_tokens)
     torch.testing.assert_close(second_value, pack.value_tokens)
-    torch.testing.assert_close(
-        first_detail.selector_tokens, second_detail.selector_tokens
-    )
-    torch.testing.assert_close(
-        first_detail.value_tokens, second_detail.value_tokens
-    )
+    torch.testing.assert_close(first_detail.selector_tokens, second_detail.selector_tokens)
+    torch.testing.assert_close(first_detail.value_tokens, second_detail.value_tokens)
     assert float(first_metrics["flow_jepa_raw_detail_deferred_to_policy"]) == 1.0
-    assert (
-        float(first_metrics["flow_jepa_raw_detail_action_independent_compile"])
-        == 1.0
-    )
+    assert float(first_metrics["flow_jepa_raw_detail_action_independent_compile"]) == 1.0
 
 
 def test_v102_training_preview_does_not_consume_trainable_detail_cache() -> None:
@@ -1423,11 +1369,7 @@ def test_v102_training_preview_does_not_consume_trainable_detail_cache() -> None
         _visual(config, batch=1),
         raw_visual=_raw_visual(config, batch=1),
     )
-    rollout_count = (
-        config.future_anchors
-        * config.num_cameras
-        * config.flow_jepa_grid_size**2
-    )
+    rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
     slices = {"rollout": slice(1, 1 + rollout_count)}
     canvas = torch.randn(1, rollout_count + 1, config.hidden_size)
     with torch.no_grad():
@@ -1533,9 +1475,7 @@ def test_v102_late_detail_reader_has_exact_zero_and_direct_gradient() -> None:
     )
     rollout = torch.randn(
         batch,
-        config.future_anchors
-        * config.num_cameras
-        * config.future_grid_size**2,
+        config.future_anchors * config.num_cameras * config.future_grid_size**2,
         config.hidden_size,
     )
     detail_tokens = config.num_cameras * config.future_grid_size**2
@@ -1570,14 +1510,8 @@ def test_soft_address_lattice_preserves_slots_and_candidates_until_policy_query(
         _visual(config, batch=1),
         raw_visual=_raw_visual(config, batch=1),
     )
-    rollout_count = (
-        config.future_anchors
-        * config.num_cameras
-        * config.flow_jepa_grid_size**2
-    )
-    grounding_canvas = torch.randn(
-        1, rollout_count + 2, config.hidden_size
-    )
+    rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
+    grounding_canvas = torch.randn(1, rollout_count + 2, config.hidden_size)
     selector, values, metrics, detail = encoder.refine_raw_evidence(
         pack,
         grounding_canvas,
@@ -1601,23 +1535,17 @@ def test_soft_address_lattice_preserves_slots_and_candidates_until_policy_query(
     )
     assert bank.fine_values.shape[-2:] == (
         candidates,
-        config.flow_jepa_raw_base_channels
-        + config.flow_jepa_raw_base_channels // 2,
+        config.flow_jepa_raw_base_channels + config.flow_jepa_raw_base_channels // 2,
     )
     assert selector.shape == pack.selector_tokens.shape
     assert values.shape == pack.value_tokens.shape
     assert float(metrics["flow_jepa_address_lattice_enabled"]) == 1.0
     assert float(metrics["flow_jepa_address_source_raw_match_active"]) == 1.0
     assert int(metrics["flow_jepa_address_slot_count"]) == 3
-    assert (
-        float(metrics["flow_jepa_address_slot_pair_distance_normalized"])
-        > 0.0
-    )
+    assert float(metrics["flow_jepa_address_slot_pair_distance_normalized"]) > 0.0
     assert float(metrics["flow_jepa_address_slot_posterior_hellinger"]) > 0.0
     assert float(metrics["flow_jepa_address_flow_prior_floor_sigma"]) == 2.0
-    assert (
-        float(metrics["flow_jepa_address_flow_prior_floor_logit_span"]) > 0.0
-    )
+    assert float(metrics["flow_jepa_address_flow_prior_floor_logit_span"]) > 0.0
 
     reader = LateRawDetailPolicyReader(config).train()
     trajectory = torch.randn(
@@ -1625,28 +1553,20 @@ def test_soft_address_lattice_preserves_slots_and_candidates_until_policy_query(
         config.action_horizon * config.action_basis_tokens,
         config.hidden_size,
     )
-    rollout = torch.randn(
-        1, rollout_count, config.hidden_size
-    )
+    rollout = torch.randn(1, rollout_count, config.hidden_size)
     updated, reader_metrics = reader(trajectory, rollout, detail)
     assert updated.shape == trajectory.shape
     assert bool(torch.isfinite(updated).all())
     assert 0.0 <= float(reader_metrics["flow_jepa_address_camera_entropy"]) <= 1.0
     assert (
         1.0
-        <= float(
-            reader_metrics[
-                "flow_jepa_address_policy_slot_effective_count"
-            ]
-        )
+        <= float(reader_metrics["flow_jepa_address_policy_slot_effective_count"])
         <= float(config.flow_jepa_address_slots)
     )
     (updated - trajectory).float().square().mean().backward()
     assert encoder.soft_address_compiler is not None
     assert encoder.raw_flow is not None
-    assert (
-        encoder.soft_address_compiler.source_dino[1].weight.grad is not None
-    )
+    assert encoder.soft_address_compiler.source_dino[1].weight.grad is not None
     assert encoder.soft_address_compiler.raw_key[1].weight.grad is not None
     assert encoder.soft_address_compiler.source_raw_key[1].weight.grad is not None
     assert encoder.soft_address_compiler.raw_pair_key[-1].weight.grad is not None
@@ -1660,10 +1580,7 @@ def test_soft_address_lattice_preserves_slots_and_candidates_until_policy_query(
 def test_soft_address_source_raw_can_correct_fine_keys_without_rewriting_values() -> None:
     torch.manual_seed(117)
     config = _v103_config(flow_jepa_raw_activation_checkpoint=0)
-    raw_dim = (
-        config.flow_jepa_raw_base_channels
-        + config.flow_jepa_raw_base_channels // 2
-    )
+    raw_dim = config.flow_jepa_raw_base_channels + config.flow_jepa_raw_base_channels // 2
     compiler = _SoftMultiResolutionAddressCompiler(
         config,
         raw_dim=raw_dim,
@@ -1688,12 +1605,8 @@ def test_soft_address_source_raw_can_correct_fine_keys_without_rewriting_values(
         requires_grad=True,
     )
     target_raw = torch.randn_like(source_raw, requires_grad=True)
-    flow = torch.zeros(
-        batch, config.num_cameras, 2, raw_side, raw_side
-    )
-    confidence = torch.full(
-        (batch, config.num_cameras, 1, raw_side, raw_side), 0.5
-    )
+    flow = torch.zeros(batch, config.num_cameras, 2, raw_side, raw_side)
+    confidence = torch.full((batch, config.num_cameras, 1, raw_side, raw_side), 0.5)
     uncertainty = torch.full_like(confidence, 0.1)
     occlusion = torch.zeros_like(confidence)
     first, metrics = compiler(
@@ -1739,11 +1652,7 @@ def test_soft_address_reader_uses_world_xy_state_before_precision_read() -> None
             _visual(config, batch=1),
             raw_visual=_raw_visual(config, batch=1),
         )
-        rollout_count = (
-            config.future_anchors
-            * config.num_cameras
-            * config.flow_jepa_grid_size**2
-        )
+        rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
         _, _, _, detail = encoder.refine_raw_evidence(
             pack,
             torch.randn(1, rollout_count + 2, config.hidden_size),
@@ -1803,11 +1712,7 @@ def test_soft_address_lattice_zero_detail_is_an_exact_zero_update() -> None:
             _visual(config, batch=1),
             raw_visual=_raw_visual(config, batch=1),
         )
-        rollout_count = (
-            config.future_anchors
-            * config.num_cameras
-            * config.flow_jepa_grid_size**2
-        )
+        rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
         _, _, _, detail = encoder.refine_raw_evidence(
             pack,
             torch.randn(1, rollout_count + 2, config.hidden_size),
@@ -1826,9 +1731,7 @@ def test_soft_address_lattice_zero_detail_is_an_exact_zero_update() -> None:
             config.hidden_size,
         )
         rollout = torch.randn(1, rollout_count, config.hidden_size)
-        updated, _ = LateRawDetailPolicyReader(config).eval()(
-            trajectory, rollout, zero_detail
-        )
+        updated, _ = LateRawDetailPolicyReader(config).eval()(trajectory, rollout, zero_detail)
     torch.testing.assert_close(updated, trajectory)
 
 
@@ -1841,11 +1744,7 @@ def test_soft_address_posterior_interventions_are_transient_and_reach_reader() -
             _visual(config, batch=1),
             raw_visual=_raw_visual(config, batch=1),
         )
-        rollout_count = (
-            config.future_anchors
-            * config.num_cameras
-            * config.flow_jepa_grid_size**2
-        )
+        rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
         _, _, _, detail = encoder.refine_raw_evidence(
             pack,
             torch.randn(1, rollout_count + 2, config.hidden_size),
@@ -1861,9 +1760,7 @@ def test_soft_address_posterior_interventions_are_transient_and_reach_reader() -
         rollout = torch.randn(1, rollout_count, config.hidden_size)
         reader = LateRawDetailPolicyReader(config).eval()
         baseline, _ = reader(trajectory, rollout, detail)
-        original_state = {
-            key: value.detach().clone() for key, value in reader.state_dict().items()
-        }
+        original_state = {key: value.detach().clone() for key, value in reader.state_dict().items()}
         expected_metric = {
             "address_posterior_uniform": "address_posterior_l1_delta",
             "fine_offset_zero": "fine_posterior_l1_delta",
@@ -1883,9 +1780,7 @@ def test_soft_address_posterior_interventions_are_transient_and_reach_reader() -
         ordinary, _ = reader(trajectory, rollout, detail)
         torch.testing.assert_close(ordinary, baseline, rtol=0.0, atol=0.0)
         for key, value in reader.state_dict().items():
-            torch.testing.assert_close(
-                value, original_state[key], rtol=0.0, atol=0.0
-            )
+            torch.testing.assert_close(value, original_state[key], rtol=0.0, atol=0.0)
 
 
 def test_v103_condition_phase_and_typed_delta_interventions_hit_real_sample_path() -> None:
@@ -1911,19 +1806,13 @@ def test_v103_condition_phase_and_typed_delta_interventions_hit_real_sample_path
     batch = 2
     visual = _visual(config, batch=batch)
     raw_visual = _raw_visual(config, batch=batch)
-    history_state = torch.randn(
-        batch, config.visual_history_length, config.state_dim
-    )
-    executed = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    history_state = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
     goal = torch.randn(batch, 3, config.goal_language_dim)
     goal_mask = torch.ones(batch, 3, dtype=torch.bool)
     noise = torch.randn(batch, config.action_horizon, config.action_dim)
-    frozen_state = {
-        key: value.detach().clone() for key, value in system.state_dict().items()
-    }
+    frozen_state = {key: value.detach().clone() for key, value in system.state_dict().items()}
 
     def run() -> torch.Tensor:
         output = system.sample(
@@ -1945,9 +1834,7 @@ def test_v103_condition_phase_and_typed_delta_interventions_hit_real_sample_path
     system.planner.set_action_path_eval_intervention("none")
     matched_baseline = run()
     route_state = system.planner.action_path_eval_intervention_state()
-    torch.testing.assert_close(
-        matched_baseline, baseline, rtol=0.0, atol=0.0
-    )
+    torch.testing.assert_close(matched_baseline, baseline, rtol=0.0, atol=0.0)
     for key in (
         "attnres_ground_to_world_source_effective_count",
         "attnres_ground_to_world_anchor_route_std",
@@ -2000,9 +1887,7 @@ def test_v103_condition_phase_and_typed_delta_interventions_hit_real_sample_path
     ):
         system.planner.set_action_path_eval_intervention(mode)
         changed = run()
-        intervention_state = (
-            system.planner.action_path_eval_intervention_state()
-        )
+        intervention_state = system.planner.action_path_eval_intervention_state()
         assert int(intervention_state["apply_count"]) > 0
         assert float((changed - baseline).abs().max()) > 0.0
         system.planner.clear_action_path_eval_intervention()
@@ -2055,9 +1940,7 @@ def test_v103_condition_phase_and_typed_delta_interventions_hit_real_sample_path
         encoder.set_raw_address_eval_intervention(mode)
         changed = run()
         intervention_metrics = encoder.raw_address_eval_metrics()
-        assert intervention_metrics[
-            "flow_jepa_raw_address_intervention_code"
-        ] == expected_code
+        assert intervention_metrics["flow_jepa_raw_address_intervention_code"] == expected_code
         for delta_key in delta_keys:
             assert float(intervention_metrics[delta_key]) > 0.0
         assert float((changed - baseline).abs().max()) > 0.0
@@ -2101,17 +1984,11 @@ def test_v103_proposal_interventions_isolate_proposal_from_direct_history() -> N
     batch = 2
     visual = _visual(config, batch=batch)
     raw_visual = _raw_visual(config, batch=batch)
-    history_state = torch.randn(
-        batch, config.visual_history_length, config.state_dim
-    )
-    executed = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    history_state = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
     noise = torch.randn(batch, config.action_horizon, config.action_dim)
-    frozen_state = {
-        key: value.detach().clone() for key, value in system.state_dict().items()
-    }
+    frozen_state = {key: value.detach().clone() for key, value in system.state_dict().items()}
 
     def run(
         mode: str | None = None,
@@ -2127,9 +2004,7 @@ def test_v103_proposal_interventions_isolate_proposal_from_direct_history() -> N
             ):
                 captured[key] = kwargs[key].detach().clone()
 
-        handle = system.planner.seed.register_forward_pre_hook(
-            capture_seed, with_kwargs=True
-        )
+        handle = system.planner.seed.register_forward_pre_hook(capture_seed, with_kwargs=True)
         if mode is not None:
             system.set_condition_eval_intervention(mode)
         try:
@@ -2154,9 +2029,7 @@ def test_v103_proposal_interventions_isolate_proposal_from_direct_history() -> N
     assert int(zero_state["apply_count"]) == 1
     assert float(zero_state["history_proposal_keep_delta"]) == 1.0
     for key in ("executed_history", "executed_memory", "proposal_tokens"):
-        torch.testing.assert_close(
-            zero_seed[key], baseline_seed[key], rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(zero_seed[key], baseline_seed[key], rtol=0.0, atol=0.0)
     torch.testing.assert_close(
         zero_seed["proposal_keep"],
         torch.zeros_like(zero_seed["proposal_keep"]),
@@ -2165,19 +2038,12 @@ def test_v103_proposal_interventions_isolate_proposal_from_direct_history() -> N
     )
     assert float((zero - baseline).abs().max()) > 0.0
 
-    shuffled, shuffled_seed, shuffled_state = run(
-        "history_proposal_batch_shuffle"
-    )
+    shuffled, shuffled_seed, shuffled_state = run("history_proposal_batch_shuffle")
     assert int(shuffled_state["apply_count"]) == 1
     assert float(shuffled_state["history_proposal_input_delta_norm"]) > 0.0
-    assert (
-        float(shuffled_state["history_proposal_shuffle_temporal_fallback"])
-        == 0.0
-    )
+    assert float(shuffled_state["history_proposal_shuffle_temporal_fallback"]) == 0.0
     for key in ("executed_history", "executed_memory", "proposal_keep"):
-        torch.testing.assert_close(
-            shuffled_seed[key], baseline_seed[key], rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(shuffled_seed[key], baseline_seed[key], rtol=0.0, atol=0.0)
     torch.testing.assert_close(
         shuffled_seed["proposal_tokens"],
         baseline_seed["proposal_tokens"].roll(shifts=1, dims=0),
@@ -2189,9 +2055,7 @@ def test_v103_proposal_interventions_isolate_proposal_from_direct_history() -> N
     restored, restored_seed, _ = run()
     torch.testing.assert_close(restored, baseline, rtol=0.0, atol=0.0)
     for key, value in baseline_seed.items():
-        torch.testing.assert_close(
-            restored_seed[key], value, rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(restored_seed[key], value, rtol=0.0, atol=0.0)
     for key, value in system.state_dict().items():
         torch.testing.assert_close(value, frozen_state[key], rtol=0.0, atol=0.0)
 
@@ -2202,16 +2066,10 @@ def test_source_raw_probe_changes_only_fine_keys_before_policy_read() -> None:
     encoder = FlowDINOEvidenceEncoder(config).eval()
     visual = _visual(config, batch=2)
     raw_visual = _raw_visual(config, batch=2)
-    rollout_count = (
-        config.future_anchors
-        * config.num_cameras
-        * config.flow_jepa_grid_size**2
-    )
+    rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
     canvas = torch.randn(2, rollout_count + 2, config.hidden_size)
     slices = {"rollout": slice(2, 2 + rollout_count)}
-    frozen_state = {
-        key: value.detach().clone() for key, value in encoder.state_dict().items()
-    }
+    frozen_state = {key: value.detach().clone() for key, value in encoder.state_dict().items()}
 
     def compile_bank(mode: str) -> tuple[SoftAddressLatticeBank, dict[str, float]]:
         encoder.set_raw_address_eval_intervention(mode)
@@ -2231,16 +2089,10 @@ def test_source_raw_probe_changes_only_fine_keys_before_policy_read() -> None:
 
     baseline, _ = compile_bank("none")
     changed, metrics = compile_bank("source_raw_key_spatial_shuffle")
-    torch.testing.assert_close(
-        changed.coarse_keys, baseline.coarse_keys, rtol=0.0, atol=0.0
-    )
-    torch.testing.assert_close(
-        changed.fine_values, baseline.fine_values, rtol=0.0, atol=0.0
-    )
+    torch.testing.assert_close(changed.coarse_keys, baseline.coarse_keys, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(changed.fine_values, baseline.fine_values, rtol=0.0, atol=0.0)
     assert float((changed.fine_keys - baseline.fine_keys).abs().max()) > 0.0
-    assert (
-        metrics["flow_jepa_source_raw_key_intervention_delta_norm"] > 0.0
-    )
+    assert metrics["flow_jepa_source_raw_key_intervention_delta_norm"] > 0.0
     assert encoder.raw_address_eval_metrics() == {}
     for key, value in encoder.state_dict().items():
         torch.testing.assert_close(value, frozen_state[key], rtol=0.0, atol=0.0)
@@ -2295,26 +2147,16 @@ def test_model_path_acceptance_matrix_separates_access_from_utility() -> None:
         paired=paired,
         verification_counts={mode: 1 for mode in paired},
         boundary_diagnostics={
-            "source_raw_match_zero": {
-                "flow_jepa_source_raw_key_intervention_delta_norm": 2.0
-            },
+            "source_raw_match_zero": {"flow_jepa_source_raw_key_intervention_delta_norm": 2.0},
             "w2p_far_context_zero": {"w2p_far_context_delta_norm": 1.0},
-            "bottom_far_rollout_zero": {
-                "bottom_far_rollout_delta_norm": 2.0
-            },
+            "bottom_far_rollout_zero": {"bottom_far_rollout_delta_norm": 2.0},
             "all_far_context_zero": {
                 "w2p_far_context_delta_norm": 1.0,
                 "bottom_far_rollout_delta_norm": 2.0,
             },
-            "action_history_proposal_zero": {
-                "history_proposal_keep_delta": 1.0
-            },
-            "future_effect_zero": {
-                "future_effect_intervention_delta_norm": 1.0
-            },
-            "p3_effect_delta_zero": {
-                "p3_effect_delta_norm": 1.0
-            },
+            "action_history_proposal_zero": {"history_proposal_keep_delta": 1.0},
+            "future_effect_zero": {"future_effect_intervention_delta_norm": 1.0},
+            "p3_effect_delta_zero": {"p3_effect_delta_norm": 1.0},
         },
         baseline_identity_max_abs_delta=0.0,
         representation={
@@ -2347,39 +2189,19 @@ def test_model_path_acceptance_matrix_separates_access_from_utility() -> None:
     assert matrix["aggregate"]["typed_policy_plan_reaches_action"]
     assert matrix["typed_policy_plan_lanes"]["effect"]["boundary_changed"]
     assert matrix["typed_policy_plan_lanes"]["effect"]["reaches_action"]
-    assert matrix["typed_policy_plan_lanes"]["precision"][
-        "boundary_changed"
-    ] is None
+    assert matrix["typed_policy_plan_lanes"]["precision"]["boundary_changed"] is None
     assert matrix["address_slot_structure"]["observed"]
-    assert matrix["address_slot_structure"][
-        "coarse_posteriors_numerically_distinct"
-    ]
-    assert matrix["address_slot_structure"][
-        "policy_uses_multiple_slots_numerically"
-    ]
+    assert matrix["address_slot_structure"]["coarse_posteriors_numerically_distinct"]
+    assert matrix["address_slot_structure"]["policy_uses_multiple_slots_numerically"]
     assert matrix["typed_route_structure"]["ground_to_world"]["observed"]
-    assert matrix["typed_route_structure"]["world_to_policy"][
-        "query_axes_vary_numerically"
-    ]
-    assert matrix["typed_route_structure"]["policy_to_mmdit"][
-        "uses_multiple_sources_numerically"
-    ]
-    assert matrix["typed_route_structure"]["protected_detail_basis"][
-        "query_axes_vary_numerically"
-    ]
-    assert matrix["long_horizon_pairwise"][
-        "joint_distinguishable_from_each_single_path"
-    ]
+    assert matrix["typed_route_structure"]["world_to_policy"]["query_axes_vary_numerically"]
+    assert matrix["typed_route_structure"]["policy_to_mmdit"]["uses_multiple_sources_numerically"]
+    assert matrix["typed_route_structure"]["protected_detail_basis"]["query_axes_vary_numerically"]
+    assert matrix["long_horizon_pairwise"]["joint_distinguishable_from_each_single_path"]
     rows = matrix["modes"]
     assert rows["source_raw_match_zero"]["utility_direction"] == "inconclusive"
-    assert (
-        rows["w2p_far_context_zero"]["utility_direction"]
-        == "ablation_harmful_path_helpful"
-    )
-    assert (
-        rows["bottom_far_rollout_zero"]["utility_direction"]
-        == "ablation_helpful_path_harmful"
-    )
+    assert rows["w2p_far_context_zero"]["utility_direction"] == "ablation_harmful_path_helpful"
+    assert rows["bottom_far_rollout_zero"]["utility_direction"] == "ablation_helpful_path_harmful"
 
 
 def test_model_path_acceptance_ignores_unrelated_natural_delta_metrics() -> None:
@@ -2531,20 +2353,16 @@ def test_typed_332_deltas_reach_action_without_fixed_policy_superhighway() -> No
         torch.ones_like(protected_basis_mass.float()),
     )
     world_xy_updates = [
-        output[f"attnres_observed_world_xy_update_norm_w{depth}"]
-        for depth in range(1, 4)
+        output[f"attnres_observed_world_xy_update_norm_w{depth}"] for depth in range(1, 4)
     ]
     assert all(torch.isfinite(value) for value in world_xy_updates)
     assert float(sum(world_xy_updates)) > 0.0
     far_masses = [
         value
         for key, value in output.items()
-        if key.startswith("attnres_world_to_policy_source_mass_")
-        and "_far1_camera" in key
+        if key.startswith("attnres_world_to_policy_source_mass_") and "_far1_camera" in key
     ]
-    assert len(far_masses) == (
-        (config.flow_jepa_world_blocks + 1) * config.num_cameras
-    )
+    assert len(far_masses) == ((config.flow_jepa_world_blocks + 1) * config.num_cameras)
     assert float(sum(far_masses)) > 0.0
     output["pred_physical_velocity"].float().square().mean().backward()
     active_routes = (
@@ -2584,9 +2402,7 @@ def test_typed_332_deltas_reach_action_without_fixed_policy_superhighway() -> No
         for parameter in group["params"]
         if parameter.requires_grad
     ]
-    trainable = {
-        id(parameter) for parameter in system.parameters() if parameter.requires_grad
-    }
+    trainable = {id(parameter) for parameter in system.parameters() if parameter.requires_grad}
     assert len(owned) == len(set(owned))
     assert set(owned) == trainable
 
@@ -2652,17 +2468,11 @@ def test_predictive_change_contract_reaches_masked_raw_context() -> None:
     )
     system = V39PolicySystem(config).train()
     optimizer_groups = _optimizer_groups(system, _complete_v113_trainer())
-    grouped_ids = [
-        id(parameter)
-        for group in optimizer_groups
-        for parameter in group["params"]
-    ]
+    grouped_ids = [id(parameter) for group in optimizer_groups for parameter in group["params"]]
     assert len(grouped_ids) == len(set(grouped_ids))
-    assert {
-        id(parameter)
-        for parameter in system.parameters()
-        if parameter.requires_grad
-    } == set(grouped_ids)
+    assert {id(parameter) for parameter in system.parameters() if parameter.requires_grad} == set(
+        grouped_ids
+    )
     batch = 1
     output = system.flow_training_forward(
         _visual(config, batch=batch),
@@ -2709,12 +2519,7 @@ def test_predictive_change_contract_reaches_masked_raw_context() -> None:
     output["pred_physical_velocity"].float().square().mean().backward()
     assert encoder.soft_address_compiler is not None
     assert encoder.soft_address_compiler.flow_prior_log_scale.grad is not None
-    assert (
-        float(
-            encoder.soft_address_compiler.flow_prior_log_scale.grad.abs().sum()
-        )
-        > 0.0
-    )
+    assert float(encoder.soft_address_compiler.flow_prior_log_scale.grad.abs().sum()) > 0.0
 
 
 def test_predictive_mask_also_owns_late_soft_address_appearance() -> None:
@@ -2735,16 +2540,22 @@ def test_predictive_mask_also_owns_late_soft_address_appearance() -> None:
     assert context is not None
     high = context.high_features
     high_side = int(high.shape[-1])
-    latest_mask = F.interpolate(
-        pack.context_dropout_mask[:, -1].reshape(
-            config.num_cameras,
-            1,
-            config.flow_jepa_grid_size,
-            config.flow_jepa_grid_size,
-        ).float(),
-        size=(high_side, high_side),
-        mode="nearest",
-    ).bool().reshape(1, config.num_cameras, 1, high_side, high_side)
+    latest_mask = (
+        F.interpolate(
+            pack.context_dropout_mask[:, -1]
+            .reshape(
+                config.num_cameras,
+                1,
+                config.flow_jepa_grid_size,
+                config.flow_jepa_grid_size,
+            )
+            .float(),
+            size=(high_side, high_side),
+            mode="nearest",
+        )
+        .bool()
+        .reshape(1, config.num_cameras, 1, high_side, high_side)
+    )
     assert bool(latest_mask.any())
     changed_high = high.clone()
     changed_high[:, -1] = torch.where(
@@ -2757,11 +2568,7 @@ def test_predictive_mask_also_owns_late_soft_address_appearance() -> None:
         pack,
         raw_context=replace(context, high_features=changed_high),
     )
-    rollout_count = (
-        config.future_anchors
-        * config.num_cameras
-        * config.flow_jepa_grid_size**2
-    )
+    rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
     canvas = torch.randn(1, rollout_count + 2, config.hidden_size)
     slices = {"rollout": slice(2, 2 + rollout_count)}
     with torch.no_grad():
@@ -2872,12 +2679,8 @@ def test_v103_action_field_has_no_target_leak_and_matches_one_step_deploy() -> N
     batch = 1
     visual = _visual(config, batch=batch)
     raw_visual = _raw_visual(config, batch=batch)
-    state_history = torch.randn(
-        batch, config.visual_history_length, config.state_dim
-    )
-    executed_history = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    state_history = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed_history = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
     goal_tokens = torch.randn(batch, 3, config.goal_language_dim)
     goal_mask = torch.ones(batch, 3, dtype=torch.bool)
@@ -2892,9 +2695,7 @@ def test_v103_action_field_has_no_target_leak_and_matches_one_step_deploy() -> N
         config.visual_token_dim,
     )
     future_b = future_a + 3.0 * torch.randn_like(future_a)
-    noise_action = torch.randn(
-        batch, config.action_horizon, config.action_dim
-    )
+    noise_action = torch.randn(batch, config.action_horizon, config.action_dim)
     noise_physical = system.codec.encode(noise_action, state)
     common = {
         "raw_visual": raw_visual,
@@ -3021,11 +2822,7 @@ def test_v103_action_loss_trains_the_history_proposal_without_changing_forward()
         action_loss = output["pred_physical_velocity"].float().square().mean()
         action_loss.backward()
         proposal_grads = {
-            name: (
-                None
-                if parameter.grad is None
-                else float(parameter.grad.detach().abs().sum())
-            )
+            name: (None if parameter.grad is None else float(parameter.grad.detach().abs().sum()))
             for name, parameter in system.proposal.named_parameters()
             if name == "future_query" or name.startswith("blocks.")
         }
@@ -3083,9 +2880,7 @@ def test_full_v103_training_graph_has_one_attached_model_path() -> None:
                 config.visual_token_dim,
             ),
             raw_visual=_raw_visual(config, batch=batch),
-            goal_language_tokens=torch.randn(
-                batch, 3, config.goal_language_dim
-            ),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
             goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
             make_counterfactuals=False,
         )
@@ -3099,20 +2894,17 @@ def test_full_v103_training_graph_has_one_attached_model_path() -> None:
     assert float(output["flow_jepa_address_source_raw_match_active"]) == 1.0
     assert float(output["evidence_policy_delta_bridge_enabled"]) == 1.0
     assert float(output["evidence_top_policy_workspace_fixed_fusion"]) == 0.0
-    total = (
-        output["pred_physical_velocity"].float().square().mean()
-        + 0.10
-        * flow_jepa_future_prediction_loss(
-            output,
-            balance_horizons=True,
-        )
+    total = output[
+        "pred_physical_velocity"
+    ].float().square().mean() + 0.10 * flow_jepa_future_prediction_loss(
+        output,
+        balance_horizons=True,
     )
     total.backward()
 
     def attached(module: torch.nn.Module | None) -> bool:
         return module is not None and any(
-            parameter.grad is not None
-            and float(parameter.grad.detach().float().abs().sum()) > 0.0
+            parameter.grad is not None and float(parameter.grad.detach().float().abs().sum()) > 0.0
             for parameter in module.parameters()
             if parameter.requires_grad
         )
@@ -3184,9 +2976,7 @@ def test_v104_future_memory_is_sequential_history_driven_and_attached() -> None:
         changed_motion,
         context.detach(),
     )
-    assert float(
-        (changed[:, -1] - queries[:, -1].detach()).detach().abs().sum()
-    ) > 0.0
+    assert float((changed[:, -1] - queries[:, -1].detach()).detach().abs().sum()) > 0.0
 
     queries[:, -1].float().square().mean().backward()
     assert motion.grad is not None and float(motion.grad.abs().sum()) > 0.0
@@ -3223,9 +3013,7 @@ def test_v104_complete_forward_reports_effective_structural_contracts() -> None:
             config.patches_per_camera,
             config.visual_token_dim,
         ),
-        goal_language_tokens=torch.randn(
-            batch, 3, config.goal_language_dim
-        ),
+        goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
         goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
         make_counterfactuals=False,
     )
@@ -3233,26 +3021,28 @@ def test_v104_complete_forward_reports_effective_structural_contracts() -> None:
     assert float(output["flow_jepa_sequential_horizon_memory"]) == 1.0
     assert float(output["role_residual_contract_enabled"]) == 1.0
     assert float(output["flow_jepa_raw_valid_fraction"]) > 0.999
-    assert float(output["role_residual_bounded_rms"]) <= float(
-        output["role_residual_raw_rms"]
-    ) + 1e-6
+    assert (
+        float(output["role_residual_bounded_rms"]) <= float(output["role_residual_raw_rms"]) + 1e-6
+    )
     assert float(output["attnres_world_to_policy_value_rms"]) <= (
         config.role_attnres_max_value_rms + 1e-4
     )
-    assert float(
-        output["evidence_policy_delta_attnres_value_rms"]
-    ) <= config.role_attnres_max_value_rms + 1e-4
+    assert (
+        float(output["evidence_policy_delta_attnres_value_rms"])
+        <= config.role_attnres_max_value_rms + 1e-4
+    )
     total = (
         output["pred_physical_velocity"].float().square().mean()
         + 0.10 * flow_jepa_future_prediction_loss(output, balance_horizons=True)
-        + sum(output[key] for key in output if key.startswith("flow_jepa_") and key.endswith("_loss"))
+        + sum(
+            output[key] for key in output if key.startswith("flow_jepa_") and key.endswith("_loss")
+        )
     )
     total.backward()
     encoder = system.planner.flow_dino_evidence
     assert encoder is not None and encoder.future_transition is not None
     assert any(
-        parameter.grad is not None
-        and float(parameter.grad.detach().abs().sum()) > 0.0
+        parameter.grad is not None and float(parameter.grad.detach().abs().sum()) > 0.0
         for parameter in encoder.future_transition.parameters()
     )
 
@@ -3262,20 +3052,16 @@ def test_v104_v105_bfloat16_structural_paths_are_finite(
     contract: str,
 ) -> None:
     torch.manual_seed(133)
-    config = (
-        _complete_v105_config
-        if contract == "v105"
-        else _complete_v104_config
-    )(flow_jepa_raw_activation_checkpoint=0)
+    config = (_complete_v105_config if contract == "v105" else _complete_v104_config)(
+        flow_jepa_raw_activation_checkpoint=0
+    )
     system = V39PolicySystem(config).train()
     batch = 1
     with torch.autocast("cpu", dtype=torch.bfloat16):
         output = system.flow_training_forward(
             _visual(config, batch=batch),
             torch.randn(batch, config.visual_history_length, config.state_dim),
-            torch.randn(
-                batch, config.executed_history_length, config.action_dim
-            ),
+            torch.randn(batch, config.executed_history_length, config.action_dim),
             torch.randn(batch, config.state_dim),
             torch.randn(batch, config.action_horizon, config.action_dim),
             raw_visual=_raw_visual(config, batch=batch),
@@ -3287,9 +3073,7 @@ def test_v104_v105_bfloat16_structural_paths_are_finite(
                 config.patches_per_camera,
                 config.visual_token_dim,
             ),
-            goal_language_tokens=torch.randn(
-                batch, 3, config.goal_language_dim
-            ),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
             goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
             make_counterfactuals=False,
         )
@@ -3300,11 +3084,7 @@ def test_v104_v105_bfloat16_structural_paths_are_finite(
                 balance_horizons=True,
                 reliable_normalization=(contract == "v105"),
             )
-            + (
-                0.02 * flow_jepa_horizon_address_loss(output)
-                if contract == "v105"
-                else 0.0
-            )
+            + (0.02 * flow_jepa_horizon_address_loss(output) if contract == "v105" else 0.0)
             + output["flow_jepa_warp_loss"]
             + output["flow_jepa_cycle_loss"]
         )
@@ -3318,9 +3098,7 @@ def test_v104_v105_bfloat16_structural_paths_are_finite(
         system.planner.world_to_policy_attnres,
     ]
     if contract == "v105":
-        structural_modules.append(
-            system.planner.flow_dino_evidence.horizon_address_jepa
-        )
+        structural_modules.append(system.planner.flow_dino_evidence.horizon_address_jepa)
     for module in structural_modules:
         assert module is not None
         for parameter in module.parameters():
@@ -3339,11 +3117,7 @@ def test_complete_model_optimizer_owns_every_trainable_parameter_once(
     }[contract]
     config = config_factory(flow_jepa_raw_activation_checkpoint=0)
     system = V39PolicySystem(config)
-    trainer = (
-        _complete_v105_trainer()
-        if contract == "v105"
-        else _complete_v103_trainer()
-    )
+    trainer = _complete_v105_trainer() if contract == "v105" else _complete_v103_trainer()
     groups = _optimizer_groups(system, trainer)
     owners = [
         (id(parameter), str(group["name"]), float(group["lr"]))
@@ -3351,18 +3125,11 @@ def test_complete_model_optimizer_owns_every_trainable_parameter_once(
         for parameter in group["params"]
     ]
     owner_ids = [identifier for identifier, _, _ in owners]
-    trainable_ids = {
-        id(parameter)
-        for parameter in system.parameters()
-        if parameter.requires_grad
-    }
+    trainable_ids = {id(parameter) for parameter in system.parameters() if parameter.requires_grad}
     assert len(owner_ids) == len(set(owner_ids))
     assert set(owner_ids) == trainable_ids
 
-    owner = {
-        identifier: (name, learning_rate)
-        for identifier, name, learning_rate in owners
-    }
+    owner = {identifier: (name, learning_rate) for identifier, name, learning_rate in owners}
     planner = system.planner
     decoder = planner.evidence_latent_mmdit_action_decoder
     assert decoder is not None
@@ -3390,9 +3157,7 @@ def test_complete_model_optimizer_owns_every_trainable_parameter_once(
     ):
         assert module is not None
         assert all(
-            id(parameter) in owner
-            for parameter in module.parameters()
-            if parameter.requires_grad
+            id(parameter) in owner for parameter in module.parameters() if parameter.requires_grad
         )
     if contract in {"v104", "v105"}:
         encoder = planner.flow_dino_evidence
@@ -3403,9 +3168,7 @@ def test_complete_model_optimizer_owns_every_trainable_parameter_once(
         ):
             assert module is not None
             assert {
-                owner[id(parameter)]
-                for parameter in module.parameters()
-                if parameter.requires_grad
+                owner[id(parameter)] for parameter in module.parameters() if parameter.requires_grad
             } == {("flow_dino_evidence", trainer.lr)}
         for module in (
             planner.ground_to_world_attnres,
@@ -3413,9 +3176,7 @@ def test_complete_model_optimizer_owns_every_trainable_parameter_once(
         ):
             assert module is not None
             assert {
-                owner[id(parameter)]
-                for parameter in module.parameters()
-                if parameter.requires_grad
+                owner[id(parameter)] for parameter in module.parameters() if parameter.requires_grad
             } == {("single_stage_shared_input", trainer.lr)}
         if contract == "v105":
             assert encoder.horizon_address_jepa is not None
@@ -3426,13 +3187,9 @@ def test_complete_model_optimizer_owns_every_trainable_parameter_once(
             } == {("flow_dino_evidence", trainer.lr)}
     for index, block in enumerate(planner.blocks):
         block_owners = {
-            owner[id(parameter)]
-            for parameter in block.parameters()
-            if parameter.requires_grad
+            owner[id(parameter)] for parameter in block.parameters() if parameter.requires_grad
         }
-        assert block_owners == {
-            (f"dit_block_{index}_single_stage", trainer.lr)
-        }
+        assert block_owners == {(f"dit_block_{index}_single_stage", trainer.lr)}
 
 
 @pytest.mark.parametrize("contract", ("v103", "v104", "v105"))
@@ -3447,12 +3204,14 @@ def test_complete_model_total_loss_reaches_every_trainable_parameter(
         "v104": _complete_v104_config,
         "v105": _complete_v105_config,
     }[contract]
-    config = config_factory(flow_jepa_raw_activation_checkpoint=0)
-    trainer = (
-        _complete_v105_trainer()
-        if contract == "v105"
-        else _complete_v103_trainer()
-    )
+    # With two history rows and one recent row there is only ONE older key.
+    # Its softmax is identically one: query normalization has no mathematical
+    # derivative (older kernels only left roundoff). All-live gradient testing
+    # needs at least two distinct older keys; singleton behavior is tested
+    # separately without manufacturing a gradient.
+    config = config_factory(flow_jepa_raw_activation_checkpoint=0, executed_history_length=3)
+    assert config.executed_history_length - config.action_history_recent_tokens >= 2
+    trainer = _complete_v105_trainer() if contract == "v105" else _complete_v103_trainer()
     system = V39PolicySystem(config).train()
     decoder = system.planner.evidence_latent_mmdit_action_decoder
     assert decoder is not None
@@ -3464,16 +3223,10 @@ def test_complete_model_total_loss_reaches_every_trainable_parameter(
     batch = 2
     visual = _visual(config, batch=batch)
     raw_visual = _raw_visual(config, batch=batch)
-    state_history = torch.randn(
-        batch, config.visual_history_length, config.state_dim
-    )
-    executed_history = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    state_history = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed_history = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
-    target_action = torch.randn(
-        batch, config.action_horizon, config.action_dim
-    )
+    target_action = torch.randn(batch, config.action_horizon, config.action_dim)
     target_visual = torch.randn(
         batch,
         config.future_anchors,
@@ -3546,7 +3299,8 @@ def test_v103_primary_action_graph_excludes_only_declared_auxiliary_readouts() -
     """No hidden trainable branch may live only outside the deployed action field."""
 
     torch.manual_seed(128)
-    config = _complete_v103_config(flow_jepa_raw_activation_checkpoint=0)
+    config = _complete_v103_config(flow_jepa_raw_activation_checkpoint=0, executed_history_length=3)
+    assert config.executed_history_length - config.action_history_recent_tokens >= 2
     system = V39PolicySystem(config).train()
     decoder = system.planner.evidence_latent_mmdit_action_decoder
     assert decoder is not None
@@ -3557,12 +3311,8 @@ def test_v103_primary_action_graph_excludes_only_declared_auxiliary_readouts() -
     batch = 2
     visual = _visual(config, batch=batch)
     raw_visual = _raw_visual(config, batch=batch)
-    state_history = torch.randn(
-        batch, config.visual_history_length, config.state_dim
-    )
-    executed_history = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    state_history = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed_history = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
     target_action = torch.randn(batch, config.action_horizon, config.action_dim)
     goal_tokens = torch.randn(batch, 3, config.goal_language_dim)
@@ -3661,9 +3411,7 @@ def test_complete_v103_bfloat16_forward_and_total_loss_backward_are_finite() -> 
                 config.patches_per_camera,
                 config.visual_token_dim,
             ),
-            goal_language_tokens=torch.randn(
-                batch, 3, config.goal_language_dim
-            ),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
             goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
             make_counterfactuals=False,
         )
@@ -3695,53 +3443,39 @@ def test_complete_v103_bfloat16_forward_and_total_loss_backward_are_finite() -> 
 
 def test_v103_launcher_activates_the_repaired_model_contract() -> None:
     root = Path(__file__).parents[1]
-    v103 = (
-        root / "scripts" / "current_v103_typed_predictive_flow_jepa.sh"
-    ).read_text(encoding="utf-8")
-    v104 = (
-        root / "scripts" / "current_v104_sequential_bounded_flow_jepa.sh"
-    ).read_text(encoding="utf-8")
-    v105 = (
-        root / "scripts" / "current_v105_horizon_addressed_flow_jepa.sh"
-    ).read_text(encoding="utf-8")
-    v106 = (
-        root / "scripts" / "current_v106_interval_stage_flow_jepa.sh"
-    ).read_text(encoding="utf-8")
-    v107 = (
-        root / "scripts" / "current_v107_complete_top_path_flow_jepa.sh"
-    ).read_text(encoding="utf-8")
-    v108 = (
-        root / "scripts" / "current_v108_online_horizon_address_flow_jepa.sh"
-    ).read_text(encoding="utf-8")
-    v109 = (
-        root
-        / "scripts"
-        / "current_v109_progressive_grounding_address_flow_jepa.sh"
-    ).read_text(encoding="utf-8")
-    v104_probe = (
-        root / "scripts" / "run_v104_model_path_probe.sh"
-    ).read_text(encoding="utf-8")
-    v105_probe = (
-        root / "scripts" / "run_v105_model_path_probe.sh"
-    ).read_text(encoding="utf-8")
-    v106_probe = (
-        root / "scripts" / "run_v106_model_path_probe.sh"
-    ).read_text(encoding="utf-8")
-    v107_probe = (
-        root / "scripts" / "run_v107_model_path_probe.sh"
-    ).read_text(encoding="utf-8")
-    v108_probe = (
-        root / "scripts" / "run_v108_model_path_probe.sh"
-    ).read_text(encoding="utf-8")
-    v109_probe = (
-        root / "scripts" / "run_v109_model_path_probe.sh"
-    ).read_text(encoding="utf-8")
-    v100 = (
-        root / "scripts" / "current_v100_strict_complementary_flow_jepa.sh"
-    ).read_text(encoding="utf-8")
-    v99 = (
-        root / "scripts" / "current_v99_observable_raw_flow_332_jepa.sh"
-    ).read_text(encoding="utf-8")
+    v103 = (root / "scripts" / "current_v103_typed_predictive_flow_jepa.sh").read_text(
+        encoding="utf-8"
+    )
+    v104 = (root / "scripts" / "current_v104_sequential_bounded_flow_jepa.sh").read_text(
+        encoding="utf-8"
+    )
+    v105 = (root / "scripts" / "current_v105_horizon_addressed_flow_jepa.sh").read_text(
+        encoding="utf-8"
+    )
+    v106 = (root / "scripts" / "current_v106_interval_stage_flow_jepa.sh").read_text(
+        encoding="utf-8"
+    )
+    v107 = (root / "scripts" / "current_v107_complete_top_path_flow_jepa.sh").read_text(
+        encoding="utf-8"
+    )
+    v108 = (root / "scripts" / "current_v108_online_horizon_address_flow_jepa.sh").read_text(
+        encoding="utf-8"
+    )
+    v109 = (root / "scripts" / "current_v109_progressive_grounding_address_flow_jepa.sh").read_text(
+        encoding="utf-8"
+    )
+    v104_probe = (root / "scripts" / "run_v104_model_path_probe.sh").read_text(encoding="utf-8")
+    v105_probe = (root / "scripts" / "run_v105_model_path_probe.sh").read_text(encoding="utf-8")
+    v106_probe = (root / "scripts" / "run_v106_model_path_probe.sh").read_text(encoding="utf-8")
+    v107_probe = (root / "scripts" / "run_v107_model_path_probe.sh").read_text(encoding="utf-8")
+    v108_probe = (root / "scripts" / "run_v108_model_path_probe.sh").read_text(encoding="utf-8")
+    v109_probe = (root / "scripts" / "run_v109_model_path_probe.sh").read_text(encoding="utf-8")
+    v100 = (root / "scripts" / "current_v100_strict_complementary_flow_jepa.sh").read_text(
+        encoding="utf-8"
+    )
+    v99 = (root / "scripts" / "current_v99_observable_raw_flow_332_jepa.sh").read_text(
+        encoding="utf-8"
+    )
     required_v103 = (
         "export FLOW_JEPA_FUTURE_CHANGE_WEIGHT=0",
         'export CLEARVLA_REQUIRED_MODEL_CONTRACT="${CLEARVLA_REQUIRED_MODEL_CONTRACT:-v103}"',
@@ -3836,15 +3570,10 @@ def test_v103_launcher_activates_the_repaired_model_contract() -> None:
     assert "runs/v109_progressive_grounding_address_flow_jepa/checkpoints/latest.pt" in v109_probe
     assert "MODEL_PATH_PROBE_LABEL=v109" in v109_probe
     assert "MODEL_PATH_REQUIRED_CONTRACT=v109" in v109_probe
-    assert (
-        '--flow-jepa-future-change-loss-weight "${FLOW_JEPA_FUTURE_CHANGE_WEIGHT}"'
-        in v100
-    )
+    assert '--flow-jepa-future-change-loss-weight "${FLOW_JEPA_FUTURE_CHANGE_WEIGHT}"' in v100
     assert "--stage1-initialization-enabled 0" in v99
     assert "--require-flow-jepa-stage1-checkpoint 0" in v99
-    v48 = (
-        root / "scripts" / "current_v48_justok.sh"
-    ).read_text(encoding="utf-8")
+    v48 = (root / "scripts" / "current_v48_justok.sh").read_text(encoding="utf-8")
     assert "--layer-recurrent-consequence 1" in v48
     assert v103.rfind("--layer-recurrent-consequence 0") >= 0
     # V48 is the historical source of the contradictory default. No
@@ -3858,9 +3587,7 @@ def test_v103_launcher_activates_the_repaired_model_contract() -> None:
         "current_v91_time_domain_evidence_mmdit.sh",
         "current_v65_z_workspace_full_diag.sh",
     ):
-        wrapper = (root / "scripts" / script_name).read_text(
-            encoding="utf-8"
-        )
+        wrapper = (root / "scripts" / script_name).read_text(encoding="utf-8")
         assert "--layer-recurrent-consequence 1" not in wrapper
 
 
@@ -3903,9 +3630,7 @@ def test_v103_model_probe_rejects_partial_or_duplicate_contracts() -> None:
     try:
         _validate_complete_v103_model_probe_contract(zero_bridge, trainer)
     except ValueError as error:
-        assert "role_attnres_ground_to_world_scale must be positive" in str(
-            error
-        )
+        assert "role_attnres_ground_to_world_scale must be positive" in str(error)
     else:
         raise AssertionError("V103 probe accepted a zero-scale role bridge")
 
@@ -3928,9 +3653,7 @@ def test_v104_contract_requires_all_three_structural_repairs() -> None:
 def test_v105_horizon_address_reads_continuous_bank_without_hard_selection() -> None:
     torch.manual_seed(144)
     config = _complete_v105_config()
-    raw_dim = int(config.flow_jepa_raw_base_channels) + int(
-        config.flow_jepa_raw_base_channels
-    ) // 2
+    raw_dim = int(config.flow_jepa_raw_base_channels) + int(config.flow_jepa_raw_base_channels) // 2
     reader = _HorizonSoftAddressJEPA(config, raw_dim=raw_dim)
     assert tuple(inspect.signature(reader.forward).parameters) == (
         "future_tokens",
@@ -3942,9 +3665,7 @@ def test_v105_horizon_address_reads_continuous_bank_without_hard_selection() -> 
     slots = int(config.flow_jepa_address_slots)
     route = int(config.flow_jepa_address_route_dim)
     candidates = 9
-    coarse = torch.randn(
-        batch, cameras, grid, grid, slots, route, requires_grad=True
-    )
+    coarse = torch.randn(batch, cameras, grid, grid, slots, route, requires_grad=True)
     fine_keys = torch.randn(
         batch,
         cameras,
@@ -4061,15 +3782,11 @@ def test_v105_complete_forward_attaches_address_to_jepa_not_a_second_action_lane
     config = _complete_v105_config(flow_jepa_raw_activation_checkpoint=0)
     system = V39PolicySystem(config).train()
     batch = 1
-    target_action = torch.randn(
-        batch, config.action_horizon, config.action_dim
-    )
+    target_action = torch.randn(batch, config.action_horizon, config.action_dim)
     output = system.flow_training_forward(
         _visual(config, batch=batch),
         torch.randn(batch, config.visual_history_length, config.state_dim),
-        torch.randn(
-            batch, config.executed_history_length, config.action_dim
-        ),
+        torch.randn(batch, config.executed_history_length, config.action_dim),
         torch.randn(batch, config.state_dim),
         target_action,
         target_visual=torch.randn(
@@ -4081,18 +3798,14 @@ def test_v105_complete_forward_attaches_address_to_jepa_not_a_second_action_lane
             config.visual_token_dim,
         ),
         raw_visual=_raw_visual(config, batch=batch),
-        goal_language_tokens=torch.randn(
-            batch, 3, config.goal_language_dim
-        ),
+        goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
         goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
         make_counterfactuals=False,
     )
     assert "flow_jepa_horizon_address_logits" in output
     assert float(output["flow_jepa_horizon_soft_address"]) == 1.0
     assert not any(
-        "address" in key
-        for key in output
-        if key.startswith("pred_") or key.startswith("post_")
+        "address" in key for key in output if key.startswith("pred_") or key.startswith("post_")
     )
     objective = flow_jepa_future_prediction_loss(
         output,
@@ -4103,16 +3816,12 @@ def test_v105_complete_forward_attaches_address_to_jepa_not_a_second_action_lane
     encoder = system.planner.flow_dino_evidence
     assert encoder is not None and encoder.horizon_address_jepa is not None
     assert any(
-        parameter.grad is not None
-        and float(parameter.grad.detach().abs().sum()) > 0.0
+        parameter.grad is not None and float(parameter.grad.detach().abs().sum()) > 0.0
         for parameter in encoder.horizon_address_jepa.parameters()
         if parameter.requires_grad
     )
     assert encoder.soft_address_compiler is not None
-    assert (
-        encoder.soft_address_compiler.raw_pair_key[-1].weight.grad
-        is not None
-    )
+    assert encoder.soft_address_compiler.raw_pair_key[-1].weight.grad is not None
     trainer = _complete_v105_trainer()
     covered = {
         id(parameter)
@@ -4135,9 +3844,7 @@ def test_v105_teacher_address_is_loss_only_and_cannot_collapse_mass_to_zero() ->
     for horizon, position in enumerate(changed_positions):
         future[:, horizon, position, 0] = 1.0 + float(horizon)
     future = future.reshape(batch, anchors * positions, hidden)
-    uniform_logits = torch.zeros(
-        batch, anchors, cameras, grid, grid, requires_grad=True
-    )
+    uniform_logits = torch.zeros(batch, anchors, cameras, grid, grid, requires_grad=True)
     matched_logits = torch.zeros_like(uniform_logits).detach()
     matched_flat = matched_logits.reshape(batch, anchors, positions)
     for horizon, position in enumerate(changed_positions):
@@ -4203,18 +3910,14 @@ def test_v105_reliable_future_loss_is_not_invariant_to_weak_teacher_scale() -> N
     current = torch.ones(1, 4, 4)
 
     def example(delta: float) -> dict[str, Tensor | tuple[int, ...]]:
-        current_future = current[:, None].expand(-1, 2, -1, -1).reshape(
-            1, 8, 4
-        )
+        current_future = current[:, None].expand(-1, 2, -1, -1).reshape(1, 8, 4)
         return {
             "pred_physical_velocity": torch.zeros(1, 1, 1),
             "flow_jepa_future_pred": torch.zeros(1, 8, 4),
             "flow_jepa_future_delta_pred": torch.zeros(1, 8, 4),
             "flow_jepa_future_target": current_future + delta,
             "flow_jepa_current_target": current,
-            "flow_jepa_future_target_mask": torch.ones(
-                1, 8, dtype=torch.bool
-            ),
+            "flow_jepa_future_target_mask": torch.ones(1, 8, dtype=torch.bool),
             "flow_jepa_future_offsets": (4, 48),
         }
 
@@ -4235,31 +3938,23 @@ def test_v105_reliable_future_loss_is_not_invariant_to_weak_teacher_scale() -> N
     assert float(weak_diagnostics["flow_jepa_future_normalization_scale"]) > float(
         weak_diagnostics["flow_jepa_future_target_delta_scale"]
     )
-    assert float(
-        weak_diagnostics["flow_jepa_future_current_reference_scale"]
-    ) == pytest.approx(1.0)
+    assert float(weak_diagnostics["flow_jepa_future_current_reference_scale"]) == pytest.approx(1.0)
 
 
 def test_v106_per_horizon_diagnostics_match_the_active_scale_floored_loss() -> None:
     current = torch.randn(2, 3, 6)
     anchors = 4
-    target_delta = torch.randn(2, anchors, 3, 6) * torch.tensor(
-        (0.02, 0.04, 0.08, 0.16)
-    )[None, :, None, None]
+    target_delta = (
+        torch.randn(2, anchors, 3, 6) * torch.tensor((0.02, 0.04, 0.08, 0.16))[None, :, None, None]
+    )
     prediction = 0.5 * target_delta
     output = {
         "pred_physical_velocity": torch.zeros(2, 1, 1),
         "flow_jepa_future_pred": prediction.reshape(2, anchors * 3, 6),
-        "flow_jepa_future_delta_pred": prediction.reshape(
-            2, anchors * 3, 6
-        ),
-        "flow_jepa_future_target": (
-            current[:, None] + target_delta
-        ).reshape(2, anchors * 3, 6),
+        "flow_jepa_future_delta_pred": prediction.reshape(2, anchors * 3, 6),
+        "flow_jepa_future_target": (current[:, None] + target_delta).reshape(2, anchors * 3, 6),
         "flow_jepa_current_target": current,
-        "flow_jepa_future_target_mask": torch.ones(
-            2, anchors * 3, dtype=torch.bool
-        ),
+        "flow_jepa_future_target_mask": torch.ones(2, anchors * 3, dtype=torch.bool),
         "flow_jepa_future_offsets": (4, 12, 24, 48),
         "flow_jepa_variance_safe_routing": torch.ones(()),
     }
@@ -4273,25 +3968,15 @@ def test_v106_per_horizon_diagnostics_match_the_active_scale_floored_loss() -> N
     )
     for offset in (4, 12, 24, 48):
         raw = diagnostics[f"flow_jepa_future_horizon_{offset}_raw_delta"]
-        normalized = diagnostics[
-            f"flow_jepa_future_horizon_{offset}_reliable_normalized"
-        ]
-        direction = diagnostics[
-            f"flow_jepa_future_horizon_{offset}_active_direction"
-        ]
-        active = diagnostics[
-            f"flow_jepa_future_horizon_{offset}_active_loss"
-        ]
+        normalized = diagnostics[f"flow_jepa_future_horizon_{offset}_reliable_normalized"]
+        direction = diagnostics[f"flow_jepa_future_horizon_{offset}_active_direction"]
+        active = diagnostics[f"flow_jepa_future_horizon_{offset}_active_loss"]
         torch.testing.assert_close(
             active,
             raw + normalized + 0.10 * direction,
         )
         torch.testing.assert_close(horizon_rows[offset], active)
-        assert float(
-            diagnostics[
-                f"flow_jepa_future_horizon_{offset}_direction_floor"
-            ]
-        ) > 0.0
+        assert float(diagnostics[f"flow_jepa_future_horizon_{offset}_direction_floor"]) > 0.0
     objective = flow_jepa_future_prediction_loss(
         output,
         balance_horizons=True,
@@ -4313,9 +3998,7 @@ def test_v105_contract_requires_address_and_reliable_normalization() -> None:
             replace(config, flow_jepa_horizon_soft_address=0),
             trainer,
         )
-    with pytest.raises(
-        ValueError, match="flow_jepa_future_reliable_normalization"
-    ):
+    with pytest.raises(ValueError, match="flow_jepa_future_reliable_normalization"):
         _validate_complete_v105_model_contract(
             config,
             replace(trainer, flow_jepa_future_reliable_normalization=0),
@@ -4351,9 +4034,7 @@ def test_v106_variance_floor_preserves_zero_and_bounds_small_signal_gain() -> No
 def test_v106_correlation_floor_preserves_cosine_scale_and_bounds_cancellation() -> None:
     ordinary = torch.randn(2, 16, 3, 3)
     legacy = F.normalize(ordinary, dim=1)
-    safe, denominator = rms_floored_l2_normalize(
-        ordinary, 0.10, dim=1
-    )
+    safe, denominator = rms_floored_l2_normalize(ordinary, 0.10, dim=1)
     cosine = F.cosine_similarity(
         legacy.flatten(2).transpose(1, 2),
         safe.flatten(2).transpose(1, 2),
@@ -4396,9 +4077,7 @@ def test_v106_correlation_floor_preserves_cosine_scale_and_bounds_cancellation()
 
 
 def test_v106_cycle_visibility_is_continuous_and_has_an_explicit_gain_bound() -> None:
-    squared_error = torch.tensor(
-        [[[[0.45, 0.50, 0.55]]]], requires_grad=True
-    )
+    squared_error = torch.tensor([[[[0.45, 0.50, 0.55]]]], requires_grad=True)
     threshold = torch.full_like(squared_error, 0.50)
     valid = torch.ones_like(squared_error, dtype=torch.bool)
     visible, hard, width_min, gain_max = _continuous_cycle_visibility(
@@ -4428,11 +4107,7 @@ def test_v106_role_block_normalization_bounds_near_constant_backward_gain() -> N
         "proposal": 1,
         "trajectory": config.action_horizon * config.action_basis_tokens,
         "stage": 0,
-        "rollout": (
-            config.future_anchors
-            * config.num_cameras
-            * config.future_grid_size**2
-        ),
+        "rollout": (config.future_anchors * config.num_cameras * config.future_grid_size**2),
         "registers": config.canvas_registers,
     }
     slices: dict[str, slice] = {}
@@ -4445,8 +4120,7 @@ def test_v106_role_block_normalization_bounds_near_constant_backward_gain() -> N
         + 1e-8 * torch.randn(1, cursor, config.hidden_size)
     ).requires_grad_(True)
     visual = (
-        torch.full((1, 7, config.hidden_size), 1e-6)
-        + 1e-8 * torch.randn(1, 7, config.hidden_size)
+        torch.full((1, 7, config.hidden_size), 1e-6) + 1e-8 * torch.randn(1, 7, config.hidden_size)
     ).requires_grad_(True)
     output, metrics = block(
         canvas,
@@ -4535,26 +4209,18 @@ def test_v106_interval_teacher_is_signed_spatial_increment_not_global_mean() -> 
 
     with patch.object(encoder, "_teacher_project_grid", side_effect=project):
         targets = encoder.teacher_interval_targets(target, current)
-    positions = (
-        config.num_cameras
-        * config.flow_jepa_grid_size
-        * config.flow_jepa_grid_size
-    )
+    positions = config.num_cameras * config.flow_jepa_grid_size * config.flow_jepa_grid_size
     progression = targets["flow_jepa_interval_progress_target"].reshape(
         batch,
         config.future_anchors,
         positions,
         config.hidden_size,
     )
-    endpoint = targets["flow_jepa_interval_endpoint_target"].reshape_as(
-        progression
-    )
+    endpoint = targets["flow_jepa_interval_endpoint_target"].reshape_as(progression)
     for horizon, (start, end) in enumerate(config.flow_jepa_interval_windows):
         expected = float(end - start)
         assert float(progression[0, horizon, 0, 0]) == pytest.approx(expected)
-        assert float(progression[0, horizon, 1, 0]) == pytest.approx(
-            -3.0 * expected
-        )
+        assert float(progression[0, horizon, 1, 0]) == pytest.approx(-3.0 * expected)
         torch.testing.assert_close(
             progression[:, horizon],
             endpoint[:, horizon],
@@ -4579,23 +4245,15 @@ def test_v106_interval_teacher_is_signed_spatial_increment_not_global_mean() -> 
         config.hidden_size,
     )
     plain_frame_mean = (8.0 + 112.0 + 16.0) / 3.0
-    assert float(outlier_content[0, 1, 0, 0]) != pytest.approx(
-        plain_frame_mean
-    )
-    teacher_source = inspect.getsource(
-        FlowDINOEvidenceEncoder.teacher_interval_targets
-    )
+    assert float(outlier_content[0, 1, 0, 0]) != pytest.approx(plain_frame_mean)
+    teacher_source = inspect.getsource(FlowDINOEvidenceEncoder.teacher_interval_targets)
     assert "self.anchors" not in teacher_source
 
 
 def test_v106_preflight_validates_the_real_interval_teacher_pack() -> None:
     config = _complete_v106_config()
     batch = 2
-    positions = (
-        config.num_cameras
-        * config.flow_jepa_grid_size
-        * config.flow_jepa_grid_size
-    )
+    positions = config.num_cameras * config.flow_jepa_grid_size * config.flow_jepa_grid_size
     future_shape = (
         batch,
         config.future_anchors * positions,
@@ -4773,9 +4431,7 @@ def test_v106_interval_loss_and_complete_contract_are_explicit() -> None:
             "flow_jepa_interval_progress_target": target,
             "flow_jepa_interval_endpoint_target": endpoint,
             "flow_jepa_current_target": current,
-            "flow_jepa_future_target_mask": torch.ones(
-                batch, anchors * cells, dtype=torch.bool
-            ),
+            "flow_jepa_future_target_mask": torch.ones(batch, anchors * cells, dtype=torch.bool),
         }
     )
     assert torch.isfinite(terms["flow_jepa_interval_stage"])
@@ -4792,19 +4448,14 @@ def test_v106_interval_loss_and_complete_contract_are_explicit() -> None:
             "flow_jepa_interval_progress_target": target,
             "flow_jepa_interval_endpoint_target": endpoint,
             "flow_jepa_current_target": current,
-            "flow_jepa_future_target_mask": torch.ones(
-                batch, anchors * cells, dtype=torch.bool
-            ),
+            "flow_jepa_future_target_mask": torch.ones(batch, anchors * cells, dtype=torch.bool),
         }
     )
     zero_terms["flow_jepa_interval_stage"].backward()
     assert zero_prediction.grad is not None
     assert torch.isfinite(zero_prediction.grad).all()
     assert float(zero_prediction.grad.norm()) < 100.0
-    assert (
-        float(zero_terms["flow_jepa_interval_stage_direction_floor_min"])
-        >= 1e-3
-    )
+    assert float(zero_terms["flow_jepa_interval_stage_direction_floor_min"]) >= 1e-3
 
     zero_future_delta = torch.zeros_like(target, requires_grad=True)
     safe_future_loss = flow_jepa_future_prediction_loss(
@@ -4814,9 +4465,7 @@ def test_v106_interval_loss_and_complete_contract_are_explicit() -> None:
             "flow_jepa_future_delta_pred": zero_future_delta,
             "flow_jepa_future_target": target,
             "flow_jepa_current_target": current,
-            "flow_jepa_future_target_mask": torch.ones(
-                batch, anchors * cells, dtype=torch.bool
-            ),
+            "flow_jepa_future_target_mask": torch.ones(batch, anchors * cells, dtype=torch.bool),
             "flow_jepa_variance_safe_routing": torch.tensor(1.0),
         },
         balance_horizons=True,
@@ -4844,51 +4493,30 @@ def test_exact_goal_and_history_nulls_remove_all_content_templates() -> None:
     seed = UnifiedCanvasSeed(config).eval()
     batch = 2
     common = {
-        "noisy_physical": torch.randn(
-            batch, config.action_horizon, config.physical_action_dim
-        ),
+        "noisy_physical": torch.randn(batch, config.action_horizon, config.physical_action_dim),
         "state": torch.randn(batch, config.state_dim),
-        "state_history": torch.randn(
-            batch, config.visual_history_length, config.state_dim
-        ),
-        "executed_history": torch.randn(
-            batch, config.executed_history_length, config.action_dim
-        ),
-        "proposal_tokens": torch.zeros(
-            batch, config.action_horizon, config.hidden_size
-        ),
+        "state_history": torch.randn(batch, config.visual_history_length, config.state_dim),
+        "executed_history": torch.randn(batch, config.executed_history_length, config.action_dim),
+        "proposal_tokens": torch.zeros(batch, config.action_horizon, config.hidden_size),
         "proposal_keep": torch.ones(batch),
-        "rollout_init": torch.randn(
-            batch, config.future_token_count, config.hidden_size
-        ),
+        "rollout_init": torch.randn(batch, config.future_token_count, config.hidden_size),
         "stage_init": torch.randn(batch, 1, config.hidden_size),
         "goal_condition_keep": torch.zeros(batch),
         "action_history_condition_keep": torch.zeros(batch),
     }
     first, first_slices = seed(
         **common,
-        executed_memory=torch.randn(
-            batch, config.action_history_token_count, config.hidden_size
-        ),
-        goal_tokens=torch.randn(
-            batch, config.goal_token_count, config.hidden_size
-        ),
+        executed_memory=torch.randn(batch, config.action_history_token_count, config.hidden_size),
+        goal_tokens=torch.randn(batch, config.goal_token_count, config.hidden_size),
     )
     second, second_slices = seed(
         **common,
         executed_memory=10.0
-        * torch.randn(
-            batch, config.action_history_token_count, config.hidden_size
-        ),
-        goal_tokens=10.0
-        * torch.randn(
-            batch, config.goal_token_count, config.hidden_size
-        ),
+        * torch.randn(batch, config.action_history_token_count, config.hidden_size),
+        goal_tokens=10.0 * torch.randn(batch, config.goal_token_count, config.hidden_size),
     )
     for name in ("task", "executed"):
-        assert torch.equal(
-            first[:, first_slices[name]], second[:, second_slices[name]]
-        )
+        assert torch.equal(first[:, first_slices[name]], second[:, second_slices[name]])
 
     phase = StatelessPhaseAdapter(config.hidden_size, 4).eval()
     visual = torch.randn(batch, 8, config.hidden_size)
@@ -4943,9 +4571,7 @@ def test_stateless_phase_only_conditions_world_and_detail_queries() -> None:
             config.visual_token_dim,
         ),
         raw_visual=_raw_visual(config, batch=batch),
-        goal_language_tokens=torch.randn(
-            batch, 3, config.goal_language_dim
-        ),
+        goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
         goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
         make_counterfactuals=False,
     )
@@ -4955,10 +4581,7 @@ def test_stateless_phase_only_conditions_world_and_detail_queries() -> None:
     assert float(output["attnres_world_to_policy_phase_query_norm"]) > 0.0
     assert float(output["attnres_world_to_policy_condition_query_norm"]) > 0.0
     for depth in range(1, config.flow_jepa_world_blocks + 1):
-        assert (
-            float(output[f"flow_jepa_world_block_query_delta_norm_w{depth}"])
-            > 0.0
-        )
+        assert float(output[f"flow_jepa_world_block_query_delta_norm_w{depth}"]) > 0.0
     output["pred_physical_velocity"].float().square().mean().backward()
     phase_modules = (
         system.planner.stateless_phase_adapter,
@@ -4973,8 +4596,7 @@ def test_stateless_phase_only_conditions_world_and_detail_queries() -> None:
     for module in phase_modules:
         assert module is not None
         assert any(
-            parameter.grad is not None
-            and float(parameter.grad.abs().sum()) > 0.0
+            parameter.grad is not None and float(parameter.grad.abs().sum()) > 0.0
             for parameter in module.parameters()
         )
     trainer = V39PolicyTrainerConfig(
@@ -4990,9 +4612,7 @@ def test_stateless_phase_only_conditions_world_and_detail_queries() -> None:
         for parameter in group["params"]
         if parameter.requires_grad
     ]
-    trainable = {
-        id(parameter) for parameter in system.parameters() if parameter.requires_grad
-    }
+    trainable = {id(parameter) for parameter in system.parameters() if parameter.requires_grad}
     assert len(owned) == len(set(owned))
     assert set(owned) == trainable
 
@@ -5009,9 +4629,7 @@ def test_v102_late_detail_attention_does_not_mix_camera_charts() -> None:
     )
     rollout = torch.randn(
         batch,
-        config.future_anchors
-        * config.num_cameras
-        * config.future_grid_size**2,
+        config.future_anchors * config.num_cameras * config.future_grid_size**2,
         config.hidden_size,
     )
     cells = config.future_grid_size**2
@@ -5028,9 +4646,7 @@ def test_v102_late_detail_attention_does_not_mix_camera_charts() -> None:
         value_tokens=values.flatten(1, 2),
     )
     changed_other_camera = selector.clone()
-    changed_other_camera[:, 1] = 100.0 * torch.randn_like(
-        changed_other_camera[:, 1]
-    )
+    changed_other_camera[:, 1] = 100.0 * torch.randn_like(changed_other_camera[:, 1])
     changed_detail = LateRawDetailEvidence(
         selector_tokens=changed_other_camera.flatten(1, 2),
         value_tokens=values.flatten(1, 2),
@@ -5047,11 +4663,7 @@ def test_v102_world_write_is_anchor_camera_only_after_dropout() -> None:
     torch.manual_seed(104)
     config = _v102_config()
     block = TemporalDynamicsBoundDiTBlock(config, role="world")
-    tokens = (
-        config.future_anchors
-        * config.num_cameras
-        * config.future_grid_size**2
-    )
+    tokens = config.future_anchors * config.num_cameras * config.future_grid_size**2
     update = torch.randn(2, tokens, config.hidden_size)
     structured = block._structure_world_rollout_update(update)
     grouped = structured.reshape(
@@ -5081,11 +4693,7 @@ def test_v102_full_world_block_writes_no_xy_specific_residual() -> None:
         "registers": config.canvas_registers,
         "trajectory": config.action_horizon * config.action_basis_tokens,
         "stage": 0,
-        "rollout": (
-            config.future_anchors
-            * config.num_cameras
-            * config.future_grid_size**2
-        ),
+        "rollout": (config.future_anchors * config.num_cameras * config.future_grid_size**2),
     }
     slices: dict[str, slice] = {}
     cursor = 0
@@ -5099,9 +4707,7 @@ def test_v102_full_world_block_writes_no_xy_specific_residual() -> None:
         torch.randn(2, config.hidden_size),
         slices,
     )
-    rollout_delta = (
-        output[:, slices["rollout"]] - canvas[:, slices["rollout"]]
-    ).reshape(
+    rollout_delta = (output[:, slices["rollout"]] - canvas[:, slices["rollout"]]).reshape(
         2,
         config.future_anchors,
         config.num_cameras,
@@ -5127,14 +4733,10 @@ def test_v102_policy_workspace_pools_basis_inside_each_horizon() -> None:
     decoder = EvidenceLatentMMDiTActionDecoder(config)
     decoder.top_policy_workspace_lift = torch.nn.Identity()
     basis = config.action_basis_tokens
-    tokens = torch.arange(
-        config.action_horizon, dtype=torch.float32
-    )[None, :, None, None].expand(
+    tokens = torch.arange(config.action_horizon, dtype=torch.float32)[None, :, None, None].expand(
         1, config.action_horizon, basis, config.hidden_size
     )
-    tokens = tokens + torch.arange(basis, dtype=torch.float32)[
-        None, None, :, None
-    ]
+    tokens = tokens + torch.arange(basis, dtype=torch.float32)[None, None, :, None]
     aligned = decoder._lift_policy_workspace(
         tokens.reshape(
             1,
@@ -5177,9 +4779,7 @@ def test_v102_event_gradient_reaches_late_raw_action_path() -> None:
         raw_visual=_raw_visual(config, batch=batch),
         make_counterfactuals=False,
     )
-    event_target = torch.ones(
-        batch * config.action_horizon, dtype=torch.long
-    )
+    event_target = torch.ones(batch * config.action_horizon, dtype=torch.long)
     event_loss = F.cross_entropy(
         output["event_logits"].float().reshape(-1, 3),
         event_target,
@@ -5212,9 +4812,7 @@ def test_v102_event_gradient_reaches_late_raw_action_path() -> None:
 
 
 def test_raw_reader_router_never_scales_detail_value_amplitude() -> None:
-    reader = _RawDeformableAddressReader(
-        8, 16, 4, radius=1, heads=4
-    ).eval()
+    reader = _RawDeformableAddressReader(8, 16, 4, radius=1, heads=4).eval()
     with torch.no_grad():
         reader.query.zero_()
         reader.flow_prior_strength.zero_()
@@ -5226,12 +4824,8 @@ def test_raw_reader_router_never_scales_detail_value_amplitude() -> None:
     flow = torch.zeros(1, 2, 16, 16)
     confidence = torch.ones(1, 1, 16, 16)
     grounding = torch.zeros(1, 4, 4, 16)
-    _, low_value, _ = reader(
-        source, target, flow, confidence, grounding, torch.zeros(1, 1, 4, 4)
-    )
-    _, high_value, _ = reader(
-        source, target, flow, confidence, grounding, torch.ones(1, 1, 4, 4)
-    )
+    _, low_value, _ = reader(source, target, flow, confidence, grounding, torch.zeros(1, 1, 4, 4))
+    _, high_value, _ = reader(source, target, flow, confidence, grounding, torch.ones(1, 1, 4, 4))
     torch.testing.assert_close(low_value, high_value)
 
 
@@ -5241,14 +4835,8 @@ def test_raw_grounding_cpu_bf16_forward_backward_is_finite() -> None:
     encoder = FlowDINOEvidenceEncoder(config).train()
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         pack = encoder(_visual(config, batch=1), raw_visual=_raw_visual(config))
-        rollout_count = (
-            config.future_anchors
-            * config.num_cameras
-            * config.flow_jepa_grid_size**2
-        )
-        grounding_canvas = torch.randn(
-            1, rollout_count + 1, config.hidden_size
-        )
+        rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
+        grounding_canvas = torch.randn(1, rollout_count + 1, config.hidden_size)
         _, values, _ = encoder.refine_raw_evidence(
             pack,
             grounding_canvas,
@@ -5270,14 +4858,8 @@ def test_v99_eval_reports_zero_and_shuffled_flow_reader_interventions() -> None:
     encoder = FlowDINOEvidenceEncoder(config).eval()
     with torch.no_grad():
         pack = encoder(_visual(config, batch=1), raw_visual=_raw_visual(config))
-        rollout_count = (
-            config.future_anchors
-            * config.num_cameras
-            * config.flow_jepa_grid_size**2
-        )
-        grounding_canvas = torch.randn(
-            1, rollout_count + 1, config.hidden_size
-        )
+        rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
+        grounding_canvas = torch.randn(1, rollout_count + 1, config.hidden_size)
         _, _, metrics = encoder.refine_raw_evidence(
             pack,
             grounding_canvas,
@@ -5299,26 +4881,16 @@ def test_v98_transient_address_intervention_preserves_checkpoint_and_camera_iden
     )
     encoder = FlowDINOEvidenceEncoder(config).eval()
     state_keys = tuple(encoder.state_dict())
-    flow = torch.arange(3 * config.num_cameras * 2 * 4 * 4).reshape(
-        3 * config.num_cameras, 2, 4, 4
-    )
-    shuffled, fallback = encoder._intervened_raw_address_flow(
-        flow.float(), batch=3, mode="shuffle"
-    )
+    flow = torch.arange(3 * config.num_cameras * 2 * 4 * 4).reshape(3 * config.num_cameras, 2, 4, 4)
+    shuffled, fallback = encoder._intervened_raw_address_flow(flow.float(), batch=3, mode="shuffle")
     expected = flow.reshape(3, config.num_cameras, 2, 4, 4).roll(1, dims=0)
-    torch.testing.assert_close(
-        shuffled.reshape_as(expected), expected.float()
-    )
+    torch.testing.assert_close(shuffled.reshape_as(expected), expected.float())
     assert not fallback
 
     encoder.set_raw_address_eval_intervention("none")
     with torch.no_grad():
         pack = encoder(_visual(config, batch=2), raw_visual=_raw_visual(config, batch=2))
-        rollout_count = (
-            config.future_anchors
-            * config.num_cameras
-            * config.flow_jepa_grid_size**2
-        )
+        rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
         grounding_canvas = torch.randn(2, rollout_count + 1, config.hidden_size)
         encoder.refine_raw_evidence(
             pack,
@@ -5347,9 +4919,7 @@ def test_v98_transient_address_intervention_preserves_checkpoint_and_camera_iden
         )
     captured = encoder.raw_address_eval_metrics()
     assert captured["flow_jepa_raw_address_intervention_code"] == pytest.approx(4.0)
-    assert (
-        captured["flow_jepa_raw_post_reader_detail_value_intervention_delta"] > 0.0
-    )
+    assert captured["flow_jepa_raw_post_reader_detail_value_intervention_delta"] > 0.0
     encoder.clear_raw_address_eval_intervention()
     assert tuple(encoder.state_dict()) == state_keys
 
@@ -5402,11 +4972,7 @@ def test_v101_source_aligned_raw_detail_updates_source_not_latest_dino_chart() -
     with torch.no_grad():
         pack = encoder(_visual(config, batch=1), raw_visual=_raw_visual(config))
         original = pack.selector_tokens.clone()
-        rollout_count = (
-            config.future_anchors
-            * config.num_cameras
-            * config.flow_jepa_grid_size**2
-        )
+        rollout_count = config.future_anchors * config.num_cameras * config.flow_jepa_grid_size**2
         selector, _, metrics = encoder.refine_raw_evidence(
             pack,
             torch.randn(1, rollout_count, config.hidden_size),
@@ -5449,16 +5015,12 @@ def test_v101_action_path_interventions_are_transient_and_preserve_camera_identi
     )
     for camera in range(cameras):
         world_entry[:, :, camera] = float(100 * (camera + 1))
-    world_residual = torch.arange(
-        world_entry.numel(), dtype=torch.float32
-    ).reshape_as(world_entry)
+    world_residual = torch.arange(world_entry.numel(), dtype=torch.float32).reshape_as(world_entry)
     world_output = world_entry + world_residual
     entry_flat = world_entry.reshape(batch, -1, config.hidden_size)
     output_flat = world_output.reshape_as(entry_flat)
 
-    planner.set_action_path_eval_intervention(
-        "world_residual_spatiotemporal_shuffle"
-    )
+    planner.set_action_path_eval_intervention("world_residual_spatiotemporal_shuffle")
     world_shuffled = planner._intervene_world_rollout(
         output_flat,
         world_entry_rollout=entry_flat,
@@ -5498,10 +5060,7 @@ def test_v101_action_path_interventions_are_transient_and_preserve_camera_identi
     )
 
     workspace = torch.arange(
-        batch
-        * config.action_horizon
-        * config.action_basis_tokens
-        * config.hidden_size,
+        batch * config.action_horizon * config.action_basis_tokens * config.hidden_size,
         dtype=torch.float32,
     ).reshape(
         batch,
@@ -5599,9 +5158,7 @@ def test_v101_action_path_probe_selection_stratifies_episode_clusters() -> None:
             event[[2, 12, 22, 32]] = True
             return np.zeros(len(self.refs), dtype=np.float32), event
 
-    loader = torch.utils.data.DataLoader(
-        _EpisodeSignalDataset(), batch_size=2, shuffle=False
-    )
+    loader = torch.utils.data.DataLoader(_EpisodeSignalDataset(), batch_size=2, shuffle=False)
     selected, metadata = _action_path_probe_batch_selection(
         loader=loader,
         planned_batches=len(loader),
@@ -5610,10 +5167,7 @@ def test_v101_action_path_probe_selection_stratifies_episode_clusters() -> None:
         event_threshold=0.1,
     )
     assert len(selected) == 8
-    assert (
-        metadata["selection_strategy"]
-        == "episode_stratified_uniform_plus_gripper_event"
-    )
+    assert metadata["selection_strategy"] == "episode_stratified_uniform_plus_gripper_event"
     assert metadata["candidate_episode_ids"] == [0, 1, 2, 3]
     assert metadata["selected_episode_ids"] == [0, 1, 2, 3]
     assert metadata["selected_episode_count"] == 4
@@ -5771,7 +5325,15 @@ def test_role_blocks_only_write_their_owned_canvas_regions() -> None:
     visual = torch.randn(2, 9, config.hidden_size)
     condition = torch.randn(2, config.hidden_size)
     owned = {
-        "grounding": ("task", "state", "state_history", "executed", "proposal", "rollout", "registers"),
+        "grounding": (
+            "task",
+            "state",
+            "state_history",
+            "executed",
+            "proposal",
+            "rollout",
+            "registers",
+        ),
         "world": ("rollout",),
         "policy": ("trajectory",),
     }
@@ -5803,18 +5365,12 @@ def test_grounding_rollout_is_clean_of_noisy_and_proposal_action() -> None:
     }
     canvas = torch.randn(2, 11, config.hidden_size)
     changed = canvas.clone()
-    changed[:, slices["proposal"]] += 20.0 * torch.randn_like(
-        changed[:, slices["proposal"]]
-    )
-    changed[:, slices["trajectory"]] += 20.0 * torch.randn_like(
-        changed[:, slices["trajectory"]]
-    )
+    changed[:, slices["proposal"]] += 20.0 * torch.randn_like(changed[:, slices["proposal"]])
+    changed[:, slices["trajectory"]] += 20.0 * torch.randn_like(changed[:, slices["trajectory"]])
     visual = torch.randn(2, 9, config.hidden_size)
     condition = torch.randn(2, config.hidden_size)
 
-    grounding = TemporalDynamicsBoundDiTBlock(
-        config, role="grounding"
-    ).eval()
+    grounding = TemporalDynamicsBoundDiTBlock(config, role="grounding").eval()
     world = TemporalDynamicsBoundDiTBlock(config, role="world").eval()
     grounding_base, _ = grounding(canvas, visual, condition, slices)
     grounding_changed, _ = grounding(changed, visual, condition, slices)
@@ -5920,9 +5476,10 @@ def test_late_bottleneck_full_policy_has_one_jepa_action_path_without_stage() ->
         make_counterfactuals=False,
     )
     assert output["flow_jepa_future_pred"].shape == output["flow_jepa_future_target"].shape
-    assert output["flow_jepa_current_target"].shape[1] * config.future_anchors == output[
-        "flow_jepa_future_target"
-    ].shape[1]
+    assert (
+        output["flow_jepa_current_target"].shape[1] * config.future_anchors
+        == output["flow_jepa_future_target"].shape[1]
+    )
     assert "flow_jepa_stage_pred" not in output
     assert "flow_jepa_stage_target" not in output
     change_direction = flow_jepa_future_change_direction_loss(output)
@@ -5997,9 +5554,7 @@ def test_late_local_read_is_source_queried_and_offscreen_safe() -> None:
     torch.testing.assert_close(metrics["flow_mass"], torch.zeros(()))
     torch.testing.assert_close(metrics["fallback_mass"], torch.ones(()))
 
-    refiner = _SparseFineFlowRefiner(
-        6, 8, radius=1, grid=2, uncertainty_floor=0.03
-    )
+    refiner = _SparseFineFlowRefiner(6, 8, radius=1, grid=2, uncertainty_floor=0.03)
     estimate = refiner(
         torch.randn(1, 4, 4, 6),
         torch.randn(1, 4, 4, 6),
@@ -6335,28 +5890,24 @@ def test_directed_canvas_attention_preserves_context_action_future_order() -> No
         output, _ = block(canvas, visual, condition, slices)
         changed_output, _ = block(changed, visual, condition, slices)
     torch.testing.assert_close(output[:, context_rows], changed_output[:, context_rows])
-    torch.testing.assert_close(output[:, slices["trajectory"]], changed_output[:, slices["trajectory"]])
+    torch.testing.assert_close(
+        output[:, slices["trajectory"]], changed_output[:, slices["trajectory"]]
+    )
     torch.testing.assert_close(output[:, slices["stage"]], changed_output[:, slices["stage"]])
 
     changed_stage = canvas.clone()
-    changed_stage[:, slices["stage"]] += 10.0 * torch.randn_like(
-        changed_stage[:, slices["stage"]]
-    )
+    changed_stage[:, slices["stage"]] += 10.0 * torch.randn_like(changed_stage[:, slices["stage"]])
     with torch.no_grad():
         stage_output, _ = block(changed_stage, visual, condition, slices)
     assert not torch.allclose(output[:, slices["rollout"]], stage_output[:, slices["rollout"]])
 
-    legacy = TemporalDynamicsBoundDiTBlock(
-        _flow_config(flow_jepa_enabled=0, future_grid_size=1)
-    )
+    legacy = TemporalDynamicsBoundDiTBlock(_flow_config(flow_jepa_enabled=0, future_grid_size=1))
     assert legacy.directed_canvas_attention is False
 
 
 def test_nonuniform_window_offsets_control_action_timeline_alignment() -> None:
     tokens = torch.tensor([[[1.0], [2.0], [3.0]]])
-    aligned = _align_milestone_tokens_to_horizon(
-        tokens, 24, boundaries=(4, 12, 24)
-    )
+    aligned = _align_milestone_tokens_to_horizon(tokens, 24, boundaries=(4, 12, 24))
     assert torch.equal(aligned[:, :4], torch.ones(1, 4, 1))
     assert torch.equal(aligned[:, 4:12], torch.full((1, 8, 1), 2.0))
     assert torch.equal(aligned[:, 12:], torch.full((1, 12, 1), 3.0))
@@ -6380,9 +5931,7 @@ def test_flow_dino_modulation_excludes_stage_and_window_feedback() -> None:
         stage_init=visual_context.stage_query,
     )
     time_emb = planner.time(torch.rand(1))
-    base, _, _ = planner._mod_embed(
-        canvas, visual_context.selector_tokens, time_emb, slices
-    )
+    base, _, _ = planner._mod_embed(canvas, visual_context.selector_tokens, time_emb, slices)
     changed = canvas.clone()
     changed[:, slices["stage"]] += 50.0
     changed[:, slices["rollout"]] -= 50.0
@@ -6505,14 +6054,9 @@ def test_goal_and_action_history_condition_the_single_policy_path() -> None:
         action,
         make_counterfactuals=False,
     )
-    assert not torch.allclose(
-        first["pred_physical_velocity"], second["pred_physical_velocity"]
-    )
+    assert not torch.allclose(first["pred_physical_velocity"], second["pred_physical_velocity"])
     assert float(first["flow_jepa_goal_token_count"]) == config.goal_token_count
-    assert (
-        float(first["flow_jepa_action_memory_token_count"])
-        == config.action_history_token_count
-    )
+    assert float(first["flow_jepa_action_memory_token_count"]) == config.action_history_token_count
 
     system.train()
     objective = second["pred_physical_velocity"].float().square().mean()
@@ -6540,9 +6084,7 @@ def test_rdt_tensor_shape_is_accepted_without_external_assets(tmp_path) -> None:
     # A format fixture, not a pretrained embedding or model-quality assertion.
     condition = tmp_path / "rdt_tensor_shape.pt"
     torch.save(torch.linspace(-1, 1, 4096).reshape(1, 4096), condition)
-    tokens, mask, metadata = load_precomputed_t5_condition(
-        condition_path=condition, max_tokens=32
-    )
+    tokens, mask, metadata = load_precomputed_t5_condition(condition_path=condition, max_tokens=32)
     assert tokens.shape == (1, 1, 4096)
     assert mask.shape == (1, 1) and mask.all()
     assert metadata["original_shape"] == [1, 4096]
@@ -6623,19 +6165,13 @@ def test_single_stage_role_optimizer_uses_one_base_lr_for_all_top_blocks() -> No
     parameter_ids = [id(parameter) for group in groups for parameter in group["params"]]
     assert len(parameter_ids) == len(set(parameter_ids))
     covered = set(parameter_ids)
-    trainable = {
-        id(parameter)
-        for parameter in system.parameters()
-        if parameter.requires_grad
-    }
+    trainable = {id(parameter) for parameter in system.parameters() if parameter.requires_grad}
     # V101 adds source-aligned raw fusion and a complete top-policy workspace
     # path.  A positive backward gradient is insufficient if either branch is
     # absent from AdamW, so require exact one-owner coverage of the full
     # single-stage graph.
     assert covered == trainable
-    top_groups = [
-        group for group in groups if str(group["name"]).startswith("dit_block_")
-    ]
+    top_groups = [group for group in groups if str(group["name"]).startswith("dit_block_")]
     assert len(top_groups) == config.depth
     assert all(float(group["lr"]) == trainer.lr for group in top_groups)
     by_name = {str(group["name"]): float(group["lr"]) for group in groups}
@@ -6672,7 +6208,9 @@ def test_v102_late_detail_reader_has_one_base_lr_optimizer_owner() -> None:
     ]
     assert late_parameters
     assert all(id(parameter) in owner for parameter in late_parameters)
-    assert all(owner[id(parameter)] == ("final_policy_heads", trainer.lr) for parameter in late_parameters)
+    assert all(
+        owner[id(parameter)] == ("final_policy_heads", trainer.lr) for parameter in late_parameters
+    )
 
 
 def test_v102_freezes_dormant_legacy_routes_and_optimizer_covers_exact_graph() -> None:
@@ -6708,9 +6246,7 @@ def test_v102_freezes_dormant_legacy_routes_and_optimizer_covers_exact_graph() -
         ),
     )
     covered = [id(parameter) for group in groups for parameter in group["params"]]
-    trainable = [
-        id(parameter) for parameter in system.parameters() if parameter.requires_grad
-    ]
+    trainable = [id(parameter) for parameter in system.parameters() if parameter.requires_grad]
     assert len(covered) == len(set(covered))
     assert set(covered) == set(trainable)
 
@@ -6728,15 +6264,11 @@ def test_v102_fallback_optimizer_owns_late_reader() -> None:
             contract_mode="midcut",
         ),
     )
-    covered = {
-        id(parameter) for group in groups for parameter in group["params"]
-    }
+    covered = {id(parameter) for group in groups for parameter in group["params"]}
     reader = system.planner.late_raw_detail_reader
     assert reader is not None
     assert all(
-        id(parameter) in covered
-        for parameter in reader.parameters()
-        if parameter.requires_grad
+        id(parameter) in covered for parameter in reader.parameters() if parameter.requires_grad
     )
 
 
@@ -6853,9 +6385,7 @@ def test_v115_flags_off_restore_exact_v114_configuration_and_graph() -> None:
     parent_system = V39PolicySystem(parent)
     torch.manual_seed(173)
     disabled_system = V39PolicySystem(disabled)
-    assert tuple(parent_system.state_dict()) == tuple(
-        disabled_system.state_dict()
-    )
+    assert tuple(parent_system.state_dict()) == tuple(disabled_system.state_dict())
     for name, value in parent_system.state_dict().items():
         torch.testing.assert_close(
             value,
@@ -6884,9 +6414,7 @@ def test_v116_flags_off_restore_exact_v115_configuration_and_graph() -> None:
     parent_system = V39PolicySystem(parent)
     torch.manual_seed(419)
     disabled_system = V39PolicySystem(disabled)
-    assert tuple(parent_system.state_dict()) == tuple(
-        disabled_system.state_dict()
-    )
+    assert tuple(parent_system.state_dict()) == tuple(disabled_system.state_dict())
     for name, value in parent_system.state_dict().items():
         torch.testing.assert_close(
             value,
@@ -6909,30 +6437,16 @@ def test_v115_policy_modulation_cannot_reopen_world_rollout() -> None:
     planner = V39PolicySystem(config).planner.eval()
     batch = 1
     canvas, slices = planner.seed(
-        noisy_physical=torch.randn(
-            batch, config.action_horizon, config.physical_action_dim
-        ),
+        noisy_physical=torch.randn(batch, config.action_horizon, config.physical_action_dim),
         state=torch.randn(batch, config.state_dim),
-        state_history=torch.randn(
-            batch, config.visual_history_length, config.state_dim
-        ),
-        executed_history=torch.randn(
-            batch, config.executed_history_length, config.action_dim
-        ),
-        executed_memory=torch.randn(
-            batch, config.action_history_token_count, config.hidden_size
-        ),
-        proposal_tokens=torch.randn(
-            batch, config.action_horizon, config.hidden_size
-        ),
+        state_history=torch.randn(batch, config.visual_history_length, config.state_dim),
+        executed_history=torch.randn(batch, config.executed_history_length, config.action_dim),
+        executed_memory=torch.randn(batch, config.action_history_token_count, config.hidden_size),
+        proposal_tokens=torch.randn(batch, config.action_horizon, config.hidden_size),
         proposal_keep=torch.ones(batch),
-        rollout_init=torch.randn(
-            batch, config.future_token_count, config.hidden_size
-        ),
+        rollout_init=torch.randn(batch, config.future_token_count, config.hidden_size),
         stage_init=None,
-        goal_tokens=torch.randn(
-            batch, config.goal_token_count, config.hidden_size
-        ),
+        goal_tokens=torch.randn(batch, config.goal_token_count, config.hidden_size),
         goal_condition_keep=torch.ones(batch),
         action_history_condition_keep=torch.ones(batch),
     )
@@ -7057,11 +6571,7 @@ def test_new_stage1_loss_is_only_the_direct_flow_jepa_objective() -> None:
         flow_jepa_refinement_sequence_loss_weight=0.02,
     )
     losses = flow_jepa_stage1_losses(output, trainer)
-    contributions = [
-        value
-        for key, value in losses.items()
-        if key.startswith("loss_contrib_")
-    ]
+    contributions = [value for key, value in losses.items() if key.startswith("loss_contrib_")]
     assert torch.allclose(losses["loss"].detach(), torch.stack(contributions).sum())
     assert torch.equal(losses["loss_group_representation"], losses["loss"].detach())
     assert "physical_flow" not in losses
@@ -7143,12 +6653,10 @@ def test_new_stage1_backpropagates_through_goal_action_history_and_flow_dino() -
     assert system.planner.flow_dino_evidence is not None
     assert system.planner.goal_resampler is not None
     assert any(
-        parameter.grad is not None
-        for parameter in system.planner.flow_dino_evidence.parameters()
+        parameter.grad is not None for parameter in system.planner.flow_dino_evidence.parameters()
     )
     assert any(
-        parameter.grad is not None
-        for parameter in system.planner.goal_resampler.parameters()
+        parameter.grad is not None for parameter in system.planner.goal_resampler.parameters()
     )
     assert any(
         parameter.grad is not None
@@ -7207,9 +6715,7 @@ def test_v95_policy_rejects_an_old_or_mismatched_stage1_checkpoint() -> None:
         **payload,
         "policy_config": dict(payload["policy_config"]),
     }
-    legacy_compatible_payload["policy_config"].pop(
-        "flow_jepa_late_policy_detail_scale"
-    )
+    legacy_compatible_payload["policy_config"].pop("flow_jepa_late_policy_detail_scale")
     _validate_flow_jepa_stage1_checkpoint(
         legacy_compatible_payload,
         policy_config=config,
@@ -7280,9 +6786,7 @@ def test_v107_contract_requires_every_top_path_repair() -> None:
         "role_residual_contract_after_gate",
     ):
         with pytest.raises(ValueError, match=field):
-            _validate_complete_v107_model_contract(
-                replace(config, **{field: 0}), trainer
-            )
+            _validate_complete_v107_model_contract(replace(config, **{field: 0}), trainer)
 
 
 def test_v107_policy_soft_lattice_uses_real_independent_glimpses() -> None:
@@ -7292,40 +6796,37 @@ def test_v107_policy_soft_lattice_uses_real_independent_glimpses() -> None:
     assert isinstance(reader.lattice_value_out, torch.nn.ModuleList)
     assert reader.lattice_query_proj is not None
     assert int(reader.lattice_query_proj.out_features) == (
-        int(config.flow_jepa_raw_reader_heads)
-        * int(config.flow_jepa_address_route_dim)
+        int(config.flow_jepa_raw_reader_heads) * int(config.flow_jepa_address_route_dim)
     )
     batch = 2
     cameras = int(config.num_cameras)
     grid = int(config.future_grid_size)
     slots = int(config.flow_jepa_address_slots)
     route = int(config.flow_jepa_address_route_dim)
-    raw_dim = int(config.flow_jepa_raw_base_channels) + int(
-        config.flow_jepa_raw_base_channels
-    ) // 2
+    raw_dim = int(config.flow_jepa_raw_base_channels) + int(config.flow_jepa_raw_base_channels) // 2
     candidates = 5
     fine_values = torch.randn(
-        batch, cameras, grid, grid, slots, candidates, raw_dim,
+        batch,
+        cameras,
+        grid,
+        grid,
+        slots,
+        candidates,
+        raw_dim,
         requires_grad=True,
     )
     bank = SoftAddressLatticeBank(
         coarse_keys=torch.randn(batch, cameras, grid, grid, slots, route),
-        fine_keys=torch.randn(
-            batch, cameras, grid, grid, slots, candidates, route
-        ),
+        fine_keys=torch.randn(batch, cameras, grid, grid, slots, candidates, route),
         fine_values=fine_values,
-        fine_valid=torch.ones(
-            batch, cameras, grid, grid, slots, candidates, dtype=torch.bool
-        ),
+        fine_valid=torch.ones(batch, cameras, grid, grid, slots, candidates, dtype=torch.bool),
         coarse_centers=torch.zeros(batch, cameras, grid, grid, slots, 2),
         coarse_variance=torch.ones(batch, cameras, grid, grid, slots, 2),
         fine_radius=torch.ones(batch, cameras, grid, grid, slots),
     )
     detail_tokens = cameras * grid * grid
     dummy = torch.zeros(batch, detail_tokens, config.hidden_size)
-    detail = LateRawDetailEvidence(
-        selector_tokens=dummy, value_tokens=dummy, address_bank=bank
-    )
+    detail = LateRawDetailEvidence(selector_tokens=dummy, value_tokens=dummy, address_bank=bank)
     trajectory = torch.randn(
         batch,
         config.action_horizon * config.action_basis_tokens,
@@ -7349,9 +6850,7 @@ def test_v107_policy_soft_lattice_uses_real_independent_glimpses() -> None:
     assert int(metrics["flow_jepa_address_policy_glimpse_count"]) == int(
         config.flow_jepa_raw_reader_heads
     )
-    assert float(
-        metrics["flow_jepa_address_policy_glimpse_route_variation"]
-    ) > 0.0
+    assert float(metrics["flow_jepa_address_policy_glimpse_route_variation"]) > 0.0
     (updated - trajectory).float().square().mean().backward()
     assert fine_values.grad is not None
     assert float(fine_values.grad.abs().sum()) > 0.0
@@ -7476,12 +6975,8 @@ def test_v107_horizon_fine_address_retains_target_cell_identity() -> None:
             candidates,
             dtype=torch.bool,
         ),
-        coarse_centers=torch.zeros(
-            batch, config.num_cameras, 2, 2, 1, 2
-        ),
-        coarse_variance=torch.ones(
-            batch, config.num_cameras, 2, 2, 1, 2
-        ),
+        coarse_centers=torch.zeros(batch, config.num_cameras, 2, 2, 1, 2),
+        coarse_variance=torch.ones(batch, config.num_cameras, 2, 2, 1, 2),
         fine_radius=torch.ones(batch, config.num_cameras, 2, 2, 1),
     )
     future = torch.randn(
@@ -7500,8 +6995,10 @@ def test_v107_post_gate_contract_bounds_actual_writes_and_types_interval() -> No
     system = V39PolicySystem(config)
     planner = system.planner
     expected_sources = (
-        config.flow_jepa_world_blocks + 2
-    ) * config.num_cameras * (1 + planner.world_to_policy_far_anchor_count)
+        (config.flow_jepa_world_blocks + 2)
+        * config.num_cameras
+        * (1 + planner.world_to_policy_far_anchor_count)
+    )
     assert planner.world_to_policy_attnres is not None
     assert int(planner.world_to_policy_attnres.max_sources) == expected_sources
 
@@ -7557,9 +7054,7 @@ def test_v107_action_loss_reaches_multi_glimpse_and_typed_interval_path() -> Non
             config.visual_token_dim,
         ),
         raw_visual=_raw_visual(config, batch=batch),
-        goal_language_tokens=torch.randn(
-            batch, 3, config.goal_language_dim
-        ),
+        goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
         goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
         make_counterfactuals=False,
     )
@@ -7660,17 +7155,12 @@ def test_object_intent_preflight_keeps_eval_mode_for_teacher_forced_path(
 
 
 def test_object_intent_dynamics_optimizer_owns_every_new_top_parameter() -> None:
-    system = V39PolicySystem(
-        _complete_object_intent_dynamics_config()
-    ).train()
+    system = V39PolicySystem(_complete_object_intent_dynamics_config()).train()
     groups = _optimizer_groups(system, _complete_v115_trainer())
     _validate_object_optimizer_ownership(system, groups)
     named = {group["name"]: group for group in groups}
     assert "object_intent_dynamics_323_top" in named
-    owned = {
-        id(parameter)
-        for parameter in named["object_intent_dynamics_323_top"]["params"]
-    }
+    owned = {id(parameter) for parameter in named["object_intent_dynamics_323_top"]["params"]}
     for module in (
         system.planner.object_grounder,
         system.planner.object_intent_organizer,
@@ -7680,9 +7170,7 @@ def test_object_intent_dynamics_optimizer_owns_every_new_top_parameter() -> None
     ):
         assert module is not None
         assert all(
-            id(parameter) in owned
-            for parameter in module.parameters()
-            if parameter.requires_grad
+            id(parameter) in owned for parameter in module.parameters() if parameter.requires_grad
         )
 
     # Legacy contract towers are neither an auxiliary objective nor a decoder
@@ -7692,18 +7180,11 @@ def test_object_intent_dynamics_optimizer_owns_every_new_top_parameter() -> None
     assert system.planner.layer_fm_probe is None
     assert system.planner.layer_consequence_cell is None
     assert not system.planner.terminal_policy_layer_contracts_only
+    assert not any(parameter.requires_grad for parameter in system.planner.midcut_norm.parameters())
     assert not any(
-        parameter.requires_grad
-        for parameter in system.planner.midcut_norm.parameters()
+        parameter.requires_grad for parameter in system.planner.midcut_heads.parameters()
     )
-    assert not any(
-        parameter.requires_grad
-        for parameter in system.planner.midcut_heads.parameters()
-    )
-    assert any(
-        parameter.requires_grad
-        for parameter in system.planner.event_probe.parameters()
-    )
+    assert any(parameter.requires_grad for parameter in system.planner.event_probe.parameters())
 
 
 def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
@@ -7723,12 +7204,8 @@ def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
     batch = 1
     visual = _visual(config, batch=batch)
     raw_visual = _raw_visual(config, batch=batch, side=32)
-    state_history = torch.randn(
-        batch, config.visual_history_length, config.state_dim
-    )
-    executed = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    state_history = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
     action = torch.randn(batch, config.action_horizon, config.action_dim)
     future_length = 48
@@ -7767,9 +7244,7 @@ def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
             proposal["tokens"],
             torch.ones(batch),
             executed_memory=proposal["history_tokens"],
-            goal_language_tokens=torch.randn(
-                batch, 5, config.goal_language_dim
-            ),
+            goal_language_tokens=torch.randn(batch, 5, config.goal_language_dim),
             goal_language_mask=torch.ones(batch, 5, dtype=torch.bool),
             future_training_pack=teacher_pack,
         )
@@ -7791,9 +7266,7 @@ def test_object_intent_dynamics_full_system_connects_teacher_w_and_p() -> None:
             raw_visual=raw_visual,
             target_visual=target_visual,
             future_training_pack=teacher_pack,
-            goal_language_tokens=torch.randn(
-                batch, 5, config.goal_language_dim
-            ),
+            goal_language_tokens=torch.randn(batch, 5, config.goal_language_dim),
             goal_language_mask=torch.ones(batch, 5, dtype=torch.bool),
             training_noise=system.codec.encode(torch.randn_like(action), state),
             training_time=torch.ones(batch),
@@ -7906,12 +7379,8 @@ def test_object_future_teacher_changes_targets_but_not_online_action() -> None:
     batch = 1
     visual = _visual(config, batch=batch)
     raw_visual = _raw_visual(config, batch=batch, side=32)
-    state_history = torch.randn(
-        batch, config.visual_history_length, config.state_dim
-    )
-    executed = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    state_history = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
     action = torch.randn(batch, config.action_horizon, config.action_dim)
     future_action = torch.randn(batch, 48, config.action_dim)
@@ -7972,9 +7441,7 @@ def test_object_future_teacher_changes_targets_but_not_online_action() -> None:
         "pred_physical_velocity",
         "pred_action_estimate",
     ):
-        torch.testing.assert_close(
-            output_a[name], output_b[name], atol=0.0, rtol=0.0
-        )
+        torch.testing.assert_close(output_a[name], output_b[name], atol=0.0, rtol=0.0)
 
 
 def test_object_intent_dynamics_five_step_deploy_reuses_static_top_without_teacher() -> None:
@@ -8101,9 +7568,7 @@ def test_v114_contract_launcher_and_v113_flag_off_ancestry() -> None:
     assert _validate_required_model_contract("v114", config, trainer) == "v114"
     v113 = replace(config, flow_jepa_utility_precision_mainline=0)
     _validate_complete_v113_model_contract(v113, trainer)
-    with pytest.raises(
-        ValueError, match="flow_jepa_utility_precision_mainline"
-    ):
+    with pytest.raises(ValueError, match="flow_jepa_utility_precision_mainline"):
         _validate_complete_v114_model_contract(v113, trainer)
     launcher = (
         Path(__file__).resolve().parents[1]
@@ -8111,8 +7576,7 @@ def test_v114_contract_launcher_and_v113_flag_off_ancestry() -> None:
         / "current_v114_shared_factual_utility_precision.sh"
     ).read_text(encoding="utf-8")
     assert (
-        'CLEARVLA_REQUIRED_MODEL_CONTRACT="${CLEARVLA_REQUIRED_MODEL_CONTRACT:-v114}"'
-        in launcher
+        'CLEARVLA_REQUIRED_MODEL_CONTRACT="${CLEARVLA_REQUIRED_MODEL_CONTRACT:-v114}"' in launcher
     )
     assert "V114_BATCH_SIZE:-8" in launcher
     assert "--flow-jepa-utility-precision-mainline 1" in launcher
@@ -8124,9 +7588,7 @@ def test_v114_contract_launcher_and_v113_flag_off_ancestry() -> None:
 
 def test_v114_utility_refiner_preserves_exact_facts_and_natural_gradients() -> None:
     torch.manual_seed(401)
-    refiner = _UtilityPrecisionLocalRefiner(
-        width=16, raw_dim=12, route_dim=8, depth=2
-    ).train()
+    refiner = _UtilityPrecisionLocalRefiner(width=16, raw_dim=12, route_dim=8, depth=2).train()
     contexts = {
         "query": torch.randn(3, 1, 8),
         "semantic": torch.randn(3, 1, 8),
@@ -8152,12 +7614,8 @@ def test_v114_utility_refiner_preserves_exact_facts_and_natural_gradients() -> N
         coordinates=coordinates,
         **contexts,
     )
-    assert (
-        float(metrics["flow_jepa_typed_p1_rgb_reconstruction_error"]) <= 2e-7
-    )
-    assert (
-        float(metrics["flow_jepa_typed_p1_detail_reconstruction_error"]) <= 2e-7
-    )
+    assert float(metrics["flow_jepa_typed_p1_rgb_reconstruction_error"]) <= 2e-7
+    assert float(metrics["flow_jepa_typed_p1_detail_reconstruction_error"]) <= 2e-7
     for mode in (
         "p2_rgb_precision_zero",
         "p2_rgb_precision_spatial_shuffle",
@@ -8208,9 +7666,7 @@ def test_v114_world_factual_chart_cannot_read_noisy_trajectory() -> None:
         cursor += int(length)
     canvas = torch.randn(2, cursor, config.hidden_size)
     changed = canvas.clone()
-    changed[:, slices["trajectory"]] = torch.randn_like(
-        changed[:, slices["trajectory"]]
-    ) * 7.0
+    changed[:, slices["trajectory"]] = torch.randn_like(changed[:, slices["trajectory"]]) * 7.0
     visual = torch.randn(2, 7, config.hidden_size)
     mod = torch.randn(2, config.hidden_size)
     baseline, _ = block(canvas, visual, mod, slices)
@@ -8250,12 +7706,8 @@ def test_v114_grounding_stage_cannot_bypass_factual_action_mask() -> None:
         cursor += int(length)
     canvas = torch.randn(2, cursor, config.hidden_size)
     changed = canvas.clone()
-    changed[:, slices["trajectory"]] = torch.randn_like(
-        changed[:, slices["trajectory"]]
-    ) * 7.0
-    changed[:, slices["proposal"]] = torch.randn_like(
-        changed[:, slices["proposal"]]
-    ) * 5.0
+    changed[:, slices["trajectory"]] = torch.randn_like(changed[:, slices["trajectory"]]) * 7.0
+    changed[:, slices["proposal"]] = torch.randn_like(changed[:, slices["proposal"]]) * 5.0
     visual = torch.randn(2, 7, config.hidden_size)
     mod = torch.randn(2, config.hidden_size)
     baseline, _ = block(canvas, visual, mod, slices)
@@ -8307,9 +7759,7 @@ def test_v114_tiled_microgrid_matches_ancestry_contraction_and_gradients() -> No
         ancestry_loss, (route_logits, fine_logits), retain_graph=True
     )
     tiled_loss = sum(value.square().mean() for value in tiled)
-    tiled_grad = torch.autograd.grad(
-        tiled_loss, (route_logits, fine_logits)
-    )
+    tiled_grad = torch.autograd.grad(tiled_loss, (route_logits, fine_logits))
     for expected, actual in zip(ancestry_grad, tiled_grad):
         torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
 
@@ -8328,25 +7778,17 @@ def test_v114_full_action_path_uses_24_factual_and_96_basis_queries() -> None:
     )
     system = V39PolicySystem(config).train()
     optimizer_groups = _optimizer_groups(system, _complete_v113_trainer())
-    grouped_ids = [
-        id(parameter)
-        for group in optimizer_groups
-        for parameter in group["params"]
-    ]
+    grouped_ids = [id(parameter) for group in optimizer_groups for parameter in group["params"]]
     assert len(grouped_ids) == len(set(grouped_ids))
-    assert {
-        id(parameter)
-        for parameter in system.parameters()
-        if parameter.requires_grad
-    } == set(grouped_ids)
+    assert {id(parameter) for parameter in system.parameters() if parameter.requires_grad} == set(
+        grouped_ids
+    )
     batch = 1
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         output = system.flow_training_forward(
             _visual(config, batch=batch),
             torch.randn(batch, config.visual_history_length, config.state_dim),
-            torch.randn(
-                batch, config.executed_history_length, config.action_dim
-            ),
+            torch.randn(batch, config.executed_history_length, config.action_dim),
             torch.randn(batch, config.state_dim),
             torch.randn(batch, config.action_horizon, config.action_dim),
             target_visual=torch.randn(
@@ -8362,9 +7804,7 @@ def test_v114_full_action_path_uses_24_factual_and_96_basis_queries() -> None:
             # legitimately unidentifiable. Use the smallest non-degenerate
             # pyramid when asserting its backward path.
             raw_visual=_raw_visual(config, batch=batch, side=48),
-            goal_language_tokens=torch.randn(
-                batch, 3, config.goal_language_dim
-            ),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
             goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
             make_counterfactuals=False,
         )
@@ -8377,16 +7817,13 @@ def test_v114_full_action_path_uses_24_factual_and_96_basis_queries() -> None:
     assert float(output["flow_jepa_typed_p1_activation_checkpoint"]) == 1.0
     # The B1 functional test stays below the V114 checkpoint threshold; the
     # metric must report actual execution separately from the configured flag.
-    assert (
-        float(output["flow_jepa_typed_p1_activation_checkpoint_active"]) == 0.0
-    )
+    assert float(output["flow_jepa_typed_p1_activation_checkpoint_active"]) == 0.0
     assert float(output["flow_jepa_address_query_chunk_actual"]) == 24.0
     output["pred_physical_velocity"].float().square().mean().backward()
     reader = system.planner.late_raw_detail_reader
     assert reader is not None
     assert not any(
-        parameter.requires_grad
-        for parameter in reader.typed_fine_query["semantic"].parameters()
+        parameter.requires_grad for parameter in reader.typed_fine_query["semantic"].parameters()
     )
     for parameter_name, parameter in (
         ("shared_p1_basis_key", reader.shared_p1_basis_key.weight),
@@ -8421,9 +7858,7 @@ def test_v115_shared_factual_bank_cross_reads_once_and_has_action_gradients() ->
         output = system.flow_training_forward(
             _visual(config, batch=batch),
             torch.randn(batch, config.visual_history_length, config.state_dim),
-            torch.randn(
-                batch, config.executed_history_length, config.action_dim
-            ),
+            torch.randn(batch, config.executed_history_length, config.action_dim),
             torch.randn(batch, config.state_dim),
             torch.randn(batch, config.action_horizon, config.action_dim),
             target_visual=torch.randn(
@@ -8435,9 +7870,7 @@ def test_v115_shared_factual_bank_cross_reads_once_and_has_action_gradients() ->
                 config.visual_token_dim,
             ),
             raw_visual=_raw_visual(config, batch=batch, side=32),
-            goal_language_tokens=torch.randn(
-                batch, 3, config.goal_language_dim
-            ),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
             goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
             make_counterfactuals=False,
         )
@@ -8447,9 +7880,7 @@ def test_v115_shared_factual_bank_cross_reads_once_and_has_action_gradients() ->
     )
     assert float(output["flow_jepa_shared_factual_glimpse_bank"]) == 1.0
     assert torch.isfinite(output["flow_jepa_p2_factual_cross_entropy"])
-    assert torch.isfinite(
-        output["flow_jepa_p2_factual_cross_basis_variation"]
-    )
+    assert torch.isfinite(output["flow_jepa_p2_factual_cross_basis_variation"])
     output["pred_physical_velocity"].float().square().mean().backward()
     reader = system.planner.late_raw_detail_reader
     assert reader is not None
@@ -8486,16 +7917,17 @@ def test_v115_teacher_dispersion_matches_materialized_reference() -> None:
         association,
         support,
     )
-    expected = torch.einsum(
-        "bscijmuv,bscijmuv->bscijm",
-        association,
-        (
-            support[:, :, :, None, None, None]
-            - matched[..., None, None, :]
+    expected = (
+        torch.einsum(
+            "bscijmuv,bscijmuv->bscijm",
+            association,
+            (support[:, :, :, None, None, None] - matched[..., None, None, :])
+            .square()
+            .mean(dim=-1),
         )
-        .square()
-        .mean(dim=-1),
-    ).clamp_min(0.0).sqrt()
+        .clamp_min(0.0)
+        .sqrt()
+    )
     actual = encoder._teacher_weighted_feature_dispersion(
         association,
         support,
@@ -8550,9 +7982,7 @@ def test_v115_g_aligned_teacher_is_loss_only_and_preserves_slot_tracks() -> None
     arguments = (
         _visual(config, batch=batch),
         torch.randn(batch, config.visual_history_length, config.state_dim),
-        torch.randn(
-            batch, config.executed_history_length, config.action_dim
-        ),
+        torch.randn(batch, config.executed_history_length, config.action_dim),
         torch.randn(batch, config.state_dim),
         torch.randn(batch, config.action_horizon, config.action_dim),
     )
@@ -8566,9 +7996,7 @@ def test_v115_g_aligned_teacher_is_loss_only_and_preserves_slot_tracks() -> None
     )
     keywords = {
         "raw_visual": _raw_visual(config, batch=batch, side=32),
-        "goal_language_tokens": torch.randn(
-            batch, 3, config.goal_language_dim
-        ),
+        "goal_language_tokens": torch.randn(batch, 3, config.goal_language_dim),
         "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
         "make_counterfactuals": False,
     }
@@ -8593,17 +8021,9 @@ def test_v115_g_aligned_teacher_is_loss_only_and_preserves_slot_tracks() -> None
         atol=0.0,
     )
     assert float(baseline["flow_jepa_g_aligned_future_teacher"]) == 1.0
-    assert (
-        float(baseline["flow_jepa_teacher_g_builds_this_pack"])
-        == 1.0
-    )
-    assert (
-        float(baseline["flow_jepa_g_aligned_teacher_used_completed_g3"])
-        == 1.0
-    )
-    slot_target = baseline[
-        "flow_jepa_future_effect_semantic_target_slots"
-    ]
+    assert float(baseline["flow_jepa_teacher_g_builds_this_pack"]) == 1.0
+    assert float(baseline["flow_jepa_g_aligned_teacher_used_completed_g3"]) == 1.0
+    slot_target = baseline["flow_jepa_future_effect_semantic_target_slots"]
     assert tuple(slot_target.shape) == (
         batch,
         config.future_anchors,
@@ -8619,21 +8039,13 @@ def test_v115_g_aligned_teacher_is_loss_only_and_preserves_slot_tracks() -> None
         slot_target,
         replaced["flow_jepa_future_effect_semantic_target_slots"],
     )
-    assert torch.isfinite(
-        baseline["flow_jepa_future_association_entropy"]
-    ).all()
-    assert torch.is_tensor(
-        baseline["flow_jepa_future_effect_transport_pred_slots"]
-    )
+    assert torch.isfinite(baseline["flow_jepa_future_association_entropy"]).all()
+    assert torch.is_tensor(baseline["flow_jepa_future_effect_transport_pred_slots"])
     predicted_covariance = baseline[
         "flow_jepa_future_effect_transport_covariance_pred_slots"
     ].float()
-    predicted_uncertainty = baseline[
-        "flow_jepa_future_effect_uncertainty_pred_slots"
-    ].float()
-    target_uncertainty = baseline[
-        "flow_jepa_future_effect_uncertainty_target_slots"
-    ].float()
+    predicted_uncertainty = baseline["flow_jepa_future_effect_uncertainty_pred_slots"].float()
+    target_uncertainty = baseline["flow_jepa_future_effect_uncertainty_target_slots"].float()
     assert bool((predicted_covariance[..., :2] >= 0.01).all())
     assert bool((predicted_covariance[..., :2] <= 1.0).all())
     assert bool((predicted_uncertainty >= 0.05).all())
@@ -8641,42 +8053,31 @@ def test_v115_g_aligned_teacher_is_loss_only_and_preserves_slot_tracks() -> None
     assert bool((target_uncertainty >= 0.0).all())
     assert bool((target_uncertainty <= 4.0).all())
     interval_terms = flow_jepa_interval_stage_terms(baseline)
-    assert (
-        float(interval_terms["flow_jepa_future_effect_supervision_active"])
-        == 1.0
-    )
+    assert float(interval_terms["flow_jepa_future_effect_supervision_active"]) == 1.0
     encoder = system.planner.flow_dino_evidence
     assert encoder is not None
     assert encoder.teacher_g_semantic_projection is not None
     system.eval()
     with torch.no_grad():
-        for parameter in (
-            encoder.teacher_g_semantic_projection.parameters()
-        ):
+        for parameter in encoder.teacher_g_semantic_projection.parameters():
             parameter.zero_()
-        with torch.autocast(
-            device_type="cpu", dtype=torch.bfloat16
-        ):
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
             no_semantic_match = system.flow_training_forward(
                 *arguments,
                 target_visual=target,
                 **keywords,
             )
-    assert torch.count_nonzero(
-        no_semantic_match[
-            "flow_jepa_future_effect_reliability_target_slots"
-        ]
-    ) == 0
-    assert torch.count_nonzero(
-        no_semantic_match[
-            "flow_jepa_future_effect_semantic_target_slots"
-        ]
-    ) == 0
-    assert torch.count_nonzero(
-        no_semantic_match[
-            "flow_jepa_future_effect_transport_target_slots"
-        ]
-    ) == 0
+    assert (
+        torch.count_nonzero(no_semantic_match["flow_jepa_future_effect_reliability_target_slots"])
+        == 0
+    )
+    assert (
+        torch.count_nonzero(no_semantic_match["flow_jepa_future_effect_semantic_target_slots"]) == 0
+    )
+    assert (
+        torch.count_nonzero(no_semantic_match["flow_jepa_future_effect_transport_target_slots"])
+        == 0
+    )
     system.train()
     organizer = system.planner.flow_dino_evidence.progressive_grounding_address
     assert organizer is not None
@@ -8694,11 +8095,7 @@ def test_v115_g_aligned_teacher_is_loss_only_and_preserves_slot_tracks() -> None
         organizer.future_effect_geometry,
     ):
         assert module is not None
-        gradients = [
-            parameter.grad
-            for parameter in module.parameters()
-            if parameter.requires_grad
-        ]
+        gradients = [parameter.grad for parameter in module.parameters() if parameter.requires_grad]
         assert gradients
         assert all(gradient is not None for gradient in gradients)
         assert all(torch.isfinite(gradient).all() for gradient in gradients)
@@ -8732,16 +8129,11 @@ def test_v115_goal_phase_machine_replays_observable_monotone_program() -> None:
         atol=1e-5,
     )
     assert float(metrics["flow_jepa_goal_phase_machine_active"]) == 1.0
-    assert (
-        float(metrics["flow_jepa_phase_program_grounding_variation"])
-        > 0.0
-    )
+    assert float(metrics["flow_jepa_phase_program_grounding_variation"]) > 0.0
     changed, _ = machine(
         **{
             **inputs,
-            "history_tokens": inputs["history_tokens"].roll(
-                shifts=1, dims=0
-            ),
+            "history_tokens": inputs["history_tokens"].roll(shifts=1, dims=0),
         }
     )
     assert not torch.equal(state.phase_belief, changed.phase_belief)
@@ -8776,16 +8168,10 @@ def test_v115_grounding_and_world_effect_are_diffusion_time_free() -> None:
     system = V39PolicySystem(config).eval()
     batch = 1
     visual = _visual(config, batch=batch)
-    state_history = torch.randn(
-        batch, config.visual_history_length, config.state_dim
-    )
-    executed_history = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    state_history = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed_history = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
-    target_action = torch.randn(
-        batch, config.action_horizon, config.action_dim
-    )
+    target_action = torch.randn(batch, config.action_horizon, config.action_dim)
     target_visual = torch.randn(
         batch,
         len(config.flow_jepa_effective_interval_support_offsets),
@@ -8802,17 +8188,13 @@ def test_v115_grounding_and_world_effect_are_diffusion_time_free() -> None:
     keywords = {
         "target_visual": target_visual,
         "raw_visual": _raw_visual(config, batch=batch, side=32),
-        "goal_language_tokens": torch.randn(
-            batch, 3, config.goal_language_dim
-        ),
+        "goal_language_tokens": torch.randn(batch, 3, config.goal_language_dim),
         "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
         "training_noise": training_noise,
         "proposal_keep": torch.ones(batch),
         "make_counterfactuals": False,
     }
-    with torch.no_grad(), torch.autocast(
-        device_type="cpu", dtype=torch.bfloat16
-    ):
+    with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         early = system.flow_training_forward(
             visual,
             state_history,
@@ -8831,9 +8213,7 @@ def test_v115_grounding_and_world_effect_are_diffusion_time_free() -> None:
             training_time=torch.full((batch,), 0.8),
             **keywords,
         )
-        system.planner.set_action_path_eval_intervention(
-            "world_residual_zero"
-        )
+        system.planner.set_action_path_eval_intervention("world_residual_zero")
         world_zero = system.flow_training_forward(
             visual,
             state_history,
@@ -8843,13 +8223,9 @@ def test_v115_grounding_and_world_effect_are_diffusion_time_free() -> None:
             training_time=torch.full((batch,), 0.2),
             **keywords,
         )
-        intervention_state = (
-            system.planner.action_path_eval_intervention_state()
-        )
+        intervention_state = system.planner.action_path_eval_intervention_state()
         system.planner.clear_action_path_eval_intervention()
-        system.planner.set_action_path_eval_intervention(
-            "future_effect_zero"
-        )
+        system.planner.set_action_path_eval_intervention("future_effect_zero")
         effect_zero = system.flow_training_forward(
             visual,
             state_history,
@@ -8859,9 +8235,7 @@ def test_v115_grounding_and_world_effect_are_diffusion_time_free() -> None:
             training_time=torch.full((batch,), 0.2),
             **keywords,
         )
-        effect_intervention_state = (
-            system.planner.action_path_eval_intervention_state()
-        )
+        effect_intervention_state = system.planner.action_path_eval_intervention_state()
         system.planner.clear_action_path_eval_intervention()
     torch.testing.assert_close(
         early["flow_jepa_future_effect_semantic_pred_slots"],
@@ -8885,14 +8259,7 @@ def test_v115_grounding_and_world_effect_are_diffusion_time_free() -> None:
         effect_zero["pred_physical_velocity"],
     )
     assert int(effect_intervention_state["apply_count"]) == 1
-    assert (
-        float(
-            effect_intervention_state[
-                "future_effect_boundary_delta_norm"
-            ]
-        )
-        > 0.0
-    )
+    assert float(effect_intervention_state["future_effect_boundary_delta_norm"]) > 0.0
 
 
 def test_v115_w_intervention_cannot_readdress_p1_current_facts() -> None:
@@ -8914,9 +8281,7 @@ def test_v115_w_intervention_cannot_readdress_p1_current_facts() -> None:
     inputs = (
         _visual(config, batch=batch),
         torch.randn(batch, config.visual_history_length, config.state_dim),
-        torch.randn(
-            batch, config.executed_history_length, config.action_dim
-        ),
+        torch.randn(batch, config.executed_history_length, config.action_dim),
         torch.randn(batch, config.state_dim),
         torch.randn(batch, config.action_horizon, config.action_dim),
     )
@@ -8930,9 +8295,7 @@ def test_v115_w_intervention_cannot_readdress_p1_current_facts() -> None:
             config.visual_token_dim,
         ),
         "raw_visual": _raw_visual(config, batch=batch, side=32),
-        "goal_language_tokens": torch.randn(
-            batch, 3, config.goal_language_dim
-        ),
+        "goal_language_tokens": torch.randn(batch, 3, config.goal_language_dim),
         "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
         "training_noise": torch.randn(
             batch,
@@ -8950,9 +8313,7 @@ def test_v115_w_intervention_cannot_readdress_p1_current_facts() -> None:
             system.planner.set_action_path_eval_intervention(action_mode)
         reader.set_address_eval_intervention("none")
         try:
-            with torch.no_grad(), torch.autocast(
-                device_type="cpu", dtype=torch.bfloat16
-            ):
+            with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16):
                 output = system.flow_training_forward(*inputs, **keywords)
             return output, reader.address_eval_intervention_state()
         finally:
@@ -8993,13 +8354,9 @@ def test_v115_complete_323_mainline_has_typed_p3_action_gradients() -> None:
     )
     trainer = _complete_v115_trainer()
     _validate_complete_v115_model_contract(config, trainer)
-    assert _validate_required_model_contract(
-        "v115", config, trainer
-    ) == "v115"
+    assert _validate_required_model_contract("v115", config, trainer) == "v115"
     launcher = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "current_v115_g_aligned_goal_phase_323.sh"
+        Path(__file__).resolve().parents[1] / "scripts" / "current_v115_g_aligned_goal_phase_323.sh"
     ).read_text(encoding="utf-8")
     for expected in (
         "CLEARVLA_REQUIRED_MODEL_CONTRACT=v115",
@@ -9025,10 +8382,7 @@ def test_v115_complete_323_mainline_has_typed_p3_action_gradients() -> None:
         "policy",
         "policy",
     )
-    assert not any(
-        parameter.requires_grad
-        for parameter in system.planner.blocks[-1].parameters()
-    )
+    assert not any(parameter.requires_grad for parameter in system.planner.blocks[-1].parameters())
     assert not any(
         parameter.requires_grad
         for parameter in system.planner.layer_contract_heads[-1].parameters()
@@ -9036,13 +8390,9 @@ def test_v115_complete_323_mainline_has_typed_p3_action_gradients() -> None:
     assert system.planner.flow_dino_evidence is not None
     assert not any(
         parameter.requires_grad
-        for parameter in (
-            system.planner.flow_dino_evidence.future_prediction.parameters()
-        )
+        for parameter in (system.planner.flow_dino_evidence.future_prediction.parameters())
     )
-    organizer = (
-        system.planner.flow_dino_evidence.progressive_grounding_address
-    )
+    organizer = system.planner.flow_dino_evidence.progressive_grounding_address
     assert organizer is not None
     assert organizer.world_owner_transitions is not None
     assert organizer.world_owner_route_attnres is not None
@@ -9055,29 +8405,17 @@ def test_v115_complete_323_mainline_has_typed_p3_action_gradients() -> None:
     assert organizer.world_typed_query is not None
     assert organizer.future_transport is not None
     assert not any(
-        parameter.requires_grad
-        for parameter in organizer.world_typed_query.parameters()
+        parameter.requires_grad for parameter in organizer.world_typed_query.parameters()
     )
-    assert not any(
-        parameter.requires_grad
-        for parameter in organizer.future_transport.parameters()
-    )
+    assert not any(parameter.requires_grad for parameter in organizer.future_transport.parameters())
     assert system.planner.horizon_typed_context_router is not None
     assert len(system.planner.horizon_typed_context_router) == 3
     assert system.planner.horizon_typed_context_query is not None
     optimizer_groups = _optimizer_groups(system, trainer)
-    grouped_id_list = [
-        id(parameter)
-        for group in optimizer_groups
-        for parameter in group["params"]
-    ]
+    grouped_id_list = [id(parameter) for group in optimizer_groups for parameter in group["params"]]
     assert len(grouped_id_list) == len(set(grouped_id_list))
     grouped_ids = set(grouped_id_list)
-    trainable_ids = {
-        id(parameter)
-        for parameter in system.parameters()
-        if parameter.requires_grad
-    }
+    trainable_ids = {id(parameter) for parameter in system.parameters() if parameter.requires_grad}
     assert grouped_ids == trainable_ids
     parameter_owner = {
         id(parameter): (str(group["name"]), float(group["lr"]))
@@ -9088,16 +8426,12 @@ def test_v115_complete_323_mainline_has_typed_p3_action_gradients() -> None:
     assert system.planner.policy_plan_compiler is not None
     assert {
         parameter_owner[id(parameter)][0]
-        for parameter in (
-            system.planner.stateless_goal_phase_machine.parameters()
-        )
+        for parameter in (system.planner.stateless_goal_phase_machine.parameters())
         if parameter.requires_grad
     } == {"single_stage_shared_input"}
     assert {
         parameter_owner[id(parameter)][1]
-        for parameter in (
-            system.planner.stateless_goal_phase_machine.parameters()
-        )
+        for parameter in (system.planner.stateless_goal_phase_machine.parameters())
         if parameter.requires_grad
     } == {trainer.lr}
     assert {
@@ -9110,18 +8444,14 @@ def test_v115_complete_323_mainline_has_typed_p3_action_gradients() -> None:
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         output = system.flow_training_forward(
             _visual(config, batch=batch),
-            torch.randn(
-                batch, config.visual_history_length, config.state_dim
-            ),
+            torch.randn(batch, config.visual_history_length, config.state_dim),
             torch.randn(
                 batch,
                 config.executed_history_length,
                 config.action_dim,
             ),
             torch.randn(batch, config.state_dim),
-            torch.randn(
-                batch, config.action_horizon, config.action_dim
-            ),
+            torch.randn(batch, config.action_horizon, config.action_dim),
             target_visual=torch.randn(
                 batch,
                 len(config.flow_jepa_effective_interval_support_offsets),
@@ -9131,12 +8461,8 @@ def test_v115_complete_323_mainline_has_typed_p3_action_gradients() -> None:
                 config.visual_token_dim,
             ),
             raw_visual=_raw_visual(config, batch=batch, side=32),
-            goal_language_tokens=torch.randn(
-                batch, 3, config.goal_language_dim
-            ),
-            goal_language_mask=torch.ones(
-                batch, 3, dtype=torch.bool
-            ),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
+            goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
             make_counterfactuals=False,
         )
     assert float(output["flow_jepa_goal_phase_machine_active"]) == 1.0
@@ -9146,9 +8472,7 @@ def test_v115_complete_323_mainline_has_typed_p3_action_gradients() -> None:
     for depth in range(3):
         typed_condition_mass = torch.stack(
             [
-                output[
-                    f"flow_jepa_w{depth}_typed_condition_{name}_mass"
-                ]
+                output[f"flow_jepa_w{depth}_typed_condition_{name}_mass"]
                 for name in ("phase", "goal", "history")
             ]
         )
@@ -9159,35 +8483,20 @@ def test_v115_complete_323_mainline_has_typed_p3_action_gradients() -> None:
         output["flow_jepa_interval_progress_pred"],
     )
     interval_terms = flow_jepa_interval_stage_terms(output)
-    assert float(
-        interval_terms["flow_jepa_future_effect_supervision_active"]
-    ) == 1.0
-    assert torch.isfinite(
-        interval_terms["flow_jepa_future_effect_semantic_loss"]
-    )
+    assert float(interval_terms["flow_jepa_future_effect_supervision_active"]) == 1.0
+    assert torch.isfinite(interval_terms["flow_jepa_future_effect_semantic_loss"])
     assert tuple(output["flow_jepa_goal_phase_belief"].shape) == (batch, 5)
     world_route_keys = {
-        key
-        for key in output
-        if key.startswith("attnres_world_to_policy_source_mass_")
+        key for key in output if key.startswith("attnres_world_to_policy_source_mass_")
     }
-    assert any(
-        "grounding_entry_" in key for key in world_route_keys
-    )
-    assert any(
-        "functional_owner_boundary_" in key for key in world_route_keys
-    )
-    assert not any(
-        any(f"_w{depth}_" in key for depth in (1, 2, 3))
-        for key in world_route_keys
-    )
+    assert any("grounding_entry_" in key for key in world_route_keys)
+    assert any("functional_owner_boundary_" in key for key in world_route_keys)
+    assert not any(any(f"_w{depth}_" in key for depth in (1, 2, 3)) for key in world_route_keys)
     lanes = [
         output[f"flow_jepa_policy_plan_{name}"]
         for name in ("precision", "effect", "temporal", "terminal")
     ]
-    protected_plan_base = output[
-        "flow_jepa_policy_plan_protected_base"
-    ]
+    protected_plan_base = output["flow_jepa_policy_plan_protected_base"]
     assert all(
         tuple(value.shape)
         == (
@@ -9239,12 +8548,8 @@ def test_v115_p3_typed_lane_interventions_apply_at_the_plan_boundary() -> None:
     batch = 1
     arguments = (
         _visual(config, batch=batch),
-        torch.randn(
-            batch, config.visual_history_length, config.state_dim
-        ),
-        torch.randn(
-            batch, config.executed_history_length, config.action_dim
-        ),
+        torch.randn(batch, config.visual_history_length, config.state_dim),
+        torch.randn(batch, config.executed_history_length, config.action_dim),
         torch.randn(batch, config.state_dim),
         torch.randn(batch, config.action_horizon, config.action_dim),
     )
@@ -9258,12 +8563,8 @@ def test_v115_p3_typed_lane_interventions_apply_at_the_plan_boundary() -> None:
             config.visual_token_dim,
         ),
         "raw_visual": _raw_visual(config, batch=batch, side=32),
-        "goal_language_tokens": torch.randn(
-            batch, 3, config.goal_language_dim
-        ),
-        "goal_language_mask": torch.ones(
-            batch, 3, dtype=torch.bool
-        ),
+        "goal_language_tokens": torch.randn(batch, 3, config.goal_language_dim),
+        "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
         "training_noise": torch.randn(
             batch,
             config.action_horizon,
@@ -9273,37 +8574,25 @@ def test_v115_p3_typed_lane_interventions_apply_at_the_plan_boundary() -> None:
         "make_counterfactuals": False,
     }
     lane_names = ("precision", "effect", "temporal", "terminal")
-    with torch.no_grad(), torch.autocast(
-        device_type="cpu", dtype=torch.bfloat16
-    ):
+    with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         baseline = system.flow_training_forward(
             *arguments,
             training_time=torch.full((batch,), 0.4),
             **keywords,
         )
         baseline_lane_norms = {
-            lane: float(
-                baseline[f"flow_jepa_policy_plan_{lane}"]
-                .float()
-                .norm()
-            )
+            lane: float(baseline[f"flow_jepa_policy_plan_{lane}"].float().norm())
             for lane in lane_names
         }
-        assert all(value > 0.0 for value in baseline_lane_norms.values()), (
-            baseline_lane_norms
-        )
+        assert all(value > 0.0 for value in baseline_lane_norms.values()), baseline_lane_norms
         for lane in lane_names:
-            system.planner.set_action_path_eval_intervention(
-                f"p3_{lane}_zero"
-            )
+            system.planner.set_action_path_eval_intervention(f"p3_{lane}_zero")
             intervened = system.flow_training_forward(
                 *arguments,
                 training_time=torch.full((batch,), 0.4),
                 **keywords,
             )
-            state = (
-                system.planner.action_path_eval_intervention_state()
-            )
+            state = system.planner.action_path_eval_intervention_state()
             system.planner.clear_action_path_eval_intervention()
             assert int(state["apply_count"]) == 1
             assert float(state[f"p3_{lane}_delta_norm"]) > 0.0
@@ -9358,9 +8647,7 @@ def test_v115_complete_bfloat16_total_loss_has_no_dead_trainable_owner(
     decoder.set_execution_training_step(2000)
     batch = 1
     state = torch.randn(batch, config.state_dim)
-    target_action = torch.randn(
-        batch, config.action_horizon, config.action_dim
-    )
+    target_action = torch.randn(batch, config.action_horizon, config.action_dim)
     sample = {
         "policy_action": target_action,
         "policy_action_raw": target_action,
@@ -9385,20 +8672,14 @@ def test_v115_complete_bfloat16_total_loss_has_no_dead_trainable_owner(
             raw_visual=_raw_visual(config, batch=batch, side=32),
             target_visual=torch.randn(
                 batch,
-                len(
-                    config.flow_jepa_effective_interval_support_offsets
-                ),
+                len(config.flow_jepa_effective_interval_support_offsets),
                 config.visual_history_length,
                 config.num_cameras,
                 config.patches_per_camera,
                 config.visual_token_dim,
             ),
-            goal_language_tokens=torch.randn(
-                batch, 3, config.goal_language_dim
-            ),
-            goal_language_mask=torch.ones(
-                batch, 3, dtype=torch.bool
-            ),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
+            goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
             make_counterfactuals=False,
         )
         losses = flow_losses(
@@ -9462,25 +8743,15 @@ def test_v115_five_step_deploy_builds_static_evidence_once_without_teacher(
     teacher_builds_before = int(encoder._teacher_g_build_count)
     inputs = (
         _visual(config, batch=1),
-        torch.randn(
-            1, config.visual_history_length, config.state_dim
-        ),
-        torch.randn(
-            1, config.executed_history_length, config.action_dim
-        ),
+        torch.randn(1, config.visual_history_length, config.state_dim),
+        torch.randn(1, config.executed_history_length, config.action_dim),
         torch.randn(1, config.state_dim),
     )
     raw_visual = _raw_visual(config, batch=1, side=32)
-    goal_language_tokens = torch.randn(
-        1, 3, config.goal_language_dim
-    )
+    goal_language_tokens = torch.randn(1, 3, config.goal_language_dim)
     goal_language_mask = torch.ones(1, 3, dtype=torch.bool)
-    sampling_noise = torch.randn(
-        1, config.action_horizon, config.action_dim
-    )
-    with torch.no_grad(), torch.autocast(
-        device_type="cpu", dtype=torch.bfloat16
-    ):
+    sampling_noise = torch.randn(1, config.action_horizon, config.action_dim)
+    with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         uncached = system.sample(
             *inputs,
             raw_visual=raw_visual,
@@ -9515,20 +8786,14 @@ def test_v115_five_step_deploy_builds_static_evidence_once_without_teacher(
             system.planner.stateless_goal_phase_machine.register_forward_hook(
                 count_hook(phase_calls)
             ),
-            system.planner.late_raw_detail_reader.register_forward_hook(
-                count_hook(reader_calls)
-            ),
-            system.planner.policy_plan_compiler.register_forward_hook(
-                count_hook(compiler_calls)
-            ),
+            system.planner.late_raw_detail_reader.register_forward_hook(count_hook(reader_calls)),
+            system.planner.policy_plan_compiler.register_forward_hook(count_hook(compiler_calls)),
         )
     )
     if contract_version in {"v117", "v118", "grounded"}:
         assert system.planner.p2_effect_reader is not None
         handles.append(
-            system.planner.p2_effect_reader.register_forward_hook(
-                count_hook(effect_reader_calls)
-            )
+            system.planner.p2_effect_reader.register_forward_hook(count_hook(effect_reader_calls))
         )
     with (
         patch.object(
@@ -9577,11 +8842,7 @@ def test_v115_five_step_deploy_builds_static_evidence_once_without_teacher(
     assert phase_calls == [1]
     assert reader_calls == [1]
     assert compiler_calls == [5]
-    assert effect_reader_calls == (
-        [5]
-        if contract_version in {"v117", "v118", "grounded"}
-        else [0]
-    )
+    assert effect_reader_calls == ([5] if contract_version in {"v117", "v118", "grounded"} else [0])
     assert int(encoder._teacher_g_build_count) == teacher_builds_before
 
 
@@ -9667,9 +8928,7 @@ def test_v116_future_effect_component_interventions_preserve_field_contract() ->
         successor_content=current + semantic,
     )
     state = SimpleNamespace(world_future_effect_field=field)
-    planner.set_action_path_eval_intervention(
-        "future_effect_semantic_zero"
-    )
+    planner.set_action_path_eval_intervention("future_effect_semantic_zero")
     planner._intervene_future_effect_field(state)
     planner.clear_action_path_eval_intervention()
     changed = state.world_future_effect_field
@@ -9726,9 +8985,7 @@ def test_grounded_reliability_one_intervention_is_a_narrow_eval_bypass() -> None
     )
     field.validate()
     state = SimpleNamespace(world_grounded_effect_field=field)
-    planner.set_action_path_eval_intervention(
-        "future_effect_reliability_one"
-    )
+    planner.set_action_path_eval_intervention("future_effect_reliability_one")
     planner._intervene_future_effect_field(state)
     intervention_state = planner.action_path_eval_intervention_state()
     planner.clear_action_path_eval_intervention()
@@ -9775,7 +9032,7 @@ def test_v116_complete_forward_has_owned_effect_and_separate_terminal() -> None:
         / "scripts"
         / "current_v116_supervised_effect_mainline.sh"
     ).read_text(encoding="utf-8")
-    assert 'CLEARVLA_REQUIRED_MODEL_CONTRACT:-v116' in launcher
+    assert "CLEARVLA_REQUIRED_MODEL_CONTRACT:-v116" in launcher
     assert "--flow-jepa-supervised-effect-mainline 1" in launcher
     assert "--flow-matching-time-distribution beta_1_5_1" in launcher
     fingerprints = _source_fingerprint()
@@ -9791,18 +9048,14 @@ def test_v116_complete_forward_has_owned_effect_and_separate_terminal() -> None:
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         output = system.flow_training_forward(
             _visual(config, batch=batch),
-            torch.randn(
-                batch, config.visual_history_length, config.state_dim
-            ),
+            torch.randn(batch, config.visual_history_length, config.state_dim),
             torch.randn(
                 batch,
                 config.executed_history_length,
                 config.action_dim,
             ),
             torch.randn(batch, config.state_dim),
-            torch.randn(
-                batch, config.action_horizon, config.action_dim
-            ),
+            torch.randn(batch, config.action_horizon, config.action_dim),
             target_visual=torch.randn(
                 batch,
                 len(config.flow_jepa_effective_interval_support_offsets),
@@ -9812,12 +9065,8 @@ def test_v116_complete_forward_has_owned_effect_and_separate_terminal() -> None:
                 config.visual_token_dim,
             ),
             raw_visual=_raw_visual(config, batch=batch, side=32),
-            goal_language_tokens=torch.randn(
-                batch, 3, config.goal_language_dim
-            ),
-            goal_language_mask=torch.ones(
-                batch, 3, dtype=torch.bool
-            ),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
+            goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
             make_counterfactuals=False,
         )
     assert float(output["flow_matching_beta_1_5_1"]) == 1.0
@@ -9827,9 +9076,7 @@ def test_v116_complete_forward_has_owned_effect_and_separate_terminal() -> None:
         config=config,
         batch_size=batch,
     )
-    assert tuple(
-        output["flow_jepa_goal_phase_terminal_probability"].shape
-    ) == (batch, 1)
+    assert tuple(output["flow_jepa_goal_phase_terminal_probability"].shape) == (batch, 1)
     torch.testing.assert_close(
         output["flow_jepa_phase_terminal_mass"],
         output["flow_jepa_goal_phase_terminal_probability"].float().mean(),
@@ -9846,19 +9093,11 @@ def test_v116_complete_forward_has_owned_effect_and_separate_terminal() -> None:
         "visibility",
         "uncertainty",
     ):
-        assert torch.is_tensor(
-            output[f"flow_jepa_future_effect_{name}_pred_slots"]
-        )
-        assert torch.is_tensor(
-            output[f"flow_jepa_future_effect_w1_{name}_pred_slots"]
-        )
+        assert torch.is_tensor(output[f"flow_jepa_future_effect_{name}_pred_slots"])
+        assert torch.is_tensor(output[f"flow_jepa_future_effect_w1_{name}_pred_slots"])
     for depth in range(3):
         for source in ("phase", "goal", "history", "proposal"):
-            assert torch.isfinite(
-                output[
-                    f"flow_jepa_w{depth}_typed_condition_{source}_mass"
-                ]
-            )
+            assert torch.isfinite(output[f"flow_jepa_w{depth}_typed_condition_{source}_mass"])
     terms = flow_jepa_interval_stage_terms(output)
     for name in (
         "w1_current",
@@ -9866,28 +9105,21 @@ def test_v116_complete_forward_has_owned_effect_and_separate_terminal() -> None:
         "w2_current",
         "w2_semantic",
     ):
-        assert torch.isfinite(
-            terms[f"flow_jepa_future_effect_{name}_loss"]
-        )
+        assert torch.isfinite(terms[f"flow_jepa_future_effect_{name}_loss"])
     assert torch.isfinite(output["pred_physical_velocity"]).all()
     optimizer_ids = {
         id(parameter)
         for group in _optimizer_groups(system, trainer)
         for parameter in group["params"]
     }
-    trainable_ids = {
-        id(parameter)
-        for parameter in system.parameters()
-        if parameter.requires_grad
-    }
+    trainable_ids = {id(parameter) for parameter in system.parameters() if parameter.requires_grad}
     assert optimizer_ids == trainable_ids, [
         name
         for name, parameter in system.named_parameters()
         if parameter.requires_grad and id(parameter) not in optimizer_ids
     ]
     (
-        output["pred_physical_velocity"].float().square().mean()
-        + terms["flow_jepa_interval_stage"]
+        output["pred_physical_velocity"].float().square().mean() + terms["flow_jepa_interval_stage"]
     ).backward()
     organizer = system.planner.flow_dino_evidence
     compiler = system.planner.policy_plan_compiler
@@ -9926,9 +9158,7 @@ def test_v117_intent_window_effect_and_p2_read_are_one_trainable_path() -> None:
     _validate_complete_v117_model_contract(config, trainer)
     assert _validate_required_model_contract("v117", config, trainer) == "v117"
     launcher = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "current_v117_window_effect_intent_p2.sh"
+        Path(__file__).resolve().parents[1] / "scripts" / "current_v117_window_effect_intent_p2.sh"
     ).read_text(encoding="utf-8")
     assert "CLEARVLA_REQUIRED_MODEL_CONTRACT=v117" in launcher
     for argument in (
@@ -10095,9 +9325,7 @@ def test_differential_intent_effect_complete_forward_owns_one_effect_path() -> N
     assert "CLEARVLA_REQUIRED_MODEL_CONTRACT=differential_intent_effect_323" in launcher
     assert "--flow-jepa-differential-intent-effect-mainline 1" in launcher
     probe_launcher = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "run_v118_model_path_probe.sh"
+        Path(__file__).resolve().parents[1] / "scripts" / "run_v118_model_path_probe.sh"
     ).read_text(encoding="utf-8")
     assert "MODEL_PATH_REQUIRED_CONTRACT=differential_intent_effect_323" in probe_launcher
     assert "intent_window_selector_uniform" not in probe_launcher
@@ -10132,9 +9360,7 @@ def test_differential_intent_effect_complete_forward_owns_one_effect_path() -> N
     planner.clear_action_path_eval_intervention()
     planner.train()
     assert isinstance(isolated_intent_probe, IntentStateBank)
-    assert torch.count_nonzero(
-        isolated_intent_probe.window_view.tokens[:, 0]
-    ) == 0
+    assert torch.count_nonzero(isolated_intent_probe.window_view.tokens[:, 0]) == 0
     torch.testing.assert_close(
         isolated_intent_probe.window_view.tokens[:, 1:],
         intent_probe.window_view.tokens[:, 1:],
@@ -10148,16 +9374,14 @@ def test_differential_intent_effect_complete_forward_owns_one_effect_path() -> N
         config.action_horizon,
         config.hidden_size,
     )
-    proposal_context, proposal_metrics = (
-        planner._functional_world_horizon_context(
-            depth=0,
-            phase_context=None,
-            goal_context=None,
-            history_context=None,
-            proposal_context=clean_proposal,
-            device=clean_proposal.device,
-            dtype=clean_proposal.dtype,
-        )
+    proposal_context, proposal_metrics = planner._functional_world_horizon_context(
+        depth=0,
+        phase_context=None,
+        goal_context=None,
+        history_context=None,
+        proposal_context=clean_proposal,
+        device=clean_proposal.device,
+        dtype=clean_proposal.dtype,
     )
     assert proposal_context is not None
     assert proposal_context.shape == (
@@ -10225,15 +9449,9 @@ def test_differential_intent_effect_complete_forward_owns_one_effect_path() -> N
         batch,
         3,
     )
-    assert tuple(
-        output["flow_jepa_future_effect_current_reference"].shape[:1]
-    ) == (batch,)
-    assert tuple(
-        output["flow_jepa_future_effect_w1_semantic_pred_slots"].shape[:2]
-    ) == (batch, 2)
-    assert tuple(
-        output["flow_jepa_future_effect_semantic_pred_slots"].shape[:2]
-    ) == (batch, 3)
+    assert tuple(output["flow_jepa_future_effect_current_reference"].shape[:1]) == (batch,)
+    assert tuple(output["flow_jepa_future_effect_w1_semantic_pred_slots"].shape[:2]) == (batch, 2)
+    assert tuple(output["flow_jepa_future_effect_semantic_pred_slots"].shape[:2]) == (batch, 3)
     torch.testing.assert_close(
         output["flow_jepa_future_effect_w1_semantic_pred_slots"],
         output["flow_jepa_future_effect_semantic_pred_slots"][:, :2],
@@ -10256,12 +9474,9 @@ def test_differential_intent_effect_complete_forward_owns_one_effect_path() -> N
         "semantic_mid",
         "semantic_late",
     ):
-        assert torch.isfinite(
-            terms[f"flow_jepa_future_effect_{name}_loss"]
-        )
+        assert torch.isfinite(terms[f"flow_jepa_future_effect_{name}_loss"])
     loss = (
-        output["pred_physical_velocity"].float().square().mean()
-        + terms["flow_jepa_interval_stage"]
+        output["pred_physical_velocity"].float().square().mean() + terms["flow_jepa_interval_stage"]
     )
     loss.backward()
     diagnostics = {"loss": loss.detach()}
@@ -10344,11 +9559,7 @@ def test_differential_intent_effect_complete_forward_owns_one_effect_path() -> N
         for group in _optimizer_groups(system, trainer)
         for parameter in group["params"]
     }
-    trainable_ids = {
-        id(parameter)
-        for parameter in system.parameters()
-        if parameter.requires_grad
-    }
+    trainable_ids = {id(parameter) for parameter in system.parameters() if parameter.requires_grad}
     assert optimizer_ids == trainable_ids
 
 
@@ -10430,9 +9641,7 @@ def test_future_teacher_changes_only_loss_targets(
     visual = _visual(config, batch=batch)
     raw_visual = _raw_visual(config, batch=batch, side=32)
     state_history = torch.randn(batch, config.visual_history_length, config.state_dim)
-    executed = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    executed = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
     action = torch.randn(batch, config.action_horizon, config.action_dim)
     target_a = torch.randn(
@@ -10472,9 +9681,10 @@ def test_future_teacher_changes_only_loss_targets(
             target_visual=target_b,
             **common,
         )
-    assert tuple(
-        first["flow_jepa_future_effect_semantic_target_slots"].shape[:2]
-    ) == (batch, 4 if capability == "grounded" else 3)
+    assert tuple(first["flow_jepa_future_effect_semantic_target_slots"].shape[:2]) == (
+        batch,
+        4 if capability == "grounded" else 3,
+    )
     assert not torch.equal(
         first["flow_jepa_future_effect_semantic_target_slots"],
         changed["flow_jepa_future_effect_semantic_target_slots"],
@@ -10551,14 +9761,12 @@ def test_grounded_intent_effect_full_system_preserves_four_object_intervals() ->
     assert int(semantic.shape[-1]) == config.visual_token_dim
     assert int(semantic.shape[-1]) != config.hidden_size
     assert system.planner.ground_to_world_attnres is None
-    assert int(output["flow_jepa_future_pred"].shape[-1]) == (
-        config.visual_token_dim
-    )
+    assert int(output["flow_jepa_future_pred"].shape[-1]) == (config.visual_token_dim)
     semantic_target = output["flow_jepa_future_effect_semantic_target_slots"]
     assert tuple(semantic_target.shape) == tuple(semantic.shape)
-    assert tuple(
-        output["flow_jepa_future_effect_current_reference_target"].shape
-    ) == tuple(output["flow_jepa_future_effect_current_reference"].shape)
+    assert tuple(output["flow_jepa_future_effect_current_reference_target"].shape) == tuple(
+        output["flow_jepa_future_effect_current_reference"].shape
+    )
     torch.testing.assert_close(
         output["flow_jepa_future_effect_current_reference_target"],
         output["flow_jepa_future_effect_current_reference"],
@@ -10581,18 +9789,8 @@ def test_grounded_intent_effect_full_system_preserves_four_object_intervals() ->
         config=config,
         batch_size=batch,
     )
-    assert bool(
-        (
-            output["flow_jepa_future_effect_visibility_target_slots"]
-            <= 0.0
-        ).all()
-    )
-    assert bool(
-        (
-            output["flow_jepa_future_effect_persistence_target_slots"]
-            <= 0.0
-        ).all()
-    )
+    assert bool((output["flow_jepa_future_effect_visibility_target_slots"] <= 0.0).all())
+    assert bool((output["flow_jepa_future_effect_persistence_target_slots"] <= 0.0).all())
     terms = flow_jepa_interval_stage_terms(output)
     assert torch.isfinite(terms["flow_jepa_interval_stage"])
     assert terms["grounded_future_effect_core"].requires_grad
@@ -10604,34 +9802,17 @@ def test_grounded_intent_effect_full_system_preserves_four_object_intervals() ->
         0.25 * terms["flow_jepa_future_effect_successor_loss"]
         + 0.20 * terms["flow_jepa_future_effect_semantic_loss"]
         + 0.10 * terms["flow_jepa_future_effect_transport_loss"]
-        + 0.05
-        * terms[
-            "flow_jepa_future_effect_transport_covariance_loss"
-        ]
-        + 0.05
-        * terms[
-            "flow_jepa_future_effect_persistence_change_loss"
-        ]
-        + 0.05
-        * terms[
-            "flow_jepa_future_effect_visibility_change_loss"
-        ]
-        + 0.05
-        * terms[
-            "flow_jepa_future_effect_uncertainty_calibration_loss"
-        ]
-        + 0.05
-        * terms[
-            "flow_jepa_future_effect_reliability_calibration_loss"
-        ]
+        + 0.05 * terms["flow_jepa_future_effect_transport_covariance_loss"]
+        + 0.05 * terms["flow_jepa_future_effect_persistence_change_loss"]
+        + 0.05 * terms["flow_jepa_future_effect_visibility_change_loss"]
+        + 0.05 * terms["flow_jepa_future_effect_uncertainty_calibration_loss"]
+        + 0.05 * terms["flow_jepa_future_effect_reliability_calibration_loss"]
     )
     torch.testing.assert_close(
         terms["grounded_future_effect_core"].detach(),
         expected_core,
     )
-    assert float(
-        terms["flow_jepa_future_effect_supervision_active"]
-    ) == 1.0
+    assert float(terms["flow_jepa_future_effect_supervision_active"]) == 1.0
     for name in (
         "successor",
         "semantic",
@@ -10643,9 +9824,7 @@ def test_grounded_intent_effect_full_system_preserves_four_object_intervals() ->
         "reliability_calibration",
         "relative_transition",
     ):
-        assert torch.isfinite(
-            terms[f"flow_jepa_future_effect_{name}_loss"]
-        )
+        assert torch.isfinite(terms[f"flow_jepa_future_effect_{name}_loss"])
     trainer = _complete_v115_trainer()
     ledger = flow_losses(
         system,
@@ -10665,8 +9844,7 @@ def test_grounded_intent_effect_full_system_preserves_four_object_intervals() ->
     )
     torch.testing.assert_close(
         ledger["loss_contrib_flow_jepa_future"],
-        float(trainer.flow_jepa_future_loss_weight)
-        * terms["grounded_future_effect_core"].detach(),
+        float(trainer.flow_jepa_future_loss_weight) * terms["grounded_future_effect_core"].detach(),
     )
     torch.testing.assert_close(
         ledger["flow_jepa_interval_stage"],
@@ -10675,13 +9853,10 @@ def test_grounded_intent_effect_full_system_preserves_four_object_intervals() ->
     assert float(ledger["grounded_intent_effect_active"]) == 1.0
     assert "grounded_w1_semantic_rms" in ledger
     assert _evidence_log_version(ledger) == "v119"
-    assert float(
-        ledger["grounded_slot_reduced_future_change_audit_only"]
-    ) == 1.0
+    assert float(ledger["grounded_slot_reduced_future_change_audit_only"]) == 1.0
     (
         terms["grounded_future_effect_core"]
-        +
-        terms["flow_jepa_interval_stage"]
+        + terms["flow_jepa_interval_stage"]
         + output["pred_physical_velocity"].float().square().mean()
     ).backward()
     grounded_gradients = [
@@ -10712,8 +9887,7 @@ def test_grounded_intent_effect_full_system_preserves_four_object_intervals() ->
         "intent": system.planner.stateless_goal_phase_machine,
         "proposal": system.planner.grounded_clean_proposal_proj,
         "world": (
-            system.planner.flow_dino_evidence
-            .progressive_grounding_address.grounded_world_compiler
+            system.planner.flow_dino_evidence.progressive_grounding_address.grounded_world_compiler
         ),
         "p2": system.planner.p2_effect_reader,
         "consequence": system.planner.consequence_plan_organizer,
@@ -10732,30 +9906,22 @@ def test_grounded_intent_effect_full_system_preserves_four_object_intervals() ->
         _complete_v115_trainer(),
     )
     optimizer_parameter_ids = [
-        id(parameter)
-        for group in optimizer_groups
-        for parameter in group["params"]
+        id(parameter) for group in optimizer_groups for parameter in group["params"]
     ]
-    assert len(optimizer_parameter_ids) == len(
-        set(optimizer_parameter_ids)
-    )
+    assert len(optimizer_parameter_ids) == len(set(optimizer_parameter_ids))
     assert [
         name
         for name, parameter in system.named_parameters()
-        if parameter.requires_grad
-        and id(parameter) not in set(optimizer_parameter_ids)
+        if parameter.requires_grad and id(parameter) not in set(optimizer_parameter_ids)
     ] == []
     for index in (3, 4, 6, 7):
         assert not any(
-            parameter.requires_grad
-            for parameter in system.planner.blocks[index].parameters()
+            parameter.requires_grad for parameter in system.planner.blocks[index].parameters()
         )
 
 
 def test_object_intent_schema_four_selects_v122_log_semantics() -> None:
-    assert _evidence_log_version(
-        {"object_intent_schema": torch.tensor(4.0)}
-    ) == "v122"
+    assert _evidence_log_version({"object_intent_schema": torch.tensor(4.0)}) == "v122"
 
 
 def test_grounded_intent_effect_uses_compact_contract_and_rejects_old_top() -> None:
@@ -10801,8 +9967,7 @@ def test_grounded_capability_flag_off_leaves_v118_graph_bit_exact() -> None:
     assert base_system.planner.differential_intent_effect_mainline
     assert not base_system.planner.grounded_intent_effect_mainline
     assert (
-        base_system.planner.flow_dino_evidence
-        .progressive_grounding_address.grounded_world_compiler
+        base_system.planner.flow_dino_evidence.progressive_grounding_address.grounded_world_compiler
         is None
     )
 
@@ -10869,9 +10034,7 @@ def test_v114_audit_gating_preserves_mainline_values_and_gradients() -> None:
     arguments = (
         _visual(config, batch=batch),
         torch.randn(batch, config.visual_history_length, config.state_dim),
-        torch.randn(
-            batch, config.executed_history_length, config.action_dim
-        ),
+        torch.randn(batch, config.executed_history_length, config.action_dim),
         torch.randn(batch, config.state_dim),
         torch.randn(batch, config.action_horizon, config.action_dim),
     )
@@ -10885,9 +10048,7 @@ def test_v114_audit_gating_preserves_mainline_values_and_gradients() -> None:
             config.visual_token_dim,
         ),
         "raw_visual": _raw_visual(config, batch=batch, side=32),
-        "goal_language_tokens": torch.randn(
-            batch, 3, config.goal_language_dim
-        ),
+        "goal_language_tokens": torch.randn(batch, 3, config.goal_language_dim),
         "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
         "make_counterfactuals": False,
     }
@@ -10949,36 +10110,22 @@ def test_v114_minimal_sampling_matches_diagnostic_sampling() -> None:
     inputs = (
         _visual(config, batch=batch),
         torch.randn(batch, config.visual_history_length, config.state_dim),
-        torch.randn(
-            batch, config.executed_history_length, config.action_dim
-        ),
+        torch.randn(batch, config.executed_history_length, config.action_dim),
         torch.randn(batch, config.state_dim),
     )
     keywords = {
         "raw_visual": _raw_visual(config, batch=batch, side=32),
-        "noise": torch.randn(
-            batch, config.action_horizon, config.action_dim
-        ),
+        "noise": torch.randn(batch, config.action_horizon, config.action_dim),
         "steps": 1,
         "return_event_logits": True,
-        "goal_language_tokens": torch.randn(
-            batch, 3, config.goal_language_dim
-        ),
+        "goal_language_tokens": torch.randn(batch, 3, config.goal_language_dim),
         "goal_language_mask": torch.ones(batch, 3, dtype=torch.bool),
     }
-    with torch.no_grad(), torch.autocast(
-        device_type="cpu", dtype=torch.bfloat16
-    ):
-        diagnostic = system.sample(
-            *inputs, collect_diagnostics=True, **keywords
-        )
-        minimal = system.sample(
-            *inputs, collect_diagnostics=False, **keywords
-        )
+    with torch.no_grad(), torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        diagnostic = system.sample(*inputs, collect_diagnostics=True, **keywords)
+        minimal = system.sample(*inputs, collect_diagnostics=False, **keywords)
     for key in ("action", "physical_action", "event_logits", "motion_logits"):
-        torch.testing.assert_close(
-            minimal[key], diagnostic[key], rtol=0.0, atol=0.0
-        )
+        torch.testing.assert_close(minimal[key], diagnostic[key], rtol=0.0, atol=0.0)
 
 
 def test_grounded_probe_none_replay_matches_deployment_bit_exact() -> None:
@@ -11026,9 +10173,12 @@ def test_grounded_probe_none_replay_matches_deployment_bit_exact() -> None:
     reader = system.planner.late_raw_detail_reader
     assert encoder is not None
     assert reader is not None
-    with torch.no_grad(), torch.autocast(
-        device_type="cpu",
-        dtype=torch.bfloat16,
+    with (
+        torch.no_grad(),
+        torch.autocast(
+            device_type="cpu",
+            dtype=torch.bfloat16,
+        ),
     ):
         ordinary = system.sample(*inputs, **keywords)
         system.planner.set_action_path_eval_intervention("none")
@@ -11090,13 +10240,10 @@ def test_grounded_probe_result_requires_replay_for_every_selected_batch() -> Non
         [{"episode_idx": torch.tensor(0)}],
         batch_size=1,
     )
-    normalizer = ArrayNormalizer.fit_identity(
-        [action.reshape(-1, config.action_dim).numpy()]
-    )
+    normalizer = ArrayNormalizer.fit_identity([action.reshape(-1, config.action_dim).numpy()])
     trainer = _complete_v115_trainer(eval_inference_steps=1)
     with patch(
-        "clearvla.experiments.observed_state_lab.policy_runtime_v39."
-        "prepare_v39_policy_sample",
+        "clearvla.experiments.observed_state_lab.policy_runtime_v39.prepare_v39_policy_sample",
         return_value=prepared,
     ):
         result = evaluate_v101_action_path_intervention(
@@ -11127,9 +10274,7 @@ def test_grounded_probe_result_requires_replay_for_every_selected_batch() -> Non
         "address_g3_slot_mean",
     ):
         assert result["intervention_verified_batches"][mode] == 1
-        assert result["acceptance_matrix"]["modes"][mode][
-            "boundary_changed"
-        ]
+        assert result["acceptance_matrix"]["modes"][mode]["boundary_changed"]
     for key in (
         "grounded_p2_effect_value_pre_mask_rms",
         "grounded_p2_effect_value_post_validity_rms",
@@ -11147,9 +10292,7 @@ def test_v113_contract_launcher_and_v112_flag_off_ancestry() -> None:
     assert _validate_required_model_contract("v113", config, trainer) == "v113"
     v112 = replace(config, flow_jepa_functional_mainline_routing=0)
     _validate_complete_v112_model_contract(v112, trainer)
-    with pytest.raises(
-        ValueError, match="flow_jepa_functional_mainline_routing"
-    ):
+    with pytest.raises(ValueError, match="flow_jepa_functional_mainline_routing"):
         _validate_complete_v113_model_contract(v112, trainer)
 
     small = {
@@ -11160,12 +10303,8 @@ def test_v113_contract_launcher_and_v112_flag_off_ancestry() -> None:
         "flow_jepa_address_route_dim": 8,
         "flow_jepa_raw_reader_heads": 2,
     }
-    v112_encoder = FlowDINOEvidenceEncoder(
-        replace(v112, **small)
-    )
-    v113_encoder = FlowDINOEvidenceEncoder(
-        replace(config, **small)
-    )
+    v112_encoder = FlowDINOEvidenceEncoder(replace(v112, **small))
+    v113_encoder = FlowDINOEvidenceEncoder(replace(config, **small))
     parent = v112_encoder.progressive_grounding_address
     repaired = v113_encoder.progressive_grounding_address
     assert parent is not None and repaired is not None
@@ -11174,13 +10313,11 @@ def test_v113_contract_launcher_and_v112_flag_off_ancestry() -> None:
     assert repaired.world_owner_fused_writes is not None
     assert repaired.world_horizon_condition is not None
     assert all(
-        not parameter.requires_grad
-        for parameter in repaired.world_owner_writes.parameters()
+        not parameter.requires_grad for parameter in repaired.world_owner_writes.parameters()
     )
     assert v113_encoder.interval_stage_organizer is not None
     assert not any(
-        parameter.requires_grad
-        for parameter in v113_encoder.interval_stage_organizer.parameters()
+        parameter.requires_grad for parameter in v113_encoder.interval_stage_organizer.parameters()
     )
 
     launcher = (
@@ -11188,10 +10325,7 @@ def test_v113_contract_launcher_and_v112_flag_off_ancestry() -> None:
         / "scripts"
         / "current_v113_functional_mainline_routing.sh"
     ).read_text(encoding="utf-8")
-    assert (
-        "CLEARVLA_REQUIRED_MODEL_CONTRACT:-v113"
-        in launcher
-    )
+    assert "CLEARVLA_REQUIRED_MODEL_CONTRACT:-v113" in launcher
     assert "--flow-jepa-functional-mainline-routing 1" in launcher
     assert "V113_BATCH_SIZE:-1" in launcher
     v111_parent = (
@@ -11200,8 +10334,7 @@ def test_v113_contract_launcher_and_v112_flag_off_ancestry() -> None:
         / "current_v111_structured_ownership_bottleneck.sh"
     ).read_text(encoding="utf-8")
     assert (
-        'CLEARVLA_REQUIRED_MODEL_CONTRACT="${'
-        'CLEARVLA_REQUIRED_MODEL_CONTRACT:-v111}"'
+        'CLEARVLA_REQUIRED_MODEL_CONTRACT="${CLEARVLA_REQUIRED_MODEL_CONTRACT:-v111}"'
     ) in v111_parent
     smoke = (
         Path(__file__).resolve().parents[1]
@@ -11211,9 +10344,7 @@ def test_v113_contract_launcher_and_v112_flag_off_ancestry() -> None:
     assert "--memory-report-detail 1" in smoke
     assert "--memory-report-sync 1" in smoke
     probe = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "run_v113_model_path_probe.sh"
+        Path(__file__).resolve().parents[1] / "scripts" / "run_v113_model_path_probe.sh"
     ).read_text(encoding="utf-8")
     assert "current_context_masked" in probe
     assert "uniform_route_weights" in probe
@@ -11222,9 +10353,7 @@ def test_v113_contract_launcher_and_v112_flag_off_ancestry() -> None:
 
 def test_v113_horizon_context_keeps_goal_history_and_phase_typed() -> None:
     torch.manual_seed(301)
-    adapter = StatelessHorizonConditionAdapter(
-        hidden=32, horizon_count=4, heads=4
-    ).train()
+    adapter = StatelessHorizonConditionAdapter(hidden=32, horizon_count=4, heads=4).train()
     inputs = {
         "goal_tokens": torch.randn(2, 4, 32, requires_grad=True),
         "history_tokens": torch.randn(2, 6, 32, requires_grad=True),
@@ -11259,12 +10388,8 @@ def test_v113_online_w_route_and_interval_interventions_hit_the_live_path() -> N
     )
     encoder = FlowDINOEvidenceEncoder(config).eval()
     bank = _synthetic_v109_address_bank(config, batch=1, zero_values=False)
-    initial_rollout = torch.randn(
-        1, config.future_token_count, config.hidden_size
-    )
-    horizon_context = torch.randn(
-        1, config.future_anchors, config.hidden_size
-    )
+    initial_rollout = torch.randn(1, config.future_token_count, config.hidden_size)
+    horizon_context = torch.randn(1, config.future_anchors, config.hidden_size)
 
     def run(
         intervention: str | None,
@@ -11273,9 +10398,7 @@ def test_v113_online_w_route_and_interval_interventions_hit_the_live_path() -> N
         rollout = initial_rollout.clone()
         collected_metrics: dict[str, Tensor] = {}
         for stage in (1, 2, 3):
-            state = encoder.update_progressive_grounding_address(
-                state, rollout, stage=stage
-            )
+            state = encoder.update_progressive_grounding_address(state, rollout, stage=stage)
         for depth in range(4):
             rollout, metrics = encoder.advance_progressive_world_owner_state(
                 rollout,
@@ -11294,9 +10417,7 @@ def test_v113_online_w_route_and_interval_interventions_hit_the_live_path() -> N
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
         baseline, interval, _ = run(None)
         route_results = {
-            (depth, operation): run(
-                f"functional_w{depth}_route_{operation}"
-            )
+            (depth, operation): run(f"functional_w{depth}_route_{operation}")
             for depth in range(config.flow_jepa_world_blocks + 1)
             for operation in ("zero", "shuffle")
         }
@@ -11304,16 +10425,11 @@ def test_v113_online_w_route_and_interval_interventions_hit_the_live_path() -> N
         _, interval_shuffle, _ = run("interval_stage_shuffle")
     for (depth, _), (intervened, _, route_metrics) in route_results.items():
         assert not torch.equal(intervened, baseline)
+        assert float((intervened - baseline).detach().float().abs().sum()) > 0.0
         assert (
-            float((intervened - baseline).detach().float().abs().sum())
+            float(route_metrics[f"flow_jepa_functional_w{depth}_route_intervention_delta_norm"])
             > 0.0
         )
-        assert float(
-            route_metrics[
-                f"flow_jepa_functional_w{depth}_route_"
-                "intervention_delta_norm"
-            ]
-        ) > 0.0
     assert float(interval.detach().float().abs().sum()) > 0.0
     assert torch.equal(interval_zero, torch.zeros_like(interval_zero))
     assert torch.isfinite(interval_shuffle).all()
@@ -11335,16 +10451,10 @@ def test_v113_p1_appearance_gateway_intervention_is_isolated() -> None:
     encoder = FlowDINOEvidenceEncoder(config).eval()
     bank = _synthetic_v109_address_bank(config, batch=1, zero_values=False)
     state = encoder.begin_progressive_grounding_address(bank)
-    rollout = torch.randn(
-        1, config.future_token_count, config.hidden_size
-    )
+    rollout = torch.randn(1, config.future_token_count, config.hidden_size)
     for stage in (1, 2, 3):
-        state = encoder.update_progressive_grounding_address(
-            state, rollout, stage=stage
-        )
-    horizon_context = torch.randn(
-        1, config.future_anchors, config.hidden_size
-    )
+        state = encoder.update_progressive_grounding_address(state, rollout, stage=stage)
+    horizon_context = torch.randn(1, config.future_anchors, config.hidden_size)
     for depth in range(config.flow_jepa_world_blocks + 1):
         rollout, _ = encoder.advance_progressive_world_owner_state(
             rollout,
@@ -11368,15 +10478,9 @@ def test_v113_p1_appearance_gateway_intervention_is_isolated() -> None:
         address_bank=bank,
         progressive_address=state,
     )
-    phase_context = torch.randn(
-        1, config.future_anchors, config.hidden_size
-    )
-    condition_context = torch.randn(
-        1, config.future_anchors, config.hidden_size
-    )
-    history_context = torch.randn(
-        1, config.future_anchors, config.hidden_size
-    )
+    phase_context = torch.randn(1, config.future_anchors, config.hidden_size)
+    condition_context = torch.randn(1, config.future_anchors, config.hidden_size)
+    history_context = torch.randn(1, config.future_anchors, config.hidden_size)
 
     def run(mode: str) -> tuple[Tensor, dict[str, str | int | float]]:
         reader.set_address_eval_intervention(mode)
@@ -11397,21 +10501,19 @@ def test_v113_p1_appearance_gateway_intervention_is_isolated() -> None:
     baseline, baseline_state = run("none")
     uniform, uniform_state = run("address_posterior_uniform")
     zero, zero_state = run("p1_appearance_gateway_zero")
-    shuffled, shuffled_state = run(
-        "p1_appearance_gateway_spatial_shuffle"
-    )
+    shuffled, shuffled_state = run("p1_appearance_gateway_spatial_shuffle")
     assert baseline_state["intervention_code"] == pytest.approx(0.0)
     assert uniform_state["intervention_code"] == pytest.approx(1.0)
     assert zero_state["intervention_code"] == pytest.approx(15.0)
     assert shuffled_state["intervention_code"] == pytest.approx(16.0)
     for intervention_state in (zero_state, shuffled_state):
         assert int(intervention_state["apply_count"]) == 1
-        assert float(
-            intervention_state[
-                "flow_jepa_typed_p1_appearance_gateway_"
-                "intervention_delta_norm"
-            ]
-        ) > 0.0
+        assert (
+            float(
+                intervention_state["flow_jepa_typed_p1_appearance_gateway_intervention_delta_norm"]
+            )
+            > 0.0
+        )
     assert float((uniform - baseline).abs().sum()) > 0.0
     assert float((zero - baseline).abs().sum()) > 0.0
     assert float((shuffled - baseline).abs().sum()) > 0.0
@@ -11441,9 +10543,7 @@ def test_v113_p1_appearance_gateway_intervention_is_isolated() -> None:
         intervened, intervention_state = run(mode)
         assert torch.isfinite(intervened).all()
         assert int(intervention_state["apply_count"]) == 1
-        assert intervention_state["intervention_code"] == pytest.approx(
-            expected_code
-        )
+        assert intervention_state["intervention_code"] == pytest.approx(expected_code)
     torch.testing.assert_close(
         state.world_appearance_fine_query,
         appearance_before,
@@ -11452,9 +10552,7 @@ def test_v113_p1_appearance_gateway_intervention_is_isolated() -> None:
 
 def test_v113_functional_p2_is_zero_preserving_and_routes_owner_deltas() -> None:
     torch.manual_seed(302)
-    refiner = _FunctionalOwnershipLocalRefiner(
-        width=16, raw_dim=12, route_dim=8, depth=2
-    ).train()
+    refiner = _FunctionalOwnershipLocalRefiner(width=16, raw_dim=12, route_dim=8, depth=2).train()
     contexts = {
         "query": torch.randn(2, 1, 8),
         "semantic": torch.randn(2, 1, 8),
@@ -11515,17 +10613,11 @@ def test_v113_full_action_path_routes_once_and_backpropagates() -> None:
     )
     system = V39PolicySystem(config).train()
     optimizer_groups = _optimizer_groups(system, _complete_v113_trainer())
-    grouped_ids = [
-        id(parameter)
-        for group in optimizer_groups
-        for parameter in group["params"]
-    ]
+    grouped_ids = [id(parameter) for group in optimizer_groups for parameter in group["params"]]
     assert len(grouped_ids) == len(set(grouped_ids))
-    assert {
-        id(parameter)
-        for parameter in system.parameters()
-        if parameter.requires_grad
-    } == set(grouped_ids)
+    assert {id(parameter) for parameter in system.parameters() if parameter.requires_grad} == set(
+        grouped_ids
+    )
     encoder = system.planner.flow_dino_evidence
     reader = system.planner.late_raw_detail_reader
     assert encoder is not None and reader is not None
@@ -11538,9 +10630,7 @@ def test_v113_full_action_path_routes_once_and_backpropagates() -> None:
         with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
             output = system.flow_training_forward(
                 _visual(config, batch=batch),
-                torch.randn(
-                    batch, config.visual_history_length, config.state_dim
-                ),
+                torch.randn(batch, config.visual_history_length, config.state_dim),
                 torch.randn(
                     batch,
                     config.executed_history_length,
@@ -11561,12 +10651,8 @@ def test_v113_full_action_path_routes_once_and_backpropagates() -> None:
                     config.visual_token_dim,
                 ),
                 raw_visual=_raw_visual(config, batch=batch, side=32),
-                goal_language_tokens=torch.randn(
-                    batch, 3, config.goal_language_dim
-                ),
-                goal_language_mask=torch.ones(
-                    batch, 3, dtype=torch.bool
-                ),
+                goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
+                goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
                 make_counterfactuals=False,
             )
     assert policy_value_read.call_count == 1
@@ -11620,9 +10706,7 @@ def test_v112_contract_launcher_and_v111_flag_off_ancestry() -> None:
     _validate_complete_v111_model_contract(v111, trainer)
     with pytest.raises(ValueError, match="flow_jepa_pre_value_owner_routing"):
         _validate_complete_v112_model_contract(v111, trainer)
-    with pytest.raises(
-        ValueError, match="flow_jepa_pre_value_owner_update_scale"
-    ):
+    with pytest.raises(ValueError, match="flow_jepa_pre_value_owner_update_scale"):
         _validate_complete_v112_model_contract(
             replace(config, flow_jepa_pre_value_owner_update_scale=0.20),
             trainer,
@@ -11635,31 +10719,19 @@ def test_v112_contract_launcher_and_v111_flag_off_ancestry() -> None:
         "flow_jepa_address_slots": 2,
         "flow_jepa_address_route_dim": 8,
     }
-    v111_organizer = FlowDINOEvidenceEncoder(
-        replace(v111, **small)
-    ).progressive_grounding_address
-    v112_organizer = FlowDINOEvidenceEncoder(
-        replace(config, **small)
-    ).progressive_grounding_address
+    v111_organizer = FlowDINOEvidenceEncoder(replace(v111, **small)).progressive_grounding_address
+    v112_organizer = FlowDINOEvidenceEncoder(replace(config, **small)).progressive_grounding_address
     assert v111_organizer is not None and v112_organizer is not None
     v111_keys = set(v111_organizer.state_dict())
     v112_keys = set(v112_organizer.state_dict())
     added = v112_keys - v111_keys
     assert added
     assert not (v111_keys - v112_keys)
-    assert all(
-        "g3_public_summary_out" in key or "world_owner_" in key
-        for key in added
-    )
-    assert not any(
-        "g3_public_summary_out" in key or "world_owner_" in key
-        for key in v111_keys
-    )
+    assert all("g3_public_summary_out" in key or "world_owner_" in key for key in added)
+    assert not any("g3_public_summary_out" in key or "world_owner_" in key for key in v111_keys)
 
     launcher = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "current_v112_pre_value_owner_routing.sh"
+        Path(__file__).resolve().parents[1] / "scripts" / "current_v112_pre_value_owner_routing.sh"
     ).read_text(encoding="utf-8")
     assert "CLEARVLA_REQUIRED_MODEL_CONTRACT=v112" in launcher
     assert "--flow-jepa-pre-value-owner-routing 1" in launcher
@@ -11690,8 +10762,7 @@ def test_v112_pre_value_owner_state_reaches_joint_p1_fine_posterior() -> None:
     assert organizer.world_owner_writes is not None
     assert organizer.g3_typed_summary_out is not None
     assert not any(
-        parameter.requires_grad
-        for parameter in organizer.g3_typed_summary_out.parameters()
+        parameter.requires_grad for parameter in organizer.g3_typed_summary_out.parameters()
     )
 
     bank = _synthetic_v109_address_bank(config, batch=1, zero_values=False)
@@ -11709,17 +10780,12 @@ def test_v112_pre_value_owner_state_reaches_joint_p1_fine_posterior() -> None:
                 stage=stage,
             )
         for depth in range(4):
-            rollout, owner_metrics = (
-                encoder.advance_progressive_world_owner_state(
-                    rollout,
-                    state,
-                    depth=depth,
-                )
+            rollout, owner_metrics = encoder.advance_progressive_world_owner_state(
+                rollout,
+                state,
+                depth=depth,
             )
-            assert (
-                f"flow_jepa_pre_value_w{depth}_appearance_state_rms"
-                in owner_metrics
-            )
+            assert f"flow_jepa_pre_value_w{depth}_appearance_state_rms" in owner_metrics
         encoder.score_progressive_horizon_posterior(rollout, state)
         assert state.world_owner_depth == 3
         assert state.world_appearance_fine_query is not None
@@ -11734,12 +10800,8 @@ def test_v112_pre_value_owner_state_reaches_joint_p1_fine_posterior() -> None:
             trajectory,
             rollout,
             LateRawDetailEvidence(
-                selector_tokens=rollout.new_empty(
-                    1, 0, config.hidden_size
-                ),
-                value_tokens=rollout.new_empty(
-                    1, 0, config.hidden_size
-                ),
+                selector_tokens=rollout.new_empty(1, 0, config.hidden_size),
+                value_tokens=rollout.new_empty(1, 0, config.hidden_size),
                 address_bank=bank,
                 progressive_address=state,
             ),
@@ -11764,8 +10826,7 @@ def test_v112_pre_value_owner_state_reaches_joint_p1_fine_posterior() -> None:
         reader.typed_fine_query["appearance"].weight,
     ]
     checked_parameters.extend(
-        transition["appearance"][-1].weight
-        for transition in organizer.world_owner_transitions
+        transition["appearance"][-1].weight for transition in organizer.world_owner_transitions
     )
     for parameter in checked_parameters:
         assert parameter.grad is not None
@@ -11790,20 +10851,21 @@ def test_v112_full_action_path_advances_all_owner_boundaries_once() -> None:
     late_reader = system.planner.late_raw_detail_reader
     assert encoder is not None and late_reader is not None
     batch = 1
-    with patch.object(
-        encoder,
-        "advance_progressive_world_owner_state",
-        wraps=encoder.advance_progressive_world_owner_state,
-    ) as owner_advance, patch.object(
-        late_reader,
-        "_read_soft_address_lattice",
-        wraps=late_reader._read_soft_address_lattice,
-    ) as policy_value_read:
+    with (
+        patch.object(
+            encoder,
+            "advance_progressive_world_owner_state",
+            wraps=encoder.advance_progressive_world_owner_state,
+        ) as owner_advance,
+        patch.object(
+            late_reader,
+            "_read_soft_address_lattice",
+            wraps=late_reader._read_soft_address_lattice,
+        ) as policy_value_read,
+    ):
         output = system.flow_training_forward(
             _visual(config, batch=batch),
-            torch.randn(
-                batch, config.visual_history_length, config.state_dim
-            ),
+            torch.randn(batch, config.visual_history_length, config.state_dim),
             torch.randn(
                 batch,
                 config.executed_history_length,
@@ -11824,18 +10886,12 @@ def test_v112_full_action_path_advances_all_owner_boundaries_once() -> None:
                 config.visual_token_dim,
             ),
             raw_visual=_raw_visual(config, batch=batch, side=32),
-            goal_language_tokens=torch.randn(
-                batch, 3, config.goal_language_dim
-            ),
-            goal_language_mask=torch.ones(
-                batch, 3, dtype=torch.bool
-            ),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
+            goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
             make_counterfactuals=False,
         )
     assert owner_advance.call_count == 4
-    assert [
-        call.kwargs["depth"] for call in owner_advance.call_args_list
-    ] == [0, 1, 2, 3]
+    assert [call.kwargs["depth"] for call in owner_advance.call_args_list] == [0, 1, 2, 3]
     assert policy_value_read.call_count == 1
     for key in (
         "flow_jepa_pre_value_owner_routing",
@@ -11922,12 +10978,8 @@ def test_v108_online_address_is_exact_identity_for_zero_observation_values() -> 
             candidates,
             dtype=torch.bool,
         ),
-        coarse_centers=torch.zeros(
-            batch, config.num_cameras, 2, 2, 1, 2
-        ),
-        coarse_variance=torch.ones(
-            batch, config.num_cameras, 2, 2, 1, 2
-        ),
+        coarse_centers=torch.zeros(batch, config.num_cameras, 2, 2, 1, 2),
+        coarse_variance=torch.ones(batch, config.num_cameras, 2, 2, 1, 2),
         fine_radius=torch.ones(batch, config.num_cameras, 2, 2, 1),
     )
     rollout = torch.randn(
@@ -11995,9 +11047,7 @@ def test_v108_action_only_loss_reaches_online_address_owners() -> None:
 
     groups = _optimizer_groups(system, _complete_v108_trainer())
     owners = [id(parameter) for group in groups for parameter in group["params"]]
-    trainable = [
-        id(parameter) for parameter in system.parameters() if parameter.requires_grad
-    ]
+    trainable = [id(parameter) for parameter in system.parameters() if parameter.requires_grad]
     assert len(owners) == len(set(owners))
     assert set(owners) == set(trainable)
 
@@ -12012,12 +11062,8 @@ def test_v108_future_teacher_cannot_condition_online_address_action() -> None:
     batch = 1
     visual = _visual(config, batch=batch)
     raw_visual = _raw_visual(config, batch=batch)
-    state_history = torch.randn(
-        batch, config.visual_history_length, config.state_dim
-    )
-    executed = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    state_history = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
     target_action = torch.randn(batch, config.action_horizon, config.action_dim)
     target_a = torch.randn(
@@ -12083,12 +11129,8 @@ def test_v108_deploy_address_is_diagnostic_independent_and_single_read() -> None
     batch = 1
     visual = _visual(config, batch=batch)
     raw_visual = _raw_visual(config, batch=batch)
-    state_history = torch.randn(
-        batch, config.visual_history_length, config.state_dim
-    )
-    executed = torch.randn(
-        batch, config.executed_history_length, config.action_dim
-    )
+    state_history = torch.randn(batch, config.visual_history_length, config.state_dim)
+    executed = torch.randn(batch, config.executed_history_length, config.action_dim)
     state = torch.randn(batch, config.state_dim)
     noise = torch.randn(batch, config.action_horizon, config.action_dim)
     goal = torch.randn(batch, 3, config.goal_language_dim)
@@ -12112,9 +11154,7 @@ def test_v108_deploy_address_is_diagnostic_independent_and_single_read() -> None
         nonlocal planner_calls
         planner_calls += 1
 
-    address_handle = encoder.horizon_address_jepa.register_forward_hook(
-        count_address
-    )
+    address_handle = encoder.horizon_address_jepa.register_forward_hook(count_address)
     planner_handle = system.planner.register_forward_hook(count_planner)
     try:
         with patch.object(
@@ -12187,15 +11227,18 @@ def test_v108_flag_off_uses_the_v107_late_auxiliary_topology() -> None:
     system = V39PolicySystem(config).eval()
     encoder = system.planner.flow_dino_evidence
     assert encoder is not None
-    with patch.object(
-        encoder,
-        "organize_horizon_address",
-        wraps=encoder.organize_horizon_address,
-    ) as online_address, patch.object(
-        encoder,
-        "predict_future_with_address",
-        wraps=encoder.predict_future_with_address,
-    ) as late_address:
+    with (
+        patch.object(
+            encoder,
+            "organize_horizon_address",
+            wraps=encoder.organize_horizon_address,
+        ) as online_address,
+        patch.object(
+            encoder,
+            "predict_future_with_address",
+            wraps=encoder.predict_future_with_address,
+        ) as late_address,
+    ):
         sampled = system.sample(
             _visual(config, batch=1),
             torch.randn(1, config.visual_history_length, config.state_dim),
@@ -12231,30 +11274,22 @@ def _synthetic_v109_address_bank(
     axis = torch.linspace(-1.0, 1.0, grid)
     yy, xx = torch.meshgrid(axis, axis, indexing="ij")
     chart_coordinates = torch.stack((xx.reshape(-1), yy.reshape(-1)), dim=-1)
-    coarse_coordinates = chart_coordinates[None, None].expand(
-        batch, cameras, -1, -1
-    ).clone()
-    flow_centers = chart_coordinates.reshape(1, 1, grid, grid, 2).expand(
-        batch, cameras, -1, -1, -1
-    ).clone()
-    fine_coordinates = flow_centers[..., None, None, :].expand(
-        batch, cameras, grid, grid, slots, candidates, 2
-    ).clone()
-    fine_coordinates = fine_coordinates + 0.05 * torch.randn_like(
-        fine_coordinates
+    coarse_coordinates = chart_coordinates[None, None].expand(batch, cameras, -1, -1).clone()
+    flow_centers = (
+        chart_coordinates.reshape(1, 1, grid, grid, 2).expand(batch, cameras, -1, -1, -1).clone()
     )
-    values = torch.randn(
-        batch, cameras, grid, grid, slots, candidates, raw_dim
+    fine_coordinates = (
+        flow_centers[..., None, None, :]
+        .expand(batch, cameras, grid, grid, slots, candidates, 2)
+        .clone()
     )
+    fine_coordinates = fine_coordinates + 0.05 * torch.randn_like(fine_coordinates)
+    values = torch.randn(batch, cameras, grid, grid, slots, candidates, raw_dim)
     if zero_values:
         values.zero_()
     return SoftAddressLatticeBank(
-        coarse_keys=torch.randn(
-            batch, cameras, grid, grid, slots, route_dim
-        ),
-        fine_keys=torch.randn(
-            batch, cameras, grid, grid, slots, candidates, route_dim
-        ),
+        coarse_keys=torch.randn(batch, cameras, grid, grid, slots, route_dim),
+        fine_keys=torch.randn(batch, cameras, grid, grid, slots, candidates, route_dim),
         fine_values=values,
         fine_valid=torch.ones(
             batch,
@@ -12265,21 +11300,13 @@ def _synthetic_v109_address_bank(
             candidates,
             dtype=torch.bool,
         ),
-        coarse_centers=flow_centers[..., None, :].expand(
-            batch, cameras, grid, grid, slots, 2
-        ).clone(),
-        coarse_variance=torch.full(
-            (batch, cameras, grid, grid, slots, 2), 0.05
-        ),
-        fine_radius=torch.full(
-            (batch, cameras, grid, grid, slots), 0.10
-        ),
-        coarse_base_logits=torch.randn(
-            batch, cameras, grid, grid, slots, chart
-        ),
-        coarse_candidate_keys=torch.randn(
-            batch, cameras, chart, route_dim
-        ),
+        coarse_centers=flow_centers[..., None, :]
+        .expand(batch, cameras, grid, grid, slots, 2)
+        .clone(),
+        coarse_variance=torch.full((batch, cameras, grid, grid, slots, 2), 0.05),
+        fine_radius=torch.full((batch, cameras, grid, grid, slots), 0.10),
+        coarse_base_logits=torch.randn(batch, cameras, grid, grid, slots, chart),
+        coarse_candidate_keys=torch.randn(batch, cameras, chart, route_dim),
         coarse_candidate_coordinates=coarse_coordinates,
         coarse_flow_centers=flow_centers,
         coarse_confidence=torch.rand(batch, cameras, grid, grid),
@@ -12288,15 +11315,9 @@ def _synthetic_v109_address_bank(
         coarse_cycle_error=torch.rand(batch, cameras, grid, grid),
         fine_coordinates=fine_coordinates,
         coarse_source_centers=flow_centers,
-        dense_source_raw_keys=torch.randn(
-            batch, cameras, route_dim, 8, 8
-        ),
-        dense_target_raw_keys=torch.randn(
-            batch, cameras, route_dim, 8, 8
-        ),
-        dense_target_dino_keys=torch.randn(
-            batch, cameras, route_dim, grid, grid
-        ),
+        dense_source_raw_keys=torch.randn(batch, cameras, route_dim, 8, 8),
+        dense_target_raw_keys=torch.randn(batch, cameras, route_dim, 8, 8),
+        dense_target_dino_keys=torch.randn(batch, cameras, route_dim, grid, grid),
         dense_target_detail=(
             torch.zeros(batch, cameras, raw_dim, 8, 8)
             if zero_values
@@ -12320,9 +11341,7 @@ def test_v109_contract_and_flag_off_ancestry() -> None:
     trainer = _complete_v109_trainer()
     _validate_complete_v109_model_contract(config, trainer)
     assert _validate_required_model_contract("v109", config, trainer) == "v109"
-    with pytest.raises(
-        ValueError, match="flow_jepa_progressive_grounding_address"
-    ):
+    with pytest.raises(ValueError, match="flow_jepa_progressive_grounding_address"):
         _validate_complete_v109_model_contract(
             replace(config, flow_jepa_progressive_grounding_address=0),
             trainer,
@@ -12411,9 +11430,7 @@ def test_v109_selector_priors_cannot_manufacture_raw_detail_values() -> None:
         flow_jepa_raw_reader_heads=2,
     )
     encoder = FlowDINOEvidenceEncoder(config).eval()
-    bank = _synthetic_v109_address_bank(
-        config, batch=1, zero_values=True
-    )
+    bank = _synthetic_v109_address_bank(config, batch=1, zero_values=True)
     state = encoder.begin_progressive_grounding_address(bank)
     rollout = torch.randn(
         1,
@@ -12421,9 +11438,7 @@ def test_v109_selector_priors_cannot_manufacture_raw_detail_values() -> None:
         config.hidden_size,
     )
     for stage in (1, 2, 3):
-        state = encoder.update_progressive_grounding_address(
-            state, rollout, stage=stage
-        )
+        state = encoder.update_progressive_grounding_address(state, rollout, stage=stage)
     encoder.score_progressive_horizon_posterior(rollout, state)
     reader = LateRawDetailPolicyReader(config).eval()
     trajectory = torch.randn(
@@ -12465,28 +11480,31 @@ def test_v109_full_action_path_uses_dynamic_g2_then_one_p_value_read() -> None:
     assert encoder.progressive_grounding_address is not None
     assert late_reader is not None
     batch = 1
-    with patch.object(
-        encoder,
-        "organize_horizon_address",
-        wraps=encoder.organize_horizon_address,
-    ) as old_online, patch.object(
-        encoder,
-        "predict_future_with_address",
-        wraps=encoder.predict_future_with_address,
-    ) as old_late, patch.object(
-        encoder.soft_address_compiler,
-        "progressive_fine_candidates",
-        wraps=encoder.soft_address_compiler.progressive_fine_candidates,
-    ) as dynamic_candidates, patch.object(
-        late_reader,
-        "_read_soft_address_lattice",
-        wraps=late_reader._read_soft_address_lattice,
-    ) as policy_value_read:
+    with (
+        patch.object(
+            encoder,
+            "organize_horizon_address",
+            wraps=encoder.organize_horizon_address,
+        ) as old_online,
+        patch.object(
+            encoder,
+            "predict_future_with_address",
+            wraps=encoder.predict_future_with_address,
+        ) as old_late,
+        patch.object(
+            encoder.soft_address_compiler,
+            "progressive_fine_candidates",
+            wraps=encoder.soft_address_compiler.progressive_fine_candidates,
+        ) as dynamic_candidates,
+        patch.object(
+            late_reader,
+            "_read_soft_address_lattice",
+            wraps=late_reader._read_soft_address_lattice,
+        ) as policy_value_read,
+    ):
         output = system.flow_training_forward(
             _visual(config, batch=batch),
-            torch.randn(
-                batch, config.visual_history_length, config.state_dim
-            ),
+            torch.randn(batch, config.visual_history_length, config.state_dim),
             torch.randn(
                 batch,
                 config.executed_history_length,
@@ -12503,9 +11521,7 @@ def test_v109_full_action_path_uses_dynamic_g2_then_one_p_value_read() -> None:
                 config.visual_token_dim,
             ),
             raw_visual=_raw_visual(config, batch=batch, side=32),
-            goal_language_tokens=torch.randn(
-                batch, 3, config.goal_language_dim
-            ),
+            goal_language_tokens=torch.randn(batch, 3, config.goal_language_dim),
             goal_language_mask=torch.ones(batch, 3, dtype=torch.bool),
             make_counterfactuals=False,
         )
@@ -12553,16 +11569,12 @@ def test_v110_contract_launcher_and_flag_off_ancestry() -> None:
         flow_jepa_coordinate_typed_raw_detail=0,
         flow_jepa_raw_micro_grid=2,
     ).validate()
-    with pytest.raises(
-        ValueError, match="flow_jepa_coordinate_typed_raw_detail"
-    ):
+    with pytest.raises(ValueError, match="flow_jepa_coordinate_typed_raw_detail"):
         _validate_complete_v110_model_contract(
             replace(config, flow_jepa_coordinate_typed_raw_detail=0), trainer
         )
     with pytest.raises(ValueError, match="flow_jepa_raw_micro_grid=3"):
-        _validate_complete_v110_model_contract(
-            replace(config, flow_jepa_raw_micro_grid=5), trainer
-        )
+        _validate_complete_v110_model_contract(replace(config, flow_jepa_raw_micro_grid=5), trainer)
     launcher = (
         Path(__file__).resolve().parents[1]
         / "scripts"
@@ -12637,9 +11649,7 @@ def test_v110_streamed_microgrid_matches_materialized_value_and_gradients() -> N
     ).clamp_min(1e-8)
 
     def reference(value: torch.Tensor) -> torch.Tensor:
-        state = torch.einsum(
-            "bqgcijmkl,bcijmkv->bqgcijmlv", materialized_weight, value
-        )
+        state = torch.einsum("bqgcijmkl,bcijmkv->bqgcijmlv", materialized_weight, value)
         return torch.einsum("bqgcijm,bqgcijmlv->bqglv", route, state)
 
     expected = (reference(rgb), reference(detail), reference(coordinates))
@@ -12657,18 +11667,14 @@ def test_v110_streamed_microgrid_matches_materialized_value_and_gradients() -> N
     probes = tuple(torch.randn_like(row) for row in expected)
     parameters = (route_logits, fine_logits, rgb, detail, coordinates)
     expected_loss = sum(
-        (value * probe).sum()
-        for value, probe in zip(expected, probes, strict=True)
+        (value * probe).sum() for value, probe in zip(expected, probes, strict=True)
     )
     expected_gradients = torch.autograd.grad(
         expected_loss,
         parameters,
         retain_graph=True,
     )
-    actual_loss = sum(
-        (value * probe).sum()
-        for value, probe in zip(actual, probes, strict=True)
-    )
+    actual_loss = sum((value * probe).sum() for value, probe in zip(actual, probes, strict=True))
     actual_gradients = torch.autograd.grad(actual_loss, parameters)
     for actual_gradient, expected_gradient in zip(
         actual_gradients, expected_gradients, strict=True
@@ -12690,19 +11696,14 @@ def test_v110_literal_rgb_chart_keeps_native_resolution() -> None:
         flow_jepa_address_slots=2,
         flow_jepa_address_route_dim=8,
     )
-    raw_dim = (
-        config.flow_jepa_raw_base_channels
-        + config.flow_jepa_raw_base_channels // 2
-    )
+    raw_dim = config.flow_jepa_raw_base_channels + config.flow_jepa_raw_base_channels // 2
     compiler = _SoftMultiResolutionAddressCompiler(config, raw_dim=raw_dim).eval()
     batch = 1
     cameras = config.num_cameras
     dino_side = 2
     raw_side = 16
     rgb_side = 64
-    source_dino = torch.randn(
-        batch, cameras, dino_side, dino_side, config.visual_token_dim
-    )
+    source_dino = torch.randn(batch, cameras, dino_side, dino_side, config.visual_token_dim)
     target_dino = torch.randn_like(source_dino)
     source_raw = torch.randn(batch, cameras, raw_dim, raw_side, raw_side)
     target_raw = torch.randn_like(source_raw)
@@ -12760,9 +11761,7 @@ def test_v110_typed_gwp_path_is_attached_and_zero_value_exact() -> None:
             state = encoder.begin_progressive_grounding_address(bank)
             rollout = torch.randn(1, config.future_token_count, config.hidden_size)
             for stage in (1, 2, 3):
-                state = encoder.update_progressive_grounding_address(
-                    state, rollout, stage=stage
-                )
+                state = encoder.update_progressive_grounding_address(state, rollout, stage=stage)
             encoder.score_progressive_horizon_posterior(rollout, state)
             assert state.dynamic_semantic_keys is not None
             assert state.dynamic_appearance_keys is not None
@@ -12771,10 +11770,7 @@ def test_v110_typed_gwp_path_is_attached_and_zero_value_exact() -> None:
             assert state.world_future_offset is not None
             assert state.canonical_summary_tokens is not None
             assert int(state.canonical_summary_tokens.shape[1]) == (
-                3
-                * config.num_cameras
-                * config.future_grid_size
-                * config.future_grid_size
+                3 * config.num_cameras * config.future_grid_size * config.future_grid_size
             )
             trajectory = torch.randn(
                 1,
@@ -12801,13 +11797,9 @@ def test_v110_typed_gwp_path_is_attached_and_zero_value_exact() -> None:
     zero_updated, zero_trajectory = run_bank(
         _synthetic_v109_address_bank(config, batch=1, zero_values=True)
     )
-    torch.testing.assert_close(
-        zero_updated, zero_trajectory, rtol=0.0, atol=0.0
-    )
+    torch.testing.assert_close(zero_updated, zero_trajectory, rtol=0.0, atol=0.0)
 
-    updated, trajectory = run_bank(
-        _synthetic_v109_address_bank(config, batch=1, zero_values=False)
-    )
+    updated, trajectory = run_bank(_synthetic_v109_address_bank(config, batch=1, zero_values=False))
     (updated - trajectory).float().square().mean().backward()
     parameters = (
         organizer.g2_typed_rectifier[-1].weight,
@@ -12834,9 +11826,7 @@ def test_v111_contract_launcher_and_v110_flag_off_ancestry() -> None:
     assert _validate_required_model_contract("v111", config, trainer) == "v111"
     v110 = replace(config, flow_jepa_structured_ownership_bottleneck=0)
     _validate_complete_v110_model_contract(v110, trainer)
-    with pytest.raises(
-        ValueError, match="flow_jepa_structured_ownership_bottleneck"
-    ):
+    with pytest.raises(ValueError, match="flow_jepa_structured_ownership_bottleneck"):
         _validate_complete_v111_model_contract(v110, trainer)
     launcher = (
         Path(__file__).resolve().parents[1]
@@ -12844,8 +11834,7 @@ def test_v111_contract_launcher_and_v110_flag_off_ancestry() -> None:
         / "current_v111_structured_ownership_bottleneck.sh"
     ).read_text(encoding="utf-8")
     assert (
-        'CLEARVLA_REQUIRED_MODEL_CONTRACT="${'
-        'CLEARVLA_REQUIRED_MODEL_CONTRACT:-v111}"'
+        'CLEARVLA_REQUIRED_MODEL_CONTRACT="${CLEARVLA_REQUIRED_MODEL_CONTRACT:-v111}"'
     ) in launcher
     assert "--flow-jepa-structured-ownership-bottleneck 1" in launcher
     smoke = (
@@ -12878,9 +11867,7 @@ def test_v111_p2_keeps_value_lanes_zero_exact_and_owner_gradients_natural() -> N
         learned_detail=torch.zeros(3, 1, 9, 12),
         **contexts,
     )
-    torch.testing.assert_close(
-        zero_output, torch.zeros_like(zero_output), rtol=0.0, atol=0.0
-    )
+    torch.testing.assert_close(zero_output, torch.zeros_like(zero_output), rtol=0.0, atol=0.0)
 
     output, metrics = refiner(
         rgb=torch.randn(3, 1, 9, 3),
@@ -12922,18 +11909,12 @@ def test_v111_structured_gwp_ownership_is_attached_without_capacity_loss() -> No
         state = encoder.begin_progressive_grounding_address(bank)
         rollout = torch.randn(1, config.future_token_count, config.hidden_size)
         for stage in (1, 2, 3):
-            state = encoder.update_progressive_grounding_address(
-                state, rollout, stage=stage
-            )
+            state = encoder.update_progressive_grounding_address(state, rollout, stage=stage)
         assert state.g2_semantic_probability is not None
         assert state.g2_appearance_probability is not None
         assert state.g2_geometry_probability is not None
         assert state.canonical_summary_tokens is not None
-        public_tokens = (
-            config.num_cameras
-            * config.future_grid_size
-            * config.future_grid_size
-        )
+        public_tokens = config.num_cameras * config.future_grid_size * config.future_grid_size
         assert int(state.canonical_summary_tokens.shape[1]) == public_tokens
         owner_keys = (
             state.canonical_semantic_keys,
@@ -12972,9 +11953,7 @@ def test_v111_structured_gwp_ownership_is_attached_without_capacity_loss() -> No
             config.hidden_size,
         )
         reader = LateRawDetailPolicyReader(config).train()
-        assert isinstance(
-            reader.typed_local_refiners[0], _StructuredOwnershipLocalRefiner
-        )
+        assert isinstance(reader.typed_local_refiners[0], _StructuredOwnershipLocalRefiner)
         updated, metrics = reader(
             trajectory,
             rollout,

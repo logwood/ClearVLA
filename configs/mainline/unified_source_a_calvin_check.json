@@ -275,6 +275,7 @@
     "target_binding_input_mode": "full_tokens_views_v1",
     "observed_outcome_mode": "before_proposal_v1",
     "entity_ownership_mode": "local_mixture_v1",
-    "identity_supervision_mode": "none"
+    "identity_supervision_mode": "none",
+    "typed_interval_gradient_mode": "ordinary_v1"
   }
 }
