@@ -177,7 +177,7 @@ def main():
             try:
                 for version, key in (('rgbd_temporal_v1', 'v1_joint_all'),
                                      ('rgbd_temporal_conditional_v2', 'v2_conditional_supported')):
-                    proxy = SimpleNamespace(grounding=model.grounding,
+                    proxy = SimpleNamespace(grounding=model.grounding, observation=model.observation,
                         config=SimpleNamespace(top=SimpleNamespace(identity_supervision_mode=version)))
                     value = production.identity_terms(proxy, batch.online, state.top.facts, batch.identity)
                     gap = abs(float(value['identity_correspondence']) - result['components'][key]['raw_loss'])
