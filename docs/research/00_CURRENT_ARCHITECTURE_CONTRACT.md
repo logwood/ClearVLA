@@ -1694,6 +1694,21 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### Unified conditional-value source candidate (2026-10-08)
+
+On `codex/causal-unified-refactor-20261008`, the explicit
+`typed_object_value_mode=conditional_object_v1` keeps per-K typed values
+conditional until the existing S/P2 read. Observed typed sources are modulated
+by interval queries rather than replaced by K-shared query-only values. The
+one shared binding is consumed once at each reader; the P2 public target
+residual keeps admitted real/null mass. This changes values and training,
+adds no selector/parameters/gain, and requires ordinary interval gradients.
+Only `causal_unified_values_v1` admits its initialization; old configs,
+checkpoints and earlier migration contracts are unchanged. See
+`UNIFIED_REFACTOR_QUALIFICATION.md` and the conditional-object tests. It is
+not a promoted physical-identity, motion, or learned-behavior repair.
+
+
 ### Unified source support and read-only configuration (2026-10-08)
 
 The isolated unified branch keeps producer support authoritative in canonical

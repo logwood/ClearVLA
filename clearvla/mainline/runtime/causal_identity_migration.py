@@ -6,7 +6,10 @@ from ..causal_identity import MODES
 
 CAUSAL_IDENTITY_AB_V1 = "causal_identity_ab_v1"
 CAUSAL_UNIFIED_SOURCE_V1 = "causal_unified_source_v1"
-CAUSAL_INITIALIZATION_MODES = frozenset({CAUSAL_IDENTITY_AB_V1, CAUSAL_UNIFIED_SOURCE_V1})
+CAUSAL_UNIFIED_VALUES_V1 = "causal_unified_values_v1"
+CAUSAL_INITIALIZATION_MODES = frozenset(
+    {CAUSAL_IDENTITY_AB_V1, CAUSAL_UNIFIED_SOURCE_V1, CAUSAL_UNIFIED_VALUES_V1}
+)
 SOURCE_DIGEST = "df3fd978ba754058943859a333cafd671871684c3cd4e6f55bf92576831d3f66"
 
 SOURCE_PATHS = frozenset(
@@ -85,6 +88,13 @@ def allowed_source_paths(mode: str) -> frozenset[str]:
         return SOURCE_PATHS
     if mode == CAUSAL_UNIFIED_SOURCE_V1:
         return UNIFIED_SOURCE_PATHS
+    if mode == CAUSAL_UNIFIED_VALUES_V1:
+        return UNIFIED_SOURCE_PATHS | frozenset(
+            {
+                "clearvla/mainline/model/typed_object_values.py",
+                "clearvla/mainline/model/compiler.py",
+            }
+        )
     raise ValueError("unknown causal initialization source contract")
 
 
@@ -93,8 +103,10 @@ def config_view(payload, *, mode=CAUSAL_IDENTITY_AB_V1):
     result = {**payload, "top": dict(payload["top"]), "objectives": dict(payload["objectives"])}
     if mode not in CAUSAL_INITIALIZATION_MODES:
         raise ValueError("unknown causal initialization source contract")
-    if mode == CAUSAL_UNIFIED_SOURCE_V1:
+    if mode in {CAUSAL_UNIFIED_SOURCE_V1, CAUSAL_UNIFIED_VALUES_V1}:
         result["top"].pop("typed_interval_gradient_mode", None)
+    if mode == CAUSAL_UNIFIED_VALUES_V1:
+        result["top"].pop("typed_object_value_mode", None)
     for name in MODES:
         result["top"].pop(name, None)
     for name in (
@@ -116,12 +128,21 @@ def validate_selection(saved, current, source_digest, *, mode=CAUSAL_IDENTITY_AB
         raise ValueError("causal identity migration requires the admitted a2d597d2 source identity")
     if mode not in CAUSAL_INITIALIZATION_MODES:
         raise ValueError("unknown causal initialization source contract")
+    if saved.top.typed_object_value_mode != "legacy_selected_v1":
+        raise ValueError("causal source requires original target value semantics")
+    if mode == CAUSAL_UNIFIED_VALUES_V1:
+        if current.top.typed_object_value_mode != "conditional_object_v1":
+            raise ValueError("conditional values migration must explicitly select the new contract")
+    elif current.top.typed_object_value_mode != "legacy_selected_v1":
+        raise ValueError(
+            "conditional object values require their explicit initialization migration"
+        )
     if saved.top.typed_interval_gradient_mode != "legacy_common_surrogate_v1":
         raise ValueError("causal identity migration requires the original interval VJP")
-    if (
-        current.top.typed_interval_gradient_mode != "legacy_common_surrogate_v1"
-        and mode != CAUSAL_UNIFIED_SOURCE_V1
-    ):
+    if current.top.typed_interval_gradient_mode != "legacy_common_surrogate_v1" and mode not in {
+        CAUSAL_UNIFIED_SOURCE_V1,
+        CAUSAL_UNIFIED_VALUES_V1,
+    }:
         raise ValueError("ordinary interval VJP requires the explicit unified source migration")
     if (
         saved.data.data_profile != "calvin_relative_7d_v1"

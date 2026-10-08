@@ -357,6 +357,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         target_binding_input_mode: str = "protected_pooled_v1",
         observed_outcome_mode: str = "none",
         typed_interval_gradient_mode: str = "legacy_common_surrogate_v1",
+        typed_object_value_mode: str = "legacy_selected_v1",
         entity_ownership_mode: str = "local_mixture_v1",
         camera_names: tuple[str, ...] = ("top", "wrist"),
     ) -> None:
@@ -392,6 +393,14 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if typed_interval_gradient_mode not in {"legacy_common_surrogate_v1", "ordinary_v1"}:
             raise ValueError("unknown typed interval gradient contract")
         self.typed_interval_gradient_mode = typed_interval_gradient_mode
+        from .typed_object_values import validate_typed_object_value_mode
+
+        validate_typed_object_value_mode(typed_object_value_mode)
+        if typed_object_value_mode == "conditional_object_v1" and (
+            target_binding_mode != "shared_operation_v1" or typed_interval_gradient_mode != "ordinary_v1"
+        ):
+            raise ValueError("conditional values require one shared binding and ordinary gradients")
+        self.typed_object_value_mode = typed_object_value_mode
         self.camera_names = tuple(camera_names)
         self.target_object_address_mode = target_object_address_mode
         self.hidden = int(hidden)
@@ -748,6 +757,37 @@ class StatelessObjectIntentOrganizer(nn.Module):
         ]
         relevance_mass = signal_probability[..., None] * validity
         relevance_mass = relevance_mass.to(dtype=typed_route.dtype)
+        if self.typed_object_value_mode == "conditional_object_v1":
+            from .typed_object_values import conditional_typed_values
+
+            if binding is None:
+                raise ValueError("conditional object values lost their shared binding")
+            # This value is conditional on K: the mass is NOT stored inside it.
+            # S and P2 each perform their own single read of the same measure.
+            conditional = conditional_typed_values(
+                typed_route,
+                typed_query,
+                torch.sigmoid(operation_score),
+                object_support,
+            ).to(typed_route.dtype)
+            selected = torch.einsum("bk,biktr->bitr", binding.mass.to(conditional), conditional)
+            components = []
+            for type_index, projection in enumerate(
+                (self.object_semantic, self.object_appearance, self.object_geometry)
+            ):
+                component, _ = smooth_rms_contract(projection(selected[:, :, type_index]), 0.35)
+                components.append(component)
+            typed_components = torch.stack(components, dim=2)
+            _, scale = smooth_rms_contract(typed_components.sum(dim=2) / (3.0**0.5), 0.35)
+            typed_components = typed_components * scale[:, :, None].to(typed_components)
+            return (
+                relevance_mass,
+                conditional,
+                typed_components,
+                target_object_address_logit,
+                score,
+                temperature,
+            )
         relevance_value = relevance_mass * typed_route[:, None].to(dtype=relevance_mass.dtype)
         # ``relevance_mass * G`` is intentionally kept as the current-object
         # fact carrier.  It cannot, however, express an interval-specific task
@@ -1414,6 +1454,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             target_object_address_logit=target_object_address_logit,
             typed_common_mass=typed_common_mass,
             typed_common_value=typed_common_value,
+            typed_object_value_mode=self.typed_object_value_mode,
             typed_interval_residual_mass=typed_interval_residual_mass,
             typed_interval_residual_value=typed_interval_residual_value,
             typed_policy_components=typed_policy_components,
@@ -1634,6 +1675,13 @@ class StatelessObjectIntentOrganizer(nn.Module):
             mass = typed_relevance_mass[..., type_index, 0].detach().float()
             selected = typed_relevance_value[..., type_index, :].detach().float()
             component = typed_policy_components[..., type_index, :].detach().float()
+            if self.typed_object_value_mode == "conditional_object_v1":
+                metrics[f"object_intent_{name}_conditional_value_rms"] = selected.square().mean().sqrt()
+                if target_binding is None:
+                    raise ValueError("conditional-value diagnostics lost target binding")
+                # Keep historical 'selected' diagnostics on their actual
+                # mass-weighted meaning, not on new conditional prototypes.
+                selected = selected * target_binding.mass.detach()[:, None, :, None].to(selected)
             metrics.update(
                 {
                     f"object_intent_{name}_route_raw_rms": raw_routes[type_index]

@@ -10,10 +10,13 @@ from torch import Tensor, nn
 
 from ..annotation_goal import ANNOTATED_ENDPOINT_GOAL
 from ..executed_world import EXECUTED_WORLD_FEEDBACK, ExecutedWorldPlanValues
-from ..global_task import COMPILED_TASK_GLOBAL, PROPRIOCEPTIVE_GLOBAL, validate_global_condition_mode
-from ..role_values import ADDRESS_ONLY_ROLE
 from ..feedback_values import INNOVATION_ONLY
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
+from ..global_task import (
+    COMPILED_TASK_GLOBAL,
+    PROPRIOCEPTIVE_GLOBAL,
+    validate_global_condition_mode,
+)
 from ..instruction_change import (
     INSTRUCTION_CHANGE_MODES,
     MIXED_REFERENCE_CHANGE,
@@ -21,10 +24,11 @@ from ..instruction_change import (
     TYPED_CHANGE_MODES,
 )
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
-from ..p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, P2_EFFECT_VALUE_MODES
 from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
+from ..p2_values import CONTEXTUAL_EFFECT_VALUES, P2_EFFECT_VALUE_MODES, WORLD_EFFECT_VALUES
 from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from ..robot_execution import RobotResponseFeedback
+from ..role_values import ADDRESS_ONLY_ROLE
 from ..task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION, TaskExecutionPlan
 from .action_codec import ACTION_BAND_ENDS
 from .annotation_goal import AnnotatedGoalPlanRead
@@ -958,10 +962,12 @@ class ObjectFutureEffectReader(nn.Module):
             public_interval_residual = public_interval - public_interval.mean(
                 dim=1, keepdim=True
             )
-            selected_target_values.append(
-                selected_typed.float()
-                + public_interval_residual[:, None, None, :, :]
-            )
+            public_target_value = public_interval_residual[:, None, None, :, :]
+            if intent.typed_object_value_mode == "conditional_object_v1":
+                # An interval-common task signal is not evidence for a real K.
+                # Preserve the admitted K/null mass instead of bypassing null.
+                public_target_value = public_target_value * posterior.float().sum(-1, keepdim=True)
+            selected_target_values.append(selected_typed.float() + public_target_value)
             interval_supports.append(interval_support)
             spatial_posteriors.append(posterior)
             source_scores.append(source_score)

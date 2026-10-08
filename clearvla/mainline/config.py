@@ -547,6 +547,7 @@ class TopConfig:
     # Legacy snapshots replay their historical surrogate VJP. New training
     # selects the ordinary derivative explicitly; forward values are equal.
     typed_interval_gradient_mode: str = "legacy_common_surrogate_v1"
+    typed_object_value_mode: str = "legacy_selected_v1"
     operation_intent_mode: str = POSTERIOR_INTENT
     object_view_mode: str = "pooled_v1"
     target_binding_input_mode: str = "protected_pooled_v1"
@@ -561,6 +562,13 @@ class TopConfig:
     p2_target_value_mode: str = "none"
 
     def validate(self) -> None:
+        if self.typed_object_value_mode not in {"legacy_selected_v1", "conditional_object_v1"}:
+            raise ValueError("unknown typed object value contract")
+        if self.typed_object_value_mode == "conditional_object_v1" and (
+            self.target_binding_mode != "shared_operation_v1"
+            or self.typed_interval_gradient_mode != "ordinary_v1"
+        ):
+            raise ValueError("conditional object values require shared binding and ordinary gradients")
         if self.typed_interval_gradient_mode not in {"legacy_common_surrogate_v1", "ordinary_v1"}:
             raise ValueError("unknown typed interval gradient contract")
         if self.annotation_goal_mode not in {"none", "annotated_endpoint_relation_v1"}:
@@ -1682,6 +1690,8 @@ class ExperimentConfig:
             cast(dict[str, object], payload["objectives"]).pop("identity_correspondence")
         if self.objectives.identity_source_prediction == 0:
             cast(dict[str, object], payload["objectives"]).pop("identity_source_prediction")
+        if self.top.typed_object_value_mode == "legacy_selected_v1":
+            cast(dict[str, object], payload["top"]).pop("typed_object_value_mode")
         if self.top.typed_interval_gradient_mode == "legacy_common_surrogate_v1":
             cast(dict[str, object], payload["top"]).pop("typed_interval_gradient_mode")
         if self.top.entity_competition_scale_mode == "batch_global_v1":

@@ -438,6 +438,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             target_binding_input_mode=top.target_binding_input_mode,
             observed_outcome_mode=top.observed_outcome_mode,
             typed_interval_gradient_mode=top.typed_interval_gradient_mode,
+            typed_object_value_mode=top.typed_object_value_mode,
             history_encoding_mode=top.history_encoding_mode,
             entity_context_mode=top.entity_context_mode,
             entity_chart_mode=top.entity_chart_mode,

@@ -134,3 +134,48 @@ nine missing warmup paths must become present, nonzero and actually updated
 after gate opening. Every other trainable parameter must also have a gradient
 tensor then; exact branch-specific zeros remain visible in the ledger and
 are not converted into false activity claims.
+
+## Conditional object values at the S/P2 boundary (2026-10-08)
+
+The prior unified source still exported `binding * value` from S and then read
+that value with binding again in P2. Its common task supplement could respond
+to concentration without distinguishing an equal-mass K swap. In addition,
+P2 added the public interval residual after target selection without retaining
+real/null mass, so an all-null target could have a nonzero target-value lane.
+The legacy counterexample is retained in an executable test.
+
+`top.typed_object_value_mode=conditional_object_v1` is a separately identified
+candidate. S produces `G[k,type] * sigmoid(operation[i,type]) *
+(1+tanh(query[i,type]))`, quarantining producer-invalid values before products.
+This is a per-object source-conditioned value, not a query-only value copied
+to K. No K probability is stored inside it. S's policy-context read and P2's
+spatial read each consume their single existing binding once. P2's public task
+residual retains the actual admitted real mass. All-null yields exactly zero
+on this target route, not a requirement for the whole robot command to vanish.
+The geometry reader can still select a view inside K; it cannot change K mass.
+
+No parameter, gain, optimizer, source ownership, matcher, loss coefficient,
+solver, controller or policy input is added or changed. Forward values and
+training gradients DO change; this is not an output-equivalence repair.
+Historical configs omit the new field and keep legacy semantics. Value meaning
+is explicit in ObjectIntentState, PolicyIntentDock, K permutation, config and
+ABI. Diagnostics separately name conditional values while preserving the
+meaning of mass-weighted selected-value statistics.
+
+Only the new `causal_unified_values_v1` initialization permits this contract
+from the same strictly admitted mature source. Previous A/B and unified source
+migration allowlists are not extended. The new A/B check presets and trainer
+parser are wired through the actual config, factory and runtime. The real-data
+checker requires `--migration causal_unified_values_v1` for these presets.
+
+Checks include ordinary double-precision first/second derivatives, source-zero,
+invalid NaN quarantine, K permutation, batch independence, equal-entropy target
+swap, producer-to-dock identity, actual P2 with 0/0.5/0.999/1 null fractions,
+legacy counterexample, constructor/parameter parity, ABI rejection, migration,
+and two ordinary optimizer updates plus the complete two-pass sampler in A/B.
+Inputs remain artificial and do not certify learned objects or task success.
+
+This candidate does not solve unqualified long-gap correspondence, physical
+instance separation or arm/gripper behavior. Nor does it remove the intentional
+posterior expectation across future intervals: centered values may legitimately
+cancel there. Those independent issues and all previous promotion blocks remain.

@@ -172,7 +172,10 @@ def verify_training_receipt(output: Path, admission: dict) -> dict:
 
 
 def main() -> int:
-    from clearvla.mainline.runtime.causal_identity_migration import CAUSAL_UNIFIED_SOURCE_V1
+    from clearvla.mainline.runtime.causal_identity_migration import (
+        CAUSAL_UNIFIED_SOURCE_V1,
+        CAUSAL_UNIFIED_VALUES_V1,
+    )
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -181,6 +184,11 @@ def main() -> int:
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument(
+        "--migration",
+        choices=(CAUSAL_UNIFIED_SOURCE_V1, CAUSAL_UNIFIED_VALUES_V1),
+        default=CAUSAL_UNIFIED_SOURCE_V1,
+    )
     args = parser.parse_args()
     if args.report.exists():
         raise FileExistsError("preserve the existing admission record")
@@ -213,7 +221,7 @@ def main() -> int:
         "--init-checkpoint",
         str(args.checkpoint.expanduser().resolve()),
         "--init-model-contract-migration",
-        CAUSAL_UNIFIED_SOURCE_V1,
+        args.migration,
         "--init-training-clock",
         "checkpoint",
         "--init-optimizer-state",

@@ -1221,9 +1221,16 @@ class PolicyIntentDock:
     annotated_goal_values: AnnotatedGoalValues | None = None
     operation_expectation: OperationExpectation | None = None
 
+    typed_object_value_mode: str = "legacy_selected_v1"
+
     time_grid_mode: str = LEGACY_FUTURE_TIME
 
     def validate(self, *, horizon: int, hidden: int) -> None:
+        from .typed_object_values import validate_typed_object_value_mode
+
+        validate_typed_object_value_mode(self.typed_object_value_mode)
+        if self.typed_object_value_mode == "conditional_object_v1" and self.target_binding is None:
+            raise ValueError("conditional object values require their shared K binding")
         resolve_future_time(self.time_grid_mode)
         if self.task_relation is not None:
             self.task_relation.validate(hidden=hidden)
@@ -1322,6 +1329,8 @@ class ObjectIntentState:
     annotated_goal_values: AnnotatedGoalValues | None = None
     operation_expectation: OperationExpectation | None = None
 
+    typed_object_value_mode: str = "legacy_selected_v1"
+
     time_grid_mode: str = LEGACY_FUTURE_TIME
     compiled_global_task: CompiledGlobalTask | None = None
 
@@ -1339,7 +1348,11 @@ class ObjectIntentState:
 
     @property
     def typed_relevance_value(self) -> Tensor:
-        """Compatibility view of the unchanged Schema25 selected value."""
+        """Recombined typed value; ``typed_object_value_mode`` owns its meaning.
+
+        Historical values already contain K selection mass. Conditional values
+        do not: each consumer must read the shared binding exactly once.
+        """
 
         return self.typed_common_value[:, None] + self.typed_interval_residual_value
 
@@ -1393,12 +1406,18 @@ class ObjectIntentState:
             annotated_goal_values=self.annotated_goal_values,
             target_object_address_logit=self.target_object_address_logit,
             typed_common_value=self.typed_common_value,
+            typed_object_value_mode=self.typed_object_value_mode,
             target_binding=self.target_binding,
             task_relation=self.task_relation,
             typed_interval_residual_value=self.typed_interval_residual_value,
         )
 
     def validate(self, *, horizon: int, hidden: int) -> None:
+        from .typed_object_values import validate_typed_object_value_mode
+
+        validate_typed_object_value_mode(self.typed_object_value_mode)
+        if self.typed_object_value_mode == "conditional_object_v1" and self.target_binding is None:
+            raise ValueError("conditional object values require their shared K binding")
         resolve_future_time(self.time_grid_mode)
         if self.compiled_global_task is not None:
             self.compiled_global_task.validate(self.public_interval_carrier, hidden=hidden)
@@ -1582,6 +1601,7 @@ class ObjectIntentState:
             target_object_address_logit=self.target_object_address_logit[:, :, index],
             typed_common_mass=self.typed_common_mass[:, index],
             typed_common_value=self.typed_common_value[:, index],
+            typed_object_value_mode=self.typed_object_value_mode,
             typed_interval_residual_mass=self.typed_interval_residual_mass[:, :, index],
             typed_interval_residual_value=self.typed_interval_residual_value[:, :, index],
             typed_policy_components=self.typed_policy_components,

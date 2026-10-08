@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 
-def configuration(shape: str, variant: str):
+def configuration(shape: str, variant: str, typed_object_values: str = "legacy_selected_v1"):
     from importlib import import_module
 
     small_config = import_module("test_mainline_executed_world")._config
@@ -42,6 +42,7 @@ def configuration(shape: str, variant: str):
         target_binding_input_mode="full_tokens_views_v1",
         observed_outcome_mode="before_proposal_v1",
         typed_interval_gradient_mode="ordinary_v1",
+        typed_object_value_mode=typed_object_values,
         object_view_mode="per_camera_values_v1",
         task_execution_mode=JOINT_TASK_EXECUTION,
         entity_context_mode="completed_g3_v1",
@@ -69,7 +70,14 @@ def configuration(shape: str, variant: str):
     return config
 
 
-def run(shape: str, variant: str, updates: int, raw_side: int, completed_step: int = 0) -> dict:
+def run(
+    shape: str,
+    variant: str,
+    updates: int,
+    raw_side: int,
+    completed_step: int = 0,
+    typed_object_values: str = "legacy_selected_v1",
+) -> dict:
     import torch
 
     from clearvla.mainline.identity_supervision import IdentityCorrespondence
@@ -86,7 +94,7 @@ def run(shape: str, variant: str, updates: int, raw_side: int, completed_step: i
         raise ValueError("fixture completed step must be a nonnegative integer")
     torch.set_num_threads(1)
     torch.manual_seed(28431)
-    config = configuration(shape, variant)
+    config = configuration(shape, variant, typed_object_values)
     fixture_config = replace(
         config,
         top=replace(config.top, identity_supervision_mode="none"),
@@ -228,6 +236,7 @@ def run(shape: str, variant: str, updates: int, raw_side: int, completed_step: i
         dimensions=config.dimensions.__dict__,
         raw_rgb_side=raw_side,
         synthetic_completed_step=completed_step,
+        typed_object_value_mode=typed_object_values,
         completed_step_semantics="execution-phase fixture only; no preceding learned updates",
         input_provenance="synthetic descriptors/RGB/actions/positive-pair labels; no real dataset, pretrained encoder, or task success claim",
         scope="full production topology, ordinary training loss backward and AdamW updates, complete two-pass action generation",
@@ -253,13 +262,25 @@ def main():
         default=0,
         help="synthetic execution-phase fixture, not an actual training history",
     )
+    parser.add_argument(
+        "--typed-object-values",
+        choices=("legacy_selected_v1", "conditional_object_v1"),
+        default="legacy_selected_v1",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists() or args.updates < 1:
         raise ValueError("new output and positive update count required")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        result = run(args.shape, args.variant, args.updates, args.raw_side, args.completed_step)
+        result = run(
+            args.shape,
+            args.variant,
+            args.updates,
+            args.raw_side,
+            args.completed_step,
+            args.typed_object_values,
+        )
     except Exception as error:
         args.output.write_text(
             json.dumps(

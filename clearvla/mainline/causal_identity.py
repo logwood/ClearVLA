@@ -27,8 +27,16 @@ def causal_identity_metadata(top):
     )
     if gradient_mode not in {"legacy_common_surrogate_v1", "ordinary_v1"}:
         raise ValueError("unknown typed interval gradient contract")
+    value_mode = (
+        top.get("typed_object_value_mode", "legacy_selected_v1")
+        if isinstance(top, Mapping)
+        else top.typed_object_value_mode
+    )
+    if value_mode not in {"legacy_selected_v1", "conditional_object_v1"}:
+        raise ValueError("unknown typed object value contract")
     if (
-        all(modes[key] == pair[0] for key, pair in MODES.items())
+        value_mode == "legacy_selected_v1"
+        and all(modes[key] == pair[0] for key, pair in MODES.items())
         and gradient_mode == "legacy_common_surrogate_v1"
     ):
         return None
@@ -70,4 +78,6 @@ def causal_identity_metadata(top):
         )
     if gradient_mode == "ordinary_v1":
         result["typed_interval_gradient"] = "ordinary-common-residual-identity-v1"
+    if value_mode == "conditional_object_v1":
+        result["typed_object_values"] = "conditional-source-values-single-K-read-v1"
     return result
