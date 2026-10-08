@@ -1,0 +1,28 @@
+{
+  "schema": "clearvla-reviewed-source-v1",
+  "parent": "d3daa09503153eb054da06f7a7fe1370415e1788",
+  "parent_tree": "09468f157a91036bc2829107121622e8446483fa",
+  "formatted_base_tree": "09468f157a91036bc2829107121622e8446483fa",
+  "source_tree": "c8db1dd48b187e9801d8882672ddb14a6b459de6",
+  "format_existing_python": [],
+  "patch_bytes": 67736,
+  "patch_sha256": "6c8a1bd60a8e6cea4ac47a4b829674d3b3ab97af58161d10de5d694fb7c3a9bb",
+  "message": "fix: preserve conditional object values and null mass through S and P2",
+  "compressed_blobs": [
+    {"sha":"f08f3272215fc6abd2b42aacbc750cd1e628f264","size":1100},
+    {"sha":"12bcaa50a54577b0d4ce3ecabe2b724f4761fbc8","size":1100},
+    {"sha":"942db970b313842dc8e326308262340d96cf5cb7","size":1100},
+    {"sha":"8314bcd7106f59d26a3bf71b5ec4ca5084b7f732","size":1100},
+    {"sha":"2b8b5fcdcc6995ebaea075b079da34f108ff222a","size":1100},
+    {"sha":"e8abd8abe2a143f04479c9ea2f0182842d362b51","size":1100},
+    {"sha":"fd4c0d0b033df5537aff5a17a71cd91e32acfbc2","size":1100},
+    {"sha":"64f365d91be1d18a5c3c0f9f00fab61c5da2e292","size":1100},
+    {"sha":"97e234c3fc5fa2a79d2ca6dfdc1e1d8580c119c6","size":1100},
+    {"sha":"6bd1dbe071a9527f4943a76fe2b879d521165e0c","size":1100},
+    {"sha":"b4d82149b967201b0c5e17933a4fbb00942c6a1e","size":1100},
+    {"sha":"7b132075cf9c3ea634c943e5f96c19b65ff54c4b","size":1100},
+    {"sha":"31f74215e716fc43bb20ed0518bec53097307473","size":1100},
+    {"sha":"3cff7bcdf62932acbe6d96d407dcc861645c7575","size":1100},
+    {"sha":"58bd89d181ffdb9ad45ab2f9aa92a1625b5a3bc3","size":318}
+  ]
+}
