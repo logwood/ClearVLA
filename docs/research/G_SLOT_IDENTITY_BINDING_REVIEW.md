@@ -4433,3 +4433,47 @@ it correctly; r1-scope is retained. No training output was created by this check
 At the last inventory both new continuations remain waiting_idle_gpu; all seven
 GPUs are occupied. The original B-v3 own-trajectory qualification and independent
 SAM jobs remain active. Do not infer a training start from a live queue PID.
+
+#### 34.33.26 startup: actual BS8 admission and clarified BS4 fallback
+
+At2026-10-08 14:10UTC both existing continuations have passed2BS8/2offline
+and cold4, then started the meaningful1024BS8 short from original B-v1.
+Candidate GPU0/PID2911284 completed35 updates (step12071); control GPU2/
+PID2903424 completed83 (step12119). The first35 batches have exact sample IDs.
+Candidate's first20-update window: loss .515242, action-flow .430997,
+raw global gradientL2 1.72054,6.775s/batch; control's latest20-window6.456s.
+All available logged windows and ordinary gain/update rows are finite.
+Actual ordinary backward updates all three new gains; connection is not a
+claim that the repair is already effective. Mechanical PyTorch allocated
+peaks are20.870GiB in both; no OOM observed in these mainline jobs.
+The utility's only short-run finding is expected full execution capacity;
+two-batch offline tail/hard-soft findings are retained, not treated as behavior
+admission. Full256offline/18-R8/physical-object qualification remains pending.
+
+The user clarified "r4" as batch size4, conditionally if needed; closed-loopR8
+is unchanged. Since free whole cards allowed the original queues to start and
+BS8 currently fits, there was no interruption or BS4 conversion. This fallback
+permission supersedes older blanket BS8 restrictions for the requested short.
+Do not manufacture a speedup by reducing declared exposure. If used later,
+record the new update clock/optimizer semantics and matched sample exposure.
+
+Evidence: E/B-v1-address-bs8-started-20261008-r1.json,
+B-v1-address-startup-log-audit-20261008-r3.json and each job's mechanical-audit,
+mechanical-admission, cold4/results and short-updates/updates.jsonl.
+The audit r1 ran before the candidate's first periodic metric existed and was
+rejected as an empty log input; its scope and stderr are retained, not a model
+failure. Reproduce with clearvla.tools.audit_policy_logs on the actual run
+directories after metrics.jsonl exists. Fixed production/runner are unchanged.
+
+Independent SAM slot-feedback long r1 failed during initial training with a
+13.77GiB co-resident allocation; no periodic train window/checkpoint was saved.
+Its20-update logging interval does not prove the exact completed-update count.
+Failed logs
+remain. Its original edbba48b BS8/11012+256+18-R8 specification was relaunched
+on idleGPU5 under Bv2-slot-feedback-long-r2.receipt.json in the separate SAM
+experiment root (runnerPID2921039). Only output paths/GPU assignment change.
+This does not replace or merge either B-v1 short.
+
+At14:16UTC r2 has its first20-BS8 window atstep12056: finite logged metrics,
+loss0.517197/action-flow0.431014,6.523s per batch. It has passed the earlier launch
+failure point; this is startup evidence only, not completion or behavior gain.

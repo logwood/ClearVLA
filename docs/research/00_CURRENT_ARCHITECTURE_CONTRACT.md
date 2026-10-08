@@ -1705,8 +1705,15 @@ mean removal, skipped iterations or any new gate. See34.33.25 before editing.
 ### Live B-v1 address continuations
 
 B-v1-address-memory-short-r1 PID2882377 and no-memory control PID2882378
-are queued on any idle whole GPU (all seven allowed; no pinned GPU4).
+have both passed actual2BS8/2offline plus cold4 and entered the1024BS8 short.
+Candidate child2911284 usesGPU0; control2903424 usesGPU2. At14:10UTC
+they completed35/83 updates; the first35 sample-ID batches match exactly.
 Check their receipt and -job/status.json in causal-identity-ab-20261007.
+The user clarified that "r4 short" means batch size4 as a fallback, not replan4.
+That permission supersedes the earlier blanket BS8 restriction when needed.
+These BS8 jobs currently fit; no fallback switch occurred. Keep closed-loopR8.
+Any later BS4 trial must explicitly declare sample/update/optimizer-clock
+changes and preserve the intended exposure, rather than silently reuse BS8 IDs.
 Fixed production e4be3be6, runner8d79c5cc. They automatically perform
 2BS8/cold4 ->1024BS8/256offline ->standard18 R8 ->source/own-trajectory
 audits; no formal long promotion. Original initialization is the complete
