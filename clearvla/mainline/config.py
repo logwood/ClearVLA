@@ -630,9 +630,9 @@ class TopConfig:
             raise ValueError("object operation outcomes require shared target, aligned time and typed P3")
         if self.observed_outcome_mode not in {"none", "before_proposal_v1"}:
             raise ValueError("unknown observed outcome placement")
-        if self.observed_outcome_mode != "none" and (self.world_feedback_mode == "none" or self.observation_measurement_mode != "source_consistent_v1"):
+        if self.observed_outcome_mode != "none" and (self.world_feedback_mode == "none" or self.observation_measurement_mode not in {"source_consistent_v1", "source_consistent_v2"}):
             raise ValueError("S outcome requires source-consistent existing executed replay")
-        if self.observation_measurement_mode not in {"legacy_v1", "source_consistent_v1"}:
+        if self.observation_measurement_mode not in {"legacy_v1", "source_consistent_v1", "source_consistent_v2"}:
             raise ValueError("unknown observed measurement mode")
         if self.observation_measurement_mode != "legacy_v1" and self.instruction_change_mode != POSTERIOR_REFERENCE_CHANGE:
             raise ValueError("source-consistent measurements require the posterior source graph")
@@ -723,7 +723,7 @@ class TopConfig:
             raise ValueError("unknown entity competition scale scope")
         if self.entity_ownership_mode not in {"local_mixture_v1", "canonical_image_v1"}:
             raise ValueError("unknown global entity ownership law")
-        if self.entity_ownership_mode == "canonical_image_v1" and (self.entity_chart_mode != "current_image_support_v1" or self.entity_context_mode != "completed_g3_v1" or self.object_view_mode != "per_camera_values_v1" or self.target_binding_input_mode != "full_tokens_views_v1" or self.observation_measurement_mode != "source_consistent_v1"):
+        if self.entity_ownership_mode == "canonical_image_v1" and (self.entity_chart_mode != "current_image_support_v1" or self.entity_context_mode != "completed_g3_v1" or self.object_view_mode != "per_camera_values_v1" or self.target_binding_input_mode != "full_tokens_views_v1" or self.observation_measurement_mode not in {"source_consistent_v1", "source_consistent_v2"}):
             raise ValueError("canonical identity requires complete source/view/binder/measurement migration")
         if self.entity_transport_gradient_mode not in {"positive_corners_v1", "ordinary_bilinear_v1"}:
             raise ValueError("unknown entity transport gradient contract")

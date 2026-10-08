@@ -73,7 +73,8 @@ def validate_selection(saved,current,source_digest):
     for name,pair in MODES.items():
         if getattr(saved.top,name)!=pair[0]:raise ValueError('causal identity source already changes '+name)
     for name in ('entity_transport_gradient_mode','entity_competition_scale_mode','observation_measurement_mode','target_binding_input_mode','observed_outcome_mode'):
-        if getattr(current.top,name)!=MODES[name][1]:raise ValueError('incomplete confirmed repair: '+name)
+        admitted = MODES[name][1:] if name == 'observation_measurement_mode' else (MODES[name][1],)
+        if getattr(current.top,name) not in admitted:raise ValueError('incomplete confirmed repair: '+name)
     is_b=current.top.entity_ownership_mode=='canonical_image_v1'
     if (current.top.identity_supervision_mode in {'rgbd_temporal_v1','rgbd_temporal_conditional_v2','rgbd_temporal_regions_v3'})!=is_b:
         raise ValueError('B must include physical correspondence supervision, A must exclude it')

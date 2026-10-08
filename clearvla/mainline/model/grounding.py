@@ -1024,7 +1024,7 @@ class DenseObjectGrounder(nn.Module):
                 value = camera_aggregate(getattr(chart, "candidate_"+name), camera_read)
                 view_values["camera_"+name] = torch.where(camera_validity > 0, value, 0.0)
         observed_content = None
-        if self.observation_measurement_mode == "source_consistent_v1":
+        if self.observation_measurement_mode in {"source_consistent_v1", "source_consistent_v2"}:
             if image_measure is None:
                 raise ValueError("observed reference requires actual G image measure")
             reference_law, _ = image_measure.normalized((2,3,4))

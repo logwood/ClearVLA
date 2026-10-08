@@ -177,7 +177,7 @@ class PosteriorInstructionReferenceRead(nn.Module):
             state_dim=state_dim, camera_names=camera_names,
         )
         self.output = nn.Linear(5 * hidden, hidden, bias=False)
-        if observation_measurement_mode == "source_consistent_v1":
+        if observation_measurement_mode in {"source_consistent_v1", "source_consistent_v2"}:
             for name in ("query", "key", "query_position", "key_position", "null_key"):
                 self.register_parameter(name, None) if isinstance(getattr(self, name), nn.Parameter) else setattr(self, name, None)
 
@@ -237,7 +237,7 @@ class PosteriorInstructionReferenceRead(nn.Module):
         grid = current_image_grid(
             side, side, device=current_dino.device
         ).reshape(patches, 2).float()
-        if self.observation_measurement_mode == "source_consistent_v1":
+        if self.observation_measurement_mode in {"source_consistent_v1", "source_consistent_v2"}:
             from clearvla.vision.observed_correspondence import observed_feature_correspondence
             kernel_start = observed_feature_correspondence(
                 current_dino, reference.dino, common, common)

@@ -194,7 +194,7 @@ class ObjectObservationAssociation(nn.Module):
         )
         if not bool(torch.isfinite(offsets.float()).all()):
             raise ValueError("Teacher future offsets contain non-finite values")
-        if self.observation_measurement_mode == "source_consistent_v1":
+        if self.observation_measurement_mode in {"source_consistent_v1", "source_consistent_v2"}:
             from .source_measurement import source_consistent_measurement
             return source_consistent_measurement(self, facts, observations, offsets, observed)
         objects = facts.objects

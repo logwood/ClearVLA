@@ -5,7 +5,7 @@ from collections.abc import Mapping
 MODES = {
     'entity_transport_gradient_mode': ('positive_corners_v1', 'ordinary_bilinear_v1'),
     'entity_competition_scale_mode': ('batch_global_v1', 'per_observation_v1'),
-    'observation_measurement_mode': ('legacy_v1', 'source_consistent_v1'),
+    'observation_measurement_mode': ('legacy_v1', 'source_consistent_v1', 'source_consistent_v2'),
     'target_binding_input_mode': ('protected_pooled_v1', 'full_tokens_views_v1'),
     'observed_outcome_mode': ('none', 'before_proposal_v1'),
     'entity_ownership_mode': ('local_mixture_v1', 'canonical_image_v1'),
@@ -37,4 +37,6 @@ def causal_identity_metadata(top):
         result['identity_supervision'].update(regions='sam-surface-motion-negative-only;unknown-retained',
             objectives='retain-all-original-positives-and-source-MSE;add-negative-JS-margin-and-equal-region-source-MSE',
             annotations='pinned-compact-training-labels;no-RGB-or-DINO-cache;no-online-policy-input')
+    if modes['observation_measurement_mode']=='source_consistent_v2':
+        result['observation_target_support']='independent-supplied-frame;source-augmentation-mask-never-copied-to-target'
     return result

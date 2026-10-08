@@ -34,9 +34,9 @@ def instruction_change_metadata(camera_names: tuple[str, ...], mode: str = TYPED
         raise ValueError("instruction change requires unique named camera charts")
     if mode not in TYPED_CHANGE_MODES:
         raise ValueError("unknown typed instruction change mode")
-    if measurement_mode not in {"legacy_v1","source_consistent_v1"}:
+    if measurement_mode not in {"legacy_v1","source_consistent_v1", "source_consistent_v2"}:
         raise ValueError("unknown instruction measurement ABI")
-    if measurement_mode == "source_consistent_v1":
+    if measurement_mode in {"source_consistent_v1", "source_consistent_v2"}:
         base=instruction_change_metadata(camera_names,mode)
         return {**base,"schema":"source-consistent-instruction-change-v1",
                 "matching":"frozen-observed-descriptor-law-before-G-read-fixed-across-physical-offsets",

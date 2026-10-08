@@ -22,7 +22,15 @@ def source_consistent_measurement(module, facts, observations, offsets, observed
     source_mask=facts.dense_chart.cell_observed[...,0]
     current=torch.where(source_mask[...,None],current,0.).flatten(2,3)
     observed=torch.ones(b,f,dtype=torch.bool,device=current.device) if observed is None else observed
-    target_mask=source_mask[:,None].expand(b,f,c,h,w) & observed[:,:,None,None,None]
+    if module.observation_measurement_mode == "source_consistent_v2":
+        # The caller supplied a complete, independently observed target frame.
+        # A current-image augmentation mask constrains which SOURCE points we
+        # can measure; it says nothing about a successor pixel's availability.
+        # Keep actual missing-frame support and all source restrictions intact.
+        target_mask=observed[:,:,None,None,None].expand(b,f,c,h,w)
+    else:
+        # Historical target construction for checkpoint-exact replay.
+        target_mask=source_mask[:,None].expand(b,f,c,h,w) & observed[:,:,None,None,None]
     target=torch.where(target_mask[...,None],observations.float(),0.).flatten(3,4)
     kernel=observed_feature_correspondence(current[:,None].expand(b,f,c,h*w,d),target,
         source_mask.flatten(2)[:,None].expand(b,f,c,h*w),target_mask.flatten(3))
