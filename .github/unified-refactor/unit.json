@@ -1,0 +1,15 @@
+{
+  "schema": "clearvla-reviewed-source-v1",
+  "parent": "a07ffcd220255f4c058793ad72df07fbd766626f",
+  "parent_tree": "75a29e1d0746f72e8a5b83524bf8d2615d95c20e",
+  "formatted_base_tree": "75a29e1d0746f72e8a5b83524bf8d2615d95c20e",
+  "source_tree": "09468f157a91036bc2829107121622e8446483fa",
+  "format_existing_python": [],
+  "patch_bytes": 8744,
+  "patch_sha256": "d4dcc5f7180017dc3a174974dd9ce61fd7ab999114f541c368286e8089126ae3",
+  "message": "test: distinguish warmup-disabled paths from broken ordinary gradients",
+  "compressed_blobs": [
+    {"sha":"fdfe5014f9aa2223c2e99e0ee213fab051aacb96","size":2250},
+    {"sha":"68564e4839d31b7534ac6d009ff3abc4971e340c","size":941}
+  ]
+}
