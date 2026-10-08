@@ -7,6 +7,8 @@ from pathlib import Path
 import argparse
 import hashlib
 import json
+import subprocess
+import sys
 import numpy as np
 
 
@@ -41,13 +43,33 @@ def main():
     p.add_argument('--plan',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
     p.add_argument('--limit',type=int,default=0)
     p.add_argument('--export-exact-masks',action='store_true')
+    p.add_argument('--scene',default=None,help='Internal isolated renderer worker')
     args=p.parse_args();args.output.mkdir(exist_ok=False)
     rows=json.loads(args.plan.read_text())['records'];files={}
     for row in rows:
         for path,sha in zip(row['raw_files'],row['sha256']):files[path]=sha
     if args.limit:files=dict(list(files.items())[:args.limit])
+    if args.scene:
+        files={f:s for f,s in files.items() if scene_for(f)==args.scene}
     results=dict(complete=False,records=[],scope=__doc__,plan_sha256=digest(args.plan),
                  script_sha256=digest(__file__),production_changed=False)
+    if args.scene is None:
+        # The library destructor disconnects its old numeric Bullet client even
+        # after close(). Never reuse that client number in this process.
+        for scene in sorted({scene_for(f) for f in files}):
+            child=args.output/scene
+            cmd=[sys.executable,'-B','-u',__file__,'--plan',str(args.plan),
+                 '--output',str(child),'--scene',scene,'--limit',str(args.limit)]
+            if args.export_exact_masks:cmd.append('--export-exact-masks')
+            with (args.output/(scene+'.log')).open('w') as log:
+                subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)
+            report=json.loads((child/'results.json').read_text())
+            assert report['complete']
+            results['records'].extend(report['records'])
+        assert len(results['records'])==len(files)
+        results.update(complete=True,all_exact=all(r['exact_rgb'] for r in results['records']))
+        (args.output/'results.json').write_text(json.dumps(results,indent=2)+'\n')
+        return
     current=None;env=None
     try:
         for filename,expected in files.items():
