@@ -43,6 +43,11 @@ def main():
                     'intent.organizer.object_identity.', 'world.dynamics.object_identity.',
                     'world.dynamics.observed_view_content.', 'world.dynamics.observed_view_role.',
                     'grounding.grounder.canonical_decoder.')
+        if model.config.top.identity_supervision_mode=='rgbd_temporal_regions_v3':
+            # Negative ownership pressure need not reach the value decoder.
+            # Audit its actual owners as well; do not misread decoder None as
+            # a disconnected separation objective.
+            prefixes += ('grounding.grounder.',)
         selected = {n: p for n, p in model.named_parameters() if p.requires_grad and n.startswith(prefixes)}
         if not selected or self.optimizer.state:
             raise ValueError('expected changed consumers and an unstepped fresh optimizer')
