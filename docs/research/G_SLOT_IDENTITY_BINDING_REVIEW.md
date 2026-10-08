@@ -3546,3 +3546,17 @@ weights and online graph stay v3; only the loss probe selects the common v2
 subobjective. Its output explicitly excludes new region losses. Actual region
 ordinary gradients remain a separate full training-entry check. Do not call a
 common-only decomposition a complete v3 objective audit.
+
+The four-window v3 common-objective mechanical decomposition completed with
+maximum production reconstruction gap8.95e-8 and unchanged parameters
+(`B-regions-v3-object-source-mechanical-r1`). Mechanical admission-r2 is now
+written. At04:13UTC, annotation shards0/1 are running on idle GPUs4/6; shards2/3
+wait for an idle allowed card or a prior worker to finish. No old job was stopped.
+`B-regions-v3-short-qualification-r1` is also queued on GPU6 after the new short:
+12-episode/24-window common-source controls,60 old factual windows, four object
+source partitions, then its own18 phase/mask/factual audit. All natural-command
+measurements use deterministic controls; the official panel runtime is unchanged.
+Pinned probe200e38fd extends the separate module-VJP instrument to actual G
+ownership parameters for v3, since separation need not reach the value decoder.
+The final-short full training-entry VJP still needs scheduling with its resolved
+annotation config; it is not replaced by these common-source controls.
