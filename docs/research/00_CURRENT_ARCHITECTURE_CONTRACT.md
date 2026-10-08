@@ -1709,6 +1709,14 @@ Zero output and isolated CPU RNG preserve the inherited initial G function.
 sam_structure_v1 initialization requires the pinned B-v2 source, identical
 dataset/config except this selector, and exact inherited tensor inventory.
 
+Production is pinned at edbba48b. Both actual two-BS8/two-offline checks
+completed at step12038 with connected, finite, updated adapter parameters.
+An extra multi-loss VJP attempt OOMed and is retained; the completed checks use
+ordinary backward hooks. Cold deployment is still pending the GPU at this entry.
+Each authorized long declares11012BS8 updates,256offline and18-R8/stored_target,
+initializing the same B-v2 step12036 with freshAdam/100warmup.
+The continuation preserves mainlineGPU6 for its existing full qualification.
+
 These runs are exploratory, separate from mainline A/B qualification. Actual
 BS8 backward, per-adapter loss VJPs, save/cold-load and finite-state checks are
 required before launch. A favorable result is not claimed in advance.

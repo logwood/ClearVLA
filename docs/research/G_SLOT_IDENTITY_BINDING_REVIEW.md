@@ -4054,3 +4054,28 @@ slot_to_image_v1 与 region_fusion_v1；rank32、零输出初始化、普通梯�
 未合入 v3 区域监督，也未顺带切换未来支持域修复，因此只有结构变量。
 明确新增 sam_structure_v1 窄迁移，源指纹882ec913…87815，旧权重逐项继承。
 实际训练/冷加载和运行身份将追加本节；机械通过不代表对象身份已改善。
+
+
+结构生产固定 edbba48b4968b38dd3a9e2d084699317104df7e1，两个selector
+都不改B-v2其他训练/部署配置。三组集成回归通过：旧默认ABI/config、
+零残差G输出及共同参数/RNG逐项相同；K重编号等变、相机隔离、
+无效位置梯度隔离、常量域不凭空产生边界差异；窄迁移拒绝未知增删参数。
+
+slot机械r1在额外逐损失autograd.grad的checkpoint重算中OOM，证据保留，
+不能归结普通训练装不下。r2改为普通backward参数hook，不增加反传次数，
+allocator选expandable_segments。slot-r2、region-r1均完成2次BS8+2离线，
+clock12036→12038、first loss完全相同0.63419044。第二批普通总梯度有限：
+slot out/down L2 .0051077/4.67e-7；region out/down/mask/depthwise
+.0031528/2.73e-7/1.06e-8/1.78e-9；每个新参数都有真实更新。
+第一步上游投影零梯度是零输出初始化的正常结果，不能据此判死路。
+第二批6.828/6.898秒，只是机械两批，不当稳定速度或收益。
+冷部署4真实旧窗口核验与接续由mechanical-cold-continuation-r1负责。
+与其他项目共享机器，GPU3机械结束后被另一个活跃探针使用，
+接续等待显卡释放，不停该作业。
+
+长跑明确沿用历史11012次BS8更新（88096样本）、256批离线，
+freshAdam/LR2e-5/100warmup、模型时钟12036→23048、同一B-v2 checkpoint。
+两个variant分别挂标准18例、6任务各3、seed0/360步/R8/stored_target，
+使用final latest.pt；保留全部NPZ。源码、初始化权重、配置、
+标准panel manifest全hash固定。队列保护主线GPU6直至其原接续全部结束。
+这些是用户授权的探索，不作为主线正式A/B根因闭合或行为改善证明。
