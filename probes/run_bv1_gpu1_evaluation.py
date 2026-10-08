@@ -98,7 +98,16 @@ def main():
     status = json.loads((old / "status.json").read_text())
     if status.get("stage") != "short1024" or status.get("pid") != h["training_process"]["pid"]:
         raise ValueError("old scheduling stage has changed")
-    if not same_process(h["old_scheduler"]) or not same_process(h["training_process"]):
+    orphaned = bool(h.get("handoff_predecessor"))
+    if orphaned:
+        predecessor = Path(h["handoff_predecessor"])
+        previous = json.loads((predecessor / "status.json").read_text())
+        original = json.loads((predecessor / "original-status.json").read_text())
+        if previous.get("state") != "failed" or "BlockingIOError" not in previous.get("error", ""):
+            raise ValueError("predecessor did not fail during scheduling-lock takeover")
+        if same_process(h["old_scheduler"]) or original.get("pid") != h["training_process"]["pid"]:
+            raise ValueError("old scheduler still active or predecessor training differs")
+    if (not orphaned and not same_process(h["old_scheduler"])) or not same_process(h["training_process"]):
         raise ValueError("handoff process identities differ")
     if h["old_scheduler"]["pid"] == h["training_process"]["pid"]:
         raise ValueError("scheduler and training must be separate processes")
@@ -182,11 +191,11 @@ def main():
     try:
         dump(out / "original-status.json", status)
         state("taking_over_scheduler", training_pid=h["training_process"]["pid"])
-        terminate_scheduler(h["old_scheduler"], h["training_process"])
+        if not orphaned:
+            terminate_scheduler(h["old_scheduler"], h["training_process"])
         # The original child keeps its log FDs/session and runs without a signal.
-        handle = (Path(r["gpu_locks"]) / (status["gpu"] + ".lock")).open("a")
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        held = handle
+        # No work will be launched on its training card by this waiting stage;
+        # don't acquire a GPU lease merely to observe the existing process.
         dump(old / "status.json", dict(state="handed_off", unix_time=time.time(),
              training_pid=h["training_process"]["pid"], continuation_receipt=str(args.receipt),
              continuation_status=str(out / "status.json"), target_gpu=h["target_gpu"],
@@ -200,8 +209,6 @@ def main():
         summary = json.loads((old / "short-updates/summary.json").read_text())
         if summary.get("complete") is not True or summary.get("updates") != 1024 or summary.get("batch_size") != 8:
             raise ValueError("existing training wrapper did not complete")
-        held.close()
-        held = None
         state("auditing_final_checkpoint")
         import torch
         from clearvla.mainline.config import load_config
