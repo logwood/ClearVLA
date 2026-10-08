@@ -3173,3 +3173,93 @@ The official LFS digest matches; installed Transformers4.57.6 is unchanged.
 Reference: [Meta SAM2](https://github.com/facebookresearch/sam2). Prompts must
 be automatic RGB/sensor proposals, never oracle points/boxes. No raw tensor
 archive or feature cache is introduced. All large evidence stays outside Git.
+
+#### 34.33.14 Independent instance proposals and source-value controls (2026-10-07)
+
+**Frozen masks are useful evidence, not accepted identities.** SAM2.1-tiny
+uses automatic32x32 image-wide prompts and fixed pipeline settings (.88
+predicted IoU, .95 stability, .7 NMS), with no oracle prompts or named-object
+selection. All required image-model weights load without missing, unexpected
+or mismatched keys. Checkpoint model_type emits a sam2_video/sam2 warning;
+the actual image parameter coverage is checked. The source environment lacks
+torchvision; retain failed pilot-r1. Retry-r2 uses the official matching
+0.26.0+cu130 wheel on an isolated stage-only PYTHONPATH, SHA256
+0f030a9bd8ada1a31b7111ea1589c1ecb5fa0884fee700a203e731b4cf378a98.
+Production packages are unchanged. Paired pilot mask/score repeats are exact.
+
+The fixed-setting full190 audit is complete (60 old plus130 own windows).
+Median best-proposal IoU is .997 for top and1.0 for wrist in both sets, but
+best-IoU is an oracle scoring ceiling, never a mask selector. Native mask
+overlaps are unknown; actual exclusive-mask coverage is33581/34270 and
+13743/15488 old top/wrist pixels, and71550/72079 and32465/34711 own pixels.
+The old/new top audits contain107090/125783 wrong-object positive endpoint
+pairs within merged masks; the new top also has912 same-object endpoint pairs
+split across different masks. These are correlated pixel-pair counts, not
+independent errors/trials. Wrist has no observed split/merge among supported
+block pairs, but misses some objects. The full pipeline costs median1.33-1.36s
+per image on this3090; this is not an admitted online training/deployment cost.
+Artifacts: sam2-mask-proposal-{old60,own130}-r1/decision-summary.json;
+receipt sam2-mask-proposal-full190-r1, pinned506c27c7.
+
+This exposes complementary failure modes: geometric surface groups can split
+one block, while a whole-instance prior can merge touching blocks. A probe-only
+agreement rule now proposes positive pairs only when BOTH agree on sameness,
+negative pairs only when BOTH disagree on identity, and otherwise unknown.
+It uses no oracle point selection or fixed color/K identity. On old4/own7
+pilot windows it supports5130/6051 top and2637/2838 wrist block pixels, with
+no observed wrong positive/negative block pairs or positive block/background
+pairs. It provides741147 top negative endpoint pairs; wrist provides zero,
+so this is not a two-camera negative-label coverage claim. Background/robot
+identity, cross-view/time linking, training-distribution coverage and actual
+canonical-cell interpolation remain open gates. Artifact:
+mask-surface-agreement-pilot11-r1; probe68855ec2.
+
+Full190 agreement qualification is complete, receipt
+mask-surface-agreement-full190-r1.receipt.json. It independently replays each
+set for sensor-only groups and verifies both RGBs. Supported block pixels are
+29878/34270 and13046/15488 old top/wrist, and52622/72079 and27843/34711 own.
+There are no observed wrong negative block pairs. Old top11/96 has262 wrong
+positive endpoint pairs; old/new top04/24 has45/92 block/background positive
+pairs. The pilot's zero-error result does not generalize to the whole set.
+These errors remain in the ledger, rather than being removed with oracle masks.
+Artifacts: mask-surface-agreement-{old60,own130}-r1/decision-summary.json.
+
+A separate producer-only capacity check rejects assigning every proposed
+fragment an exclusive K. The maximum mutually negative group count is the
+maximum matching in the SAM/surface bipartite graph: top median6 old /5 own,
+exceeding4 in52/60 and91/130 windows. Four real slots cannot provide disjoint
+support for that many groups. This only rejects naive hard assignment or
+zero-affinity targets for every fragment; it does NOT prove that soft
+discrimination of more than4 regions is impossible. Do not enlarge K or
+arbitrarily discard groups to hide this mismatch. Whole-body and rigid-link
+scoring is running under receipt mask-surface-allbody-full190-r2 (37174395):
+oracle UID/link masks are exported only after proposal construction. Confirm
+the group maps are exactly unchanged from r1 before interpreting the new audit.
+This separates articulated parts, repeated fragments and task objects without
+letting simulator identities select labels. Artifact:
+mask-surface-agreement-capacity-r1.json.
+
+Proposed next label-plane direction, conditional on admission: preserve existing
+sensor positive pairs, define compatible whole-instance/foreground semantics,
+add supported different-instance constraints, and test region-balanced source
+prediction. The current agreement positives are not accepted training labels.
+Do not prescribe a color to K, force equal slot occupancy, remove source labels,
+or put a frozen segmentation model into production without a resource/behavior
+qualification. Both formal experiments remain unstarted.
+
+**The explicit coordinate branch does not explain low scene dependence.**
+The actual B-v2 source objective is reproduced on the same12 validation episodes
+and24 windows, zero updates, maximum production gap4.47e-8 and exact common-K
+relabeling. In cross01/cross10/time0/time1, actual MSE is
+.34970/.24029/.27054/.36562. Removing all source prototypes and keeping only
+coordinates/background raises it to1.13667/1.05097/1.06643/1.13714. Removing
+coordinates alone changes MSE by-3.12/+13.95/+18.24/-.77%; replacing the whole
+source with another episode changes it only+.57/+1.77/+4.01/+1.05%.
+Thus the source-value route matters, but its dependence on the particular
+scene remains weak in these windows. This does not justify deleting legitimate
+coordinate conditioning or interpreting zero-input ablations as independent
+contribution percentages. Source prediction remains background dominated
+(34.33.13); next test instance-specific source targets and representation,
+not a blind coordinate-branch removal. Artifact:
+B-nullv2-source-components-r1/decision-summary.json, pinned93135060;
+source training/identity.py:96-105 and probe_identity_source_dependence.py.

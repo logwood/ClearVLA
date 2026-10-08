@@ -1734,7 +1734,7 @@ The 130 own windows have exact same-instruction repeats, but supported top/
 wrist object observations choose K3 in 250/268 and 133/139 cases. Low null
 has not restored physical separation. Independent mask proposals and sensor
 groups are research candidates only; groups can split one physical body.
-No formal A/B experiment is promoted. See 34.33.6-34.33.13
+No formal A/B experiment is promoted. See 34.33.6-34.33.14
 and pinned external receipts for current evidence and pending qualifications.
 
 The immutable BS8 short-run source is 3a84399926d50831470518e1b7f105131d3f1056.
@@ -1786,6 +1786,19 @@ Composing short RGB matches to the task start also fails: no moving wrist
 points pass the final gate in either the older 16 or independent v2 14 windows.
 Abstention and occlusion errors must remain in the ledger; relaxing unknown
 or forcing distinct slot occupancy is not an admitted repair.
+
+Independent frozen RGB mask proposals pass parameter-loading/repeat checks and
+have high oracle-scored IoU over old60/own130, but still merge or split some
+physical blocks. They are not training labels. The proposed mask/sensor-surface
+agreement rule keeps disagreement unknown. Full190 block scoring finds no
+wrong negatives but retains a few positive/boundary errors. Raw proposals
+also contain more than4 mutually negative regions in most top views, rejecting
+a naive exclusive-slot target for every fragment, not all soft discrimination.
+Whole-body/rigid-link scoring is running to clarify fragment semantics. No
+simulator mask/pose enters a producer. Background/robot, temporal/view linking
+and canonical-cell support still need qualification. The auxiliary source-value ledger rejects a simple
+coordinate-only shortcut explanation: coordinates/background alone have high
+prediction error, despite low sensitivity to another episode's full source.
 
 
 ### Current CALVIN audit constraint (2026-10-07)
