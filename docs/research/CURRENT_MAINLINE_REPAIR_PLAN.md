@@ -688,3 +688,30 @@ Q5 endpoint heads, native command/clipping history. Check actual downstream
 consumers rather than extending CT into a redundant physical world model.
 Record accumulated milestone failures and resource cost, without postponing
 small source commits behind CI. Persistent identity/goal progress is still open.
+
+
+## Unified refactor implementation ledger (2026-10-08)
+
+Base 2ab07178; isolated branch codex/causal-unified-refactor-20261008. These are
+source fixes and qualification tools, not a new trained checkpoint.
+
+| Item | Production change | Verification / remaining boundary |
+|---|---|---|
+| Invalid source arithmetic | canonical_transport masks local AND atom support before multiplication/floor | finite ordinary VJPs; unsupported NaN payload and duplicate/support tests |
+| View allocation | authoritative log mass retained in facts/belief, S and W conditional weighting | extreme-mass, all-empty, per-observation/source tests; not object visibility |
+| Empty/malformed evidence | binder empty language, matcher empty target and nonfinite-input validation | zero/null forward and ordinary backward; no replacement matcher promotion |
+| Identity labels | generic explicit camera pair groups with history-span validation | old CALVIN loss parity and real producer-gradient fixtures; physical identity remains unqualified |
+| Native data contract | independent state/action widths, optional effectors, units/time/boundary metadata | actual HDF5 loader on generated fixtures; no claim of real training or universal outlets |
+| Robot feedback ledger | observed and predicted deltas retained separately from innovation | actual observer forward/loss backward; no false phase-consumption claim |
+| Migration | separate named source contract, exact old-source/model/data checks retained | parser/clock/allowlist tests; real trained checkpoint admission still needs assets |
+| Static and model gates | all Python AST/detach inventory, source-relative type review, isolated regressions and two-pass model runner | no syntax audit alone claims a dynamic autograd proof |
+| Real-data gate | strict selected-asset/runtime preflight and ordinary synchronous trainer entry | blocked when /data assets/CUDA unavailable; evaluation trajectories are never training substitutes |
+
+CPU command: `python scripts/run_unified_refactor_checks.py --output /ABS/NEW_DIR`.
+Model fixture command: `python scripts/check_unified_model_flow.py --variant B --output /ABS/NEW.json`.
+Real data requires an actual config, source checkpoint and selected CUDA device:
+`python scripts/run_unified_real_data_check.py --config configs/mainline/unified_source_b_calvin_check.json --checkpoint /ABS/SOURCE.pt --output-dir /ABS/NEW_RUN --report /ABS/NEW_REPORT.json --device cuda:0 --execute`.
+Do not infer that the command ran merely because this recipe exists. Runtime
+receipts, process exit, saved checkpoints and full data/source identity are the
+acceptance evidence. Full-scale online DINO/T5 BS8 and learned object/phase/
+arm-gripper/controller behavior are not covered by small synthetic CPU fixtures.

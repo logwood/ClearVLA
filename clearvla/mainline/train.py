@@ -28,21 +28,25 @@ from .data.loading import MainlineDataBundle, load_mainline_data, to_training_ba
 from .interfaces import TrainingBatch
 from .model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
 from .model.types import PhysicalActionCondition, PhysicalActionSequenceCondition
-from .runtime.causal_identity_migration import CAUSAL_IDENTITY_AB_V1
+from .runtime.causal_identity_migration import (
+    CAUSAL_IDENTITY_AB_V1,
+    CAUSAL_INITIALIZATION_MODES,
+    CAUSAL_UNIFIED_SOURCE_V1,
+)
 from .runtime.checkpoints import (
+    CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
+    DINOV3_DEEP_REPAIR_V1_MIGRATION,
+    G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
+    JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
+    JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
     LIBERO_RELEASE_FIRST_REPAIR_MIGRATION,
     LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION,
     LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION,
-    JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
-    CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
-    JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
-    DINOV3_DEEP_REPAIR_V1_MIGRATION,
-    S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
-    G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
     P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
     P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
     P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION,
     P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
+    S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
     WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION,
     InitializationState,
     load_checkpoint_exact,
@@ -156,6 +160,7 @@ def _parser() -> argparse.ArgumentParser:
             JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
             CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
             CAUSAL_IDENTITY_AB_V1,
+            CAUSAL_UNIFIED_SOURCE_V1,
             DINOV3_DEEP_REPAIR_V1_MIGRATION,
             S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
             G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
@@ -166,16 +171,24 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--init-training-clock", choices=("fresh", "checkpoint"), default="fresh",
-        help=("For the parameter-preserving CALVIN endpoint/trajectory repair only, "
-              "explicitly retain completed model updates and mature execution phase. "
-              "Optimizer moments are separately opt-in; RNG remains fresh. Not exact resume."),
+        "--init-training-clock",
+        choices=("fresh", "checkpoint"),
+        default="fresh",
+        help=(
+            "For the parameter-preserving CALVIN endpoint/trajectory repair only, "
+            "explicitly retain completed model updates and mature execution phase. "
+            "Optimizer moments are separately opt-in; RNG remains fresh. Not exact resume."
+        ),
     )
     parser.add_argument(
-        "--init-optimizer-state", choices=("fresh", "checkpoint"), default="fresh",
-        help=("For the parameter-preserving CALVIN repair with retained training clock, "
-              "optionally retain verified named AdamW moments. Current schedule and "
-              "fresh RNG/loader are retained; this is not exact resume."),
+        "--init-optimizer-state",
+        choices=("fresh", "checkpoint"),
+        default="fresh",
+        help=(
+            "For the parameter-preserving CALVIN repair with retained training clock, "
+            "optionally retain verified named AdamW moments. Current schedule and "
+            "fresh RNG/loader are retained; this is not exact resume."
+        ),
     )
     parser.add_argument("--validate-checkpoint", type=Path)
     parser.add_argument(
@@ -229,10 +242,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gripper-first-step-release",
         type=float,
-        help=(
-            "Continuous-gripper auxiliary loss weight for the immediately "
-            "executed opening row."
-        ),
+        help=("Continuous-gripper auxiliary loss weight for the immediately executed opening row."),
     )
     parser.add_argument(
         "--gripper-first-step-hold",
@@ -411,45 +421,42 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
             "exact resume, model initialization, read-only validation and bottom-only migration "
             "are mutually exclusive"
         )
-    if (
-        args.init_data_contract_migration is not None
-        and args.init_checkpoint is None
-    ):
-        raise ValueError(
-            "--init-data-contract-migration requires --init-checkpoint"
-        )
-    if (
-        args.init_model_contract_migration is not None
-        and args.init_checkpoint is None
-    ):
-        raise ValueError(
-            "--init-model-contract-migration requires --init-checkpoint"
-        )
+    if args.init_data_contract_migration is not None and args.init_checkpoint is None:
+        raise ValueError("--init-data-contract-migration requires --init-checkpoint")
+    if args.init_model_contract_migration is not None and args.init_checkpoint is None:
+        raise ValueError("--init-model-contract-migration requires --init-checkpoint")
     if (
         args.init_data_contract_migration is not None
         and args.init_model_contract_migration is not None
     ):
         raise ValueError(
-            "data-contract and model-contract initialization migrations "
-            "cannot be combined"
+            "data-contract and model-contract initialization migrations cannot be combined"
         )
     if getattr(args, "init_training_clock", "fresh") == "checkpoint" and (
         args.init_checkpoint is None
-        or args.init_model_contract_migration not in {CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION, CAUSAL_IDENTITY_AB_V1}
+        or args.init_model_contract_migration
+        not in {CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION, *CAUSAL_INITIALIZATION_MODES}
     ):
-        raise ValueError("checkpoint training clock requires the parameter-preserving CALVIN endpoint/trajectory migration")
+        raise ValueError(
+            "checkpoint training clock requires the parameter-preserving CALVIN endpoint/trajectory migration"
+        )
     if getattr(args, "init_optimizer_state", "fresh") == "checkpoint" and (
         args.init_checkpoint is None
         or args.init_model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION
         or args.init_training_clock != "checkpoint"
     ):
-        raise ValueError("checkpoint optimizer moments require the parameter-preserving CALVIN migration and retained training clock")
+        raise ValueError(
+            "checkpoint optimizer moments require the parameter-preserving CALVIN migration and retained training clock"
+        )
     return result
 
 
 def _initialize_training_clock(
-    engine: MainlineTrainingEngine, schedule: WarmupCosineSchedule,
-    initialization: InitializationState, *, mode: str,
+    engine: MainlineTrainingEngine,
+    schedule: WarmupCosineSchedule,
+    initialization: InitializationState,
+    *,
+    mode: str,
 ) -> None:
     """Seed one declared completed-update clock after strict weight verification.
 
@@ -459,20 +466,34 @@ def _initialize_training_clock(
     parameter; a newly introduced module cannot skip its training warmup here.
     """
     if mode == "fresh":
-        if schedule.update_origin != 0:raise ValueError("fresh model clock cannot use a retained optimizer origin")
+        if schedule.update_origin != 0:
+            raise ValueError("fresh model clock cannot use a retained optimizer origin")
         engine.global_step = 0
         engine.model.set_training_step(0)
         return
-    if mode == "checkpoint" and initialization.model_contract_migration == CAUSAL_IDENTITY_AB_V1:
+    if (
+        mode == "checkpoint"
+        and initialization.model_contract_migration in CAUSAL_INITIALIZATION_MODES
+    ):
         # Preserve mature execution/teacher phases, but new parameters and all
         # moments receive a declared fresh optimizer warmup. Not exact resume.
-        step=initialization.global_step
-        if engine.global_step!=0 or schedule.update_origin!=step or schedule.step_index!=step or schedule.optimizer.state:
-            raise ValueError("causal identity initialization requires matching source clock and fresh declared optimizer origin")
-        engine.global_step=step
+        step = initialization.global_step
+        if (
+            engine.global_step != 0
+            or schedule.update_origin != step
+            or schedule.step_index != step
+            or schedule.optimizer.state
+        ):
+            raise ValueError(
+                "causal identity initialization requires matching source clock and fresh declared optimizer origin"
+            )
+        engine.global_step = step
         engine.model.set_training_step(step)
         return
-    if mode != "checkpoint" or initialization.model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
+    if (
+        mode != "checkpoint"
+        or initialization.model_contract_migration != CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION
+    ):
         raise ValueError("retained training clock requires a parameter-preserving migration")
     step = initialization.global_step
     if not isinstance(step, int) or isinstance(step, bool) or step < 0:
@@ -488,8 +509,11 @@ def _initialize_training_clock(
 
 
 def _initialize_optimizer_moments(
-    engine: MainlineTrainingEngine, initialization: InitializationState,
-    checkpoint: Path, *, mode: str,
+    engine: MainlineTrainingEngine,
+    initialization: InitializationState,
+    checkpoint: Path,
+    *,
+    mode: str,
 ) -> dict[str, object]:
     """Retain AdamW history only after parameter-preserving model admission.
 
@@ -505,7 +529,9 @@ def _initialize_optimizer_moments(
         or engine.global_step != initialization.global_step
         or engine.schedule.step_index != initialization.global_step
     ):
-        raise ValueError("optimizer continuation requires the admitted parameter-preserving migration and retained clock")
+        raise ValueError(
+            "optimizer continuation requires the admitted parameter-preserving migration and retained clock"
+        )
     optimizer = engine.optimizer
     if not isinstance(optimizer, torch.optim.AdamW) or optimizer.state:
         raise ValueError("optimizer continuation requires fresh AdamW state")
@@ -537,7 +563,8 @@ def _initialize_optimizer_moments(
         new_names = tuple(new.get("parameter_names", ()))
         if (
             old.get("name") != new.get("name")
-            or not old_names or old_names != new_names
+            or not old_names
+            or old_names != new_names
             or len(old_names) != len(old["params"])
             or len(set(old_names)) != len(old_names)
             or len(old["params"]) != len(new["params"])
@@ -562,9 +589,11 @@ def _initialize_optimizer_moments(
                 raise ValueError("optimizer checkpoint has an unknown state schema")
             step = state["step"]
             if (
-                not isinstance(step, torch.Tensor) or step.ndim != 0
+                not isinstance(step, torch.Tensor)
+                or step.ndim != 0
                 or not bool(torch.isfinite(step))
-                or float(step) < 0 or float(step) > initialization.global_step
+                or float(step) < 0
+                or float(step) > initialization.global_step
                 or float(step) != int(float(step))
             ):
                 raise ValueError("optimizer moment step is not a valid completed-update count")
@@ -572,7 +601,8 @@ def _initialize_optimizer_moments(
                 value = state[name]
                 if (
                     not isinstance(value, torch.Tensor)
-                    or value.shape != parameter.shape or value.dtype != parameter.dtype
+                    or value.shape != parameter.shape
+                    or value.dtype != parameter.dtype
                     or not bool(torch.isfinite(value).all())
                     or (name.endswith("sq") and bool((value < 0).any()))
                 ):
@@ -590,7 +620,9 @@ def _initialize_optimizer_moments(
     }
     optimizer.load_state_dict({"state": owned, "param_groups": groups})
     return {
-        "mode": mode, "loaded": True, "state_tensors": len(owned),
+        "mode": mode,
+        "loaded": True,
+        "state_tensors": len(owned),
         "source_global_step": initialization.global_step,
         "lr_owner": "current retained schedule",
         "parameter_mapping": "exact named group ordering",
@@ -693,10 +725,10 @@ def _print_multitask_validation(
     tasks = report.get("tasks")
     micro = report.get("micro")
     macro = report.get("macro")
-    if not isinstance(tasks, Mapping) or not isinstance(
-        micro, Mapping
-    ) or not isinstance(
-        macro, Mapping
+    if (
+        not isinstance(tasks, Mapping)
+        or not isinstance(micro, Mapping)
+        or not isinstance(macro, Mapping)
     ):
         raise TypeError("multitask validation report is malformed")
     train_tasks = None if train_mix is None else train_mix.get("tasks")
@@ -858,27 +890,23 @@ def _emit_training_window(
     if int(window_batches) <= 0 or int(window_samples) <= 0:
         raise ValueError("training-window counts must be positive")
     if not math.isfinite(float(window_seconds)) or float(window_seconds) < 0.0:
-        raise ValueError(
-            "training-window duration must be finite and non-negative"
-        )
+        raise ValueError("training-window duration must be finite and non-negative")
     values = archival_metrics(window_metrics.materialize())
     values.update(gradient_window.materialize())
-    values["runtime_window_seconds_per_batch"] = float(window_seconds) / float(
-        window_batches
-    )
+    values["runtime_window_seconds_per_batch"] = float(window_seconds) / float(window_batches)
     values["runtime_window_samples_per_second"] = float(window_samples) / max(
         float(window_seconds), 1e-8
     )
     values["learning_rate"] = float(learning_rate)
-    values["learning_rate_history_proposal"] = float(
-        learning_rate
-    ) * role_lr_scale("history_proposal", config)
-    values["learning_rate_bottom_decoder"] = float(
-        learning_rate
-    ) * role_lr_scale("bottom_mmdit", config)
-    values["learning_rate_bottom_capacity"] = float(
-        learning_rate
-    ) * role_lr_scale("bottom_capacity", config)
+    values["learning_rate_history_proposal"] = float(learning_rate) * role_lr_scale(
+        "history_proposal", config
+    )
+    values["learning_rate_bottom_decoder"] = float(learning_rate) * role_lr_scale(
+        "bottom_mmdit", config
+    )
+    values["learning_rate_bottom_capacity"] = float(learning_rate) * role_lr_scale(
+        "bottom_capacity", config
+    )
     logger.write(
         "train",
         epoch=int(epoch),
@@ -950,7 +978,9 @@ def _data_state(
         data_profile=bundle.data_profile_metadata,
         gripper_indices=tuple(int(value) for value in bundle.gripper_indices),
         goal_metadata=bundle.goal.metadata,
-        visual_encoder_identity=(None if bundle.visual_encoder is None else bundle.visual_encoder.identity()),
+        visual_encoder_identity=(
+            None if bundle.visual_encoder is None else bundle.visual_encoder.identity()
+        ),
     )
     return state
 
@@ -1002,9 +1032,7 @@ def _module_parameter_context(
         result[name] = {
             "parameter_count": sum(int(parameter.numel()) for parameter in parameters),
             "trainable_parameter_count": sum(
-                int(parameter.numel())
-                for parameter in parameters
-                if parameter.requires_grad
+                int(parameter.numel()) for parameter in parameters if parameter.requires_grad
             ),
             "parameter_tensor_count": len(parameters),
         }
@@ -1121,10 +1149,7 @@ def _diagnostic_batch_indices(*, planned_batches: int, budget: int) -> set[int]:
         return set(range(1, planned_batches + 1))
     if budget == 1:
         return {1 + (planned_batches - 1) // 2}
-    return {
-        1 + round(index * (planned_batches - 1) / float(budget - 1))
-        for index in range(budget)
-    }
+    return {1 + round(index * (planned_batches - 1) / float(budget - 1)) for index in range(budget)}
 
 
 CORE_ATTRIBUTION_MODES = (
@@ -1139,8 +1164,7 @@ CORE_ATTRIBUTION_MODES = (
 
 def _maximum_identity_error(*pairs: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
     errors = [
-        (left.detach().float() - right.detach().float()).abs().amax()
-        for left, right in pairs
+        (left.detach().float() - right.detach().float()).abs().amax() for left, right in pairs
     ]
     if not errors:
         raise ValueError("identity accounting requires at least one tensor pair")
@@ -1158,9 +1182,7 @@ def _world_dynamic_neutral_cache(
     dynamics = world.dynamics
     neutral_dynamics = replace(
         dynamics,
-        successor_content=dynamics.current_reference[:, None].expand_as(
-            dynamics.successor_content
-        ),
+        successor_content=dynamics.current_reference[:, None].expand_as(dynamics.successor_content),
         semantic_delta=torch.zeros_like(dynamics.semantic_delta),
         transport_mean=torch.zeros_like(dynamics.transport_mean),
         transport_covariance=torch.zeros_like(dynamics.transport_covariance),
@@ -1242,8 +1264,7 @@ def _wrong_action_world_cache(
     if isinstance(primary_condition, PhysicalActionSequenceCondition):
         donor_action = primary_condition.source_action.roll(shifts=shift, dims=0)
         donor_delta = (
-            donor_action.detach().float()
-            - primary_condition.source_action.detach().float()
+            donor_action.detach().float() - primary_condition.source_action.detach().float()
         )
         wrong_condition = model.outlet_adapter.world_condition_from_horizon_action(
             donor_action,
@@ -1255,8 +1276,7 @@ def _wrong_action_world_cache(
             dims=0,
         )
         donor_delta = (
-            donor_action.detach().float()
-            - primary_condition.interval_action.detach().float()
+            donor_action.detach().float() - primary_condition.interval_action.detach().float()
         )
         # The current action anchor belongs to the receiving sample.  Only the
         # four proposed interval actions are donated in the legacy ABI.
@@ -1410,9 +1430,7 @@ def _validation_action_estimator_match(
     if tuple(source_noise.shape) != tuple(flow_state.target_physical.shape):
         raise ValueError("estimator and deployment initial noise shapes differ")
     alpha = flow_state.time.to(dtype=source_noise.dtype)[:, None, None]
-    noisy_physical = (
-        (1.0 - alpha) * source_noise + alpha * flow_state.target_physical
-    )
+    noisy_physical = (1.0 - alpha) * source_noise + alpha * flow_state.target_physical
     if flow_state.row_valid is not None:
         noisy_physical = torch.where(flow_state.row_valid[..., None], noisy_physical, source_noise)
     device = cache.history.state.device
@@ -1722,9 +1740,7 @@ def _validate(
         if task_deployment is not None:
             if batch.audit.episode_index is None:
                 raise ValueError("multitask validation lost CPU episode identity")
-            validation_task_indices = bundle.task_indices_for_episodes(
-                batch.audit.episode_index
-            )
+            validation_task_indices = bundle.task_indices_for_episodes(batch.audit.episode_index)
         diagnostics = batch_index in sampling_diagnostic_indices
         run_proposal_ablation = batch_index in proposal_ablation_indices
         run_execution_ablation = batch_index in execution_ablation_indices
@@ -1761,10 +1777,7 @@ def _validate(
             for name, value in loss_result.metrics.items()
             if not (
                 name.startswith(("object_p2_semantic_", "object_p2_geometry_"))
-                and (
-                    "_band_" in name
-                    or name.endswith("_temporal_support_fraction")
-                )
+                and ("_band_" in name or name.endswith("_temporal_support_fraction"))
             )
         }
         losses.update(
@@ -1785,22 +1798,17 @@ def _validate(
             # preserves matched cross-version/action-ablation comparisons.
             generator=_owned_generator(device, 37_237 + batch_index),
         )
-        motion_target = (
-            engine.model.outlet_adapter.arm_motion_magnitude(
-                batch.action_target.normalized,
-                batch.online.history.action_state,
-            )
-            >= float(config.objectives.arm_motion_threshold)
-        )
+        motion_target = engine.model.outlet_adapter.arm_motion_magnitude(
+            batch.action_target.normalized,
+            batch.online.history.action_state,
+        ) >= float(config.objectives.arm_motion_threshold)
         deployment.update(
             prediction.action,
             batch,
             motion_logits=prediction.motion_logits,
             motion_target=motion_target,
             physical_field=prediction.physical_field,
-            gripper_decode_delta_blend=(
-                engine.model.outlet_adapter.decode_delta_blend
-            ),
+            gripper_decode_delta_blend=(engine.model.outlet_adapter.decode_delta_blend),
             gripper_command_logits=prediction.gripper_command_logits,
             gripper_command=prediction.gripper_command,
             gripper_output_mode=config.bottom.gripper_output_mode,
@@ -1835,9 +1843,7 @@ def _validate(
                 motion_logits=prediction.motion_logits,
                 motion_target=motion_target,
                 physical_field=prediction.physical_field,
-                gripper_decode_delta_blend=(
-                    engine.model.outlet_adapter.decode_delta_blend
-                ),
+                gripper_decode_delta_blend=(engine.model.outlet_adapter.decode_delta_blend),
                 gripper_command_logits=prediction.gripper_command_logits,
                 gripper_command=prediction.gripper_command,
                 gripper_output_mode=config.bottom.gripper_output_mode,
@@ -1845,10 +1851,7 @@ def _validate(
         if diagnostics:
             sampling_diagnostic_batches += 1
             losses.update(
-                {
-                    f"validation_deploy_{name}": value
-                    for name, value in prediction.metrics.items()
-                },
+                {f"validation_deploy_{name}": value for name, value in prediction.metrics.items()},
                 weight=batch.online.batch,
             )
             estimator_match_batches += 1
@@ -1889,8 +1892,8 @@ def _validate(
                 del counterfactual
             core_attribution_batches += 1
             core_attribution.update_primary(prediction.action, batch)
-            neutral_world_cache, neutral_world_boundary = (
-                _world_dynamic_neutral_cache(refined_cache, config)
+            neutral_world_cache, neutral_world_boundary = _world_dynamic_neutral_cache(
+                refined_cache, config
             )
             wrong_world_cache, wrong_world_boundary = _wrong_action_world_cache(
                 engine.model,
@@ -1915,10 +1918,7 @@ def _validate(
                 }:
                     counterfactual_cache = neutral_world_cache
                     boundary_metrics.update(
-                        {
-                            f"world_{name}": value
-                            for name, value in neutral_world_boundary.items()
-                        }
+                        {f"world_{name}": value for name, value in neutral_world_boundary.items()}
                     )
                 elif mode == "wrong_action_world":
                     counterfactual_cache = wrong_world_cache
@@ -1993,9 +1993,7 @@ def _validate(
                                 ]
                             ),
                             "controlled_transition_intervention_active": (
-                                counterfactual.metrics[
-                                    "controlled_transition_intervention_active"
-                                ]
+                                counterfactual.metrics["controlled_transition_intervention_active"]
                             ),
                         }
                     )
@@ -2102,11 +2100,7 @@ def _validate(
                     # Ordinary execution interventions hold the already
                     # rebuilt W cache fixed.  Keep that useful diagnostic for
                     # B-spine too, but name it as a refined-pass-only result.
-                    execution_mode = (
-                        "spine_zero"
-                        if mode == "spine_zero_refined_pass"
-                        else mode
-                    )
+                    execution_mode = "spine_zero" if mode == "spine_zero_refined_pass" else mode
                     execution = sample_cached_action(
                         engine.model,
                         refined_cache,
@@ -2123,12 +2117,10 @@ def _validate(
                 execution_rows[f"{stem}_mse_physical"] = supported_mean(
                     (error / action_scale).square(), label_rows
                 )
-                execution_rows[f"{stem}_action_delta_mse_normalized"] = (
-                    delta.square().mean()
-                )
+                execution_rows[f"{stem}_action_delta_mse_normalized"] = delta.square().mean()
                 execution_rows[f"{stem}_action_delta_mse_physical"] = (
-                    delta / action_scale
-                ).square().mean()
+                    (delta / action_scale).square().mean()
+                )
                 if mode.startswith("spine_zero_"):
                     physical_primary_error = primary_error / action_scale
                     physical_error = error / action_scale
@@ -2158,15 +2150,15 @@ def _validate(
                                 ),
                             ):
                                 selection = (slice(None), band_slice, channel_slice)
-                                execution_rows[
-                                    f"{surface}_primary_mse_{chart}"
-                                ] = primary_value[selection].square().mean()
+                                execution_rows[f"{surface}_primary_mse_{chart}"] = (
+                                    primary_value[selection].square().mean()
+                                )
                                 execution_rows[f"{surface}_mse_{chart}"] = (
                                     value[selection].square().mean()
                                 )
-                                execution_rows[
-                                    f"{surface}_action_delta_mse_{chart}"
-                                ] = delta_value[selection].square().mean()
+                                execution_rows[f"{surface}_action_delta_mse_{chart}"] = (
+                                    delta_value[selection].square().mean()
+                                )
                 del execution
             execution_ablations.update(
                 execution_rows,
@@ -2207,8 +2199,7 @@ def _validate(
             probe_metrics = accumulator.means()
             for metric_name in probe_metric_names:
                 result[
-                    "validation_libero_gripper_"
-                    f"{name}_{metric_name.removeprefix('validation_')}"
+                    f"validation_libero_gripper_{name}_{metric_name.removeprefix('validation_')}"
                 ] = probe_metrics[metric_name]
     if p2_intervention_batches:
         result.update(p2_interventions.means())
@@ -2219,15 +2210,11 @@ def _validate(
         result["validation_core_attribution_world_consequence_identity_expected"] = float(
             config.top.task_execution_mode == "none"
         )
-    result["validation_sampling_diagnostic_batches"] = float(
-        sampling_diagnostic_batches
-    )
+    result["validation_sampling_diagnostic_batches"] = float(sampling_diagnostic_batches)
     result["validation_sampling_diagnostic_coverage"] = float(
         sampling_diagnostic_batches / max(completed_batches, 1)
     )
-    result["validation_p2_intervention_batches"] = float(
-        p2_intervention_batches
-    )
+    result["validation_p2_intervention_batches"] = float(p2_intervention_batches)
     result["validation_p2_intervention_coverage"] = float(
         p2_intervention_batches / max(completed_batches, 1)
     )
@@ -2235,21 +2222,15 @@ def _validate(
     result["validation_core_attribution_coverage"] = float(
         core_attribution_batches / max(completed_batches, 1)
     )
-    result["validation_action_estimator_match_batches"] = float(
-        estimator_match_batches
-    )
+    result["validation_action_estimator_match_batches"] = float(estimator_match_batches)
     result["validation_action_estimator_match_coverage"] = float(
         estimator_match_batches / max(completed_batches, 1)
     )
-    result["validation_proposal_ablation_batches"] = float(
-        proposal_ablation_batches
-    )
+    result["validation_proposal_ablation_batches"] = float(proposal_ablation_batches)
     result["validation_proposal_ablation_coverage"] = float(
         proposal_ablation_batches / max(completed_batches, 1)
     )
-    result["validation_execution_ablation_batches"] = float(
-        execution_ablation_batches
-    )
+    result["validation_execution_ablation_batches"] = float(execution_ablation_batches)
     result["validation_execution_ablation_coverage"] = float(
         execution_ablation_batches / max(completed_batches, 1)
     )
@@ -2268,17 +2249,13 @@ def _validate(
             "coarse_to_full_transport",
         )
         for stem in rms_rows:
-            result[f"validation_action_{stem}_rms"] = math.sqrt(
-                max(rows[f"{stem}_mse"], 0.0)
-            )
+            result[f"validation_action_{stem}_rms"] = math.sqrt(max(rows[f"{stem}_mse"], 0.0))
         for semantic in (*action_semantics, "semantic", "transport"):
-            estimator_rms = result[
-                f"validation_action_estimator_to_full_{semantic}_rms"
-            ]
+            estimator_rms = result[f"validation_action_estimator_to_full_{semantic}_rms"]
             coarse_rms = result[f"validation_action_coarse_to_full_{semantic}_rms"]
-            result[
-                f"validation_action_estimator_to_full_{semantic}_ratio_vs_coarse"
-            ] = float(estimator_rms / max(coarse_rms, 1e-12))
+            result[f"validation_action_estimator_to_full_{semantic}_ratio_vs_coarse"] = float(
+                estimator_rms / max(coarse_rms, 1e-12)
+            )
         for name in (
             "estimator_full_update_direction_cosine",
             "estimator_full_update_direction_valid_fraction",
@@ -2291,12 +2268,8 @@ def _validate(
         rows = proposal_ablations.materialize()
         primary_normalized = rows["proposal_primary_mse_normalized"]
         primary_physical = rows["proposal_primary_mse_physical"]
-        result["validation_proposal_primary_rmse_normalized"] = float(
-            primary_normalized**0.5
-        )
-        result["validation_proposal_primary_rmse_physical"] = float(
-            primary_physical**0.5
-        )
+        result["validation_proposal_primary_rmse_normalized"] = float(primary_normalized**0.5)
+        result["validation_proposal_primary_rmse_physical"] = float(primary_physical**0.5)
         normalized = rows["proposal_zero_mse_normalized"]
         physical = rows["proposal_zero_mse_physical"]
         result["validation_proposal_zero_rmse_normalized"] = float(normalized**0.5)
@@ -2317,12 +2290,8 @@ def _validate(
         rows = execution_ablations.materialize()
         primary_normalized = rows["execution_primary_mse_normalized"]
         primary_physical = rows["execution_primary_mse_physical"]
-        result["validation_execution_primary_rmse_normalized"] = float(
-            primary_normalized**0.5
-        )
-        result["validation_execution_primary_rmse_physical"] = float(
-            primary_physical**0.5
-        )
+        result["validation_execution_primary_rmse_normalized"] = float(primary_normalized**0.5)
+        result["validation_execution_primary_rmse_physical"] = float(primary_physical**0.5)
         for mode in _execution_ablation_modes(config):
             name = f"execution_{mode}"
             normalized = rows[f"{name}_mse_normalized"]
@@ -2354,12 +2323,10 @@ def _validate(
                             result[f"validation_{surface}_rmse_{chart}"] = float(
                                 counterfactual_surface**0.5
                             )
-                            result[
-                                f"validation_{surface}_mse_gain_vs_primary_{chart}"
-                            ] = float(primary_surface - counterfactual_surface)
-                            result[
-                                f"validation_{surface}_action_delta_rmse_{chart}"
-                            ] = float(
+                            result[f"validation_{surface}_mse_gain_vs_primary_{chart}"] = float(
+                                primary_surface - counterfactual_surface
+                            )
+                            result[f"validation_{surface}_action_delta_rmse_{chart}"] = float(
                                 rows[f"{surface}_action_delta_mse_{chart}"] ** 0.5
                             )
     multitask = None if task_deployment is None else task_deployment.report(result)
@@ -2427,22 +2394,17 @@ def _validate_boundary_panel(
             dtype=dtype,
             generator=_owned_generator(device, seed_offset + batch_index),
         )
-        motion_target = (
-            engine.model.outlet_adapter.arm_motion_magnitude(
-                batch.action_target.normalized,
-                batch.online.history.action_state,
-            )
-            >= float(config.objectives.arm_motion_threshold)
-        )
+        motion_target = engine.model.outlet_adapter.arm_motion_magnitude(
+            batch.action_target.normalized,
+            batch.online.history.action_state,
+        ) >= float(config.objectives.arm_motion_threshold)
         deployment.update(
             prediction.action,
             batch,
             motion_logits=prediction.motion_logits,
             motion_target=motion_target,
             physical_field=prediction.physical_field,
-            gripper_decode_delta_blend=(
-                engine.model.outlet_adapter.decode_delta_blend
-            ),
+            gripper_decode_delta_blend=(engine.model.outlet_adapter.decode_delta_blend),
             gripper_command_logits=prediction.gripper_command_logits,
             gripper_command=prediction.gripper_command,
             gripper_output_mode=config.bottom.gripper_output_mode,
@@ -2455,9 +2417,7 @@ def _validate_boundary_panel(
     for name, value in deployment.means().items():
         if not name.startswith("validation_"):
             raise AssertionError("validation accumulator emitted an unscoped metric")
-        result[
-            f"validation_boundary_{region}_{name.removeprefix('validation_')}"
-        ] = float(value)
+        result[f"validation_boundary_{region}_{name.removeprefix('validation_')}"] = float(value)
     result[f"validation_boundary_{region}_batches"] = float(completed_batches)
     return result
 
@@ -2468,9 +2428,7 @@ def main() -> None:
     validation_checkpoint_resolved: str | None = None
     initialization_checkpoint_resolved: str | None = None
     config = _overrides(load_config(args.config), args)
-    validation_config = _validation_sampling_config(
-        config, args.validation_flow_schedule
-    )
+    validation_config = _validation_sampling_config(config, args.validation_flow_schedule)
     _seed(config.data.seed)
     device = _device(args.device)
     _configure_cuda_math(device=device, enable_tf32=bool(config.runtime.cuda_tf32))
@@ -2480,11 +2438,13 @@ def main() -> None:
     bundle = load_mainline_data(config, allow_null_goal=bool(args.allow_null_goal))
     if validation_checkpoint is None:
         from .data.loading import require_annotation_goal_training_coverage
+
         require_annotation_goal_training_coverage(
             config, bundle.datasets["train"].boundary_summary()
         )
     if config.data.visual_feature_mode == "dinov3_online_v1":
         from clearvla.vision.online_pipeline import OnlineVisionPipeline
+
         bundle = replace(bundle, visual_encoder=OnlineVisionPipeline.from_config(config, device))
     train_loader_generator = torch.Generator().manual_seed(config.data.seed + 101)
     train_flow_generator = _owned_generator(device, config.data.seed + 102)
@@ -2502,9 +2462,7 @@ def main() -> None:
         workers=config.data.num_workers,
         device=device,
         shuffle=False,
-        task_panel_max_batches=(
-            config.runtime.max_val_batches if bundle.is_multitask else None
-        ),
+        task_panel_max_batches=(config.runtime.max_val_batches if bundle.is_multitask else None),
     )
     boundary_loaders = {
         region: bundle.loader(
@@ -2576,8 +2534,12 @@ def main() -> None:
         )
     elif args.init_checkpoint is not None:
         verified_source_dataset = None
-        if args.init_model_contract_migration in {CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION, CAUSAL_IDENTITY_AB_V1}:
+        if args.init_model_contract_migration in {
+            CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
+            *CAUSAL_INITIALIZATION_MODES,
+        }:
             from .runtime.identity import calvin_endpoint_source_dataset_identity
+
             verified_source_dataset = calvin_endpoint_source_dataset_identity(bundle, config)
         initialization_state = load_checkpoint_for_initialization(
             args.init_checkpoint,
@@ -2596,7 +2558,9 @@ def main() -> None:
             engine, schedule, initialization_state, mode=args.init_training_clock
         )
         optimizer_initialization = _initialize_optimizer_moments(
-            engine, initialization_state, Path(args.init_checkpoint),
+            engine,
+            initialization_state,
+            Path(args.init_checkpoint),
             mode=args.init_optimizer_state,
         )
         best_metric = None
@@ -2661,19 +2625,14 @@ def main() -> None:
         "information_sampling": getattr(
             getattr(train_loader, "batch_sampler", None), "summary", None
         ),
-        "validation_panel": getattr(
-            getattr(val_loader, "batch_sampler", None), "summary", None
-        ),
+        "validation_panel": getattr(getattr(val_loader, "batch_sampler", None), "summary", None),
         "window_boundaries": {
             "training_contract": bundle.window_boundary_contract,
             "datasets": {
-                name: dataset.boundary_summary()
-                for name, dataset in bundle.datasets.items()
+                name: dataset.boundary_summary() for name, dataset in bundle.datasets.items()
             },
             "deployment_validation_panels": {
-                region: getattr(
-                    getattr(loader, "batch_sampler", None), "summary", None
-                )
+                region: getattr(getattr(loader, "batch_sampler", None), "summary", None)
                 for region, loader in boundary_loaders.items()
             },
         },
@@ -2684,12 +2643,8 @@ def main() -> None:
             "state_sha256": identity.dataset.state_normalizer_sha256,
         },
         "gradient_audit": {
-            "finite_spike_preclip_l2_threshold": (
-                engine.gradient_spike_audit_threshold
-            ),
-            "parameter_scan_policy": (
-                "only_after_finite_global_threshold_crossing"
-            ),
+            "finite_spike_preclip_l2_threshold": (engine.gradient_spike_audit_threshold),
+            "parameter_scan_policy": ("only_after_finite_global_threshold_crossing"),
         },
         "execution_mode": (
             "validation_only"
@@ -2701,8 +2656,11 @@ def main() -> None:
     }
     if bundle.visual_encoder is not None:
         context["visual_encoder"] = bundle.visual_encoder.identity()
-        print("[mainline-vision] mode=dinov3_online_v1 frozen=true feature_cache=none "
-              "input=full_fov_256 native_grid=16x16 policy_chart=full_rgb_endpoint_v1", flush=True)
+        print(
+            "[mainline-vision] mode=dinov3_online_v1 frozen=true feature_cache=none "
+            "input=full_fov_256 native_grid=16x16 policy_chart=full_rgb_endpoint_v1",
+            flush=True,
+        )
     if initialization_state is not None:
         if initialization_checkpoint_resolved is None:
             raise RuntimeError("model initialization checkpoint provenance was not resolved")
@@ -2716,17 +2674,13 @@ def main() -> None:
             "changed_source_files": list(initialization_state.changed_source_files),
             "data_contract_migration": initialization_state.data_contract_migration,
             "model_contract_migration": initialization_state.model_contract_migration,
-            "saved_window_boundary_contract": (
-                initialization_state.saved_window_boundary_contract
-            ),
+            "saved_window_boundary_contract": (initialization_state.saved_window_boundary_contract),
             "current_window_boundary_contract": (
                 initialization_state.current_window_boundary_contract
             ),
             "saved_dataset_identity": initialization_state.saved_dataset_identity,
             "current_dataset_identity": initialization_state.current_dataset_identity,
-            "normalizer_identity_equal": (
-                initialization_state.normalizer_identity_equal
-            ),
+            "normalizer_identity_equal": (initialization_state.normalizer_identity_equal),
             "optimizer_loaded": bool(optimizer_initialization["loaded"]),
             "optimizer_initialization": optimizer_initialization,
             "schedule_loaded": False,
@@ -2734,7 +2688,9 @@ def main() -> None:
             "data_loader_state_loaded": False,
             "training_clock": args.init_training_clock,
             "initial_global_step": engine.global_step,
-            "retained_completed_updates": engine.global_step if args.init_training_clock == "checkpoint" else 0,
+            "retained_completed_updates": engine.global_step
+            if args.init_training_clock == "checkpoint"
+            else 0,
             "fresh_global_step": 0 if args.init_training_clock == "fresh" else None,
             "fresh_best_metric": best_metric,
         }
@@ -2754,12 +2710,8 @@ def main() -> None:
             "rng_loaded": False,
             "checkpoint_writes_enabled": False,
         }
-        context["validation_flow_schedule"] = deployment_flow_schedule(
-            validation_config
-        ).identity
-        context["validation_flow_schedule_override"] = (
-            args.validation_flow_schedule is not None
-        )
+        context["validation_flow_schedule"] = deployment_flow_schedule(validation_config).identity
+        context["validation_flow_schedule_override"] = args.validation_flow_schedule is not None
     # Preflight uses the deterministic validation sampler and separate RNGs;
     # it must not consume formal training shuffle, condition-dropout or flow
     # randomness.
@@ -2907,9 +2859,7 @@ def main() -> None:
             if bundle.is_multitask:
                 if batch.audit.episode_index is None:
                     raise ValueError("multitask training lost CPU episode identity")
-                task_indices = bundle.task_indices_for_episodes(
-                    batch.audit.episode_index
-                )
+                task_indices = bundle.task_indices_for_episodes(batch.audit.episode_index)
                 for task in task_indices.tolist():
                     task_sample_counts[int(task)] += 1
             emit = batch_index % config.runtime.log_every == 0

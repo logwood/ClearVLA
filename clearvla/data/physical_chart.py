@@ -125,13 +125,18 @@ class PhysicalChartSpec:
     action_channels: tuple[PhysicalChannelSpec, ...]
     state_channels: tuple[PhysicalChannelSpec, ...]
     source: str
+    schema: str = PHYSICAL_CHART_SCHEMA
 
     def validate(self) -> None:
         if not self.name or not self.chart_kind or not self.source:
             raise ValueError("physical chart identity and source must be non-empty")
         if not self.action_channels or not self.state_channels:
             raise ValueError("physical chart must describe action and state channels")
-        if len(self.action_channels) != len(self.state_channels):
+        if self.schema not in {PHYSICAL_CHART_SCHEMA, "clearvla-physical-chart-v2"}:
+            raise ValueError("unknown physical chart schema")
+        if self.schema == PHYSICAL_CHART_SCHEMA and len(self.action_channels) != len(
+            self.state_channels
+        ):
             raise ValueError("action/state physical channel widths must agree")
         for channels in (self.action_channels, self.state_channels):
             names = tuple(channel.name for channel in channels)
@@ -143,6 +148,10 @@ class PhysicalChartSpec:
     @property
     def output_dim(self) -> int:
         return len(self.action_channels)
+
+    @property
+    def state_output_dim(self) -> int:
+        return len(self.state_channels)
 
     @property
     def action_units(self) -> tuple[str, ...]:
@@ -159,7 +168,7 @@ class PhysicalChartSpec:
     def as_dict(self) -> dict[str, object]:
         self.validate()
         return {
-            "schema": PHYSICAL_CHART_SCHEMA,
+            "schema": self.schema,
             "name": self.name,
             "chart_kind": self.chart_kind,
             "source": self.source,
@@ -200,8 +209,7 @@ def _pen_channels() -> tuple[PhysicalChannelSpec, ...]:
 
 def _unknown_channels(names: tuple[str, ...], *, source: str) -> tuple[PhysicalChannelSpec, ...]:
     return tuple(
-        PhysicalChannelSpec(name=name, unit="source_native", source=source)
-        for name in names
+        PhysicalChannelSpec(name=name, unit="source_native", source=source) for name in names
     )
 
 
@@ -214,10 +222,7 @@ _CALVIN_ACTION_CHANNELS = (
             nominal_lower=-1.0,
             nominal_upper=1.0,
             nominal_abs_limit=1.0,
-            source=(
-                "CALVIN Robot.relative_to_absolute: command multiplied by "
-                "max_rel_pos=0.02 m"
-            ),
+            source=("CALVIN Robot.relative_to_absolute: command multiplied by max_rel_pos=0.02 m"),
         )
         for name in ("delta_x", "delta_y", "delta_z")
     ),
@@ -229,8 +234,7 @@ _CALVIN_ACTION_CHANNELS = (
             nominal_upper=1.0,
             nominal_abs_limit=1.0,
             source=(
-                "CALVIN Robot.relative_to_absolute: command multiplied by "
-                "max_rel_orn=0.05 rad"
+                "CALVIN Robot.relative_to_absolute: command multiplied by max_rel_orn=0.05 rad"
             ),
         )
         for name in ("delta_roll", "delta_pitch", "delta_yaw")
@@ -321,9 +325,7 @@ _LIBERO_STATE_CHANNELS = (
         source="LIBERO sum(abs(robot0_gripper_qpos)) opening width",
     ),
 )
-_RDT_LEFT_CHANNEL_NAMES = tuple(f"left_joint_{index + 1}" for index in range(6)) + (
-    "left_gripper",
-)
+_RDT_LEFT_CHANNEL_NAMES = tuple(f"left_joint_{index + 1}" for index in range(6)) + ("left_gripper",)
 _RDT_RIGHT_CHANNEL_NAMES = tuple(f"right_joint_{index + 1}" for index in range(6)) + (
     "right_gripper",
 )
@@ -352,17 +354,29 @@ def _chart(
 PHYSICAL_CHART_SPECS: dict[str, PhysicalChartSpec] = {
     "maniskill_pd_ee_delta_pose_7d_v1": _chart(
         "maniskill_pd_ee_delta_pose_7d_v1",
-        tuple(PhysicalChannelSpec(
-            name=name, unit="normalized_relative_command" if i < 6 else "normalized_continuous_command",
-            nominal_lower=-1.0, nominal_upper=1.0, nominal_abs_limit=1.0,
-            source="ManiSkill panda_wristcam pd_ee_delta_pose native controller",
-        ) for i, name in enumerate(("dx", "dy", "dz", "rx", "ry", "rz", "gripper"))),
+        tuple(
+            PhysicalChannelSpec(
+                name=name,
+                unit="normalized_relative_command" if i < 6 else "normalized_continuous_command",
+                nominal_lower=-1.0,
+                nominal_upper=1.0,
+                nominal_abs_limit=1.0,
+                source="ManiSkill panda_wristcam pd_ee_delta_pose native controller",
+            )
+            for i, name in enumerate(("dx", "dy", "dz", "rx", "ry", "rz", "gripper"))
+        ),
         chart_kind="maniskill_normalized_pd_ee_delta_pose_command",
         source="ManiSkill StackCube-v1; not interchangeable with LIBERO OSC_POSE",
-        state_channels=tuple(PhysicalChannelSpec(
-            name=name, unit="rad" if 3 <= i < 6 else "m",
-            source="ManiSkill TCP xyz/wxyz-to-rotvec plus sum of finger qpos",
-        ) for i, name in enumerate(("tcp_x", "tcp_y", "tcp_z", "rotvec_x", "rotvec_y", "rotvec_z", "opening"))),
+        state_channels=tuple(
+            PhysicalChannelSpec(
+                name=name,
+                unit="rad" if 3 <= i < 6 else "m",
+                source="ManiSkill TCP xyz/wxyz-to-rotvec plus sum of finger qpos",
+            )
+            for i, name in enumerate(
+                ("tcp_x", "tcp_y", "tcp_z", "rotvec_x", "rotvec_y", "rotvec_z", "opening")
+            )
+        ),
     ),
     "identity_7d_pen": _chart(
         "identity_7d_pen",
@@ -437,10 +451,24 @@ PHYSICAL_CHART_SPECS["maniskill_pd_ee_delta_pose_7d_v2"] = _chart(
     PHYSICAL_CHART_SPECS["maniskill_pd_ee_delta_pose_7d_v1"].action_channels,
     chart_kind="maniskill_normalized_pd_ee_delta_pose_command",
     source="ManiSkill commands unchanged; fixed-down-reference causal state chart v2",
-    state_channels=tuple(PhysicalChannelSpec(
-        name=name, unit="rad" if 3 <= i < 6 else "m",
-        source="TCP xyz; causal log of Rx(pi)^-1 R_tcp; summed finger opening",
-    ) for i, name in enumerate(("tcp_x", "tcp_y", "tcp_z", "local_rotvec_x", "local_rotvec_y", "local_rotvec_z", "opening"))),
+    state_channels=tuple(
+        PhysicalChannelSpec(
+            name=name,
+            unit="rad" if 3 <= i < 6 else "m",
+            source="TCP xyz; causal log of Rx(pi)^-1 R_tcp; summed finger opening",
+        )
+        for i, name in enumerate(
+            (
+                "tcp_x",
+                "tcp_y",
+                "tcp_z",
+                "local_rotvec_x",
+                "local_rotvec_y",
+                "local_rotvec_z",
+                "opening",
+            )
+        )
+    ),
 )
 
 
@@ -451,8 +479,7 @@ def resolve_physical_chart_spec(name: str) -> PhysicalChartSpec:
         return PHYSICAL_CHART_SPECS[str(name)]
     except KeyError as error:
         raise ValueError(
-            f"unknown physical chart profile {name!r}; "
-            f"known={sorted(PHYSICAL_CHART_SPECS)}"
+            f"unknown physical chart profile {name!r}; known={sorted(PHYSICAL_CHART_SPECS)}"
         ) from error
 
 

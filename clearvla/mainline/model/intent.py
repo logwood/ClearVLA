@@ -8,10 +8,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from clearvla.vision.entity_chart import ImageLogMeasure, current_image_grid
+from clearvla.vision.entity_chart import current_image_grid
 
 from ..annotation_goal import ANNOTATED_ENDPOINT_GOAL
-from ..role_values import ADDRESS_ONLY_ROLE
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..instruction_change import (
     INSTRUCTION_CHANGE_MODES,
@@ -21,6 +20,7 @@ from ..instruction_change import (
 )
 from ..instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
+from ..role_values import ADDRESS_ONLY_ROLE
 from ..supervision import FutureLabelSupport, quarantine, supported_mean
 from ..task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION
 from ..temporal import LEGACY_HISTORY_ENCODING, TIMED_HISTORY_ENCODING, HistoryTiming
@@ -29,7 +29,11 @@ from .instruction_change import TypedInstructionReferenceRead
 from .instruction_posterior import PosteriorInstructionReferenceRead
 from .instruction_progress import InstructionReferenceRead
 from .operation_expectation import ObjectOperationPredictor, OperationExpectationRead
-from .routing import register_gradient_axis_rms_metrics, register_gradient_rms_metric, smooth_rms_contract
+from .routing import (
+    register_gradient_axis_rms_metrics,
+    register_gradient_rms_metric,
+    smooth_rms_contract,
+)
 from .target_binding import (
     LOCAL_TARGET_READERS,
     SHARED_TARGET_BINDING,
@@ -56,9 +60,7 @@ TYPED_INTENT_NAMES = ("semantic", "appearance", "geometry")
 
 
 def _causal_mask(length: int, device: torch.device) -> Tensor:
-    return torch.triu(
-        torch.ones(length, length, device=device, dtype=torch.bool), diagonal=1
-    )
+    return torch.triu(torch.ones(length, length, device=device, dtype=torch.bool), diagonal=1)
 
 
 def _interval_slices(length: int) -> tuple[slice, ...]:
@@ -109,17 +111,24 @@ def _diagnostic_attention_weights(
     """
     projection = attention.in_proj_weight
     if (
-        projection is None or attention.in_proj_bias is not None
-        or attention.bias_k is not None or attention.bias_v is not None
-        or attention.add_zero_attn or attention.dropout != 0.0
+        projection is None
+        or attention.in_proj_bias is not None
+        or attention.bias_k is not None
+        or attention.bias_v is not None
+        or attention.add_zero_attn
+        or attention.dropout != 0.0
         or not attention.batch_first
     ):
         raise ValueError("intent diagnostics require packed bias-free zero-dropout attention")
     width, heads = attention.embed_dim, attention.num_heads
     if (
-        query.ndim != 3 or key.ndim != 3 or query.shape[0] != key.shape[0]
-        or query.shape[-1] != width or key.shape[-1] != width
-        or query.device != key.device or key.shape[1] < 1
+        query.ndim != 3
+        or key.ndim != 3
+        or query.shape[0] != key.shape[0]
+        or query.shape[-1] != width
+        or key.shape[-1] != width
+        or query.device != key.device
+        or key.shape[1] < 1
         or tuple(projection.shape) != (3 * width, width)
     ):
         raise ValueError("intent diagnostic query/key shape or device is invalid")
@@ -131,12 +140,12 @@ def _diagnostic_attention_weights(
         key = torch.where(valid[..., None], key, torch.zeros_like(key))
     with torch.autocast(device_type=query.device.type, enabled=False):
         q = F.linear(query.detach().float(), projection[:width].detach().float())
-        k = F.linear(key.detach().float(), projection[width:2 * width].detach().float())
+        k = F.linear(key.detach().float(), projection[width : 2 * width].detach().float())
         batch, queries = q.shape[:2]
         head_width = width // heads
         q = q.reshape(batch, queries, heads, head_width).transpose(1, 2)
         k = k.reshape(batch, key.shape[1], heads, head_width).transpose(1, 2)
-        logits = torch.matmul(q, k.transpose(-2, -1)) * (head_width ** -0.5)
+        logits = torch.matmul(q, k.transpose(-2, -1)) * (head_width**-0.5)
         if valid is not None:
             logits = logits.masked_fill(~valid[:, None, None], torch.finfo(logits.dtype).min)
         weights = torch.softmax(logits, dim=-1)
@@ -147,8 +156,12 @@ def _diagnostic_attention_weights(
 
 class _CrossRead(nn.Module):
     def __init__(
-        self, hidden: int, heads: int, maximum_rms: float = 0.35,
-        *, source_values_only: bool = False,
+        self,
+        hidden: int,
+        heads: int,
+        maximum_rms: float = 0.35,
+        *,
+        source_values_only: bool = False,
     ) -> None:
         super().__init__()
         self.source_values_only = bool(source_values_only)
@@ -181,9 +194,7 @@ class _CrossRead(nn.Module):
         all_invalid: Tensor | None = None
         effective_padding_mask = padding_mask
         if padding_mask is not None:
-            if padding_mask.ndim != 2 or tuple(padding_mask.shape) != tuple(
-                memory.shape[:2]
-            ):
+            if padding_mask.ndim != 2 or tuple(padding_mask.shape) != tuple(memory.shape[:2]):
                 raise ValueError("cross-read padding mask must align with memory")
             if int(memory.shape[1]) < 1:
                 raise ValueError("cross-read memory cannot be empty")
@@ -216,7 +227,9 @@ class _CrossRead(nn.Module):
         weights = (
             _diagnostic_attention_weights(
                 self.attention, normalized_query, normalized_memory, effective_padding_mask
-            ) if diagnostics else None
+            )
+            if diagnostics
+            else None
         )
         update, _ = smooth_rms_contract(update, self.maximum_rms)
         # In the joint task path a learned query is an address, not task
@@ -348,7 +361,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.time_grid = resolve_future_time(future_time_grid_mode)
         if instruction_change_mode not in INSTRUCTION_CHANGE_MODES:
             raise ValueError("unknown instruction change consumer")
-        if instruction_change_mode in TYPED_CHANGE_MODES and instruction_reference_mode != INSTRUCTION_START_REFERENCE:
+        if (
+            instruction_change_mode in TYPED_CHANGE_MODES
+            and instruction_reference_mode != INSTRUCTION_START_REFERENCE
+        ):
             raise ValueError("typed change requires an instruction observation reference")
         self.instruction_change_mode = instruction_change_mode
         if instruction_reference_mode not in {"none", INSTRUCTION_START_REFERENCE}:
@@ -362,7 +378,10 @@ class StatelessObjectIntentOrganizer(nn.Module):
             raise ValueError("unknown target object address mode")
         if target_binding_mode not in {LOCAL_TARGET_READERS, SHARED_TARGET_BINDING}:
             raise ValueError("unknown target binding mode")
-        if target_binding_mode == SHARED_TARGET_BINDING and target_object_address_mode != "post_pool_only":
+        if (
+            target_binding_mode == SHARED_TARGET_BINDING
+            and target_object_address_mode != "post_pool_only"
+        ):
             raise ValueError("shared binding cannot duplicate the additive target address")
         self.target_binding_mode = target_binding_mode
         self.per_camera_values = object_view_mode == "per_camera_values_v1"
@@ -401,15 +420,23 @@ class StatelessObjectIntentOrganizer(nn.Module):
         self.object_geometry = nn.Linear(route_dim, hidden, bias=False)
         self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.interval_clock_code: Tensor | None
-        self.register_buffer("interval_clock_code", self.time_grid.interval_encoding(hidden)[None] if self.time_grid.aligned else None)
+        self.register_buffer(
+            "interval_clock_code",
+            self.time_grid.interval_encoding(hidden)[None] if self.time_grid.aligned else None,
+        )
         self.interval_goal = _CrossRead(
             hidden, heads, source_values_only=task_execution_mode in JOINT_TASK_EXECUTION_MODES
         )
         self.interval_history = _CrossRead(hidden, heads)
         self.task_relation_encoder = (
-            JointTaskRelationEncoder(hidden=hidden, state_dim=state_dim, camera_names=camera_names,
-                                     task_execution_mode=task_execution_mode)
-            if task_execution_mode in JOINT_TASK_EXECUTION_MODES else None
+            JointTaskRelationEncoder(
+                hidden=hidden,
+                state_dim=state_dim,
+                camera_names=camera_names,
+                task_execution_mode=task_execution_mode,
+            )
+            if task_execution_mode in JOINT_TASK_EXECUTION_MODES
+            else None
         )
         # Joint task execution keeps the relation reader as the sole source
         # of task/object values, but its current query/value chain can attenuate
@@ -418,14 +445,14 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # ordinary action losses; it is not a selector and cannot change the
         # neutral initialization or constructor RNG stream.
         if self.task_relation_encoder is not None:
-            self.language_identity_residual_weight = nn.Parameter(
-                torch.zeros(hidden, hidden)
-            )
+            self.language_identity_residual_weight = nn.Parameter(torch.zeros(hidden, hidden))
         else:
             self.register_parameter("language_identity_residual_weight", None)
         self.interval_object = (
-            TaskRelationRead(hidden, heads, role_value_mode=role_value_mode) if self.task_relation_encoder is not None else
-            BoundTargetRead(hidden, heads) if target_binding_mode == SHARED_TARGET_BINDING
+            TaskRelationRead(hidden, heads, role_value_mode=role_value_mode)
+            if self.task_relation_encoder is not None
+            else BoundTargetRead(hidden, heads)
+            if target_binding_mode == SHARED_TARGET_BINDING
             else _CrossRead(hidden, heads)
         )
         self.typed_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
@@ -440,9 +467,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # loss open the route without a hand-set gain.
         self.target_object_address: _ZeroStartTargetAddress | None
         if target_object_address_mode == "shared_target_prior_v1":
-            self.target_object_address = _ZeroStartTargetAddress(
-                len(TYPED_INTENT_NAMES)
-            )
+            self.target_object_address = _ZeroStartTargetAddress(len(TYPED_INTENT_NAMES))
         else:
             # The accepted reader must retain the exact old parameter set and
             # constructor RNG stream.  Runtime still exposes a typed zero field
@@ -473,36 +498,69 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if target_binding_mode == SHARED_TARGET_BINDING:
             if not camera_names or len(set(camera_names)) != len(camera_names):
                 raise ValueError("target evidence requires unique declared cameras")
-            self.shared_binder = (TaskConditionedTargetBinder(hidden, heads)
-                                  if task_execution_mode in JOINT_TASK_EXECUTION_MODES else SharedTargetBinder(hidden))
+            self.shared_binder = (
+                TaskConditionedTargetBinder(hidden, heads)
+                if task_execution_mode in JOINT_TASK_EXECUTION_MODES
+                else SharedTargetBinder(hidden)
+            )
             self.target_coordinate = nn.Linear(2, hidden, bias=False)
             self.target_state = nn.Linear(state_dim, hidden, bias=False)
             self.target_view = nn.Embedding(len(camera_names), hidden)
 
-        self.instruction_progress: InstructionReferenceRead | TypedInstructionReferenceRead | PosteriorInstructionReferenceRead | None
+        self.instruction_progress: (
+            InstructionReferenceRead
+            | TypedInstructionReferenceRead
+            | PosteriorInstructionReferenceRead
+            | None
+        )
         if instruction_change_mode in TYPED_CHANGE_MODES:
-            reader_type = (PosteriorInstructionReferenceRead if instruction_change_mode == POSTERIOR_REFERENCE_CHANGE
-                           else TypedInstructionReferenceRead)
+            reader_type = (
+                PosteriorInstructionReferenceRead
+                if instruction_change_mode == POSTERIOR_REFERENCE_CHANGE
+                else TypedInstructionReferenceRead
+            )
             self.instruction_progress = reader_type(
-                hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names,
-                **({"observation_measurement_mode": observation_measurement_mode}
-                   if reader_type is PosteriorInstructionReferenceRead else {}))
+                hidden=hidden,
+                content_dim=content_dim,
+                state_dim=state_dim,
+                camera_names=camera_names,
+                **(
+                    {"observation_measurement_mode": observation_measurement_mode}
+                    if reader_type is PosteriorInstructionReferenceRead
+                    else {}
+                ),
+            )
         else:
             self.instruction_progress = (
-                InstructionReferenceRead(hidden=hidden, content_dim=content_dim,
-                                        state_dim=state_dim, cameras=len(camera_names))
-                if instruction_reference_mode == INSTRUCTION_START_REFERENCE else None
+                InstructionReferenceRead(
+                    hidden=hidden,
+                    content_dim=content_dim,
+                    state_dim=state_dim,
+                    cameras=len(camera_names),
+                )
+                if instruction_reference_mode == INSTRUCTION_START_REFERENCE
+                else None
             )
 
         self.operation_predictor = None
         self.operation_read = None
         if operation_intent_mode == OBJECT_OUTCOME_INTENT:
             if not self.time_grid.aligned or target_binding_mode != SHARED_TARGET_BINDING:
-                raise ValueError("operation predictor needs shared target and aligned physical time")
+                raise ValueError(
+                    "operation predictor needs shared target and aligned physical time"
+                )
             self.operation_predictor = ObjectOperationPredictor(
-                hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
+                hidden=hidden,
+                content_dim=content_dim,
+                state_dim=state_dim,
+                camera_names=camera_names,
+            )
             self.operation_read = OperationExpectationRead(
-                hidden=hidden, content_dim=content_dim, state_dim=state_dim, camera_names=camera_names)
+                hidden=hidden,
+                content_dim=content_dim,
+                state_dim=state_dim,
+                camera_names=camera_names,
+            )
         elif operation_intent_mode != POSTERIOR_INTENT:
             raise ValueError("unknown operation intent")
 
@@ -512,18 +570,37 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if annotation_goal_mode == ANNOTATED_ENDPOINT_GOAL:
             if instruction_change_mode != POSTERIOR_REFERENCE_CHANGE:
                 raise ValueError("endpoint goal requires full posterior instruction evidence")
-            self.endpoint_goal = EndpointGoalPredictor(hidden=hidden, content_dim=content_dim,
-                state_dim=state_dim, heads=heads, camera_names=camera_names)
-            self.endpoint_goal_read = AnnotatedGoalValueRead(hidden=hidden, content_dim=content_dim,
-                state_dim=state_dim, camera_names=camera_names)
+            self.endpoint_goal = EndpointGoalPredictor(
+                hidden=hidden,
+                content_dim=content_dim,
+                state_dim=state_dim,
+                heads=heads,
+                camera_names=camera_names,
+            )
+            self.endpoint_goal_read = AnnotatedGoalValueRead(
+                hidden=hidden,
+                content_dim=content_dim,
+                state_dim=state_dim,
+                camera_names=camera_names,
+            )
             self.endpoint_goal_output = nn.Linear(4 * hidden, hidden, bias=False)
         elif annotation_goal_mode != "none":
             raise ValueError("unknown endpoint goal mode")
 
-        self.object_identity = nn.Linear(hidden,hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
-        if self.object_identity is not None:nn.init.zeros_(self.object_identity.weight)
+        self.object_identity = (
+            nn.Linear(hidden, hidden, bias=False)
+            if entity_ownership_mode == "canonical_image_v1"
+            else None
+        )
+        if self.object_identity is not None:
+            nn.init.zeros_(self.object_identity.weight)
         from .observed_outcome import ObservedOutcomeRead
-        self.observed_outcome = ObservedOutcomeRead(hidden, content_dim, camera_names) if observed_outcome_mode == "before_proposal_v1" else None
+
+        self.observed_outcome = (
+            ObservedOutcomeRead(hidden, content_dim, camera_names)
+            if observed_outcome_mode == "before_proposal_v1"
+            else None
+        )
 
     @staticmethod
     def _paired_history(
@@ -546,9 +623,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
         actions = left_pad(executed_history, length)
         previous = torch.cat((states[:, :1], states[:, :-1]), dim=1)
         delta = states - previous
-        offset = torch.linspace(
-            -1.0, 0.0, length, device=states.device, dtype=states.dtype
-        )[None, :, None].expand(states.shape[0], -1, -1)
+        offset = torch.linspace(-1.0, 0.0, length, device=states.device, dtype=states.dtype)[
+            None, :, None
+        ].expand(states.shape[0], -1, -1)
         return torch.cat((states, actions, delta, offset), dim=-1), delta
 
     def _object_tokens(self, facts: ObjectFactSet) -> Tensor:
@@ -570,9 +647,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
     @staticmethod
     def _bounded_unit(value: Tensor, *, floor: float = 0.25) -> Tensor:
         value_f = value.float()
-        return value_f / (
-            value_f.square().sum(dim=-1, keepdim=True) + float(floor) ** 2
-        ).sqrt()
+        return value_f / (value_f.square().sum(dim=-1, keepdim=True) + float(floor) ** 2).sqrt()
 
     def _typed_relevance(
         self,
@@ -589,13 +664,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # bounded RMS-normalized copy alongside the centered direction; this
         # keeps the original cosine path while preserving interval identity.
         query_centered = self.typed_query_norm(public_interval_carrier)
-        query_rms = public_interval_carrier.float() / (
-            public_interval_carrier.float().square().mean(dim=-1, keepdim=True)
-            + 0.25**2
-        ).sqrt()
-        query_source = query_centered + 0.50 * query_rms.to(
-            dtype=query_centered.dtype
+        query_rms = (
+            public_interval_carrier.float()
+            / (public_interval_carrier.float().square().mean(dim=-1, keepdim=True) + 0.25**2).sqrt()
         )
+        query_source = query_centered + 0.50 * query_rms.to(dtype=query_centered.dtype)
         typed_query = torch.stack(
             tuple(projection(query_source) for projection in self.typed_relevance_queries),
             dim=2,
@@ -623,9 +696,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             self._bounded_unit(typed_query),
             self._bounded_unit(typed_route),
         ).clamp(-1.0, 1.0)
-        temperature = 0.25 + 3.75 * torch.sigmoid(
-            self.typed_temperature_logit.float()
-        )
+        temperature = 0.25 + 3.75 * torch.sigmoid(self.typed_temperature_logit.float())
         signal_probability = torch.sigmoid(
             score * temperature.to(device=score.device)[None, None, None]
         )
@@ -634,9 +705,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # learn whether semantic, appearance or geometry identifies the target.
         # Removing the supported K-common component makes uniform evidence an
         # exact neutral prior and leaves producer support authority unchanged.
-        typed_address_score = score * temperature.to(device=score.device)[
-            None, None, None
-        ]
+        typed_address_score = score * temperature.to(device=score.device)[None, None, None]
         if self.target_object_address is None:
             target_address_raw = torch.zeros_like(typed_address_score[..., 0])
         else:
@@ -647,9 +716,7 @@ class StatelessObjectIntentOrganizer(nn.Module):
             target_address_raw.float(),
             torch.zeros_like(target_address_raw, dtype=torch.float32),
         )
-        first_legal_k = target_support.to(dtype=torch.int64).argmax(
-            dim=-1, keepdim=True
-        )
+        first_legal_k = target_support.to(dtype=torch.int64).argmax(dim=-1, keepdim=True)
         target_address_reference = safe_target_address.gather(-1, first_legal_k)
         target_address_relative = safe_target_address - target_address_reference
         target_count = target_support.float().sum(dim=-1, keepdim=True)
@@ -667,13 +734,15 @@ class StatelessObjectIntentOrganizer(nn.Module):
             # Operation/type gates can vary by future interval, but not select
             # a different K for each type. The single target law owns K.
             operation_score = (typed_address_score * binding.mass[:, None, :, None]).sum(dim=2)
-            signal_probability = binding.mass[:, None, :, None] * torch.sigmoid(operation_score)[:, :, None]
-        validity = (validity_values if binding is None else object_support[..., None].float())[:, None, :, None, :]
+            signal_probability = (
+                binding.mass[:, None, :, None] * torch.sigmoid(operation_score)[:, :, None]
+            )
+        validity = (validity_values if binding is None else object_support[..., None].float())[
+            :, None, :, None, :
+        ]
         relevance_mass = signal_probability[..., None] * validity
         relevance_mass = relevance_mass.to(dtype=typed_route.dtype)
-        relevance_value = (
-            relevance_mass * typed_route[:, None].to(dtype=relevance_mass.dtype)
-        )
+        relevance_value = relevance_mass * typed_route[:, None].to(dtype=relevance_mass.dtype)
         # ``relevance_mass * G`` is intentionally kept as the current-object
         # fact carrier.  It cannot, however, express an interval-specific task
         # direction: every future row only rescales the same G vector.  Carry a
@@ -694,23 +763,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
         # A typed task value may follow a route only when that producer type
         # has an actual current fact.  This keeps a zero semantic/appearance/
         # geometry source exactly zero instead of fabricating a value from S.
-        route_support = (
-            typed_route.detach().abs().sum(dim=-1, keepdim=True) > 1.0e-8
-        ).to(dtype=relevance_mass.dtype)
+        route_support = (typed_route.detach().abs().sum(dim=-1, keepdim=True) > 1.0e-8).to(
+            dtype=relevance_mass.dtype
+        )
         if binding is None:
             task_gate = validity.to(dtype=relevance_mass.dtype) * route_support[:, None]
         else:
             # Exclude the shared null mass from value amplitude; it is a selector
             # fallback, not S evidence.
             target_mass = binding.mass.float()
-            target_mass = target_mass / target_mass.sum(
-                dim=-1, keepdim=True
-            ).clamp_min(1.0e-6)
+            target_mass = target_mass / target_mass.sum(dim=-1, keepdim=True).clamp_min(1.0e-6)
             task_gate = (
                 target_mass[:, None, :, None, None]
-                * object_support[:, None, :, None, None].to(
-                    dtype=relevance_mass.dtype
-                )
+                * object_support[:, None, :, None, None].to(dtype=relevance_mass.dtype)
                 * route_support[:, None]
             )
         # Unit gain preserves the bounded interval value instead of erasing it.
@@ -729,7 +794,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
             # K is a fixed identity axis.  A fixed mean preserves zero and
             # cannot cancel the optionality by renormalizing selected mass.
             selected_route = (
-                relevance_value[..., type_index, :].mean(dim=2) if binding is None
+                relevance_value[..., type_index, :].mean(dim=2)
+                if binding is None
                 else relevance_value[..., type_index, :].sum(dim=2)
             )
             component, _ = smooth_rms_contract(projection(selected_route), 0.35)
@@ -738,12 +804,8 @@ class StatelessObjectIntentOrganizer(nn.Module):
             # this residual only prevents a time/language difference from
             # disappearing when the relevance mass is nearly constant.
             query_residual = typed_query[:, :, type_index]
-            query_residual = query_residual - query_residual.mean(
-                dim=1, keepdim=True
-            )
-            query_component, _ = smooth_rms_contract(
-                projection(query_residual), 0.35
-            )
+            query_residual = query_residual - query_residual.mean(dim=1, keepdim=True)
+            query_component, _ = smooth_rms_contract(projection(query_residual), 0.35)
             if binding is not None:
                 # The typed residual is already target-owned.  Do not gate it
                 # by relevance_mass: that includes the sigmoid evidence
@@ -752,13 +814,11 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 # K-plus-null binding mass, retaining zero when no real target
                 # is supported.
                 target_gate = binding.mass.float()
-                target_gate = target_gate / target_gate.sum(
-                    dim=-1, keepdim=True
-                ).clamp_min(1.0e-6)
+                target_gate = target_gate / target_gate.sum(dim=-1, keepdim=True).clamp_min(1.0e-6)
                 target_gate = target_gate.sum(dim=-1, keepdim=True)[..., None]
-                target_gate = target_gate.expand(
-                    -1, component.shape[1], -1
-                ).to(dtype=component.dtype)
+                target_gate = target_gate.expand(-1, component.shape[1], -1).to(
+                    dtype=component.dtype
+                )
                 component = component + 0.50 * query_component * target_gate
             components.append(component)
         typed_components = torch.stack(components, dim=2)
@@ -905,22 +965,40 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if self.per_camera_values:
             camera_valid = (facts.camera_validity[..., 0] > 0) & object_validity[..., None]
             encoded_views = []
-            for name, projection in (("content", self.object_content), ("semantic", self.object_semantic),
-                                     ("appearance", self.object_appearance), ("geometry", self.object_geometry)):
-                source = getattr(facts, "camera_"+name)
+            for name, projection in (
+                ("content", self.object_content),
+                ("semantic", self.object_semantic),
+                ("appearance", self.object_appearance),
+                ("geometry", self.object_geometry),
+            ):
+                source = getattr(facts, "camera_" + name)
                 if source is None:
                     raise ValueError("selected per-camera graph has no actual camera content")
-                encoded_views.append(projection(torch.where(camera_valid[...,None], source, 0.0)))
+                encoded_views.append(projection(torch.where(camera_valid[..., None], source, 0.0)))
             view_attribute_tokens = torch.stack(encoded_views, dim=-2)
-            view_attribute_tokens = torch.where(camera_valid[...,None,None], view_attribute_tokens, 0.0)
+            view_attribute_tokens = torch.where(
+                camera_valid[..., None, None], view_attribute_tokens, 0.0
+            )
         if self.shared_binder is not None:
-            if self.target_coordinate is None or self.target_view is None or self.target_state is None:
+            if (
+                self.target_coordinate is None
+                or self.target_view is None
+                or self.target_state is None
+            ):
                 raise RuntimeError("shared target evidence encoder is incomplete")
             if facts.camera_coordinates.shape[2] != len(self.camera_names):
                 raise ValueError("target facts lost declared camera axis")
-            history_support = torch.ones(history.shape[:2], dtype=torch.bool, device=history.device) if history_validity is None else history_validity
-            safe_history = torch.where(history_support[..., None], history, torch.zeros_like(history))
-            history_context = safe_history.sum(1) / history_support.sum(1, keepdim=True).clamp_min(1)
+            history_support = (
+                torch.ones(history.shape[:2], dtype=torch.bool, device=history.device)
+                if history_validity is None
+                else history_validity
+            )
+            safe_history = torch.where(
+                history_support[..., None], history, torch.zeros_like(history)
+            )
+            history_context = safe_history.sum(1) / history_support.sum(1, keepdim=True).clamp_min(
+                1
+            )
             if isinstance(self.shared_binder, TaskConditionedTargetBinder):
                 if self.target_binding_input_mode == "full_tokens_views_v1":
                     if view_attribute_tokens is None or facts.current_image_measure is None:
@@ -928,31 +1006,58 @@ class StatelessObjectIntentOrganizer(nn.Module):
                     measure = facts.current_image_measure
                     joint, _ = measure.normalized((2, 3, 4))
                     view_mass = joint.sum((-2, -1))
-                    view_objects = view_attribute_tokens[..., 0, :] + view_attribute_tokens[..., 1:, :].sum(-2) / (3.0 ** .5)
+                    view_log_mass = None
+                    view_objects = view_attribute_tokens[..., 0, :] + view_attribute_tokens[
+                        ..., 1:, :
+                    ].sum(-2) / (3.0**0.5)
                     if self.object_identity is not None:
                         if facts.identity_state is None or facts.view_mass is None:
-                            raise ValueError("canonical target binding lost identity/view allocation")
-                        view_objects = view_objects + self.object_identity(facts.identity_state.to(view_objects))[:,:,None]
+                            raise ValueError(
+                                "canonical target binding lost identity/view allocation"
+                            )
+                        view_objects = (
+                            view_objects
+                            + self.object_identity(facts.identity_state.to(view_objects))[
+                                :, :, None
+                            ]
+                        )
                         view_mass = facts.view_mass
+                        view_log_mass = facts.view_log_mass
                     target_binding = self.shared_binder(
-                        goal_memory, view_objects, object_validity, history=history_context,
-                        task_mask=goal_mask.bool(), view_support=camera_valid, view_mass=view_mass,
+                        goal_memory,
+                        view_objects,
+                        object_validity,
+                        history=history_context,
+                        task_mask=goal_mask.bool(),
+                        view_support=camera_valid,
+                        view_mass=view_mass,
+                        view_log_mass=view_log_mass,
                     )
                 elif view_attribute_tokens is None:
-                    target_binding = self.shared_binder(protected_goal, objects, object_validity, history=history_context)
+                    target_binding = self.shared_binder(
+                        protected_goal, objects, object_validity, history=history_context
+                    )
                 else:
                     # Bind once from the pooled G object facts. Per-camera
                     # values are retained for target evidence after identity
                     # is resolved; their camera-local normalization removes
                     # the K allocation signal needed by the shared binder.
                     target_binding = self.shared_binder(
-                        protected_goal, objects, object_validity,
+                        protected_goal,
+                        objects,
+                        object_validity,
                         history=history_context,
                     )
             else:
-                target_binding = self.shared_binder(protected_goal.mean(1) + history_context, objects, object_validity)
+                target_binding = self.shared_binder(
+                    protected_goal.mean(1) + history_context, objects, object_validity
+                )
             camera_valid = (facts.camera_validity[..., 0] > 0) & object_validity[..., None]
-            camera_positions = torch.where(camera_valid[..., None], facts.camera_coordinates, torch.zeros_like(facts.camera_coordinates))
+            camera_positions = torch.where(
+                camera_valid[..., None],
+                facts.camera_coordinates,
+                torch.zeros_like(facts.camera_coordinates),
+            )
             view_ids = torch.arange(len(self.camera_names), device=objects.device)
             # Native image coordinates are not subtracted from world TCP.
             # Declared view identity + robot state condition a learnable relation.
@@ -961,31 +1066,59 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 + self.target_view(view_ids)[None, None].to(objects.dtype)
                 + self.target_state(state).to(objects.dtype)[:, None, None]
             )
-            attribute_tokens = torch.stack((content_objects, self.object_semantic(semantic_input),
-                self.object_appearance(appearance_input), self.object_geometry(geometry_input)), dim=2)
+            attribute_tokens = torch.stack(
+                (
+                    content_objects,
+                    self.object_semantic(semantic_input),
+                    self.object_appearance(appearance_input),
+                    self.object_geometry(geometry_input),
+                ),
+                dim=2,
+            )
             if view_attribute_tokens is None:
-                target_valid = torch.cat((object_validity[..., None].expand(-1, -1, 4), camera_valid), dim=-1)
+                target_valid = torch.cat(
+                    (object_validity[..., None].expand(-1, -1, 4), camera_valid), dim=-1
+                )
                 target_tokens = torch.cat((attribute_tokens, camera_tokens), dim=2)
             else:
-                target_valid = torch.cat((camera_valid[...,None].expand(-1,-1,-1,4).flatten(-2), camera_valid), dim=-1)
-                target_tokens = torch.cat((view_attribute_tokens.flatten(2,3), camera_tokens), dim=2)
+                target_valid = torch.cat(
+                    (camera_valid[..., None].expand(-1, -1, -1, 4).flatten(-2), camera_valid),
+                    dim=-1,
+                )
+                target_tokens = torch.cat(
+                    (view_attribute_tokens.flatten(2, 3), camera_tokens), dim=2
+                )
             target_evidence = TargetEvidence(
-                torch.where(target_valid[..., None], target_tokens, torch.zeros_like(target_tokens)), target_valid
+                torch.where(
+                    target_valid[..., None], target_tokens, torch.zeros_like(target_tokens)
+                ),
+                target_valid,
             )
         progress = None
         instruction_change = None
         if self.instruction_progress is not None:
             if instruction_reference is None or current_dino is None or target_binding is None:
-                raise ValueError("instruction progress requires causal reference and shared binding")
-            if isinstance(self.instruction_progress, (TypedInstructionReferenceRead, PosteriorInstructionReferenceRead)):
+                raise ValueError(
+                    "instruction progress requires causal reference and shared binding"
+                )
+            if isinstance(
+                self.instruction_progress,
+                (TypedInstructionReferenceRead, PosteriorInstructionReferenceRead),
+            ):
                 progress, instruction_change = self.instruction_progress(
-                    reference=instruction_reference, current_dino=current_dino,
-                    current_state=state, facts=facts, binding=target_binding,
+                    reference=instruction_reference,
+                    current_dino=current_dino,
+                    current_state=state,
+                    facts=facts,
+                    binding=target_binding,
                 )
             else:
                 progress, _ = self.instruction_progress(
-                    reference=instruction_reference, current_dino=current_dino,
-                    current_state=state, facts=facts, binding=target_binding,
+                    reference=instruction_reference,
+                    current_dino=current_dino,
+                    current_state=state,
+                    facts=facts,
+                    binding=target_binding,
                     task_context=protected_goal.mean(1),
                 )
         elif instruction_reference is not None:
@@ -994,9 +1127,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if self.time_grid.aligned:
             assert self.interval_clock_code is not None
             interval_identity = interval_identity + self.interval_clock_code.to(interval_identity)
-        interval_base = interval_identity.to(
-            device=objects.device, dtype=objects.dtype
-        ).expand(batch, -1, -1)
+        interval_base = interval_identity.to(device=objects.device, dtype=objects.dtype).expand(
+            batch, -1, -1
+        )
         _, goal_innovation, interval_goal_attention = self.interval_goal(
             interval_base, protected_goal, diagnostics=collect_diagnostics
         )
@@ -1015,11 +1148,17 @@ class StatelessObjectIntentOrganizer(nn.Module):
         language_object_query = interval_base + goal_innovation + history_innovation
         task_relation = None
         if isinstance(self.interval_object, TaskRelationRead):
-            if self.task_relation_encoder is None or target_binding is None or target_evidence is None:
+            if (
+                self.task_relation_encoder is None
+                or target_binding is None
+                or target_evidence is None
+            ):
                 raise RuntimeError("joint task relation source is incomplete")
             source = facts.current_image_source
             if source is None or current_dino is None:
-                raise ValueError("joint task relations require original G3 and native current chart")
+                raise ValueError(
+                    "joint task relations require original G3 and native current chart"
+                )
             if source.spatial is not facts.dense_chart.current_image_support:
                 raise ValueError("joint task relation spatial source is not current G3")
             side = math.isqrt(current_dino.shape[-2])
@@ -1027,7 +1166,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 raise ValueError("joint task relation native patch chart must be square")
             image = source.on_image(rows=side, columns=side)
             spatial_support = image.supported & camera_valid[..., None, None]
-            position_probability, _ = image.restrict(camera_valid[..., None, None]).normalized((-2, -1))
+            position_probability, _ = image.restrict(camera_valid[..., None, None]).normalized(
+                (-2, -1)
+            )
             relation_views = spatial_support.flatten(-2).any(-1) & camera_valid
             task_relation = self.task_relation_encoder(
                 task_intervals=goal_innovation,
@@ -1035,23 +1176,31 @@ class StatelessObjectIntentOrganizer(nn.Module):
                 # VALUE path.  It was previously used only as an attention key
                 # and was therefore discarded before JointTaskRelationEncoder.
                 interval_context=interval_base,
-                attributes=attribute_tokens if view_attribute_tokens is None else view_attribute_tokens,
+                attributes=attribute_tokens
+                if view_attribute_tokens is None
+                else view_attribute_tokens,
                 position_probability=position_probability.flatten(-2),
                 position_grid=current_image_grid(side, side, device=state.device).reshape(-1, 2),
                 state=state,
-                history_context=history_context, view_observed=relation_views,
-                binding=target_binding, current_content=facts.content,
+                history_context=history_context,
+                view_observed=relation_views,
+                binding=target_binding,
+                current_content=facts.content,
             )
             object_innovation = self.interval_object(language_object_query, task_relation)
             interval_object_attention = target_binding.mass[:, None].expand(-1, 4, -1)
         elif isinstance(self.interval_object, BoundTargetRead):
             if target_binding is None or target_evidence is None:
                 raise RuntimeError("shared S read has no operated-object binding")
-            object_innovation = self.interval_object(language_object_query, target_evidence, target_binding)
+            object_innovation = self.interval_object(
+                language_object_query, target_evidence, target_binding
+            )
             interval_object_attention = target_binding.mass[:, None].expand(-1, 4, -1)
         else:
             _, object_innovation, interval_object_attention = self.interval_object(
-                language_object_query, interval_objects, padding_mask=~object_validity,
+                language_object_query,
+                interval_objects,
+                padding_mask=~object_validity,
                 diagnostics=collect_diagnostics,
             )
         language_identity_residual = torch.zeros_like(object_innovation)
@@ -1095,19 +1244,35 @@ class StatelessObjectIntentOrganizer(nn.Module):
             public_intervals = public_intervals + language_identity_residual
         annotated_goal = None
         if self.endpoint_goal is not None:
-            if instruction_reference is None or instruction_change is None or self.endpoint_goal_read is None or self.endpoint_goal_output is None:
+            if (
+                instruction_reference is None
+                or instruction_change is None
+                or self.endpoint_goal_read is None
+                or self.endpoint_goal_output is None
+            ):
                 raise ValueError("annotated goal lost its causal reference or value reader")
-            prediction = self.endpoint_goal(reference=instruction_reference, language=protected_goal)
+            prediction = self.endpoint_goal(
+                reference=instruction_reference, language=protected_goal
+            )
             annotated_goal = compare_goal_to_current(prediction, instruction_change)
             values = self.endpoint_goal_read(annotated_goal)
-            public_intervals = public_intervals + self.endpoint_goal_output(torch.cat(values, -1).to(public_intervals.dtype))[:, None]
+            public_intervals = (
+                public_intervals
+                + self.endpoint_goal_output(torch.cat(values, -1).to(public_intervals.dtype))[
+                    :, None
+                ]
+            )
         operation_expectation = None
         if self.operation_predictor is not None:
             if target_binding is None or self.operation_read is None:
                 raise ValueError("operation expectation lost binding or consumer")
             operation_expectation = self.operation_predictor(
-                task_intervals=public_intervals, facts=facts, state=state,
-                binding=target_binding, task_relation=task_relation)
+                task_intervals=public_intervals,
+                facts=facts,
+                state=state,
+                binding=target_binding,
+                task_relation=task_relation,
+            )
             # Prediction and task remain distinguishable; the expected values
             # serve actual coarse/P1/P2/time consumers instead of a logging head.
             public_intervals = public_intervals + self.operation_read(operation_expectation)
@@ -1123,22 +1288,18 @@ class StatelessObjectIntentOrganizer(nn.Module):
             facts=facts,
             binding=target_binding,
         )
-        typed_common_mass, typed_interval_residual_mass = (
-            _interval_common_residual(typed_relevance_mass)
+        typed_common_mass, typed_interval_residual_mass = _interval_common_residual(
+            typed_relevance_mass
         )
-        typed_common_value, typed_interval_residual_value = (
-            _interval_common_residual(
-                typed_relevance_value, preserve_common_grad=True
-            )
+        typed_common_value, typed_interval_residual_value = _interval_common_residual(
+            typed_relevance_value, preserve_common_grad=True
         )
         typed_policy_context = typed_policy_components.sum(dim=2) / (3.0**0.5)
         policy_intervals = public_intervals + typed_policy_context
         temporal_base = self.temporal_identity.to(
             device=public_intervals.device, dtype=public_intervals.dtype
         ).expand(batch, -1, -1)
-        temporal, _, _ = self.temporal_read(
-            temporal_base, public_intervals, diagnostics=False
-        )
+        temporal, _, _ = self.temporal_read(temporal_base, public_intervals, diagnostics=False)
         state_change_values = self.state_change_input(observed_state_delta)
         rate_padding = None
         no_rate = None
@@ -1163,20 +1324,26 @@ class StatelessObjectIntentOrganizer(nn.Module):
         state_change_attention = (
             _diagnostic_attention_weights(
                 self.state_change_read, state_query, state_key, rate_padding
-            ) if collect_diagnostics else None
+            )
+            if collect_diagnostics
+            else None
         )
         if state_change_attention is None:
             state_change_attention = history.new_zeros(batch, 1, history.shape[1])
         state_change_history = state_change_history[:, 0]
         if no_rate is not None:
             state_change_attention = torch.where(
-                no_rate[:, None, None], torch.zeros_like(state_change_attention), state_change_attention
+                no_rate[:, None, None],
+                torch.zeros_like(state_change_attention),
+                state_change_attention,
             )
             state_change_history = torch.where(
                 no_rate[:, None], torch.zeros_like(state_change_history), state_change_history
             )
         if target_binding is None:
-            observed_motion = facts.transport_prior if facts.latest_flow_steps is None else facts.transport_rate
+            observed_motion = (
+                facts.transport_prior if facts.latest_flow_steps is None else facts.transport_rate
+            )
             transport_prior = observed_motion.to(
                 device=objects.device,
                 dtype=objects.dtype,
@@ -1191,14 +1358,18 @@ class StatelessObjectIntentOrganizer(nn.Module):
             transport_validity = validity_values.to(
                 device=transport_tokens.device, dtype=transport_tokens.dtype
             )
-            state_change_transport = (
-                transport_tokens * transport_validity
-            ).sum(dim=1) / transport_validity.sum(dim=1).clamp_min(1.0)
+            state_change_transport = (transport_tokens * transport_validity).sum(
+                dim=1
+            ) / transport_validity.sum(dim=1).clamp_min(1.0)
         else:
             if self.target_view is None:
                 raise RuntimeError("target motion has no declared view identity")
             view_valid = (facts.camera_validity[..., 0] > 0) & object_validity[..., None]
-            motion = facts.camera_transport_prior if facts.latest_flow_steps is None else facts.camera_transport_rate
+            motion = (
+                facts.camera_transport_prior
+                if facts.latest_flow_steps is None
+                else facts.camera_transport_rate
+            )
             motion = torch.where(view_valid[..., None], motion, torch.zeros_like(motion))
             observed_transport_for_diagnostics = motion
             view_ids = torch.arange(len(self.camera_names), device=motion.device)
@@ -1208,7 +1379,9 @@ class StatelessObjectIntentOrganizer(nn.Module):
             view_motion = view_motion * (1 + torch.tanh(self.target_view(view_ids)))[None, None]
             view_weights = masked_probability(facts.log_camera_validity[..., 0], view_valid)
             per_object_motion = (view_motion.float() * view_weights[..., None]).sum(2)
-            state_change_transport = (per_object_motion * target_binding.mass[..., None]).sum(1).to(objects.dtype)
+            state_change_transport = (
+                (per_object_motion * target_binding.mass[..., None]).sum(1).to(objects.dtype)
+            )
         state_change_evidence, _ = smooth_rms_contract(
             self.state_change_fuse(
                 torch.cat((state_change_history, state_change_transport), dim=-1)
@@ -1250,27 +1423,36 @@ class StatelessObjectIntentOrganizer(nn.Module):
         if not collect_diagnostics:
             return state_out, {}
         metrics: dict[str, Tensor] = {
-            "object_intent_goal_attention_entropy": normalized_entropy(
-                goal_attention, dim=-1
-            ).detach().mean(),
+            "object_intent_goal_attention_entropy": normalized_entropy(goal_attention, dim=-1)
+            .detach()
+            .mean(),
             "object_intent_interval_goal_entropy": normalized_entropy(
                 interval_goal_attention, dim=-1
-            ).detach().mean(),
+            )
+            .detach()
+            .mean(),
             "object_intent_interval_history_entropy": normalized_entropy(
                 interval_history_attention, dim=-1
-            ).detach().mean(),
+            )
+            .detach()
+            .mean(),
             "object_intent_interval_object_entropy": normalized_entropy(
                 interval_object_attention, dim=-1
-            ).detach().mean(),
+            )
+            .detach()
+            .mean(),
             "object_intent_language_object_attention_entropy": normalized_entropy(
                 interval_object_attention, dim=-1
-            ).detach().mean(),
+            )
+            .detach()
+            .mean(),
             "object_intent_language_object_attention_valid_fraction": (
                 object_validity.detach().float().mean()
             ),
-            "object_intent_public_interval_variation": public_intervals.detach().float().std(
-                dim=1, unbiased=False
-            ).mean(),
+            "object_intent_public_interval_variation": public_intervals.detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
             "object_intent_public_interval_common_mode_variation": public_intervals.detach()
             .float()
             .mean(dim=-1)
@@ -1291,46 +1473,94 @@ class StatelessObjectIntentOrganizer(nn.Module):
             .squeeze(-1)
             .std(dim=1, unbiased=False)
             .mean(),
-            "object_intent_policy_interval_variation": policy_intervals.detach().float().std(
-                dim=1, unbiased=False
-            ).mean(),
-            "object_intent_temporal_variation": temporal.detach().float().std(
-                dim=1, unbiased=False
-            ).mean(),
-            "object_intent_goal_innovation_rms": goal_innovation.detach().float().square().mean().sqrt(),
-            "object_intent_history_innovation_rms": history_innovation.detach().float().square().mean().sqrt(),
-            "object_intent_object_innovation_rms": object_innovation.detach().float().square().mean().sqrt(),
-            "object_intent_language_identity_residual_rms": language_identity_residual.detach().float().square().mean().sqrt(),
-            "object_intent_typed_action_context_rms": typed_policy_context.detach().float().square().mean().sqrt(),
-            "object_intent_typed_policy_context_interval_variation": typed_policy_context.detach().float().std(
-                dim=1, unbiased=False
-            ).mean(),
-            "object_intent_target_address_logit_rms": target_object_address_logit.detach().square().mean().sqrt(),
-            "object_intent_target_address_logit_k_variation": target_object_address_logit.detach().std(
-                dim=2, unbiased=False
-            ).mean(),
+            "object_intent_policy_interval_variation": policy_intervals.detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
+            "object_intent_temporal_variation": temporal.detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
+            "object_intent_goal_innovation_rms": goal_innovation.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_history_innovation_rms": history_innovation.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_object_innovation_rms": object_innovation.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_language_identity_residual_rms": language_identity_residual.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_action_context_rms": typed_policy_context.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_typed_policy_context_interval_variation": typed_policy_context.detach()
+            .float()
+            .std(dim=1, unbiased=False)
+            .mean(),
+            "object_intent_target_address_logit_rms": target_object_address_logit.detach()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_target_address_logit_k_variation": target_object_address_logit.detach()
+            .std(dim=2, unbiased=False)
+            .mean(),
             "object_intent_target_address_logit_k_center_error": (
                 (
-                    target_object_address_logit.detach()
-                    * object_validity[:, None].detach().float()
+                    target_object_address_logit.detach() * object_validity[:, None].detach().float()
                 ).sum(dim=2)
                 / object_validity.detach().float().sum(dim=1)[:, None].clamp_min(1.0)
-            ).abs().amax(),
-            "object_intent_observed_state_delta_rms": observed_state_delta.detach().float().square().mean().sqrt(),
-            "object_intent_state_change_history_rms": state_change_history.detach().float().square().mean().sqrt(),
-            "object_intent_state_change_transport_rms": state_change_transport.detach().float().square().mean().sqrt(),
-            "object_intent_state_change_evidence_rms": state_change_evidence.detach().float().square().mean().sqrt(),
+            )
+            .abs()
+            .amax(),
+            "object_intent_observed_state_delta_rms": observed_state_delta.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_state_change_history_rms": state_change_history.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_state_change_transport_rms": state_change_transport.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
+            "object_intent_state_change_evidence_rms": state_change_evidence.detach()
+            .float()
+            .square()
+            .mean()
+            .sqrt(),
             "object_intent_state_change_attention_entropy": normalized_entropy(
                 state_change_attention, dim=-1
-            ).detach().mean(),
+            )
+            .detach()
+            .mean(),
         }
         # Shared-target mode retains each camera chart; do not relabel its
         # per-view magnitude as the legacy cross-camera-averaged vector RMS.
         transport_metric = (
-            "object_intent_observed_transport_rms" if target_binding is None
+            "object_intent_observed_transport_rms"
+            if target_binding is None
             else "object_intent_observed_transport_per_view_rms"
         )
-        metrics[transport_metric] = observed_transport_for_diagnostics.detach().float().square().mean().sqrt()
+        metrics[transport_metric] = (
+            observed_transport_for_diagnostics.detach().float().square().mean().sqrt()
+        )
         if self.timed_history is not None:
             # A physical-step rate is not the legacy paired-row displacement.
             metrics["object_intent_observed_state_rate_per_step_rms"] = metrics.pop(
@@ -1407,27 +1637,19 @@ class StatelessObjectIntentOrganizer(nn.Module):
                     .sqrt(),
                     f"object_intent_{name}_relevance_mass": mass.mean(),
                     f"object_intent_{name}_null_mass": (1.0 - mass).mean(),
-                    f"object_intent_{name}_selected_value_rms": selected.square()
-                    .mean()
-                    .sqrt(),
+                    f"object_intent_{name}_selected_value_rms": selected.square().mean().sqrt(),
                     f"object_intent_{name}_object_variation": selected.std(
                         dim=2, unbiased=False
                     ).mean(),
                     f"object_intent_{name}_interval_variation": selected.std(
                         dim=1, unbiased=False
                     ).mean(),
-                    f"object_intent_{name}_action_context_rms": component.square()
-                    .mean()
-                    .sqrt(),
-                    f"object_intent_{name}_score_abs": typed_relevance_score[
-                        ..., type_index
-                    ]
+                    f"object_intent_{name}_action_context_rms": component.square().mean().sqrt(),
+                    f"object_intent_{name}_score_abs": typed_relevance_score[..., type_index]
                     .detach()
                     .abs()
                     .mean(),
-                    f"object_intent_{name}_temperature": typed_temperature[
-                        type_index
-                    ].detach(),
+                    f"object_intent_{name}_temperature": typed_temperature[type_index].detach(),
                 }
             )
         return state_out, metrics
@@ -1455,7 +1677,10 @@ class FuturePlanRecognizer(nn.Module):
         self.effect_input = nn.Linear(content_dim, hidden, bias=False)
         self.interval_identity = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.interval_clock_code: Tensor | None
-        self.register_buffer("interval_clock_code", self.time_grid.interval_encoding(hidden)[None] if self.time_grid.aligned else None)
+        self.register_buffer(
+            "interval_clock_code",
+            self.time_grid.interval_encoding(hidden)[None] if self.time_grid.aligned else None,
+        )
         self.block = _SelfBlock(hidden, heads)
         self.action_reconstruction = nn.Linear(hidden, action_dim, bias=False)
         self.state_reconstruction = nn.Linear(hidden, state_dim, bias=False)
@@ -1490,12 +1715,8 @@ class FuturePlanRecognizer(nn.Module):
             )
             if future_interval_valid is not None:
                 interval_valid = interval_valid & future_interval_valid
-        action_summary = torch.stack(
-            [future_action[:, row].mean(dim=1) for row in slices], dim=1
-        )
-        state_summary = torch.stack(
-            [future_state[:, row].mean(dim=1) for row in slices], dim=1
-        )
+        action_summary = torch.stack([future_action[:, row].mean(dim=1) for row in slices], dim=1)
+        state_summary = torch.stack([future_state[:, row].mean(dim=1) for row in slices], dim=1)
         if current_loss_support.ndim != 4 or int(current_loss_support.shape[-1]) != 1:
             raise ValueError("recognizer current loss support must be [B,K,C,1]")
         if int(current_loss_support.shape[0]) != int(future_action.shape[0]):
@@ -1507,9 +1728,7 @@ class FuturePlanRecognizer(nn.Module):
         # exports object-level future geometry/content.
         object_support = current_loss_support.detach().float().amax(dim=2)
         if teacher is None:
-            effect_summary = future_action.new_zeros(
-                future_action.shape[0], 4, self.content_dim
-            )
+            effect_summary = future_action.new_zeros(future_action.shape[0], 4, self.content_dim)
             teacher_valid = future_action.new_zeros(future_action.shape[0], 4, 1)
         else:
             teacher.validate()
@@ -1522,13 +1741,15 @@ class FuturePlanRecognizer(nn.Module):
                 raise ValueError("recognizer object support does not align with teacher")
             support = object_support[:, None]
             denominator = support.sum(dim=2).clamp_min(1.0)
-            effect_summary = (
-                teacher.semantic_delta.detach().float() * support
-            ).sum(dim=2) / denominator
+            effect_summary = (teacher.semantic_delta.detach().float() * support).sum(
+                dim=2
+            ) / denominator
             effect_summary = effect_summary.to(dtype=teacher.semantic_delta.dtype)
-            teacher_valid = (support.sum(dim=2) > 0).to(
-                dtype=teacher.semantic_delta.dtype
-            ).expand(-1, teacher.semantic_delta.shape[1], -1)
+            teacher_valid = (
+                (support.sum(dim=2) > 0)
+                .to(dtype=teacher.semantic_delta.dtype)
+                .expand(-1, teacher.semantic_delta.shape[1], -1)
+            )
         if interval_valid is not None:
             action_summary = quarantine(action_summary, interval_valid)
             state_summary = quarantine(state_summary, interval_valid)
@@ -1542,19 +1763,19 @@ class FuturePlanRecognizer(nn.Module):
             self.action_input(action_summary)
             + self.state_input(state_summary)
             + self.effect_input(effect_summary)
-            + interval_identity.to(
-                device=future_action.device, dtype=future_action.dtype
-            )
+            + interval_identity.to(device=future_action.device, dtype=future_action.dtype)
         )
         token = self.block(token, valid=interval_valid)
         action_pred = self.action_reconstruction(token)
         state_pred = self.state_reconstruction(token)
         effect_pred = self.effect_reconstruction(token)
         effect_error = (
-            (effect_pred.float() - effect_summary.detach().float()).square()
-            * teacher_valid.detach().float()
-        ).sum() / teacher_valid.detach().float().sum().clamp_min(1.0) / float(
-            self.content_dim
+            (
+                (effect_pred.float() - effect_summary.detach().float()).square()
+                * teacher_valid.detach().float()
+            ).sum()
+            / teacher_valid.detach().float().sum().clamp_min(1.0)
+            / float(self.content_dim)
         )
         reconstruction = (
             supported_mean(
@@ -1607,19 +1828,22 @@ class CoarseActionIntent(nn.Module):
             raise ValueError("unknown coarse action condition mode")
         self.query = nn.Parameter(torch.randn(1, 4, hidden) * 0.02)
         self.row_clock_interpolation: Tensor | None
-        self.register_buffer("row_clock_interpolation", self.time_grid.row_interpolation() if self.time_grid.aligned else None)
+        self.register_buffer(
+            "row_clock_interpolation",
+            self.time_grid.row_interpolation() if self.time_grid.aligned else None,
+        )
         # Keep the trained four-query basis as the shared temporal scaffold.
         # The new zero-initialized row offsets add row-specific capacity
         # without replacing or resetting the existing action head/query.
         self.sequence_row_offset: nn.Parameter | None = None
         if self.action_condition_mode == "sequence_prefix_v1":
-            self.sequence_row_offset = nn.Parameter(
-                torch.zeros(1, self.horizon, hidden)
-            )
+            self.sequence_row_offset = nn.Parameter(torch.zeros(1, self.horizon, hidden))
         self.intent_read = _CrossRead(hidden, heads)
         self.object_read = (
-            TaskRelationRead(hidden, heads, role_value_mode=role_value_mode) if task_execution_mode in JOINT_TASK_EXECUTION_MODES else
-            BoundTargetRead(hidden, heads) if target_binding_mode == SHARED_TARGET_BINDING
+            TaskRelationRead(hidden, heads, role_value_mode=role_value_mode)
+            if task_execution_mode in JOINT_TASK_EXECUTION_MODES
+            else BoundTargetRead(hidden, heads)
+            if target_binding_mode == SHARED_TARGET_BINDING
             else _CrossRead(hidden, heads)
         )
         self.history_read = _CrossRead(hidden, heads)
@@ -1644,11 +1868,22 @@ class CoarseActionIntent(nn.Module):
                 raise RuntimeError("sequence coarse action has no row offsets")
             if self.time_grid.aligned:
                 assert self.row_clock_interpolation is not None
-                query_seed = torch.einsum("ti,bih->bth", self.row_clock_interpolation.to(self.query), self.query) + self.sequence_row_offset
+                query_seed = (
+                    torch.einsum(
+                        "ti,bih->bth", self.row_clock_interpolation.to(self.query), self.query
+                    )
+                    + self.sequence_row_offset
+                )
             else:
-                query_seed = F.interpolate(
-                    self.query.transpose(1, 2), size=self.horizon, mode="linear", align_corners=True,
-                ).transpose(1, 2) + self.sequence_row_offset
+                query_seed = (
+                    F.interpolate(
+                        self.query.transpose(1, 2),
+                        size=self.horizon,
+                        mode="linear",
+                        align_corners=True,
+                    ).transpose(1, 2)
+                    + self.sequence_row_offset
+                )
         query = query_seed.to(
             device=intent.public_interval_carrier.device,
             dtype=intent.public_interval_carrier.dtype,
@@ -1665,10 +1900,14 @@ class CoarseActionIntent(nn.Module):
         conditioned_query = query + intent_delta
         object_padding_mask = None
         if intent.public_object_validity is not None:
-            validity = intent.public_object_validity.to(
-                device=intent.public_object_memory.device,
-                dtype=torch.float32,
-            ).squeeze(-1).clamp(0.0, 1.0)
+            validity = (
+                intent.public_object_validity.to(
+                    device=intent.public_object_memory.device,
+                    dtype=torch.float32,
+                )
+                .squeeze(-1)
+                .clamp(0.0, 1.0)
+            )
             object_padding_mask = ~(validity > 0.0)
         if isinstance(self.object_read, TaskRelationRead):
             _, history_delta, _ = self.history_read(
@@ -1683,13 +1922,17 @@ class CoarseActionIntent(nn.Module):
         elif isinstance(self.object_read, BoundTargetRead):
             if intent.target_binding is None or intent.target_evidence is None:
                 raise ValueError("shared coarse read requires target binding and current facts")
-            object_delta = self.object_read(conditioned_query, intent.target_evidence, intent.target_binding)
+            object_delta = self.object_read(
+                conditioned_query, intent.target_evidence, intent.target_binding
+            )
         else:
             if intent.target_binding is not None or intent.target_evidence is not None:
                 raise ValueError("legacy coarse read cannot silently ignore target binding")
             _, object_delta, _ = self.object_read(
-                conditioned_query, intent.public_object_memory,
-                padding_mask=object_padding_mask, diagnostics=collect_diagnostics,
+                conditioned_query,
+                intent.public_object_memory,
+                padding_mask=object_padding_mask,
+                diagnostics=collect_diagnostics,
             )
         if not isinstance(self.object_read, TaskRelationRead):
             # Preserve legacy execution and backward accumulation order.
@@ -1702,7 +1945,8 @@ class CoarseActionIntent(nn.Module):
         # In the selected candidate, the temporal scaffold and history are
         # read queries, not an independent source of proposed task motion.
         token = self.block(
-            object_delta if isinstance(self.object_read, TaskRelationRead)
+            object_delta
+            if isinstance(self.object_read, TaskRelationRead)
             else conditioned_query + object_delta + history_delta
         )
         action_prediction = self.action_head(token)
@@ -1715,9 +1959,7 @@ class CoarseActionIntent(nn.Module):
                 future_action = quarantine(future_action, future_action_valid)
             if self.action_condition_mode == "sequence_prefix_v1":
                 if int(future_action.shape[1]) < self.horizon:
-                    raise ValueError(
-                        "sequence coarse supervision requires 24 future rows"
-                    )
+                    raise ValueError("sequence coarse supervision requires 24 future rows")
                 target = future_action[:, : self.horizon].detach()
                 if supervised_rows is not None:
                     supervised_rows = supervised_rows[:, : self.horizon]

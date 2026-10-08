@@ -54,7 +54,14 @@ class RobotExecutionObserver(nn.Module):
         squared = F.mse_loss(prediction, observed_delta, reduction="none")
         loss = squared.sum() / (step.observed.float().sum().clamp_min(1) * self.state_dim)
         innovation = torch.where(valid, observed_delta - prediction.detach(), 0.0).detach()
-        return RobotResponseFeedback(innovation, step.observed, step, current_state), loss
+        return RobotResponseFeedback(
+            innovation,
+            step.observed,
+            step,
+            current_state,
+            observed_delta=observed_delta.detach(),
+            predicted_delta=prediction.detach(),
+        ), loss
 
     def read(self, feedback: RobotResponseFeedback, query: Tensor) -> Tensor:
         if query.ndim != 4:

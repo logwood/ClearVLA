@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from clearvla.vision.source_weights import conditional_source_weights
+
 from ..executed_world import ExecutedWorldPrediction
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
 from ..world_control import (
@@ -64,22 +66,16 @@ class _ObjectIntervalBlock(nn.Module):
         # separate parameter-free variance floor instead of erasing that
         # amplitude through unit-variance normalization.
         self.object_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        self.typed_object_norm = VarianceFlooredCenteredNorm(
-            typed_normalization_floor
-        )
+        self.typed_object_norm = VarianceFlooredCenteredNorm(typed_normalization_floor)
         self.object_attention = nn.MultiheadAttention(
             hidden, heads, bias=False, dropout=0.0, batch_first=True
         )
         self.interval_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        self.typed_interval_norm = VarianceFlooredCenteredNorm(
-            typed_normalization_floor
-        )
+        self.typed_interval_norm = VarianceFlooredCenteredNorm(typed_normalization_floor)
         self.interval_attention = nn.MultiheadAttention(
             hidden, heads, bias=False, dropout=0.0, batch_first=True
         )
-        self.typed_ffn_norm = VarianceFlooredCenteredNorm(
-            typed_normalization_floor
-        )
+        self.typed_ffn_norm = VarianceFlooredCenteredNorm(typed_normalization_floor)
         self.ffn = nn.Sequential(
             nn.LayerNorm(hidden, elementwise_affine=False),
             nn.Linear(hidden, 2 * hidden, bias=False),
@@ -143,9 +139,9 @@ class _ObjectIntervalBlock(nn.Module):
                 value,
                 torch.zeros_like(value),
             )
-            key_padding_mask = (~support)[:, None, :].expand(
-                -1, intervals, -1
-            ).reshape(batch * intervals, objects)
+            key_padding_mask = (
+                (~support)[:, None, :].expand(-1, intervals, -1).reshape(batch * intervals, objects)
+            )
             all_invalid = (~support.any(dim=-1)).repeat_interleave(intervals)
             key_padding_mask = key_padding_mask.clone()
             key_padding_mask[:, 0] = key_padding_mask[:, 0] & ~all_invalid
@@ -224,9 +220,7 @@ class _ObjectIntervalBlock(nn.Module):
         return {
             "denominator_min": torch.stack([row[0] for row in rows]).amin(),
             "gain_max": torch.stack([row[1] for row in rows]).amax(),
-            "output_input_rms_ratio_max": torch.stack(
-                [row[2] for row in rows]
-            ).amax(),
+            "output_input_rms_ratio_max": torch.stack([row[2] for row in rows]).amax(),
         }
 
     def forward_typed(
@@ -254,18 +248,16 @@ class _ObjectIntervalBlock(nn.Module):
                 value,
                 torch.zeros_like(value),
             )
-            key_padding_mask = (~support)[:, None, :].expand(
-                -1, intervals, -1
-            ).reshape(batch * intervals, objects)
+            key_padding_mask = (
+                (~support)[:, None, :].expand(-1, intervals, -1).reshape(batch * intervals, objects)
+            )
             all_invalid = (~support.any(dim=-1)).repeat_interleave(intervals)
             key_padding_mask = key_padding_mask.clone()
             key_padding_mask[:, 0] = key_padding_mask[:, 0] & ~all_invalid
         statistics: list[tuple[Tensor, Tensor, Tensor]] = []
 
         object_view = value.reshape(batch * intervals, objects, hidden)
-        normalized, denominator = self.typed_object_norm.forward_with_denominator(
-            object_view
-        )
+        normalized, denominator = self.typed_object_norm.forward_with_denominator(object_view)
         if collect_diagnostics:
             statistics.append(
                 self._normalization_statistics(
@@ -290,12 +282,8 @@ class _ObjectIntervalBlock(nn.Module):
                 torch.zeros_like(value),
             )
 
-        interval_view = value.transpose(1, 2).reshape(
-            batch * objects, intervals, hidden
-        )
-        normalized, denominator = self.typed_interval_norm.forward_with_denominator(
-            interval_view
-        )
+        interval_view = value.transpose(1, 2).reshape(batch * objects, intervals, hidden)
+        normalized, denominator = self.typed_interval_norm.forward_with_denominator(interval_view)
         if collect_diagnostics:
             statistics.append(
                 self._normalization_statistics(
@@ -325,13 +313,9 @@ class _ObjectIntervalBlock(nn.Module):
             need_weights=False,
         )
         update, _ = smooth_rms_contract(update, 0.35)
-        value = value + update.reshape(
-            batch, objects, intervals, hidden
-        ).transpose(1, 2)
+        value = value + update.reshape(batch, objects, intervals, hidden).transpose(1, 2)
 
-        normalized, denominator = self.typed_ffn_norm.forward_with_denominator(
-            value
-        )
+        normalized, denominator = self.typed_ffn_norm.forward_with_denominator(value)
         if collect_diagnostics:
             statistics.append(
                 self._normalization_statistics(
@@ -349,9 +333,7 @@ class _ObjectIntervalBlock(nn.Module):
                 value,
                 torch.zeros_like(value),
             )
-        return value, self._merge_normalization_statistics(
-            tuple(statistics)
-        )
+        return value, self._merge_normalization_statistics(tuple(statistics))
 
 
 class ObjectFutureDynamicsCompiler(nn.Module):
@@ -368,9 +350,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     ) -> Tensor:
         """Return finite producer-owned object support in FP32."""
 
-        return torch.nan_to_num(
-            facts.validity.float(), nan=0.0, posinf=0.0, neginf=0.0
-        ).clamp(0.0, 1.0)
+        return torch.nan_to_num(facts.validity.float(), nan=0.0, posinf=0.0, neginf=0.0).clamp(
+            0.0, 1.0
+        )
 
     @staticmethod
     def _supported_object_values(
@@ -448,36 +430,47 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.camera_condition_mode = str(camera_condition_mode)
         if self.camera_condition_mode not in self.CAMERA_CONDITION_MODES:
             raise ValueError(
-                "W camera condition mode must be motion_prior_only or "
-                "coordinate_role_v1"
+                "W camera condition mode must be motion_prior_only or coordinate_role_v1"
             )
         self.camera_names = tuple(str(name) for name in (camera_names or ()))
         if self.camera_condition_mode == "coordinate_role_v1":
-            if not self.camera_names or len(set(self.camera_names)) != len(
-                self.camera_names
-            ):
-                raise ValueError(
-                    "coordinate_role_v1 requires non-empty unique camera names"
-                )
+            if not self.camera_names or len(set(self.camera_names)) != len(self.camera_names):
+                raise ValueError("coordinate_role_v1 requires non-empty unique camera names")
             if any(not name for name in self.camera_names):
                 raise ValueError("W camera role names must be non-empty")
         self.control_mode = str(control_mode)
         if self.control_mode not in {LEGACY_WORLD_CONTROL, KNOWN_PREFIX_WORLD_CONTROL}:
             raise ValueError("unknown W control domain mode")
-        if self.control_mode == KNOWN_PREFIX_WORLD_CONTROL and action_condition_mode != "sequence_prefix_v1":
+        if (
+            self.control_mode == KNOWN_PREFIX_WORLD_CONTROL
+            and action_condition_mode != "sequence_prefix_v1"
+        ):
             raise ValueError("known-prefix world requires sequence physical controls")
         self.action_condition_mode = str(action_condition_mode)
         if self.action_condition_mode not in self.ACTION_CONDITION_MODES:
             raise ValueError(
-                "W action condition mode must be interval_mean_v1 or "
-                "sequence_prefix_v1"
+                "W action condition mode must be interval_mean_v1 or sequence_prefix_v1"
             )
         self.object_content = nn.Linear(content_dim, hidden, bias=False)
-        self.object_identity = nn.Linear(hidden,hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
-        if self.object_identity is not None:nn.init.zeros_(self.object_identity.weight)
-        self.observed_view_content = nn.Linear(content_dim,hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
-        self.observed_view_role = nn.Linear(len(camera_names),hidden,bias=False) if entity_ownership_mode == "canonical_image_v1" else None
-        if self.observed_view_content is not None:nn.init.zeros_(self.observed_view_content.weight)
+        self.object_identity = (
+            nn.Linear(hidden, hidden, bias=False)
+            if entity_ownership_mode == "canonical_image_v1"
+            else None
+        )
+        if self.object_identity is not None:
+            nn.init.zeros_(self.object_identity.weight)
+        self.observed_view_content = (
+            nn.Linear(content_dim, hidden, bias=False)
+            if entity_ownership_mode == "canonical_image_v1"
+            else None
+        )
+        self.observed_view_role = (
+            nn.Linear(len(camera_names), hidden, bias=False)
+            if entity_ownership_mode == "canonical_image_v1"
+            else None
+        )
+        if self.observed_view_content is not None:
+            nn.init.zeros_(self.observed_view_content.weight)
         self.object_semantic = nn.Linear(route_dim, hidden, bias=False)
         self.object_appearance = nn.Linear(route_dim, hidden, bias=False)
         self.object_geometry = nn.Linear(route_dim, hidden, bias=False)
@@ -496,18 +489,14 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         del removed_goal_read
         retained_rng_state = torch.get_rng_state()
         sidecar_generator = torch.Generator(device="cpu")
-        sidecar_generator.manual_seed(
-            (int(torch.initial_seed()) ^ 0x5343483238) % (2**63 - 1)
-        )
+        sidecar_generator.manual_seed((int(torch.initial_seed()) ^ 0x5343483238) % (2**63 - 1))
         # This is the sole W action ingress.  Its input is the lossless
         # [absolute, adjacent-delta] view of the normalized seven-dimensional
         # physical proposal; no coarse hidden coordinate or goal/S carrier is
         # accepted by the compiler API.
         try:
             torch.set_rng_state(sidecar_generator.get_state())
-            self.physical_action_condition = nn.Linear(
-                2 * int(action_dim), hidden, bias=False
-            )
+            self.physical_action_condition = nn.Linear(2 * int(action_dim), hidden, bias=False)
         finally:
             torch.set_rng_state(retained_rng_state)
         # The sequence mode reuses the trained physical row projection above.
@@ -529,7 +518,12 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 torch.set_rng_state(retained_rng_state)
         self.interval_identity = nn.Parameter(torch.randn(1, 4, 1, hidden) * 0.02)
         self.interval_clock_code: Tensor | None
-        self.register_buffer("interval_clock_code", self.time_grid.interval_encoding(hidden)[None, :, None] if self.time_grid.aligned else None)
+        self.register_buffer(
+            "interval_clock_code",
+            self.time_grid.interval_encoding(hidden)[None, :, None]
+            if self.time_grid.aligned
+            else None,
+        )
         self.w1 = _ObjectIntervalBlock(
             hidden,
             heads,
@@ -542,12 +536,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         )
         self.w2_query_norm = nn.LayerNorm(hidden, elementwise_affine=False)
         self.w1_memory_norm = nn.LayerNorm(hidden, elementwise_affine=False)
-        self.typed_w2_query_norm = VarianceFlooredCenteredNorm(
-            self.normalization_floor
-        )
-        self.typed_w1_memory_norm = VarianceFlooredCenteredNorm(
-            self.normalization_floor
-        )
+        self.typed_w2_query_norm = VarianceFlooredCenteredNorm(self.normalization_floor)
+        self.typed_w1_memory_norm = VarianceFlooredCenteredNorm(self.normalization_floor)
         self.w1_to_w2 = nn.MultiheadAttention(
             hidden, heads, bias=False, dropout=0.0, batch_first=True
         )
@@ -588,9 +578,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             finally:
                 torch.set_rng_state(retained_rng_state)
             nn.init.zeros_(self.camera_coordinate_role_condition.weight)
-            stable_roles = {
-                name: index for index, name in enumerate(sorted(self.camera_names))
-            }
+            stable_roles = {name: index for index, name in enumerate(sorted(self.camera_names))}
             role_basis = torch.zeros(
                 len(self.camera_names),
                 len(self.camera_names),
@@ -609,27 +597,35 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.robot_relation_encoder: RobotObjectRelationEncoder | None = None
         if self.robot_condition_mode == OBSERVED_ROBOT_VIEWS:
             if state_dim is None or self.camera_condition_mode != "coordinate_role_v1":
-                raise ValueError("robot-object W requires explicit state width and named view conditions")
+                raise ValueError(
+                    "robot-object W requires explicit state width and named view conditions"
+                )
             retained_rng_state = torch.get_rng_state()
             try:
                 self.robot_relation_encoder = RobotObjectRelationEncoder(
-                    state_dim=state_dim, state_mode=state_feature_mode,
-                    content_dim=content_dim, hidden=hidden, camera_names=self.camera_names,
+                    state_dim=state_dim,
+                    state_mode=state_feature_mode,
+                    content_dim=content_dim,
+                    hidden=hidden,
+                    camera_names=self.camera_names,
                 )
             finally:
                 torch.set_rng_state(retained_rng_state)
         elif self.robot_condition_mode != NO_ROBOT_WORLD:
             raise ValueError("unknown W robot observation mode")
 
-    def _robot_relation(self, facts: ObjectFactSet | ObjectWorldBelief) -> RobotObjectRelation | None:
+    def _robot_relation(
+        self, facts: ObjectFactSet | ObjectWorldBelief
+    ) -> RobotObjectRelation | None:
         if self.robot_relation_encoder is None:
             if isinstance(facts, ObjectWorldBelief) and facts.robot_observation is not None:
                 raise ValueError("legacy W cannot silently consume an undeclared robot observation")
             return None
         if not isinstance(facts, ObjectWorldBelief):
-            raise ValueError("robot-object W requires a compact belief with current robot observation")
+            raise ValueError(
+                "robot-object W requires a compact belief with current robot observation"
+            )
         return self.robot_relation_encoder(facts)
-
 
     @staticmethod
     def _zero_preserving_condition(
@@ -676,9 +672,9 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 objects,
             ):
                 raise ValueError("typed W object support must be [B,K]")
-            typed_support = object_support[:, None, :].expand(
-                -1, types, -1
-            ).reshape(batch * types, objects)
+            typed_support = (
+                object_support[:, None, :].expand(-1, types, -1).reshape(batch * types, objects)
+            )
         typed_batch = value.permute(0, 3, 1, 2, 4).reshape(
             batch * types, intervals, objects, hidden
         )
@@ -693,9 +689,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             raise RuntimeError("typed W block did not return its diagnostic boundary")
         typed_batch, metrics = result
         return (
-            typed_batch.reshape(
-                batch, types, intervals, objects, hidden
-            ).permute(0, 2, 3, 1, 4),
+            typed_batch.reshape(batch, types, intervals, objects, hidden).permute(0, 2, 3, 1, 4),
             metrics,
         )
 
@@ -711,9 +705,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             f"{prefix}_denominator_min": torch.stack(
                 [row["denominator_min"] for row in active]
             ).amin(),
-            f"{prefix}_gain_max": torch.stack(
-                [row["gain_max"] for row in active]
-            ).amax(),
+            f"{prefix}_gain_max": torch.stack([row["gain_max"] for row in active]).amax(),
             f"{prefix}_output_input_rms_ratio_max": torch.stack(
                 [row["output_input_rms_ratio_max"] for row in active]
             ).amax(),
@@ -753,28 +745,44 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 raise TypeError("interval-mean W requires PhysicalActionCondition")
             action.validate(action_dim=action_dim)
         else:
-            if not isinstance(action, (PhysicalActionSequenceCondition, RecordedActionSequenceCondition)):
-                raise TypeError(
-                    "sequence-prefix W requires PhysicalActionSequenceCondition"
-                )
+            if not isinstance(
+                action, (PhysicalActionSequenceCondition, RecordedActionSequenceCondition)
+            ):
+                raise TypeError("sequence-prefix W requires PhysicalActionSequenceCondition")
             action.validate(action_dim=action_dim)
-            if isinstance(action, RecordedActionSequenceCondition) and action.time_grid_mode != self.time_grid.mode:
+            if (
+                isinstance(action, RecordedActionSequenceCondition)
+                and action.time_grid_mode != self.time_grid.mode
+            ):
                 raise ValueError("W supervision action uses a different time grid")
         validity = self._safe_object_validity(facts).to(device=facts.content.device)
         safe_content = self._supported_object_values(facts.content, validity)
         objects = self.object_content(safe_content)
         if self.object_identity is not None:
-            if facts.identity_state is None or facts.camera_content is None or facts.view_mass is None:
+            if (
+                facts.identity_state is None
+                or facts.camera_content is None
+                or facts.view_mass is None
+            ):
                 raise ValueError("canonical W lost compact identity/view evidence")
-            view_valid=(facts.camera_validity[...,0]>0)&(validity[...,0,None]>0)
-            view=self.observed_view_content(torch.where(view_valid[...,None],facts.camera_content,0.).to(objects))
-            ordered=sorted(self.camera_names)
-            role=torch.eye(len(ordered),device=objects.device,dtype=objects.dtype)[[ordered.index(n) for n in self.camera_names]]
-            view=view*(1+torch.tanh(self.observed_view_role(role))[None,None])
-            mass=torch.where(view_valid,facts.view_mass,0.)
-            mass=mass/torch.where(mass.sum(-1,keepdim=True)>0,mass.sum(-1,keepdim=True),1.)
-            identity=torch.where(validity>0,facts.identity_state,0.)
-            objects=objects+self.object_identity(identity.to(objects))+(view*mass[...,None].to(view)).sum(2)
+            view_valid = (facts.camera_validity[..., 0] > 0) & (validity[..., 0, None] > 0)
+            view = self.observed_view_content(
+                torch.where(view_valid[..., None], facts.camera_content, 0.0).to(objects)
+            )
+            ordered = sorted(self.camera_names)
+            role = torch.eye(len(ordered), device=objects.device, dtype=objects.dtype)[
+                [ordered.index(n) for n in self.camera_names]
+            ]
+            view = view * (1 + torch.tanh(self.observed_view_role(role))[None, None])
+            mass, _, _ = conditional_source_weights(
+                facts.view_mass, view_valid, log_mass=facts.view_log_mass
+            )
+            identity = torch.where(validity > 0, facts.identity_state, 0.0)
+            objects = (
+                objects
+                + self.object_identity(identity.to(objects))
+                + (view * mass[..., None].to(view)).sum(2)
+            )
         if self.robot_relation_encoder is not None:
             relation = self._robot_relation(facts) if robot_relation is None else robot_relation
             assert relation is not None and isinstance(facts, ObjectWorldBelief)
@@ -782,16 +790,19 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             transport_prior = relation.pooled.to(dtype=objects.dtype)
         else:
             safe_transport_prior = self._supported_object_values(
-                (facts.transport_prior if facts.latest_flow_steps is None else facts.transport_rate).to(device=facts.content.device),
+                (
+                    facts.transport_prior
+                    if facts.latest_flow_steps is None
+                    else facts.transport_rate
+                ).to(device=facts.content.device),
                 validity,
             )
-            transport_prior = self.object_transport_prior(safe_transport_prior.to(dtype=facts.content.dtype))
+            transport_prior = self.object_transport_prior(
+                safe_transport_prior.to(dtype=facts.content.dtype)
+            )
         gradient_metrics: dict[str, Tensor] = {}
         if isinstance(action, (PhysicalActionSequenceCondition, RecordedActionSequenceCondition)):
-            if (
-                self.sequence_time_condition is None
-                or self.sequence_action_recurrence is None
-            ):
+            if self.sequence_time_condition is None or self.sequence_action_recurrence is None:
                 raise RuntimeError("sequence-prefix W encoder is not constructed")
             action_source = action.physical_fingerprint.to(dtype=objects.dtype)
             if collect_diagnostics:
@@ -805,9 +816,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 self.physical_action_condition(action_source),
                 0.35,
             )
-            row_time = (
-                action.row_end.to(device=objects.device, dtype=objects.dtype)
-                / float(action.control_time_scale if isinstance(action, RecordedActionSequenceCondition) else action.horizon)
+            row_time = action.row_end.to(device=objects.device, dtype=objects.dtype) / float(
+                action.control_time_scale
+                if isinstance(action, RecordedActionSequenceCondition)
+                else action.horizon
             )
             time_carrier = self.sequence_time_condition(row_time)
             recurrent_input, _ = smooth_rms_contract(
@@ -823,7 +835,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 )
                 recurrent_state = (
                     torch.where(action.observed[:, row_index, None], next_state, recurrent_state)
-                    if isinstance(action, RecordedActionSequenceCondition) else next_state
+                    if isinstance(action, RecordedActionSequenceCondition)
+                    else next_state
                 )
                 prefix_states.append(recurrent_state)
             action_carrier = torch.stack(
@@ -864,10 +877,13 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         if self.time_grid.aligned:
             assert self.interval_clock_code is not None
             interval_identity = interval_identity + self.interval_clock_code.to(interval_identity)
-        interval = action_carrier + interval_identity.to(
-            device=objects.device,
-            dtype=objects.dtype,
-        )[:, :, 0]
+        interval = (
+            action_carrier
+            + interval_identity.to(
+                device=objects.device,
+                dtype=objects.dtype,
+            )[:, :, 0]
+        )
         base = objects[:, None] + transport_prior[:, None] + interval[:, :, None]
 
         # W owns physical evolution for every current object.  Goal relevance
@@ -876,8 +892,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         # zero-preserving modulation of the same physical owner; it cannot
         # create a typed value from a missing fact.
         typed_sources = tuple(
-            self._supported_object_values(source, validity)
-            * validity.to(dtype=source.dtype)
+            self._supported_object_values(source, validity) * validity.to(dtype=source.dtype)
             for source in (facts.semantic, facts.appearance, facts.geometry)
         )
         typed_source_views: list[Tensor] = []
@@ -903,9 +918,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 projection(source),
                 0.35,
             )
-            interval_raw = common[:, None] * torch.tanh(
-                action_carrier[:, :, None]
-            )
+            interval_raw = common[:, None] * torch.tanh(action_carrier[:, :, None])
             innovation, _ = smooth_rms_contract(
                 interval_raw,
                 0.35,
@@ -919,9 +932,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         metrics: dict[str, Tensor] = {
             **gradient_metrics,
             "object_w_goal_direct_ingress": interval.new_zeros((), dtype=torch.float32),
-            "object_w_coarse_hidden_direct_ingress": interval.new_zeros(
-                (), dtype=torch.float32
-            ),
+            "object_w_coarse_hidden_direct_ingress": interval.new_zeros((), dtype=torch.float32),
             "object_w_physical_action_carrier_rms": action_carrier.detach()
             .float()
             .square()
@@ -984,16 +995,17 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             metrics[f"object_w_{name}_interval_contribution_rms"] = (
                 innovation.square().mean().sqrt()
             )
-            metrics[f"object_w_{name}_fact_input_rms"] = typed_source_views[
-                type_index
-            ].detach().float().square().mean().sqrt()
+            metrics[f"object_w_{name}_fact_input_rms"] = (
+                typed_source_views[type_index].detach().float().square().mean().sqrt()
+            )
         return base, typed_common, typed_interval, metrics
 
     def _camera_geometry_carrier(
         self,
         facts: ObjectFactSet | ObjectWorldBelief,
         typed_geometry: Tensor,
-        *, robot_relation: RobotObjectRelation | None = None,
+        *,
+        robot_relation: RobotObjectRelation | None = None,
     ) -> Tensor:
         """Condition geometry independently on each observed camera motion."""
 
@@ -1013,17 +1025,16 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         # diagnostic fixtures.  Quarantine its camera transport before the
         # zero-preserving modulation; otherwise ``0 * tanh(NaN)`` would make an
         # otherwise empty geometry carrier non-finite.
-        object_camera_support = (
-            (camera_validity > 0.0)
-            & (validity[:, :, None, :] > 0.0)
+        object_camera_support = (camera_validity > 0.0) & (validity[:, :, None, :] > 0.0)
+        camera_motion = (
+            facts.camera_transport_prior
+            if facts.latest_flow_steps is None
+            else facts.camera_transport_rate
         )
-        camera_motion = facts.camera_transport_prior if facts.latest_flow_steps is None else facts.camera_transport_rate
         safe_camera_transport = torch.where(
             object_camera_support,
             camera_motion.to(device=typed_geometry.device),
-            torch.zeros_like(
-                camera_motion.to(device=typed_geometry.device)
-            ),
+            torch.zeros_like(camera_motion.to(device=typed_geometry.device)),
         )
         camera_context = self.object_transport_prior(
             safe_camera_transport.to(dtype=typed_geometry.dtype)
@@ -1084,9 +1095,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 dtype=dtype,
             )
         if cameras != len(self.camera_names):
-            raise ValueError(
-                "W camera axis does not match the declared camera role order"
-            )
+            raise ValueError("W camera axis does not match the declared camera role order")
         projection = self.camera_coordinate_role_condition
         if projection is None:
             raise RuntimeError("coordinate_role_v1 lost its condition projection")
@@ -1186,8 +1195,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
 
         full_geometry = self._camera_geometry_carrier(
             facts,
-            safe_typed_common[:, None, ..., 2, :]
-            + safe_typed_interval[..., 2, :],
+            safe_typed_common[:, None, ..., 2, :] + safe_typed_interval[..., 2, :],
             robot_relation=robot_relation,
         )
         covariance_raw = self.covariance_head(full_geometry).float()
@@ -1203,10 +1211,14 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             * camera_availability
         )
 
-        current_reference = self._supported_object_values(
-            facts.content if facts.observed_content is None else facts.observed_content,
-            validity,
-        ).detach().to(dtype=semantic_delta.dtype)
+        current_reference = (
+            self._supported_object_values(
+                facts.content if facts.observed_content is None else facts.observed_content,
+                validity,
+            )
+            .detach()
+            .to(dtype=semantic_delta.dtype)
+        )
         base_camera_availability = self._safe_camera_validity(
             facts,
             dtype=torch.float32,
@@ -1251,16 +1263,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             dtype=semantic_delta.dtype,
             device=semantic_delta.device,
         )
-        camera_condition_weight_rms = semantic_delta.new_zeros(
-            (), dtype=torch.float32
-        )
+        camera_condition_weight_rms = semantic_delta.new_zeros((), dtype=torch.float32)
         if self.camera_coordinate_role_condition is not None:
             camera_condition_weight_rms = (
-                self.camera_coordinate_role_condition.weight.detach()
-                .float()
-                .square()
-                .mean()
-                .sqrt()
+                self.camera_coordinate_role_condition.weight.detach().float().square().mean().sqrt()
             )
         saturation = torch.cat(
             (
@@ -1278,9 +1284,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 float(self.camera_condition_mode == "coordinate_role_v1"),
                 dtype=torch.float32,
             ),
-            "object_w_camera_coordinate_role_weight_rms": (
-                camera_condition_weight_rms
-            ),
+            "object_w_camera_coordinate_role_weight_rms": (camera_condition_weight_rms),
             f"{diagnostic_prefix}_camera_coordinate_role_condition_rms": (
                 coordinate_role_context.detach().float().square().mean().sqrt()
             ),
@@ -1330,23 +1334,35 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             ).mean()
         return metrics
 
-    def predict_executed_endpoint(self, *, facts: ObjectWorldBelief,
-                                  action: ExecutedActionSequenceCondition) -> ExecutedWorldPrediction:
+    def predict_executed_endpoint(
+        self, *, facts: ObjectWorldBelief, action: ExecutedActionSequenceCondition
+    ) -> ExecutedWorldPrediction:
         """Current-weight retrodiction; only existing first four-step endpoint."""
         if not isinstance(action, ExecutedActionSequenceCondition) or not self.time_grid.aligned:
             raise ValueError("executed W endpoint requires its own aligned control record")
         action.validate(action_dim=self.action_dim)
-        complete=action.observed[:,:4].all(1)
-        empty=~action.observed[:,:4].any(1)
-        if bool(action.observed[:,4:].any()) or not bool((complete|empty).all()):
-            raise ValueError("executed endpoint requires exactly four controls or an absent transition")
-        _,state,_=self.forward_w1(facts=facts,action=action,collect_diagnostics=False)
-        field,_=self._field_with_diagnostics(facts=facts,typed_common=state.common_typed,
+        complete = action.observed[:, :4].all(1)
+        empty = ~action.observed[:, :4].any(1)
+        if bool(action.observed[:, 4:].any()) or not bool((complete | empty).all()):
+            raise ValueError(
+                "executed endpoint requires exactly four controls or an absent transition"
+            )
+        _, state, _ = self.forward_w1(facts=facts, action=action, collect_diagnostics=False)
+        field, _ = self._field_with_diagnostics(
+            facts=facts,
+            typed_common=state.common_typed,
             typed_interval_innovation=state.near_interval_innovation,
-            diagnostic_prefix=None,robot_relation=state.robot_relation)
+            diagnostic_prefix=None,
+            robot_relation=state.robot_relation,
+        )
         field.validate(expected_intervals=2)
-        return ExecutedWorldPrediction(field.semantic_delta[:,0],field.transport_mean[:,0],
-                                       field.transport_covariance[:,0],action,complete)
+        return ExecutedWorldPrediction(
+            field.semantic_delta[:, 0],
+            field.transport_mean[:, 0],
+            field.transport_covariance[:, 0],
+            action,
+            complete,
+        )
 
     def forward_w1(
         self,
@@ -1357,7 +1373,10 @@ class ObjectFutureDynamicsCompiler(nn.Module):
     ) -> tuple[FutureObjectDynamics | None, ObjectW1WorkingState, dict[str, Tensor]]:
         relation = self._robot_relation(facts)
         base, raw_common, raw_interval, base_metrics = self._base(
-            facts, action, collect_diagnostics=collect_diagnostics, robot_relation=relation,
+            facts,
+            action,
+            collect_diagnostics=collect_diagnostics,
+            robot_relation=relation,
         )
         object_support = self._safe_object_validity(facts).detach()[..., 0] > 0.0
         near = self.w1(
@@ -1452,7 +1471,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
                 control_domain=(
                     CandidateControlDomain(action.horizon, interval_bounds=self.time_grid.bounds)
                     if self.control_mode == KNOWN_PREFIX_WORLD_CONTROL
-                    and isinstance(action, PhysicalActionSequenceCondition) else None
+                    and isinstance(action, PhysicalActionSequenceCondition)
+                    else None
                 ),
             ),
             metrics,

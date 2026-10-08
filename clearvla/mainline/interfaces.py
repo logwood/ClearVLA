@@ -25,6 +25,8 @@ from .annotation_goal import AnnotationEndpoint
 from .config import ExperimentConfig
 from .executed_world import ExecutedWorldWindow
 from .future_time import LEGACY_FUTURE_TIME, resolve_future_time
+from .identity_pairs import IdentityPairBatch
+from .identity_supervision import IdentityCorrespondence
 from .instruction_reference import INSTRUCTION_START_REFERENCE, InstructionReference
 from .robot_execution import ExecutedRobotStep
 from .supervision import FutureLabelSupport
@@ -151,14 +153,20 @@ class ObservableHistory:
         if config.top.world_feedback_mode != "none":
             if self.executed_world_window is None:
                 raise ValueError("selected world feedback requires its causal executed window")
-            self.executed_world_window.validate(config,batch=batch,device=self.state.device)
+            self.executed_world_window.validate(config, batch=batch, device=self.state.device)
         elif self.executed_world_window is not None:
             raise ValueError("executed world window supplied to unselected graph")
         if config.top.robot_feedback_mode != "none":
             if self.executed_robot_step is None:
-                raise ValueError("selected robot feedback graph requires the adjacent executed step")
-            self.executed_robot_step.validate(batch=batch, state_dim=dims.state_dim,
-                                              action_dim=dims.action_dim, device=self.state.device)
+                raise ValueError(
+                    "selected robot feedback graph requires the adjacent executed step"
+                )
+            self.executed_robot_step.validate(
+                batch=batch,
+                state_dim=dims.state_dim,
+                action_dim=dims.action_dim,
+                device=self.state.device,
+            )
         elif self.executed_robot_step is not None:
             raise ValueError("executed robot step supplied to an unselected graph")
         _shape(self.state, (batch, dims.state_dim), "current state")
@@ -275,7 +283,9 @@ class FutureSupervision:
         if (self.annotation_endpoint is not None) != (config.top.annotation_goal_mode != "none"):
             raise ValueError("annotation endpoint label presence differs from the selected graph")
         if self.annotation_endpoint is not None:
-            self.annotation_endpoint.validate(config, batch=self.batch, device=self.dino_supports.device)
+            self.annotation_endpoint.validate(
+                config, batch=self.batch, device=self.dino_supports.device
+            )
         if self.time_grid_mode != config.top.future_time_grid_mode:
             raise ValueError("future label time grid differs from selected graph")
         dims = config.dimensions
@@ -294,7 +304,11 @@ class FutureSupervision:
             raise ValueError("future action sequence must be [B,Tw,A]")
         world_horizon = int(self.action_sequence.shape[1])
         grid = resolve_future_time(config.top.future_time_grid_mode)
-        if world_horizon < grid.horizon or (grid.aligned and world_horizon != grid.horizon) or int(self.action_sequence.shape[-1]) != dims.action_dim:
+        if (
+            world_horizon < grid.horizon
+            or (grid.aligned and world_horizon != grid.horizon)
+            or int(self.action_sequence.shape[-1]) != dims.action_dim
+        ):
             raise ValueError("future action sequence must cover its declared physical time grid")
         _shape(
             self.state_sequence,
@@ -430,9 +444,6 @@ class AuditMetadata:
             raise TypeError("audit frame_progress must be float32")
 
 
-from .identity_supervision import IdentityCorrespondence
-
-
 @dataclass(frozen=True)
 class TrainingBatch:
     """Training engine input; only the engine can see all three partitions."""
@@ -441,7 +452,7 @@ class TrainingBatch:
     action_target: ActionSupervision
     future: FutureSupervision
     audit: AuditMetadata = AuditMetadata()
-    identity: IdentityCorrespondence | None = None
+    identity: IdentityCorrespondence | IdentityPairBatch | None = None
 
     def validate(self, config: ExperimentConfig) -> None:
         self.online.validate(config)
@@ -465,12 +476,14 @@ class TrainingBatch:
             _, context, start, _, center = endpoint.source_indices.unbind(-1)
             expected_age = center - (start - context)
             if bool((endpoint.declared & (expected_age != reference.age_steps)).any()):
-                raise ValueError("annotation endpoint and instruction reference source clocks differ")
+                raise ValueError(
+                    "annotation endpoint and instruction reference source clocks differ"
+                )
         self.audit.validate(self.online.batch)
         if (self.identity is not None) != (config.top.identity_supervision_mode != "none"):
             raise ValueError("identity training labels differ from the selected graph")
         if self.identity is not None:
-            self.identity.validate(batch=self.online.batch,device=self.online.device)
+            self.identity.validate(batch=self.online.batch, device=self.online.device)
 
 
 __all__ = [

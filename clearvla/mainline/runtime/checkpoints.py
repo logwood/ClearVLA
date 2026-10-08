@@ -28,18 +28,17 @@ from ..model.component_contracts import (
     modular_to_legacy_name,
 )
 from ..training.optimizer import WarmupCosineSchedule
+from .causal_identity_migration import (
+    CAUSAL_IDENTITY_AB_V1,
+    CAUSAL_INITIALIZATION_MODES,
+    CAUSAL_UNIFIED_SOURCE_V1,
+)
 
 CHECKPOINT_SCHEMA = "clearvla-mainline-checkpoint-v4"
-LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION = (
-    "libero_window_boundary_supervision_v1"
-)
-LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION = (
-    "libero_retarget_training_overlay_v1"
-)
+LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION = "libero_window_boundary_supervision_v1"
+LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION = "libero_retarget_training_overlay_v1"
 LIBERO_RELEASE_FIRST_REPAIR_MIGRATION = "libero_release_first_repair_v1"
-WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION = (
-    "world_camera_coordinate_role_v1"
-)
+WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION = "world_camera_coordinate_role_v1"
 P2_SHARED_TARGET_PRIOR_V1_MIGRATION = "p2_shared_target_prior_v1"
 P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION = "p2_shared_target_prior_pread_v1"
 P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION = (
@@ -47,19 +46,18 @@ P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION = (
 )
 P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION = "p2_post_pool_pread_control_v1"
 JOINT_TASK_OBJECT_BINDING_V1_MIGRATION = "joint_task_object_binding_v1"
-JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION = (
-    "joint_task_object_binding_trajectory_v1"
-)
-from .causal_identity_migration import CAUSAL_IDENTITY_AB_V1
+JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION = "joint_task_object_binding_trajectory_v1"
 
 CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION = "calvin_endpoint_trajectory_repair_v1"
-CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS = frozenset({
-    "clearvla/benchmarks/calvin_raw.py",
-    "clearvla/mainline/data/loading.py",
-    "clearvla/mainline/train.py",
-    "clearvla/mainline/runtime/checkpoints.py",
-    "clearvla/mainline/runtime/identity.py",
-})
+CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS = frozenset(
+    {
+        "clearvla/benchmarks/calvin_raw.py",
+        "clearvla/mainline/data/loading.py",
+        "clearvla/mainline/train.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/runtime/identity.py",
+    }
+)
 VALIDATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/model/compiler.py",
@@ -108,17 +106,14 @@ P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS = frozenset(
         "clearvla/mainline/train.py",
     }
 )
-P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS = (
-    P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS
-    | frozenset(
-        {
-            "clearvla/benchmarks/calvin_raw.py",
-            "clearvla/mainline/data/loading.py",
-            "clearvla/mainline/data/token_store.py",
-            "clearvla/vision/decoded_image_store.py",
-            "clearvla/vision/npy_rows.py",
-        }
-    )
+P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS = P2_SHARED_TARGET_PRIOR_V1_SOURCE_PATHS | frozenset(
+    {
+        "clearvla/benchmarks/calvin_raw.py",
+        "clearvla/mainline/data/loading.py",
+        "clearvla/mainline/data/token_store.py",
+        "clearvla/vision/decoded_image_store.py",
+        "clearvla/vision/npy_rows.py",
+    }
 )
 WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS = frozenset(
     {
@@ -137,12 +132,9 @@ WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS = frozenset(
     }
 )
 P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_SOURCE_PATHS = (
-    P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
-    | WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS
+    P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS | WORLD_ACTION_SEQUENCE_PREFIX_V1_SOURCE_PATHS
 )
-P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS = (
-    P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
-)
+P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS = P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
 JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/config.py",
@@ -171,29 +163,22 @@ JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY = (
 JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY = (
     "intent.organizer.language_identity_residual_weight"
 )
-JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_SOURCE_PATHS = (
-    JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
-)
+JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_SOURCE_PATHS = JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
 DINOV3_DEEP_REPAIR_V1_MIGRATION = "dinov3_deep_repair_v1"
-DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY = (
-    "policy_compiler.effect_reader.target_value_gain"
-)
-DINOV3_DEEP_REPAIR_V1_SOURCE_PATHS = (
-    JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS
-    | frozenset(
-        {
-            "clearvla/mainline/config.py",
-            "clearvla/mainline/model/compiler.py",
-            "clearvla/mainline/model/grounding.py",
-            "clearvla/mainline/model/observation_association.py",
-            "clearvla/mainline/model/policy.py",
-            "clearvla/mainline/model/teacher.py",
-            "clearvla/mainline/model/top.py",
-            "clearvla/mainline/runtime/checkpoints.py",
-            "clearvla/mainline/train.py",
-            "clearvla/mainline/training/losses.py",
-        }
-    )
+DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY = "policy_compiler.effect_reader.target_value_gain"
+DINOV3_DEEP_REPAIR_V1_SOURCE_PATHS = JOINT_TASK_OBJECT_BINDING_V1_SOURCE_PATHS | frozenset(
+    {
+        "clearvla/mainline/config.py",
+        "clearvla/mainline/model/compiler.py",
+        "clearvla/mainline/model/grounding.py",
+        "clearvla/mainline/model/observation_association.py",
+        "clearvla/mainline/model/policy.py",
+        "clearvla/mainline/model/teacher.py",
+        "clearvla/mainline/model/top.py",
+        "clearvla/mainline/runtime/checkpoints.py",
+        "clearvla/mainline/train.py",
+        "clearvla/mainline/training/losses.py",
+    }
 )
 S_INTERVAL_VALUE_REPAIR_V1_MIGRATION = "s_interval_value_repair_v1"
 S_INTERVAL_VALUE_REPAIR_V1_SOURCE_PATHS = frozenset(
@@ -204,9 +189,7 @@ S_INTERVAL_VALUE_REPAIR_V1_SOURCE_PATHS = frozenset(
         "clearvla/mainline/train.py",
     }
 )
-G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION = (
-    "g_slot_identity_source_repair_v1"
-)
+G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION = "g_slot_identity_source_repair_v1"
 G_SLOT_IDENTITY_SOURCE_REPAIR_V1_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/model/compiler.py",
@@ -216,9 +199,7 @@ G_SLOT_IDENTITY_SOURCE_REPAIR_V1_SOURCE_PATHS = frozenset(
         "clearvla/mainline/train.py",
     }
 )
-P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = (
-    "intent.organizer.target_object_address.weight"
-)
+P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY = "intent.organizer.target_object_address.weight"
 WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS = frozenset(
     {
         "intent.coarse_action.sequence_row_offset",
@@ -229,9 +210,10 @@ WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS = frozenset(
         "world.dynamics.sequence_action_recurrence.bias_hh",
     }
 )
-P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_NEW_STATE_KEYS = frozenset(
-    {P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY}
-) | WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS
+P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_NEW_STATE_KEYS = (
+    frozenset({P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY})
+    | WORLD_ACTION_SEQUENCE_PREFIX_V1_NEW_STATE_KEYS
+)
 LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS = frozenset(
     {
         "clearvla/mainline/checkpoint.py",
@@ -450,9 +432,7 @@ def _validate_optimizer_state(
         # time-dependent and is checked against the schedule below; parameter
         # IDs are remapped through the existing ownership checks.
         for option in set(saved_group_raw).difference({"params", "lr"}):
-            if not _optimizer_option_equal(
-                saved_group_raw[option], current_group_raw[option]
-            ):
+            if not _optimizer_option_equal(saved_group_raw[option], current_group_raw[option]):
                 raise ValueError(f"exact resume optimizer option {option!r} differs")
         saved_ids = saved_group_raw.get("params")
         current_ids = current_group_raw.get("params")
@@ -574,9 +554,12 @@ def save_checkpoint(
     ratio = schedule.ratio(global_step)
     for base, group in zip(schedule.base_lrs, optimizer.param_groups, strict=True):
         lr = group.get("lr")
-        if (isinstance(lr, bool) or not isinstance(lr, (int, float))
+        if (
+            isinstance(lr, bool)
+            or not isinstance(lr, (int, float))
             or not math.isfinite(lr)
-            or not math.isclose(lr, base * ratio, rel_tol=1e-12, abs_tol=0.0)):
+            or not math.isclose(lr, base * ratio, rel_tol=1e-12, abs_tol=0.0)
+        ):
             raise ValueError("checkpoint optimizer learning rate differs from schedule")
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -849,10 +832,9 @@ def load_checkpoint_for_validation(
     if saved_selection != current_selection:
         raise ValueError("validation replay component selection differs")
     report = compare_checkpoint_identity(saved_identity, identity)
-    legacy_layout_only = (
-        int(saved_manifest.layout_schema) != LAYOUT_SCHEMA
-        and _layout_only_manifest_difference(saved_manifest, current_manifest)
-    )
+    legacy_layout_only = int(
+        saved_manifest.layout_schema
+    ) != LAYOUT_SCHEMA and _layout_only_manifest_difference(saved_manifest, current_manifest)
     allowed_identity_reasons = {"source identity differs"}
     if legacy_layout_only:
         allowed_identity_reasons.add("manifest identity differs")
@@ -874,13 +856,9 @@ def load_checkpoint_for_validation(
     )
     allowed_source_paths = VALIDATION_REPLAY_SOURCE_PATHS
     if legacy_layout_only:
-        allowed_source_paths = allowed_source_paths.union(
-            LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS
-        )
+        allowed_source_paths = allowed_source_paths.union(LAYOUT_MIGRATION_REPLAY_SOURCE_PATHS)
     unexpected_source_files = tuple(
-        path
-        for path in changed_source_files
-        if path not in allowed_source_paths
+        path for path in changed_source_files if path not in allowed_source_paths
     )
     if unexpected_source_files:
         raise ValueError(
@@ -1165,19 +1143,14 @@ def load_checkpoint_for_initialization(
         raise ValueError("model initialization component selection differs")
 
     selected_migration = (
-        None
-        if data_contract_migration is None
-        else str(data_contract_migration).strip()
+        None if data_contract_migration is None else str(data_contract_migration).strip()
     )
     selected_model_migration = (
-        None
-        if model_contract_migration is None
-        else str(model_contract_migration).strip()
+        None if model_contract_migration is None else str(model_contract_migration).strip()
     )
     if selected_migration is not None and selected_model_migration is not None:
         raise ValueError(
-            "data-contract and model-contract initialization migrations "
-            "cannot be combined"
+            "data-contract and model-contract initialization migrations cannot be combined"
         )
     if selected_migration not in {
         None,
@@ -1185,9 +1158,7 @@ def load_checkpoint_for_initialization(
         LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION,
         LIBERO_RELEASE_FIRST_REPAIR_MIGRATION,
     }:
-        raise ValueError(
-            f"unknown model-initialization data migration {selected_migration!r}"
-        )
+        raise ValueError(f"unknown model-initialization data migration {selected_migration!r}")
     if selected_model_migration not in {
         None,
         P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION,
@@ -1199,13 +1170,13 @@ def load_checkpoint_for_initialization(
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
         CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
         CAUSAL_IDENTITY_AB_V1,
+        CAUSAL_UNIFIED_SOURCE_V1,
         DINOV3_DEEP_REPAIR_V1_MIGRATION,
         S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
         G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
     }:
         raise ValueError(
-            "unknown model-initialization model migration "
-            f"{selected_model_migration!r}"
+            f"unknown model-initialization model migration {selected_model_migration!r}"
         )
 
     report = compare_checkpoint_identity(saved_identity, identity)
@@ -1213,21 +1184,22 @@ def load_checkpoint_for_initialization(
         "config identity differs",
         "source identity differs",
     }
-    if verified_source_dataset is not None and selected_model_migration not in {CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION, CAUSAL_IDENTITY_AB_V1}:
+    if verified_source_dataset is not None and selected_model_migration not in {
+        CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
+        *CAUSAL_INITIALIZATION_MODES,
+    }:
         raise ValueError("verified source dataset is only valid for endpoint provenance repair")
-    if selected_migration is not None or selected_model_migration in {CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION, CAUSAL_IDENTITY_AB_V1}:
+    if selected_migration is not None or selected_model_migration in {
+        CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
+        *CAUSAL_INITIALIZATION_MODES,
+    }:
         admitted_identity_reasons.add("dataset identity differs")
     rejected_reasons = tuple(
-        reason
-        for reason in report.reasons
-        if reason not in admitted_identity_reasons
+        reason for reason in report.reasons if reason not in admitted_identity_reasons
     )
     if rejected_reasons:
         raise ValueError("model initialization rejected: " + "; ".join(rejected_reasons))
-    if (
-        selected_model_migration
-        == P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
-    ):
+    if selected_model_migration == P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION:
         if (
             saved_config.top.p2_spatial_intent_mode != "post_pool_only"
             or config.top.p2_spatial_intent_mode != "shared_target_prior_v1"
@@ -1262,9 +1234,7 @@ def load_checkpoint_for_initialization(
             )
         if _p2_shared_target_prior_sequence_prefix_pread_migration_config_view(
             saved_config
-        ) != _p2_shared_target_prior_sequence_prefix_pread_migration_config_view(
-            config
-        ):
+        ) != _p2_shared_target_prior_sequence_prefix_pread_migration_config_view(config):
             raise ValueError(
                 "combined target/sequence migration differs outside its three selectors"
             )
@@ -1277,16 +1247,12 @@ def load_checkpoint_for_initialization(
             saved_config.top.p2_spatial_intent_mode != "post_pool_only"
             or config.top.p2_spatial_intent_mode != "post_pool_only"
         ):
-            raise ValueError(
-                "P2 post-pool pread control requires post_pool_only on both sides"
-            )
+            raise ValueError("P2 post-pool pread control requires post_pool_only on both sides")
         if (
             saved_config.data.visual_cache_read_backend != "mmap"
             or config.data.visual_cache_read_backend != "pread"
         ):
-            raise ValueError(
-                "P2 post-pool pread control requires mmap source and pread target"
-            )
+            raise ValueError("P2 post-pool pread control requires mmap source and pread target")
         if (
             saved_config.data.visual_pread_max_open_files != 16
             or type(config.data.visual_pread_max_open_files) is not int
@@ -1303,9 +1269,7 @@ def load_checkpoint_for_initialization(
                 "P2 post-pool pread control differs outside its physical-read selector"
             )
         if saved_identity.dataset != identity.dataset:
-            raise ValueError(
-                "P2 post-pool pread control requires identical dataset identity"
-            )
+            raise ValueError("P2 post-pool pread control requires identical dataset identity")
     elif selected_model_migration in {
         P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
         P2_SHARED_TARGET_PRIOR_V1_MIGRATION,
@@ -1344,13 +1308,9 @@ def load_checkpoint_for_initialization(
         elif _p2_shared_target_prior_migration_config_view(
             saved_config
         ) != _p2_shared_target_prior_migration_config_view(config):
-            raise ValueError(
-                "P2 shared-target migration differs outside its one model selector"
-            )
+            raise ValueError("P2 shared-target migration differs outside its one model selector")
         if saved_identity.dataset != identity.dataset:
-            raise ValueError(
-                "P2 shared-target migration requires identical dataset identity"
-            )
+            raise ValueError("P2 shared-target migration requires identical dataset identity")
     elif selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
         if (
             saved_config.top.world_camera_condition_mode != "motion_prior_only"
@@ -1362,19 +1322,14 @@ def load_checkpoint_for_initialization(
             )
         if tuple(saved_config.data.camera_names) != tuple(config.data.camera_names):
             raise ValueError(
-                "W camera-condition migration requires the identical declared "
-                "camera role order"
+                "W camera-condition migration requires the identical declared camera role order"
             )
         if _world_camera_condition_migration_config_view(
             saved_config
         ) != _world_camera_condition_migration_config_view(config):
-            raise ValueError(
-                "W camera-condition migration differs outside its one model selector"
-            )
+            raise ValueError("W camera-condition migration differs outside its one model selector")
         if saved_identity.dataset != identity.dataset:
-            raise ValueError(
-                "W camera-condition migration requires identical dataset identity"
-            )
+            raise ValueError("W camera-condition migration requires identical dataset identity")
     elif selected_model_migration == DINOV3_DEEP_REPAIR_V1_MIGRATION:
         if (
             saved_config.top.teacher_current_reference_mode != "g_assignment_v1"
@@ -1391,17 +1346,11 @@ def load_checkpoint_for_initialization(
         if _dinov3_deep_repair_migration_config_view(
             saved_config
         ) != _dinov3_deep_repair_migration_config_view(config):
-            raise ValueError(
-                "DINOv3 deep repair migration differs outside its admitted selectors"
-            )
+            raise ValueError("DINOv3 deep repair migration differs outside its admitted selectors")
         if saved_identity.dataset != identity.dataset:
-            raise ValueError(
-                "DINOv3 deep repair migration requires identical dataset identity"
-            )
+            raise ValueError("DINOv3 deep repair migration requires identical dataset identity")
     elif selected_model_migration == S_INTERVAL_VALUE_REPAIR_V1_MIGRATION:
-        if _initialization_config_view(saved_config) != _initialization_config_view(
-            config
-        ):
+        if _initialization_config_view(saved_config) != _initialization_config_view(config):
             raise ValueError(
                 "S interval-value repair migration differs outside source-only changes"
             )
@@ -1410,24 +1359,30 @@ def load_checkpoint_for_initialization(
                 "S interval-value repair migration requires identical dataset identity"
             )
     elif selected_model_migration == G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION:
-        if _initialization_config_view(saved_config) != _initialization_config_view(
-            config
+        if _initialization_config_view(saved_config) != _initialization_config_view(config):
+            raise ValueError("G-slot identity source repair differs outside source-only changes")
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError("G-slot identity source repair requires identical dataset identity")
+    elif selected_model_migration in CAUSAL_INITIALIZATION_MODES:
+        from .causal_identity_migration import config_view, validate_selection
+
+        validate_selection(saved_config, config, saved_identity.source.digest)
+        if config_view(_initialization_config_view(saved_config)) != config_view(
+            _initialization_config_view(config)
         ):
             raise ValueError(
-                "G-slot identity source repair differs outside source-only changes"
+                "causal identity repair differs outside its declared graph/objective selectors"
             )
-        if saved_identity.dataset != identity.dataset:
-            raise ValueError(
-                "G-slot identity source repair requires identical dataset identity"
-            )
-    elif selected_model_migration == CAUSAL_IDENTITY_AB_V1:
-        from .causal_identity_migration import config_view, validate_selection
-        validate_selection(saved_config,config,saved_identity.source.digest)
-        if config_view(_initialization_config_view(saved_config)) != config_view(_initialization_config_view(config)):
-            raise ValueError("causal identity repair differs outside its declared graph/objective selectors")
         if saved_identity.dataset != identity.dataset:
             from dataclasses import replace
-            if verified_source_dataset != saved_identity.dataset or replace(identity.dataset,inventory_sha256=saved_identity.dataset.inventory_sha256) != saved_identity.dataset:
+
+            if (
+                verified_source_dataset != saved_identity.dataset
+                or replace(
+                    identity.dataset, inventory_sha256=saved_identity.dataset.inventory_sha256
+                )
+                != saved_identity.dataset
+            ):
                 raise ValueError("causal identity repair requires exact source inventory proof")
     elif selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
         if (
@@ -1441,16 +1396,28 @@ def load_checkpoint_for_initialization(
             or saved_config.objectives.gripper_command_transition != 0
             or config.objectives.gripper_command_transition <= 0
         ):
-            raise ValueError("endpoint/trajectory repair requires the existing CALVIN endpoint graph and explicit trajectory supervision")
-        if _joint_task_object_binding_trajectory_migration_config_view(saved_config) != _joint_task_object_binding_trajectory_migration_config_view(config):
-            raise ValueError("endpoint/trajectory repair differs outside its six trajectory-supervision selectors")
+            raise ValueError(
+                "endpoint/trajectory repair requires the existing CALVIN endpoint graph and explicit trajectory supervision"
+            )
+        if _joint_task_object_binding_trajectory_migration_config_view(
+            saved_config
+        ) != _joint_task_object_binding_trajectory_migration_config_view(config):
+            raise ValueError(
+                "endpoint/trajectory repair differs outside its six trajectory-supervision selectors"
+            )
         if saved_identity.dataset != identity.dataset:
             from dataclasses import replace
+
             if (
                 verified_source_dataset != saved_identity.dataset
-                or replace(identity.dataset, inventory_sha256=saved_identity.dataset.inventory_sha256) != saved_identity.dataset
+                or replace(
+                    identity.dataset, inventory_sha256=saved_identity.dataset.inventory_sha256
+                )
+                != saved_identity.dataset
             ):
-                raise ValueError("endpoint/trajectory repair requires exact source inventory proof; only annotation inventory may differ")
+                raise ValueError(
+                    "endpoint/trajectory repair requires exact source inventory proof; only annotation inventory may differ"
+                )
     elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION:
         if (
             saved_config.data.data_profile != "calvin_relative_7d_v1"
@@ -1476,9 +1443,7 @@ def load_checkpoint_for_initialization(
                 "joint binding trajectory migration requires identical dataset identity"
             )
     elif selected_model_migration == JOINT_TASK_OBJECT_BINDING_V1_MIGRATION:
-        if _initialization_config_view(saved_config) != _initialization_config_view(
-            config
-        ):
+        if _initialization_config_view(saved_config) != _initialization_config_view(config):
             raise ValueError(
                 "joint task-object binding migration differs outside its model parameters"
             )
@@ -1541,14 +1506,10 @@ def load_checkpoint_for_initialization(
         ):
             raise ValueError("LIBERO retarget migration requires the LIBERO outlet")
         if (
-            saved_config.data.window_boundary_contract
-            != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
-            or config.data.window_boundary_contract
-            != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+            saved_config.data.window_boundary_contract != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+            or config.data.window_boundary_contract != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
         ):
-            raise ValueError(
-                "LIBERO retarget migration requires terminal-suffix source and target"
-            )
+            raise ValueError("LIBERO retarget migration requires terminal-suffix source and target")
         if (
             saved_config.data.libero_retarget_overlay_root.strip()
             or saved_config.data.libero_retarget_overlay_manifest.strip()
@@ -1578,9 +1539,7 @@ def load_checkpoint_for_initialization(
             saved_identity.dataset.raw_root != identity.dataset.raw_root
             or saved_identity.dataset.hdf5_glob != identity.dataset.hdf5_glob
         ):
-            raise ValueError(
-                "LIBERO retarget migration cannot replace the base dataset root/glob"
-            )
+            raise ValueError("LIBERO retarget migration cannot replace the base dataset root/glob")
         if saved_identity.dataset == identity.dataset:
             raise ValueError("LIBERO retarget migration did not change dataset identity")
     else:
@@ -1591,30 +1550,25 @@ def load_checkpoint_for_initialization(
         if (
             saved_config.data.data_profile != "libero_relative_7d_v1"
             or config.data.data_profile != "libero_relative_7d_v1"
-            or saved_config.data.window_boundary_contract
-            != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
-            or config.data.window_boundary_contract
-            != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+            or saved_config.data.window_boundary_contract != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
+            or config.data.window_boundary_contract != CAUSAL_PREFIX_TERMINAL_SUFFIX_V2
         ):
             raise ValueError(
                 "LIBERO release-first repair requires terminal-suffix v2 on both sides"
             )
-        if float(config.data.release_first_action_fraction) <= 0.0 and float(
-            config.objectives.gripper_first_step_release
-        ) <= 0.0:
-            raise ValueError(
-                "LIBERO release-first repair must enable a sampling or loss control"
-            )
-        if _libero_release_repair_config_view(
-            saved_config
-        ) != _libero_release_repair_config_view(config):
+        if (
+            float(config.data.release_first_action_fraction) <= 0.0
+            and float(config.objectives.gripper_first_step_release) <= 0.0
+        ):
+            raise ValueError("LIBERO release-first repair must enable a sampling or loss control")
+        if _libero_release_repair_config_view(saved_config) != _libero_release_repair_config_view(
+            config
+        ):
             raise ValueError(
                 "LIBERO release-first repair differs outside its two explicit controls"
             )
         if saved_identity.dataset != identity.dataset:
-            raise ValueError(
-                "LIBERO release-first repair requires identical dataset identity"
-            )
+            raise ValueError("LIBERO release-first repair requires identical dataset identity")
 
     saved_sources = dict(saved_identity.source.files)
     current_sources = dict(identity.source.files)
@@ -1625,20 +1579,16 @@ def load_checkpoint_for_initialization(
             if saved_sources.get(source_path) != current_sources.get(source_path)
         )
     )
-    if selected_model_migration == CAUSAL_IDENTITY_AB_V1:
-        from .causal_identity_migration import SOURCE_PATHS
-        allowed_source_paths = SOURCE_PATHS
+    if selected_model_migration in CAUSAL_INITIALIZATION_MODES:
+        from .causal_identity_migration import allowed_source_paths as causal_source_paths
+
+        allowed_source_paths = causal_source_paths(selected_model_migration)
     elif selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
         allowed_source_paths = CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS
     elif selected_model_migration == P2_POST_POOL_PREAD_CONTROL_V1_MIGRATION:
         allowed_source_paths = P2_POST_POOL_PREAD_CONTROL_V1_SOURCE_PATHS
-    elif (
-        selected_model_migration
-        == P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
-    ):
-        allowed_source_paths = (
-            P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_SOURCE_PATHS
-        )
+    elif selected_model_migration == P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION:
+        allowed_source_paths = P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_SOURCE_PATHS
     elif selected_model_migration == P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION:
         allowed_source_paths = P2_SHARED_TARGET_PRIOR_PREAD_V1_SOURCE_PATHS
     elif selected_model_migration == P2_SHARED_TARGET_PRIOR_V1_MIGRATION:
@@ -1685,15 +1635,10 @@ def load_checkpoint_for_initialization(
         saved_layout_schema=int(saved_manifest.layout_schema),
     )
     current_model = model.state_dict()
-    if (
-        selected_model_migration
-        == P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION
-    ):
+    if selected_model_migration == P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_MIGRATION:
         missing = set(current_model) - set(mapped_model)
         unexpected = set(mapped_model) - set(current_model)
-        expected_missing = set(
-            P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_NEW_STATE_KEYS
-        )
+        expected_missing = set(P2_SHARED_TARGET_PRIOR_SEQUENCE_PREFIX_PREAD_V1_NEW_STATE_KEYS)
         if missing != expected_missing or unexpected:
             raise ValueError(
                 "combined target/sequence migration must add exactly its seven "
@@ -1721,28 +1666,22 @@ def load_checkpoint_for_initialization(
             if not isinstance(value, torch.Tensor):
                 raise ValueError(f"combined migration state {name!r} is not a tensor")
             if tuple(value.shape) != expected_shapes[name]:
-                raise ValueError(
-                    f"combined migration state {name!r} has an incompatible shape"
-                )
+                raise ValueError(f"combined migration state {name!r} has an incompatible shape")
             if not value.is_floating_point() or not bool(torch.isfinite(value).all()):
+                raise ValueError(f"combined migration state {name!r} must be finite floating point")
+            if name == P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY and value.dtype != torch.float32:
                 raise ValueError(
-                    f"combined migration state {name!r} must be finite floating point"
+                    "combined target/sequence migration requires one FP32 [1,3] address weight"
                 )
             if (
-                name == P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY
-                and value.dtype != torch.float32
+                name
+                in {
+                    P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY,
+                    "intent.coarse_action.sequence_row_offset",
+                }
+                and int(torch.count_nonzero(value).item()) != 0
             ):
-                raise ValueError(
-                    "combined target/sequence migration requires one FP32 [1,3] "
-                    "address weight"
-                )
-            if name in {
-                P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY,
-                "intent.coarse_action.sequence_row_offset",
-            } and int(torch.count_nonzero(value).item()) != 0:
-                raise ValueError(
-                    f"combined migration state {name!r} must be exact zero"
-                )
+                raise ValueError(f"combined migration state {name!r} must be exact zero")
             mapped_model[name] = value.detach().clone()
     elif selected_model_migration in {
         P2_SHARED_TARGET_PRIOR_PREAD_V1_MIGRATION,
@@ -1751,32 +1690,25 @@ def load_checkpoint_for_initialization(
         missing = set(current_model) - set(mapped_model)
         unexpected = set(mapped_model) - set(current_model)
         if missing != {P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY} or unexpected:
-            raise ValueError(
-                "P2 shared-target migration must add exactly its one address weight"
-            )
+            raise ValueError("P2 shared-target migration must add exactly its one address weight")
         new_address = current_model[P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY]
         if (
             not isinstance(new_address, torch.Tensor)
             or tuple(new_address.shape) != (1, 3)
             or new_address.dtype != torch.float32
         ):
-            raise ValueError(
-                "P2 shared-target migration requires one FP32 [1,3] address weight"
-            )
-        if not bool(torch.isfinite(new_address).all()) or int(
-            torch.count_nonzero(new_address).item()
-        ) != 0:
+            raise ValueError("P2 shared-target migration requires one FP32 [1,3] address weight")
+        if (
+            not bool(torch.isfinite(new_address).all())
+            or int(torch.count_nonzero(new_address).item()) != 0
+        ):
             raise ValueError(
                 "P2 shared-target migration requires a finite exact-zero new address weight"
             )
         mapped_model = dict(mapped_model)
-        mapped_model[P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY] = (
-            new_address.detach().clone()
-        )
+        mapped_model[P2_SHARED_TARGET_PRIOR_V1_NEW_STATE_KEY] = new_address.detach().clone()
     elif selected_model_migration == WORLD_CAMERA_COORDINATE_ROLE_V1_MIGRATION:
-        new_condition_key = (
-            "world.dynamics.camera_coordinate_role_condition.weight"
-        )
+        new_condition_key = "world.dynamics.camera_coordinate_role_condition.weight"
         missing = set(current_model) - set(mapped_model)
         unexpected = set(mapped_model) - set(current_model)
         if missing != {new_condition_key} or unexpected:
@@ -1784,17 +1716,19 @@ def load_checkpoint_for_initialization(
                 "W camera-condition migration must add exactly its one condition weight"
             )
         new_condition = current_model[new_condition_key]
-        if not isinstance(new_condition, torch.Tensor) or int(
-            torch.count_nonzero(new_condition).item()
-        ) != 0:
+        if (
+            not isinstance(new_condition, torch.Tensor)
+            or int(torch.count_nonzero(new_condition).item()) != 0
+        ):
             raise ValueError(
                 "W camera-condition migration requires an exact-zero new condition weight"
             )
         mapped_model = dict(mapped_model)
         mapped_model[new_condition_key] = new_condition.detach().clone()
-    elif selected_model_migration == CAUSAL_IDENTITY_AB_V1:
+    elif selected_model_migration in CAUSAL_INITIALIZATION_MODES:
         from .causal_identity_migration import migrate_state
-        mapped_model=migrate_state(mapped_model,current_model,config)
+
+        mapped_model = migrate_state(mapped_model, current_model, config)
     elif selected_model_migration == G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION:
         missing = set(current_model) - set(mapped_model)
         unexpected = set(mapped_model) - set(current_model)
@@ -1806,9 +1740,7 @@ def load_checkpoint_for_initialization(
         missing = set(current_model) - set(mapped_model)
         unexpected = set(mapped_model) - set(current_model)
         if missing != {DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY} or unexpected:
-            raise ValueError(
-                "DINOv3 deep repair migration must add exactly its target-value gain"
-            )
+            raise ValueError("DINOv3 deep repair migration must add exactly its target-value gain")
         new_gain = current_model[DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY]
         if (
             not isinstance(new_gain, torch.Tensor)
@@ -1817,9 +1749,7 @@ def load_checkpoint_for_initialization(
             or not bool(torch.isfinite(new_gain).all())
             or int(torch.count_nonzero(new_gain).item()) != 0
         ):
-            raise ValueError(
-                "DINOv3 deep repair migration requires a finite exact-zero FP32 gain"
-            )
+            raise ValueError("DINOv3 deep repair migration requires a finite exact-zero FP32 gain")
         mapped_model = dict(mapped_model)
         mapped_model[DINOV3_DEEP_REPAIR_V1_NEW_STATE_KEY] = new_gain.detach().clone()
     elif selected_model_migration in {
@@ -1848,15 +1778,14 @@ def load_checkpoint_for_initialization(
                 "joint task-object binding migration requires one FP32 "
                 f"[1,{2 * hidden}] score weight"
             )
-        if not bool(torch.isfinite(new_score).all()) or int(
-            torch.count_nonzero(new_score).item()
-        ) != 0:
+        if (
+            not bool(torch.isfinite(new_score).all())
+            or int(torch.count_nonzero(new_score).item()) != 0
+        ):
             raise ValueError(
                 "joint task-object binding migration requires a finite exact-zero score weight"
             )
-        new_identity = current_model[
-            JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY
-        ]
+        new_identity = current_model[JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY]
         if (
             not isinstance(new_identity, torch.Tensor)
             or tuple(new_identity.shape) != (hidden, hidden)
@@ -1866,17 +1795,16 @@ def load_checkpoint_for_initialization(
                 "joint task-object binding migration requires one FP32 "
                 f"[{hidden},{hidden}] language identity weight"
             )
-        if not bool(torch.isfinite(new_identity).all()) or int(
-            torch.count_nonzero(new_identity).item()
-        ) != 0:
+        if (
+            not bool(torch.isfinite(new_identity).all())
+            or int(torch.count_nonzero(new_identity).item()) != 0
+        ):
             raise ValueError(
                 "joint task-object binding migration requires a finite exact-zero "
                 "language identity weight"
             )
         mapped_model = dict(mapped_model)
-        mapped_model[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY] = (
-            new_score.detach().clone()
-        )
+        mapped_model[JOINT_TASK_OBJECT_BINDING_V1_NEW_STATE_KEY] = new_score.detach().clone()
         mapped_model[JOINT_TASK_OBJECT_BINDING_LANGUAGE_IDENTITY_STATE_KEY] = (
             new_identity.detach().clone()
         )
@@ -1971,9 +1899,13 @@ def migrate_bottom_only(
         current_selection = live_selection
     else:
         current_selection = None
-    if saved_selection is not None and current_selection is not None and (
-        saved_selection.execution_bottom != current_selection.execution_bottom
-        or saved_selection.terminal_controller != current_selection.terminal_controller
+    if (
+        saved_selection is not None
+        and current_selection is not None
+        and (
+            saved_selection.execution_bottom != current_selection.execution_bottom
+            or saved_selection.terminal_controller != current_selection.terminal_controller
+        )
     ):
         raise ValueError("bottom migration component selection is incompatible")
     compatibility = compare_checkpoint_identity(saved_identity, identity)

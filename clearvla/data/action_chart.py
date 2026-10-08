@@ -16,6 +16,7 @@ from typing import Sequence
 import numpy as np
 
 from .hdf5_episode import LoadedEpisode
+from .native_contract import NativeArrayProfile
 from .physical_chart import PhysicalChartSpec, resolve_physical_chart_spec
 
 
@@ -90,8 +91,12 @@ class ActionStateChartProfile:
         digest or a model-conditioning input.
         """
 
-        if self.name in {"calvin_relative_7d_v1", "libero_relative_7d_v1",
-                         "maniskill_pd_ee_delta_pose_7d_v1", "maniskill_pd_ee_delta_pose_7d_v2"}:
+        if self.name in {
+            "calvin_relative_7d_v1",
+            "libero_relative_7d_v1",
+            "maniskill_pd_ee_delta_pose_7d_v1",
+            "maniskill_pd_ee_delta_pose_7d_v2",
+        }:
             return "relative_command_magnitude"
         if self.name in {
             "identity_7d_pen",
@@ -279,16 +284,20 @@ def _profile(
 ACTION_STATE_CHART_PROFILES: dict[str, ActionStateChartProfile] = {
     "maniskill_pd_ee_delta_pose_7d_v2": _profile(
         name="maniskill_pd_ee_delta_pose_7d_v2",
-        action_indices=range(7), state_indices=range(7),
-        state_to_action_scale=(1.0,) * 7, gripper_indices=(6,),
+        action_indices=range(7),
+        state_indices=range(7),
+        state_to_action_scale=(1.0,) * 7,
+        gripper_indices=(6,),
         action_chart="maniskill_normalized_pd_ee_delta_pose_plus_continuous_gripper",
         state_chart="maniskill_tcp_xyz_fixed_down_causal_rotvec_plus_finger_opening_v2",
         source_dim=7,
     ),
     "maniskill_pd_ee_delta_pose_7d_v1": _profile(
         name="maniskill_pd_ee_delta_pose_7d_v1",
-        action_indices=range(7), state_indices=range(7),
-        state_to_action_scale=(1.0,) * 7, gripper_indices=(6,),
+        action_indices=range(7),
+        state_indices=range(7),
+        state_to_action_scale=(1.0,) * 7,
+        gripper_indices=(6,),
         action_chart="maniskill_normalized_pd_ee_delta_pose_plus_continuous_gripper",
         state_chart="maniskill_tcp_xyz_rotvec_plus_finger_opening",
         source_dim=7,
@@ -373,7 +382,7 @@ def resolve_action_state_profile(name: str) -> ActionStateChartProfile:
 
 def project_episodes(
     episodes: Sequence[LoadedEpisode],
-    profile: ActionStateChartProfile,
+    profile: ActionStateChartProfile | NativeArrayProfile,
 ) -> list[LoadedEpisode]:
     if not episodes:
         raise ValueError("cannot project an empty episode inventory")

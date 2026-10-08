@@ -13,10 +13,14 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
-from ..role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, ROLE_VALUE_MODES
+from clearvla.vision.source_weights import conditional_source_weights
+
 from ..future_time import CONTROL_ALIGNED_FUTURE_TIME, resolve_future_time
+from ..role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, ROLE_VALUE_MODES
 from ..task_execution import (
-    JOINT_SPATIAL_TASK_EXECUTION, JOINT_TASK_EXECUTION, JOINT_TASK_EXECUTION_MODES,
+    JOINT_SPATIAL_TASK_EXECUTION,
+    JOINT_TASK_EXECUTION,
+    JOINT_TASK_EXECUTION_MODES,
     TaskRelationEvidence,
 )
 from .routing import smooth_rms_contract
@@ -38,8 +42,13 @@ class JointTaskRelationEncoder(nn.Module):
     role_basis: Tensor
 
     def __init__(
-        self, *, hidden: int, state_dim: int, camera_names: tuple[str, ...],
-        task_execution_mode: str = JOINT_TASK_EXECUTION, spatial_tile_size: int = 16,
+        self,
+        *,
+        hidden: int,
+        state_dim: int,
+        camera_names: tuple[str, ...],
+        task_execution_mode: str = JOINT_TASK_EXECUTION,
+        spatial_tile_size: int = 16,
     ) -> None:
         super().__init__()
         if task_execution_mode not in JOINT_TASK_EXECUTION_MODES:
@@ -79,11 +88,15 @@ class JointTaskRelationEncoder(nn.Module):
         # Within the existing S owner; v1 creates no parameters or RNG draws.
         self.spatial_context = (
             nn.Linear(4 * hidden, hidden, bias=False)
-            if task_execution_mode == JOINT_SPATIAL_TASK_EXECUTION else None
+            if task_execution_mode == JOINT_SPATIAL_TASK_EXECUTION
+            else None
         )
 
     def _spatial_expectation(
-        self, features: Tensor, context: Tensor, probability: Tensor,
+        self,
+        features: Tensor,
+        context: Tensor,
+        probability: Tensor,
     ) -> Tensor:
         """Condition BEFORE marginalizing the original G3 spatial law.
 
@@ -116,9 +129,17 @@ class JointTaskRelationEncoder(nn.Module):
                 stop = min(start + self.spatial_tile_size, features.shape[0])
                 points = features[start:stop]
                 mass = probability[..., start:stop]
-                if torch.is_grad_enabled() and any(x.requires_grad for x in (context, points, mass)):
-                    piece = checkpoint(integrate, context, points, mass,
-                                       use_reentrant=False, preserve_rng_state=False)
+                if torch.is_grad_enabled() and any(
+                    x.requires_grad for x in (context, points, mass)
+                ):
+                    piece = checkpoint(
+                        integrate,
+                        context,
+                        points,
+                        mass,
+                        use_reentrant=False,
+                        preserve_rng_state=False,
+                    )
                 else:
                     piece = integrate(context, points, mass)
                 result = result + piece
@@ -164,8 +185,13 @@ class JointTaskRelationEncoder(nn.Module):
         if interval_context is not None:
             if interval_context.shape != (b, 4, h):
                 raise ValueError("joint relation interval context axis differs")
-            if interval_context.device != attributes.device or not interval_context.is_floating_point():
-                raise ValueError("joint relation interval context must be colocated floating tensor")
+            if (
+                interval_context.device != attributes.device
+                or not interval_context.is_floating_point()
+            ):
+                raise ValueError(
+                    "joint relation interval context must be colocated floating tensor"
+                )
             if not bool(torch.isfinite(interval_context).all()):
                 raise ValueError("joint relation interval context is nonfinite")
         if state.shape != (b, self.robot.in_features) or history_context.shape != (b, h):
@@ -173,7 +199,7 @@ class JointTaskRelationEncoder(nn.Module):
         valid = view_observed & binding.supported[..., None]
         dtype = self.task.weight.dtype
         if per_view:
-            a = torch.where(valid[...,None,None], attributes, 0.0)
+            a = torch.where(valid[..., None, None], attributes, 0.0)
             a = self.attributes(a.flatten(-2).to(dtype))
         else:
             a = torch.where(valid.any(-1)[..., None, None], attributes, 0.0)
@@ -207,7 +233,9 @@ class JointTaskRelationEncoder(nn.Module):
                 # carrier unchanged in common mode; the bounded multiplicative
                 # interaction preserves the producer-owned K/C support and
                 # cannot fabricate a task value when task_base is zero.
-                context = interval_context.to(dtype) - interval_context.to(dtype).mean(1, keepdim=True)
+                context = interval_context.to(dtype) - interval_context.to(dtype).mean(
+                    1, keepdim=True
+                )
                 context_value = self.task(context)
                 task_base = task_base * (1.0 + 0.50 * torch.tanh(context_value))
             task = task_base[:, :, None, None].expand(-1, -1, k, c, -1)
@@ -222,7 +250,9 @@ class JointTaskRelationEncoder(nn.Module):
             role = self.view(self.role_basis.to(dtype))[None, None].expand(b, k, -1, -1)
             task_base = self.task(task_intervals.to(dtype))
             if interval_context is not None:
-                context = interval_context.to(dtype) - interval_context.to(dtype).mean(1, keepdim=True)
+                context = interval_context.to(dtype) - interval_context.to(dtype).mean(
+                    1, keepdim=True
+                )
                 context_value = self.task(context)
                 task_base = task_base * (1.0 + 0.50 * torch.tanh(context_value))
             task = task_base[:, :, None, None].expand(-1, -1, k, c, -1)
@@ -234,11 +264,16 @@ class JointTaskRelationEncoder(nn.Module):
                     F.silu(F.linear(position_grid.float(), self.coordinates[0].weight.float())),
                     self.coordinates[2].weight.float(),
                 )
-                context = F.linear(torch.cat((obj, robot, role, task), -1).float(),
-                                   self.spatial_context.weight.float())
+                context = F.linear(
+                    torch.cat((obj, robot, role, task), -1).float(),
+                    self.spatial_context.weight.float(),
+                )
                 xy = self._spatial_expectation(features, context, p)
             rel = self.relation(torch.cat((obj, xy.to(obj.dtype), robot, role), -1))
-            rel = rel * (1.0 + torch.tanh(self.history(history_context.to(dtype))))[:, None, None, None]
+            rel = (
+                rel
+                * (1.0 + torch.tanh(self.history(history_context.to(dtype))))[:, None, None, None]
+            )
         # No relation-only or task-only additive value bypass. This
         # constrains representation ownership, not a robot behavior rule.
         values = self.interaction(
@@ -246,7 +281,12 @@ class JointTaskRelationEncoder(nn.Module):
         )
         values = torch.where(valid[:, None, :, :, None], values, 0.0)
         result = TaskRelationEvidence(
-            values, valid, binding, self.camera_names, current_content, state,
+            values,
+            valid,
+            binding,
+            self.camera_names,
+            current_content,
+            state,
             execution_mode=self.task_execution_mode,
         )
         result.validate(hidden=h)
@@ -261,7 +301,9 @@ class ObjectRoleRead(nn.Module):
     reads target and scene with different parameters, never in one competition.
     """
 
-    def __init__(self, hidden: int, heads: int, *, role_value_mode: str = ADDRESS_ONLY_ROLE) -> None:
+    def __init__(
+        self, hidden: int, heads: int, *, role_value_mode: str = ADDRESS_ONLY_ROLE
+    ) -> None:
         super().__init__()
         if hidden < 1 or heads < 1 or hidden % heads:
             raise ValueError("object-role attention dimensions must be head aligned")
@@ -325,7 +367,9 @@ class TaskRelationRead(nn.Module):
 
     time_code: Tensor
 
-    def __init__(self, hidden: int, heads: int, *, role_value_mode: str = ADDRESS_ONLY_ROLE) -> None:
+    def __init__(
+        self, hidden: int, heads: int, *, role_value_mode: str = ADDRESS_ONLY_ROLE
+    ) -> None:
         super().__init__()
         self.hidden = hidden
         self.target = ObjectRoleRead(hidden, heads, role_value_mode=role_value_mode)
@@ -350,7 +394,9 @@ class TaskRelationRead(nn.Module):
 class TaskAwareFactualRead(nn.Module):
     """Task relation changes the P1 query, never the factual value source."""
 
-    def __init__(self, hidden: int, heads: int, *, role_value_mode: str = ADDRESS_ONLY_ROLE) -> None:
+    def __init__(
+        self, hidden: int, heads: int, *, role_value_mode: str = ADDRESS_ONLY_ROLE
+    ) -> None:
         super().__init__()
         self.relation_query = TaskRelationRead(hidden, heads, role_value_mode=role_value_mode)
         self.current_values = BoundTargetRead(hidden, heads)
@@ -381,7 +427,12 @@ class TaskOutcomePlanRead(nn.Module):
     time_code: Tensor
 
     def __init__(
-        self, *, hidden: int, content_dim: int, heads: int, camera_names: tuple[str, ...],
+        self,
+        *,
+        hidden: int,
+        content_dim: int,
+        heads: int,
+        camera_names: tuple[str, ...],
         task_execution_mode: str = JOINT_TASK_EXECUTION,
         role_value_mode: str = ADDRESS_ONLY_ROLE,
     ) -> None:
@@ -408,7 +459,8 @@ class TaskOutcomePlanRead(nn.Module):
 
         self.effect_context_key = (
             nn.Linear(2 * hidden, hidden, bias=False)
-            if task_execution_mode == JOINT_SPATIAL_TASK_EXECUTION else None
+            if task_execution_mode == JOINT_SPATIAL_TASK_EXECUTION
+            else None
         )
 
     def _effect_comparison(self, expected: Tensor, predicted: Tensor) -> tuple[Tensor, Tensor]:
@@ -428,8 +480,10 @@ class TaskOutcomePlanRead(nn.Module):
             raise ValueError("paired effects must share a device")
         with torch.autocast(device_type=expected.device.type, enabled=False):
             pair = torch.stack((expected.float(), predicted.float()), -2)
-            encoded = F.linear(F.silu(F.linear(pair, self.gap_model[0].weight.float())),
-                               self.gap_model[2].weight.float())
+            encoded = F.linear(
+                F.silu(F.linear(pair, self.gap_model[0].weight.float())),
+                self.gap_model[2].weight.float(),
+            )
             gap = encoded[..., 0, :] - encoded[..., 1, :]
             midpoint = 0.5 * (expected.float() + predicted.float())
             difference = expected.float() - predicted.float()
@@ -505,12 +559,17 @@ class TaskOutcomePlanRead(nn.Module):
             )
         else:
             with torch.autocast(device_type=query.device.type, enabled=False):
-                semantic_pair = F.linear(torch.stack((expected_sem, predicted_sem), -2).float(),
-                                         self.semantic.weight.float())
+                semantic_pair = F.linear(
+                    torch.stack((expected_sem, predicted_sem), -2).float(),
+                    self.semantic.weight.float(),
+                )
                 semantic_pair = semantic_pair[:, :, :, None].expand(
-                    -1, -1, -1, len(self.camera_names), -1, -1)
-                image_pair = F.linear(torch.stack((expected_img, predicted_img), -2).float(),
-                                      self.image.weight.float())
+                    -1, -1, -1, len(self.camera_names), -1, -1
+                )
+                image_pair = F.linear(
+                    torch.stack((expected_img, predicted_img), -2).float(),
+                    self.image.weight.float(),
+                )
                 effects = torch.cat((semantic_pair, image_pair), -1)
                 effects = torch.where(support[..., None, None], effects, 0.0)
                 relation_values = torch.where(support[..., None], relation.values, 0.0)
@@ -559,10 +618,16 @@ class TaskConditionedTargetBinder(nn.Module):
         self.null = nn.Linear(hidden, 1)
 
     def forward(
-        self, task: Tensor, objects: Tensor, supported: Tensor, *, history: Tensor,
+        self,
+        task: Tensor,
+        objects: Tensor,
+        supported: Tensor,
+        *,
+        history: Tensor,
         view_support: Tensor | None = None,
         task_mask: Tensor | None = None,
         view_mass: Tensor | None = None,
+        view_log_mass: Tensor | None = None,
     ) -> TargetBinding:
         if (
             task.ndim != 3
@@ -577,6 +642,18 @@ class TaskConditionedTargetBinder(nn.Module):
             or history.shape != (task.shape[0], task.shape[-1])
         ):
             raise ValueError("task-conditioned binding lost source support/history")
+        if any(x.device != task.device for x in (objects, supported, history)):
+            raise ValueError("binding sources and masks must share a device")
+        if task_mask is not None and task_mask.device != task.device:
+            raise ValueError("binding language mask must share the token device")
+        if task.shape[1] == 0:
+            # Empty instruction is unknown, not a padding indexing exception.
+            # The masked sentinel keeps ordinary autograd and does not create
+            # a second selector or a real language observation.
+            if task_mask is not None and task_mask.shape != task.shape[:2]:
+                raise ValueError("empty binding task mask has inconsistent axes")
+            task = task.sum(1, keepdim=True)
+            task_mask = torch.zeros(task.shape[:2], dtype=torch.bool, device=task.device)
         per_view = objects.ndim == 4
         object_count = objects.shape[1]
         if task_mask is not None:
@@ -592,45 +669,72 @@ class TaskConditionedTargetBinder(nn.Module):
             attention_mask = None
             task_present = torch.ones(task.shape[0], dtype=torch.bool, device=task.device)
         if per_view:
-            if view_support is None or view_support.shape != objects.shape[:3] or view_support.dtype != torch.bool:
+            if (
+                view_support is None
+                or view_support.shape != objects.shape[:3]
+                or view_support.dtype != torch.bool
+            ):
                 raise ValueError("camera-conditioned binding requires producer view support")
-            legal = view_support & supported[...,None]
-            safe = torch.where(legal[...,None], objects, 0.0).flatten(1,2)
+            legal = view_support & supported[..., None]
+            safe = torch.where(legal[..., None], objects, 0.0).flatten(1, 2)
         else:
-            if view_support is not None or view_mass is not None:
+            if view_support is not None or view_mass is not None or view_log_mass is not None:
                 raise ValueError("pooled binder cannot acquire a fabricated camera axis")
             safe = torch.where(supported[..., None], objects, 0.0)
         obj = self.objects(safe)
         query = self.query_norm(obj + self.history_query(history)[:, None])
         task_value = self.task_value(task)
-        read, _ = self.task_read(query, self.task_norm(task_value), task_value,
-            key_padding_mask=None if attention_mask is None else ~attention_mask, need_weights=False)
+        read, _ = self.task_read(
+            query,
+            self.task_norm(task_value),
+            task_value,
+            key_padding_mask=None if attention_mask is None else ~attention_mask,
+            need_weights=False,
+        )
         read = torch.where(task_present[:, None, None], read, 0.0)
         object_score = self.score(read * torch.tanh(self.compatibility(obj)))[..., 0]
-        task_mean = task_value.mean(1) if task_mask is None else (
-            torch.where(task_mask[..., None], task_value, 0.0).sum(1)
-            / task_mask.sum(1, keepdim=True).clamp_min(1))
+        task_mean = (
+            task_value.mean(1)
+            if task_mask is None
+            else (
+                torch.where(task_mask[..., None], task_value, 0.0).sum(1)
+                / task_mask.sum(1, keepdim=True).clamp_min(1)
+            )
+        )
         task_context = task_mean[:, None].expand(-1, obj.shape[1], -1)
-        task_object_score = self.task_object_score(torch.cat(
-            (obj * task_context, obj * torch.tanh(task_context)), dim=-1
-        ))[..., 0]
+        task_object_score = self.task_object_score(
+            torch.cat((obj * task_context, obj * torch.tanh(task_context)), dim=-1)
+        )[..., 0]
         score = object_score + task_object_score
         if per_view:
             score = score.reshape(task.shape[0], object_count, -1).float()
             # Log-mean-exp is permutation equivariant and does not reward an
             # object solely for having more available cameras. No view quota.
-            if view_mass is None:
-                score = torch.logsumexp(torch.where(legal, score, -1e9), -1) - legal.sum(-1).clamp_min(1).float().log()
+            if view_mass is None and view_log_mass is None:
+                score = (
+                    torch.logsumexp(torch.where(legal, score, -1e9), -1)
+                    - legal.sum(-1).clamp_min(1).float().log()
+                )
             else:
-                if view_mass.shape != legal.shape:
-                    raise ValueError("view allocation must retain K and camera axes")
-                mass = torch.where(legal, view_mass.float(), 0.0)
-                if not bool(torch.isfinite(mass).all()) or bool((mass < 0).any()):
-                    raise ValueError("view allocation must be finite and nonnegative")
-                positive = mass > 0
-                safe_mass = torch.where(positive, mass, 1.0)
-                log_weight = safe_mass.log() - mass.sum(-1, keepdim=True).clamp_min(torch.finfo(mass.dtype).tiny).log()
-                score = torch.logsumexp(torch.where(legal & positive, score + log_weight, -1e9), -1)
+                _, log_weight, has_mass = conditional_source_weights(
+                    view_mass,
+                    legal,
+                    log_mass=view_log_mass,
+                )
+                active = legal & has_mass
+                if view_log_mass is not None:
+                    active = active & torch.isfinite(view_log_mass)
+                else:
+                    assert view_mass is not None
+                    active = active & (view_mass > 0)
+                # A truly empty allocation becomes selector-unknown; source
+                # visibility remains a separate producer field.
+                safe_scores = torch.where(active, score + log_weight, -torch.inf)
+                safe_scores = torch.where(has_mass, safe_scores, 0.0)
+                score = torch.logsumexp(safe_scores, -1)
+                supported = supported & has_mass[..., 0]
             supported = supported & legal.any(-1)
             score = torch.where(supported, score, 0.0)
-        return TargetBinding.from_logits(score, self.null(task_mean), supported & task_present[:, None])
+        return TargetBinding.from_logits(
+            score, self.null(task_mean), supported & task_present[:, None]
+        )

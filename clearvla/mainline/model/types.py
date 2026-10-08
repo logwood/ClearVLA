@@ -13,17 +13,17 @@ from torch import Tensor
 from clearvla.vision.entity_chart import (
     CURRENT_IMAGE_CHART,
     QUERY_CHART,
+    CanonicalImageReadSource,
     CurrentImageSupport,
     ImageLogMeasure,
     ObjectImageReadSource,
-    CanonicalImageReadSource,
 )
 from clearvla.vision.entity_history import ObservedEntityHistory
 from clearvla.vision.source_time import displacement_rate, validate_reference_steps
 
 from ..annotation_goal import AnnotatedGoalEvidence, AnnotatedGoalValues
-from ..global_task import CompiledGlobalTask
 from ..future_time import LEGACY_FUTURE_TIME, resolve_future_time
+from ..global_task import CompiledGlobalTask
 from ..instruction_change import InstructionChangeEvidence
 from ..instruction_posterior import InstructionChangeValues
 from ..manifest import INTERVALS
@@ -310,7 +310,9 @@ class LocalFactSet:
     context_slots: Tensor | None = None  # completed current G3 at the same support [B,C,Y,X,M,H]
     current_image_support: CurrentImageSupport | None = None
     observed_history: ObservedEntityHistory | None = None
-    current_observed_content: Tensor | None = None  # actual full-RGB endpoint chart, never 8-to-16 interpolation
+    current_observed_content: Tensor | None = (
+        None  # actual full-RGB endpoint chart, never 8-to-16 interpolation
+    )
 
     @property
     def batch(self) -> int:
@@ -330,7 +332,9 @@ class LocalFactSet:
 
     def validate(self) -> None:
         if self.latest_flow_steps is not None:
-            validate_reference_steps(self.latest_flow_steps, batch=self.batch, device=self.content_slots.device)
+            validate_reference_steps(
+                self.latest_flow_steps, batch=self.batch, device=self.content_slots.device
+            )
         if self.public_scene_base.ndim != 5:
             raise ValueError("local public scene base must be [B,C,Y,X,H]")
         if self.content_slots.ndim != 6 or self.semantic_slots.ndim != 6:
@@ -385,7 +389,9 @@ class LocalFactSet:
             if self.current_image_support is None:
                 raise ValueError("causal entity history needs actual current-image support")
             history_shape = self.observed_history.content.shape
-            if (history_shape[0], *history_shape[2:5], history_shape[-1]) != tuple(self.target_dino_content.shape):
+            if (history_shape[0], *history_shape[2:5], history_shape[-1]) != tuple(
+                self.target_dino_content.shape
+            ):
                 raise ValueError("entity history and current observed chart axes differ")
             history = self.observed_history
             if history.content.device != self.content_slots.device:
@@ -403,7 +409,11 @@ class LocalFactSet:
             ):
                 raise ValueError("entity history and current observed content disagree")
         if self.context_slots is not None:
-            _shape(self.context_slots, (*prefix, int(self.public_scene_base.shape[-1])), "local completed G3 context")
+            _shape(
+                self.context_slots,
+                (*prefix, int(self.public_scene_base.shape[-1])),
+                "local completed G3 context",
+            )
             if self.context_slots.device != self.content_slots.device:
                 raise ValueError("local G3 context must share its candidate device")
         if tuple(self.public_scene_base.shape[:4]) != prefix[:4]:
@@ -501,7 +511,11 @@ class DenseFactChart:
         if self.current_image_support is not None:
             self.current_image_support.validate(self.candidate_validity)
         if self.candidate_context is not None:
-            _shape(self.candidate_context, (*prefix, int(self.public_scene_base.shape[-1])), "dense completed G3 context")
+            _shape(
+                self.candidate_context,
+                (*prefix, int(self.public_scene_base.shape[-1])),
+                "dense completed G3 context",
+            )
             if self.candidate_context.device != self.candidate_content.device:
                 raise ValueError("dense G3 context must share candidate device")
         chart_prefix = prefix[:4]
@@ -562,6 +576,7 @@ class ObjectFactSet:
     image_ownership: Tensor | None = None  # B,K+null,C,Yfull,Xfull, conditional ownership
     observed_content: Tensor | None = None  # source-consistent W measurement reference
     view_mass: Tensor | None = None  # joint allocation B,K,C, distinct from validity
+    view_log_mass: Tensor | None = None  # authoritative allocation before exp underflow
 
     @property
     def batch(self) -> int:
@@ -589,7 +604,9 @@ class ObjectFactSet:
 
     @property
     def transport_rate(self) -> Tensor:
-        return _camera_weighted_mean(self.camera_transport_rate, self.camera_validity, self.camera_support)
+        return _camera_weighted_mean(
+            self.camera_transport_rate, self.camera_validity, self.camera_support
+        )
 
     @property
     def transport_prior(self) -> Tensor:
@@ -603,7 +620,9 @@ class ObjectFactSet:
 
     def validate(self) -> None:
         if self.latest_flow_steps is not None:
-            validate_reference_steps(self.latest_flow_steps, batch=self.batch, device=self.content.device)
+            validate_reference_steps(
+                self.latest_flow_steps, batch=self.batch, device=self.content.device
+            )
         self.dense_chart.validate()
         if self.observed_content is not None and self.observed_content.shape != self.content.shape:
             raise ValueError("observed reference and object descriptor axes differ")
@@ -657,35 +676,82 @@ class ObjectFactSet:
         _shape(self.object_to_chart, expected_chart, "object-to-chart posterior")
         if self.object_chart_mode not in {QUERY_CHART, CURRENT_IMAGE_CHART}:
             raise ValueError("unknown object-to-chart coordinate semantics")
-        if (self.object_chart_mode == CURRENT_IMAGE_CHART) != (self.dense_chart.current_image_support is not None):
+        if (self.object_chart_mode == CURRENT_IMAGE_CHART) != (
+            self.dense_chart.current_image_support is not None
+        ):
             raise ValueError("object chart mode and actual support disagree")
-        if (self.object_chart_mode == CURRENT_IMAGE_CHART) != (self.current_image_measure is not None):
+        if (self.object_chart_mode == CURRENT_IMAGE_CHART) != (
+            self.current_image_measure is not None
+        ):
             raise ValueError("object chart mode and authoritative image measure disagree")
         if self.current_image_measure is not None:
             if self.current_image_measure.log_mass.shape != self.object_to_chart.shape:
                 raise ValueError("object image measure has different axes")
         if self.current_image_source is not None:
-            src=self.current_image_source
-            if src.spatial is not self.dense_chart.current_image_support or self.current_image_measure is None:
+            src = self.current_image_source
+            if (
+                src.spatial is not self.dense_chart.current_image_support
+                or self.current_image_measure is None
+            ):
                 raise ValueError("G3 image source lost the actual spatial owner")
             if src.supported.shape != src.log_measure.shape:
                 raise ValueError("G3 image source support axes differ")
-            if isinstance(src, ObjectImageReadSource) and src.log_measure.shape != self.candidate_assignment.shape:
+            if (
+                isinstance(src, ObjectImageReadSource)
+                and src.log_measure.shape != self.candidate_assignment.shape
+            ):
                 raise ValueError("G3 image source lost actual local candidate axes")
-            if isinstance(src, CanonicalImageReadSource) and (src.log_measure.ndim != 5 or src.log_measure.shape[:3] != (batch,objects,cameras)):
+            if isinstance(src, CanonicalImageReadSource) and (
+                src.log_measure.ndim != 5 or src.log_measure.shape[:3] != (batch, objects, cameras)
+            ):
                 raise ValueError("canonical image source lost K/view axes")
         if isinstance(self.current_image_source, CanonicalImageReadSource):
-            if any(value is not None for value in (self.candidate_assignment,self.semantic_candidate_assignment,self.appearance_candidate_assignment,self.geometry_candidate_assignment,self.null_assignment)):
-                raise ValueError("canonical graph must not manufacture independent local K assignments")
-            if self.image_ownership is None or self.identity_state is None or self.view_mass is None:
+            if any(
+                value is not None
+                for value in (
+                    self.candidate_assignment,
+                    self.semantic_candidate_assignment,
+                    self.appearance_candidate_assignment,
+                    self.geometry_candidate_assignment,
+                    self.null_assignment,
+                )
+            ):
+                raise ValueError(
+                    "canonical graph must not manufacture independent local K assignments"
+                )
+            if (
+                self.image_ownership is None
+                or self.identity_state is None
+                or self.view_mass is None
+            ):
                 raise ValueError("canonical identity must preserve ownership, state, and view mass")
-            _shape(self.image_ownership, (batch, objects + 1, cameras, *self.current_image_source.log_measure.shape[-2:]), "canonical conditional ownership")
+            _shape(
+                self.image_ownership,
+                (batch, objects + 1, cameras, *self.current_image_source.log_measure.shape[-2:]),
+                "canonical conditional ownership",
+            )
             _shape(self.view_mass, (batch, objects, cameras), "canonical view mass")
+            if self.view_log_mass is not None:
+                _shape(self.view_log_mass, (batch, objects, cameras), "canonical log view mass")
+                if (
+                    self.view_log_mass.dtype != torch.float32
+                    or self.view_log_mass.device != self.content.device
+                ):
+                    raise ValueError(
+                        "canonical view log allocation must remain FP32 on the object device"
+                    )
             if self.identity_state.ndim != 3 or self.identity_state.shape[:2] != (batch, objects):
                 raise ValueError("canonical identity state lost its K axis")
-            if not bool(torch.isfinite(self.image_ownership).all()) or bool((self.image_ownership < 0).any()):
+            if not bool(torch.isfinite(self.image_ownership).all()) or bool(
+                (self.image_ownership < 0).any()
+            ):
                 raise ValueError("canonical ownership must remain a finite probability law")
-            if not torch.allclose(self.image_ownership.sum(1), torch.ones_like(self.image_ownership[:,0]), atol=2e-6, rtol=2e-6):
+            if not torch.allclose(
+                self.image_ownership.sum(1),
+                torch.ones_like(self.image_ownership[:, 0]),
+                atol=2e-6,
+                rtol=2e-6,
+            ):
                 raise ValueError("canonical K+null ownership must conserve mass")
         else:
             candidates = self.dense_chart.candidate_content
@@ -705,12 +771,25 @@ class ObjectFactSet:
                     name.replace("_", " "),
                 )
             _shape(self.null_assignment, tuple(candidates.shape[:5]), "null assignment")
-        view_values = [self.camera_content, self.camera_semantic, self.camera_appearance, self.camera_geometry]
+        view_values = [
+            self.camera_content,
+            self.camera_semantic,
+            self.camera_appearance,
+            self.camera_geometry,
+        ]
         if any(v is not None for v in view_values):
             if any(v is None for v in view_values):
                 raise ValueError("per-camera object values must be complete")
-            for value, global_value in zip(view_values, (self.content, self.semantic, self.appearance, self.geometry), strict=True):
-                _shape(value, (batch, objects, cameras, global_value.shape[-1]), "per-camera object value")
+            for value, global_value in zip(
+                view_values,
+                (self.content, self.semantic, self.appearance, self.geometry),
+                strict=True,
+            ):
+                _shape(
+                    value,
+                    (batch, objects, cameras, global_value.shape[-1]),
+                    "per-camera object value",
+                )
         _shape(self.reconstructed_dino, tuple(chart.shape), "reconstructed DINO")
         if self.reconstruction_error.ndim != 0:
             raise ValueError("object reconstruction error must be scalar")
@@ -723,19 +802,35 @@ class ObjectFactSet:
         index = permutation.to(device=self.content.device, dtype=torch.long)
         return ObjectFactSet(
             dense_chart=self.dense_chart,
-            current_image_source=None if self.current_image_source is None else self.current_image_source.permute(index),
+            current_image_source=None
+            if self.current_image_source is None
+            else self.current_image_source.permute(index),
             camera_content=None if self.camera_content is None else self.camera_content[:, index],
-            camera_semantic=None if self.camera_semantic is None else self.camera_semantic[:, index],
-            camera_appearance=None if self.camera_appearance is None else self.camera_appearance[:, index],
-            camera_geometry=None if self.camera_geometry is None else self.camera_geometry[:, index],
-            identity_state=None if self.identity_state is None else self.identity_state[:,index],
-            image_ownership=None if self.image_ownership is None else torch.cat((self.image_ownership[:,:-1][:,index],self.image_ownership[:,-1:]),1),
-            observed_content=None if self.observed_content is None else self.observed_content[:,index],
-            view_mass=None if self.view_mass is None else self.view_mass[:,index],
+            camera_semantic=None
+            if self.camera_semantic is None
+            else self.camera_semantic[:, index],
+            camera_appearance=None
+            if self.camera_appearance is None
+            else self.camera_appearance[:, index],
+            camera_geometry=None
+            if self.camera_geometry is None
+            else self.camera_geometry[:, index],
+            identity_state=None if self.identity_state is None else self.identity_state[:, index],
+            image_ownership=None
+            if self.image_ownership is None
+            else torch.cat(
+                (self.image_ownership[:, :-1][:, index], self.image_ownership[:, -1:]), 1
+            ),
+            observed_content=None
+            if self.observed_content is None
+            else self.observed_content[:, index],
+            view_mass=None if self.view_mass is None else self.view_mass[:, index],
+            view_log_mass=None if self.view_log_mass is None else self.view_log_mass[:, index],
             object_chart_mode=self.object_chart_mode,
             current_image_measure=(
                 self.current_image_measure.permute(index)
-                if self.current_image_measure is not None else None
+                if self.current_image_measure is not None
+                else None
             ),
             content=self.content[:, index],
             semantic=self.semantic[:, index],
@@ -752,16 +847,26 @@ class ObjectFactSet:
             validity=self.validity[:, index],
             log_validity=self.log_validity[:, index],
             object_to_chart=self.object_to_chart[:, index],
-            candidate_assignment=None if self.candidate_assignment is None else self.candidate_assignment[:, index],
-            semantic_candidate_assignment=None if self.semantic_candidate_assignment is None else self.semantic_candidate_assignment[:, index],
-            appearance_candidate_assignment=None if self.appearance_candidate_assignment is None else self.appearance_candidate_assignment[:, index],
-            geometry_candidate_assignment=None if self.geometry_candidate_assignment is None else self.geometry_candidate_assignment[:, index],
+            candidate_assignment=None
+            if self.candidate_assignment is None
+            else self.candidate_assignment[:, index],
+            semantic_candidate_assignment=None
+            if self.semantic_candidate_assignment is None
+            else self.semantic_candidate_assignment[:, index],
+            appearance_candidate_assignment=None
+            if self.appearance_candidate_assignment is None
+            else self.appearance_candidate_assignment[:, index],
+            geometry_candidate_assignment=None
+            if self.geometry_candidate_assignment is None
+            else self.geometry_candidate_assignment[:, index],
             null_assignment=self.null_assignment,
             reconstructed_dino=self.reconstructed_dino,
             reconstruction_error=self.reconstruction_error,
         )
 
-    def world_belief(self, *, robot_observation: RobotWorldObservation | None = None) -> "ObjectWorldBelief":
+    def world_belief(
+        self, *, robot_observation: RobotWorldObservation | None = None
+    ) -> "ObjectWorldBelief":
         """Export only the current object evidence needed by a W rerun.
 
         Deployment may perform one outer action-world refinement.  Retaining
@@ -772,7 +877,11 @@ class ObjectFactSet:
 
         self.validate()
         return ObjectWorldBelief(
-            identity_state=self.identity_state,observed_content=self.observed_content,view_mass=self.view_mass,camera_content=self.camera_content,
+            identity_state=self.identity_state,
+            observed_content=self.observed_content,
+            view_mass=self.view_mass,
+            view_log_mass=self.view_log_mass,
+            camera_content=self.camera_content,
             robot_observation=robot_observation,
             content=self.content,
             semantic=self.semantic,
@@ -814,6 +923,7 @@ class ObjectWorldBelief:
     identity_state: Tensor | None = None
     observed_content: Tensor | None = None
     view_mass: Tensor | None = None
+    view_log_mass: Tensor | None = None
     camera_content: Tensor | None = None
 
     @property
@@ -832,7 +942,9 @@ class ObjectWorldBelief:
 
     @property
     def transport_rate(self) -> Tensor:
-        return _camera_weighted_mean(self.camera_transport_rate, self.camera_validity, self.camera_support)
+        return _camera_weighted_mean(
+            self.camera_transport_rate, self.camera_validity, self.camera_support
+        )
 
     @property
     def transport_prior(self) -> Tensor:
@@ -846,7 +958,9 @@ class ObjectWorldBelief:
         if self.robot_observation is not None:
             self.robot_observation.validate(batch=self.batch, device=self.content.device)
         if self.latest_flow_steps is not None:
-            validate_reference_steps(self.latest_flow_steps, batch=self.batch, device=self.content.device)
+            validate_reference_steps(
+                self.latest_flow_steps, batch=self.batch, device=self.content.device
+            )
         if self.observed_content is not None and self.observed_content.shape != self.content.shape:
             raise ValueError("W observed reference axes differ")
         if self.content.ndim != 3:
@@ -864,7 +978,12 @@ class ObjectWorldBelief:
             (batch, objects, cameras, 2),
             "world belief camera coordinates",
         )
-        for name in ("camera_transport_prior", "camera_support", "camera_validity", "log_camera_validity"):
+        for name in (
+            "camera_transport_prior",
+            "camera_support",
+            "camera_validity",
+            "log_camera_validity",
+        ):
             value = getattr(self, name)
             expected_width = 2 if name == "camera_transport_prior" else 1
             _shape(
@@ -889,10 +1008,13 @@ class ObjectWorldBelief:
             raise ValueError("world-belief permutation must contain every object")
         index = permutation.to(device=self.content.device, dtype=torch.long)
         return ObjectWorldBelief(
-            identity_state=None if self.identity_state is None else self.identity_state[:,index],
-            observed_content=None if self.observed_content is None else self.observed_content[:,index],
-            view_mass=None if self.view_mass is None else self.view_mass[:,index],
-            camera_content=None if self.camera_content is None else self.camera_content[:,index],
+            identity_state=None if self.identity_state is None else self.identity_state[:, index],
+            observed_content=None
+            if self.observed_content is None
+            else self.observed_content[:, index],
+            view_mass=None if self.view_mass is None else self.view_mass[:, index],
+            view_log_mass=None if self.view_log_mass is None else self.view_log_mass[:, index],
+            camera_content=None if self.camera_content is None else self.camera_content[:, index],
             robot_observation=self.robot_observation,
             content=self.content[:, index],
             semantic=self.semantic[:, index],
@@ -990,13 +1112,9 @@ class CompletedP1PolicyState:
         if hidden is not None and int(expected[3]) != int(hidden):
             raise ValueError("completed P1 policy state has the wrong hidden width")
         if tuple(self.policy_query_residual.shape) != expected:
-            raise ValueError(
-                "completed P1 policy residual must align with factual_base"
-            )
+            raise ValueError("completed P1 policy residual must align with factual_base")
         if self.policy_query_residual.device != self.factual_base.device:
-            raise ValueError(
-                "completed P1 policy residual must share factual_base device"
-            )
+            raise ValueError("completed P1 policy residual must share factual_base device")
 
 
 @dataclass(frozen=True)
@@ -1039,23 +1157,20 @@ class ActionIntentDock:
                 or self.history_validity.device != self.history_memory.device
             ):
                 raise ValueError("intent history validity must be boolean [B,L] on memory device")
-        if self.public_object_memory.ndim != 3 or int(
-            self.public_object_memory.shape[0]
-        ) != batch:
+        if self.public_object_memory.ndim != 3 or int(self.public_object_memory.shape[0]) != batch:
             raise ValueError("action-intent object memory must be [B,K,H]")
         if self.public_object_validity is not None:
-            if self.public_object_validity.ndim != 3 or tuple(
-                self.public_object_validity.shape[:2]
-            ) != tuple(self.public_object_memory.shape[:2]) or int(
-                self.public_object_validity.shape[-1]
-            ) != 1:
+            if (
+                self.public_object_validity.ndim != 3
+                or tuple(self.public_object_validity.shape[:2])
+                != tuple(self.public_object_memory.shape[:2])
+                or int(self.public_object_validity.shape[-1]) != 1
+            ):
                 raise ValueError("action-intent object validity must be [B,K,1]")
             if self.public_object_validity.dtype != torch.float32:
                 raise TypeError("action-intent object validity must remain FP32")
             if self.public_object_validity.device != self.public_object_memory.device:
-                raise ValueError(
-                    "action-intent object validity must share object-memory device"
-                )
+                raise ValueError("action-intent object validity must share object-memory device")
 
 
 @dataclass(frozen=True)
@@ -1126,9 +1241,9 @@ class PolicyIntentDock:
             (batch, hidden),
             "policy-intent state-change evidence",
         )
-        if self.typed_common_value.ndim != 4 or tuple(
-            self.typed_common_value.shape[:1]
-        ) != (batch,):
+        if self.typed_common_value.ndim != 4 or tuple(self.typed_common_value.shape[:1]) != (
+            batch,
+        ):
             raise ValueError("policy-intent typed common value must be [B,K,3,R]")
         objects = int(self.typed_common_value.shape[1])
         if self.annotated_goal is not None:
@@ -1163,9 +1278,7 @@ class PolicyIntentDock:
         if self.target_object_address_logit.dtype != torch.float32:
             raise TypeError("policy-intent target object address logit must remain FP32")
         if self.target_object_address_logit.device != self.interval_key.device:
-            raise ValueError(
-                "policy-intent target object address logit must share intent device"
-            )
+            raise ValueError("policy-intent target object address logit must share intent device")
         route = int(self.typed_common_value.shape[3])
         _shape(
             self.typed_interval_residual_value,
@@ -1263,12 +1376,8 @@ class ObjectIntentState:
             target_binding=self.target_binding,
             task_relation=self.task_relation,
             target_evidence=self.target_evidence,
-            condition_query_context=self.protected_goal_set.mean(dim=1)[:, None].expand(
-                -1, 4, -1
-            ),
-            history_query_context=self.history_tokens[:, -1:, :].expand(
-                batch, 4, -1
-            ),
+            condition_query_context=self.protected_goal_set.mean(dim=1)[:, None].expand(-1, 4, -1),
+            history_query_context=self.history_tokens[:, -1:, :].expand(batch, 4, -1),
         )
 
     def policy_dock(self) -> PolicyIntentDock:
@@ -1347,9 +1456,7 @@ class ObjectIntentState:
             if self.object_validity.dtype != torch.float32:
                 raise TypeError("intent object validity must remain FP32")
             if self.object_validity.device != self.object_tokens.device:
-                raise ValueError(
-                    "intent object validity must share object-token device"
-                )
+                raise ValueError("intent object validity must share object-token device")
         _shape(
             self.target_object_address_logit,
             (batch, 4, objects),
@@ -1369,9 +1476,11 @@ class ObjectIntentState:
             (batch, 4, objects, 3, 1),
             "typed interval residual mass",
         )
-        if self.typed_common_value.ndim != 4 or tuple(
-            self.typed_common_value.shape[:3]
-        ) != (batch, objects, 3):
+        if self.typed_common_value.ndim != 4 or tuple(self.typed_common_value.shape[:3]) != (
+            batch,
+            objects,
+            3,
+        ):
             raise ValueError("typed common value lost object/type identity")
         route = int(self.typed_common_value.shape[-1])
         _shape(
@@ -1388,7 +1497,9 @@ class ObjectIntentState:
             raise ValueError("target binding and current evidence must be provided together")
         if self.target_binding is not None and self.target_evidence is not None:
             self.target_evidence.validate(hidden=hidden)
-            self.target_binding.validate(batch=batch, objects=objects, device=self.object_tokens.device)
+            self.target_binding.validate(
+                batch=batch, objects=objects, device=self.object_tokens.device
+            )
             if not torch.equal(self.target_binding.supported, self.target_evidence.valid.any(-1)):
                 raise ValueError("intent target support disagrees with observed evidence")
         self.action_dock().validate(hidden=hidden)
@@ -1427,8 +1538,11 @@ class ObjectIntentState:
                 raise ValueError("task relation permutation lost shared target")
             # Reuse the very same permuted source as the paired S expectation;
             # independently indexing it would create a different owner object.
-            source = (operation.current_content if operation is not None
-                      else self.task_relation.current_content[:, index])
+            source = (
+                operation.current_content
+                if operation is not None
+                else self.task_relation.current_content[:, index]
+            )
             relation = replace(
                 self.task_relation,
                 values=self.task_relation.values[:, :, index],
@@ -1446,13 +1560,21 @@ class ObjectIntentState:
             object_tokens=self.object_tokens[:, index],
             target_binding=binding,
             instruction_change=change,
-            instruction_plan_values=(None if self.instruction_plan_values is None or change is None else
-                                     self.instruction_plan_values.permute(index,change)),
+            instruction_plan_values=(
+                None
+                if self.instruction_plan_values is None or change is None
+                else self.instruction_plan_values.permute(index, change)
+            ),
             operation_expectation=operation,
             annotated_goal=annotated_goal,
-            annotated_goal_values=(None if self.annotated_goal_values is None or annotated_goal is None else
-                                   self.annotated_goal_values.permute(index, annotated_goal)),
-            target_evidence=None if self.target_evidence is None else self.target_evidence.permute(index),
+            annotated_goal_values=(
+                None
+                if self.annotated_goal_values is None or annotated_goal is None
+                else self.annotated_goal_values.permute(index, annotated_goal)
+            ),
+            target_evidence=None
+            if self.target_evidence is None
+            else self.target_evidence.permute(index),
             public_interval_carrier=self.public_interval_carrier,
             policy_interval_context=self.policy_interval_context,
             temporal_queries=self.temporal_queries,
@@ -1666,9 +1788,7 @@ class PhysicalActionCondition:
             "physical action condition current action",
         )
         if not (
-            self.interval_action.device
-            == self.interval_delta.device
-            == self.current_action.device
+            self.interval_action.device == self.interval_delta.device == self.current_action.device
         ):
             raise ValueError("physical action condition tensors must share a device")
         if not (
@@ -1763,12 +1883,10 @@ def physical_action_normalizer_fingerprint(
     """Hash exactly the affine chart values used by the outlet adapter."""
 
     offset_values = tuple(
-        float(value)
-        for value in offset.detach().float().cpu().reshape(-1).tolist()
+        float(value) for value in offset.detach().float().cpu().reshape(-1).tolist()
     )
     scale_values = tuple(
-        float(value)
-        for value in scale.detach().float().cpu().reshape(-1).tolist()
+        float(value) for value in scale.detach().float().cpu().reshape(-1).tolist()
     )
     encoded = json.dumps(
         {"offset": offset_values, "scale": scale_values},
@@ -1840,11 +1958,15 @@ class PhysicalActionSequenceCondition:
             ),
             dim=1,
         )
-        row_start = torch.arange(
-            horizon,
-            device=action.device,
-            dtype=action.dtype,
-        ).reshape(1, horizon, 1).expand(batch, -1, -1)
+        row_start = (
+            torch.arange(
+                horizon,
+                device=action.device,
+                dtype=action.dtype,
+            )
+            .reshape(1, horizon, 1)
+            .expand(batch, -1, -1)
+        )
         offset, scale = cls._expanded_normalizer_chart(
             action,
             normalizer_offset,
@@ -1903,9 +2025,7 @@ class PhysicalActionSequenceCondition:
         source_current = current_action.to(device=action.device, dtype=action.dtype)
         # Metadata retains the exact FP32 chart; the numerical action view
         # keeps the established arithmetic in the producer's dtype.
-        arm_command = action[..., :arm_dim] - offset[..., :arm_dim].to(
-            dtype=action.dtype
-        )
+        arm_command = action[..., :arm_dim] - offset[..., :arm_dim].to(dtype=action.dtype)
         canonical_arm = torch.cumsum(arm_command, dim=1)
         gripper = action[..., arm_dim:]
         gripper_boundary = torch.cat(
@@ -1924,11 +2044,15 @@ class PhysicalActionSequenceCondition:
             ),
             dim=-1,
         )
-        row_start = torch.arange(
-            horizon,
-            device=action.device,
-            dtype=action.dtype,
-        ).reshape(1, horizon, 1).expand(batch, -1, -1)
+        row_start = (
+            torch.arange(
+                horizon,
+                device=action.device,
+                dtype=action.dtype,
+            )
+            .reshape(1, horizon, 1)
+            .expand(batch, -1, -1)
+        )
         condition = cls(
             source_action=action,
             canonical_value=canonical_value,
@@ -2004,10 +2128,14 @@ class PhysicalActionSequenceCondition:
             (self.batch, self.horizon, 1),
             _ACTION_SEQUENCE_CHART_CODES[self.chart_version],
         )
-        current_boundary = self.current_action[:, None].to(
-            device=self.device,
-            dtype=self.source_action.dtype,
-        ).expand(-1, self.horizon, -1)
+        current_boundary = (
+            self.current_action[:, None]
+            .to(
+                device=self.device,
+                dtype=self.source_action.dtype,
+            )
+            .expand(-1, self.horizon, -1)
+        )
         return torch.cat(
             (
                 self.source_action,
@@ -2096,18 +2224,20 @@ class PhysicalActionSequenceCondition:
             self.normalizer_offset.dtype != torch.float32
             or self.normalizer_scale.dtype != torch.float32
         ):
-            raise TypeError(
-                "physical action sequence normalizer metadata must remain FP32"
-            )
+            raise TypeError("physical action sequence normalizer metadata must remain FP32")
 
     def assert_exact_contract(self) -> None:
         """Run synchronization-requiring value checks only in explicit audits."""
 
-        expected_start = torch.arange(
-            24,
-            device=self.device,
-            dtype=self.row_start.dtype,
-        ).reshape(1, 24, 1).expand(self.batch, -1, -1)
+        expected_start = (
+            torch.arange(
+                24,
+                device=self.device,
+                dtype=self.row_start.dtype,
+            )
+            .reshape(1, 24, 1)
+            .expand(self.batch, -1, -1)
+        )
         if not torch.equal(self.row_start, expected_start):
             raise ValueError("physical action sequence row starts are not contiguous")
         if not torch.equal(self.row_end, expected_start + 1):
@@ -2140,10 +2270,9 @@ class PhysicalActionSequenceCondition:
             current = self.current_action
         else:
             arm = self.arm_dim
-            expected_arm_delta = (
-                self.source_action[..., :arm]
-                - self.normalizer_offset[..., :arm].to(dtype=self.source_action.dtype)
-            )
+            expected_arm_delta = self.source_action[..., :arm] - self.normalizer_offset[
+                ..., :arm
+            ].to(dtype=self.source_action.dtype)
             if not torch.equal(
                 self.canonical_delta[..., :arm],
                 expected_arm_delta,
@@ -2246,9 +2375,7 @@ class ControlledTransitionState:
 
     def validate(self, *, hidden: int) -> None:
         validate_transition_condition_mode(self.condition_mode)
-        if self.selector.ndim != 3 or tuple(self.selector.shape) != tuple(
-            self.value.shape
-        ):
+        if self.selector.ndim != 3 or tuple(self.selector.shape) != tuple(self.value.shape):
             raise ValueError("controlled transition selector/value must align")
         if int(self.selector.shape[-1]) != int(hidden):
             raise ValueError("controlled transition hidden width is invalid")
@@ -2275,9 +2402,7 @@ class ControlledTransitionSource:
         if self.selector.ndim != 3:
             raise ValueError("controlled transition source must be [B,N,H]")
         if tuple(self.selector.shape[1:]) != (int(rows), int(hidden)):
-            raise ValueError(
-                "controlled transition source must retain every G3 spatial row"
-            )
+            raise ValueError("controlled transition source must retain every G3 spatial row")
 
 
 @dataclass(frozen=True)
@@ -2323,7 +2448,8 @@ class FutureObjectDynamics:
         return replace(
             self,
             successor_content=torch.where(
-                domain.mask_for(self.successor_content), self.successor_content,
+                domain.mask_for(self.successor_content),
+                self.successor_content,
                 self.current_reference[:, None],
             ),
             semantic_delta=domain.quarantine(self.semantic_delta),
@@ -2385,9 +2511,11 @@ class FutureObjectDynamics:
             (batch, objects, cameras, 2),
             "future camera coordinates",
         )
-        if self.camera_names and (len(self.camera_names) != cameras
-                or len(set(self.camera_names)) != cameras
-                or any(not name for name in self.camera_names)):
+        if self.camera_names and (
+            len(self.camera_names) != cameras
+            or len(set(self.camera_names)) != cameras
+            or any(not name for name in self.camera_names)
+        ):
             raise ValueError("future named camera charts must be unique and match C")
         _shape(
             self.transport_mean,
@@ -2452,9 +2580,7 @@ class FutureObjectDynamics:
             log_chart_availability=self.log_chart_availability[:, index],
             camera_coordinates=self.camera_coordinates[:, index],
             camera_chart_availability=self.camera_chart_availability[:, index],
-            log_camera_chart_availability=(
-                self.log_camera_chart_availability[:, index]
-            ),
+            log_camera_chart_availability=(self.log_camera_chart_availability[:, index]),
             control_domain=self.control_domain,
             source_content=None if self.source_content is None else self.source_content[:, index],
         )
@@ -2531,13 +2657,20 @@ class RecordedActionSequenceCondition:
     def interval_observed(self) -> Tensor:
         # A future state depends on ALL earlier controls, not just controls in
         # its interval. An unobserved earlier control cannot be filled by zero.
-        return torch.stack([
-            self.observed[:, :upper].all(dim=1) for _, upper in resolve_future_time(self.time_grid_mode).bounds
-        ], dim=1)
+        return torch.stack(
+            [
+                self.observed[:, :upper].all(dim=1)
+                for _, upper in resolve_future_time(self.time_grid_mode).bounds
+            ],
+            dim=1,
+        )
 
     def validate(self, *, action_dim: int) -> None:
-        expected_schema = ("executed-world-action-sequence-v1"
-            if isinstance(self, ExecutedActionSequenceCondition) else "observed-world-action-sequence-v1")
+        expected_schema = (
+            "executed-world-action-sequence-v1"
+            if isinstance(self, ExecutedActionSequenceCondition)
+            else "observed-world-action-sequence-v1"
+        )
         if self.schema != expected_schema:
             raise ValueError("unknown recorded action source schema")
         if self.source_action.ndim != 3:
@@ -2554,7 +2687,11 @@ class RecordedActionSequenceCondition:
             raise ValueError("observed actions must form a causal prefix without holes")
         if type(self.control_time_scale) is not int or self.control_time_scale != 24:
             raise ValueError("observed controls must retain the online physical time scale")
-        if self.chart_version not in _ACTION_SEQUENCE_CHART_CODES or not self.outlet_profile or not self.normalizer_fingerprint:
+        if (
+            self.chart_version not in _ACTION_SEQUENCE_CHART_CODES
+            or not self.outlet_profile
+            or not self.normalizer_fingerprint
+        ):
             raise ValueError("observed action chart metadata is missing or unknown")
         for value in (self.source_action, self.canonical_value, self.canonical_delta, self.row_end):
             if value.device != self.device or not value.is_floating_point() or value.requires_grad:
@@ -2573,9 +2710,11 @@ class RecordedActionSequenceCondition:
 class ObservedActionSequenceCondition(RecordedActionSequenceCondition):
     """Future labels, never acknowledged controls or a deployment candidate."""
 
+
 @dataclass(frozen=True)
 class ExecutedActionSequenceCondition(RecordedActionSequenceCondition):
     """Already executed recorded controls; never future labels or proposals."""
+
     schema: str = "executed-world-action-sequence-v1"
 
 
@@ -2619,7 +2758,9 @@ class CandidateWorld:
         return self.action_condition.action_fingerprint
 
     def validate(self, *, action_dim: int) -> None:
-        if not isinstance(self.action_condition, (PhysicalActionCondition, PhysicalActionSequenceCondition)):
+        if not isinstance(
+            self.action_condition, (PhysicalActionCondition, PhysicalActionSequenceCondition)
+        ):
             raise TypeError("candidate world rejects training-only observed controls")
         self.action_condition.validate(action_dim=action_dim)
         self.dynamics.validate()
@@ -2646,9 +2787,7 @@ class CandidateWorld:
         """Reject a world paired with another candidate action object."""
 
         if self.action_condition is not action_condition:
-            raise ValueError(
-                "candidate world action fingerprint does not match current candidate"
-            )
+            raise ValueError("candidate world action fingerprint does not match current candidate")
 
 
 @dataclass(frozen=True)
@@ -2665,7 +2804,9 @@ class ObjectTopTrainingTargets:
     supervised_world: SupervisedWorld | None = None  # training plane only
     robot_response_loss: Tensor | None = None  # past-to-current observed response
     annotated_goal_terms: dict[str, Tensor] | None = None
-    operation_terms: dict[str, Tensor] | None = None  # supervised expectations, never observed progress
+    operation_terms: dict[str, Tensor] | None = (
+        None  # supervised expectations, never observed progress
+    )
 
     @property
     def total_unweighted(self) -> Tensor:

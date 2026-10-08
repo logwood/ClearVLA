@@ -1694,6 +1694,35 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### Isolated unified source revision (2026-10-08; not promoted)
+
+`codex/causal-unified-refactor-20261008` starts at `2ab07178`, retaining the
+actual A/B implementation and all unqualified-identity/motion findings below.
+New source fixes quarantine invalid canonical coordinates/probabilities BEFORE
+arithmetic; keep source-owned view log mass through G -> one S binder -> compact
+W; support empty language/target sets as unknown; and reject nonfinite observed
+matching inputs. These do not promote a replacement physical matcher or labels.
+
+Training identity pairs now have explicit source/target cameras and actual
+history-span checks. The original CALVIN producer and v2 objective keep their
+meaning; generic pairs do not manufacture correspondences. State/action array
+widths, optional effectors, units, timebase and episode flags have an explicit
+native-v2 adapter, leaving old seven-dimensional profiles/digests intact. This
+adapter is not evidence of arbitrary-robot checkpoint/outlet compatibility.
+Robot response records preserve observed and predicted deltas beside innovation;
+its existing consumer is unchanged, so this is not a claimed phase repair.
+
+The new `causal_unified_source_v1` migration names these source changes without
+broadening old A/B admission. It retains the original checkpoint/config/data and
+exact added/removed parameter checks; new graphs receive fresh Adam warmup at a
+separate update origin. Never silently load old optimizer history into changed
+parameter semantics. Source/gradient fixtures and strict real-data admission are
+separate scripts. Missing CUDA, training episodes or pretrained assets is a
+blocked real-data gate, never a passing synthetic substitute. Existing rollout
+scores and every physical-identity/motion/phase limitation remain unchanged until
+fresh qualified training and matched closed loops establish otherwise.
+
+
 ### A/B repair qualification (2026-10-07; formal promotion pending)
 
 See audit section 34.33. A now connects ordinary normalized transport,

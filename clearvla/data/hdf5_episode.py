@@ -102,11 +102,7 @@ class LoadedEpisode:
 
     @property
     def cached_frame_count(self) -> int:
-        return (
-            int(self.length)
-            if self.cache_frame_count is None
-            else int(self.cache_frame_count)
-        )
+        return int(self.length) if self.cache_frame_count is None else int(self.cache_frame_count)
 
     def resolve_cached_frame_indices(self, indices: np.ndarray) -> np.ndarray:
         """Map logical visual rows onto a verified physical cache prefix.
@@ -129,8 +125,7 @@ class LoadedEpisode:
         if cached == self.length:
             return rows
         if (
-            self.terminal_padding_mode
-            != RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING
+            self.terminal_padding_mode != RELATIVE_ACTION_ABSORBING_TERMINAL_PADDING
             or self.terminal_state_index is None
             or cached != int(self.terminal_state_index) + 1
             or not 0 < cached < self.length
@@ -223,16 +218,21 @@ def load_episode(
     action_state_key: str | None = None,
     state_key: str | None = None,
     camera_key_overrides: dict[str, str] | None = None,
+    array_contract: str = "legacy-paired-v1",
 ) -> LoadedEpisode:
+    if array_contract not in {"legacy-paired-v1", "independent-native-v2"}:
+        raise ValueError("unknown native array loading contract")
+    if array_contract == "independent-native-v2" and (not state_key or not action_state_key):
+        raise ValueError(
+            "independent state/action charts require explicit observed state and previous command"
+        )
     overrides = camera_key_overrides or {}
     with h5py.File(path, "r") as f:
         datasets = list_hdf5_datasets_from_handle(f)
         resolved_action = resolve_key(datasets, action_key, ACTION_ALIASES, required=True)
         assert resolved_action is not None
         resolved_state = (
-            resolve_key(datasets, state_key, STATE_ALIASES, required=True)
-            if state_key
-            else None
+            resolve_key(datasets, state_key, STATE_ALIASES, required=True) if state_key else None
         )
         resolved_action_state = (
             resolve_key(
@@ -312,9 +312,7 @@ def load_episode(
             None if raw_strict_valid_end is None else int(raw_strict_valid_end)
         )
         raw_terminal_index = f.attrs.get("terminal_state_index")
-        terminal_state_index = (
-            None if raw_terminal_index is None else int(raw_terminal_index)
-        )
+        terminal_state_index = None if raw_terminal_index is None else int(raw_terminal_index)
         raw_padding_mode = f.attrs.get("terminal_padding_mode", "")
         if isinstance(raw_padding_mode, (bytes, np.bytes_)):
             raw_padding_mode = bytes(raw_padding_mode).decode("utf-8")
@@ -323,15 +321,11 @@ def load_episode(
         source_action_count = (
             None if raw_source_action_count is None else int(raw_source_action_count)
         )
-        raw_state_normalizer_reference_key = f.attrs.get(
-            "state_normalizer_reference_key"
-        )
-        if isinstance(
-            raw_state_normalizer_reference_key, (bytes, np.bytes_)
-        ):
-            raw_state_normalizer_reference_key = bytes(
-                raw_state_normalizer_reference_key
-            ).decode("utf-8")
+        raw_state_normalizer_reference_key = f.attrs.get("state_normalizer_reference_key")
+        if isinstance(raw_state_normalizer_reference_key, (bytes, np.bytes_)):
+            raw_state_normalizer_reference_key = bytes(raw_state_normalizer_reference_key).decode(
+                "utf-8"
+            )
         state_normalizer_reference_key = (
             ""
             if raw_state_normalizer_reference_key is None
@@ -340,26 +334,18 @@ def load_episode(
         if state_normalizer_reference_key:
             reference_dataset = f.get(state_normalizer_reference_key)
             if not isinstance(reference_dataset, h5py.Dataset):
-                raise ValueError(
-                    f"{path}: state normalizer reference key does not name a dataset"
-                )
-            state_normalizer_reference_raw = np.asarray(
-                reference_dataset, dtype=np.float32
-            )
+                raise ValueError(f"{path}: state normalizer reference key does not name a dataset")
+            state_normalizer_reference_raw = np.asarray(reference_dataset, dtype=np.float32)
         else:
             state_normalizer_reference_raw = None
         raw_state_normalizer_reference_semantics = f.attrs.get(
             "state_normalizer_reference_semantics", ""
         )
-        if isinstance(
-            raw_state_normalizer_reference_semantics, (bytes, np.bytes_)
-        ):
+        if isinstance(raw_state_normalizer_reference_semantics, (bytes, np.bytes_)):
             raw_state_normalizer_reference_semantics = bytes(
                 raw_state_normalizer_reference_semantics
             ).decode("utf-8")
-        state_normalizer_reference_semantics = str(
-            raw_state_normalizer_reference_semantics
-        ).strip()
+        state_normalizer_reference_semantics = str(raw_state_normalizer_reference_semantics).strip()
         raw_annotation_index = f.attrs.get("source_annotation_index")
         if raw_annotation_index is not None and (
             isinstance(raw_annotation_index, (bool, np.bool_))
@@ -371,8 +357,10 @@ def load_episode(
         raw_source_end = f.attrs.get("source_end")
         raw_context_start = f.attrs.get("context_start")
         for source_name, source_value in (
-            ("source_start", raw_source_start), ("source_end", raw_source_end),
-            ("context_start", raw_context_start), ("terminal_state_index", raw_terminal_index),
+            ("source_start", raw_source_start),
+            ("source_end", raw_source_end),
+            ("context_start", raw_context_start),
+            ("terminal_state_index", raw_terminal_index),
         ):
             if source_value is not None and (
                 isinstance(source_value, (bool, np.bool_))
@@ -395,7 +383,7 @@ def load_episode(
         raise ValueError(
             f"{path}: state must have shape [T,D] aligned with action, got {states.shape}"
         )
-    if states.shape[1] != actions.shape[1]:
+    if array_contract == "legacy-paired-v1" and states.shape[1] != actions.shape[1]:
         raise ValueError(
             f"{path}: state/action dims must match for unified RDT token space, got {states.shape[1]} != {actions.shape[1]}"
         )
@@ -427,9 +415,7 @@ def load_episode(
                 f"[{valid_center_start},{valid_center_end}] for T={actions.shape[0]}"
             )
     if (strict_valid_center_start is None) != (strict_valid_center_end is None):
-        raise ValueError(
-            f"{path}: strict valid center bounds must be both present or both absent"
-        )
+        raise ValueError(f"{path}: strict valid center bounds must be both present or both absent")
     if strict_valid_center_start is not None and strict_valid_center_end is not None:
         if not 0 <= strict_valid_center_start <= strict_valid_center_end < int(actions.shape[0]):
             raise ValueError(
@@ -442,56 +428,40 @@ def load_episode(
         )
     if terminal_state_index is not None:
         if terminal_padding_mode not in SUPPORTED_TERMINAL_PADDING_MODES:
-            raise ValueError(
-                f"{path}: unsupported terminal padding mode {terminal_padding_mode!r}"
-            )
+            raise ValueError(f"{path}: unsupported terminal padding mode {terminal_padding_mode!r}")
         if not 1 <= terminal_state_index < int(actions.shape[0]) - 1:
             raise ValueError(
                 f"{path}: terminal state index {terminal_state_index} leaves no absorbing suffix"
             )
         if valid_center_end is not None and valid_center_end >= terminal_state_index:
-            raise ValueError(
-                f"{path}: valid center end must precede terminal state index"
-            )
+            raise ValueError(f"{path}: valid center end must precede terminal state index")
     if source_action_count is not None:
         if terminal_padding_mode != LIBERO_TERMINAL_REPLAY_ABSORBING_PADDING:
-            raise ValueError(
-                f"{path}: source_action_count is reserved for LIBERO terminal replay"
-            )
+            raise ValueError(f"{path}: source_action_count is reserved for LIBERO terminal replay")
         if terminal_state_index != source_action_count:
-            raise ValueError(
-                f"{path}: LIBERO terminal_state_index must equal source_action_count"
-            )
+            raise ValueError(f"{path}: LIBERO terminal_state_index must equal source_action_count")
         if int(actions.shape[0]) != source_action_count + 48:
             raise ValueError(f"{path}: LIBERO terminal replay must append exactly 48 rows")
     if state_normalizer_reference_raw is not None:
         reference_count = (
-            int(source_action_count)
-            if source_action_count is not None
-            else int(actions.shape[0])
+            int(source_action_count) if source_action_count is not None else int(actions.shape[0])
         )
         if (
             state_normalizer_reference_raw.ndim != 2
-            or state_normalizer_reference_raw.shape
-            != (reference_count, int(states.shape[1]))
+            or state_normalizer_reference_raw.shape != (reference_count, int(states.shape[1]))
             or not np.isfinite(state_normalizer_reference_raw).all()
         ):
             raise ValueError(
                 f"{path}: state normalizer reference must be finite "
                 f"[{reference_count},{states.shape[1]}]"
             )
-        if (
-            state_normalizer_reference_semantics
-            != LIBERO_E8_STATE_NORMALIZER_REFERENCE
-        ):
+        if state_normalizer_reference_semantics != LIBERO_E8_STATE_NORMALIZER_REFERENCE:
             raise ValueError(
                 f"{path}: state normalizer reference has unsupported semantics "
                 f"{state_normalizer_reference_semantics!r}"
             )
     elif state_normalizer_reference_semantics:
-        raise ValueError(
-            f"{path}: state normalizer reference semantics exist without a dataset"
-        )
+        raise ValueError(f"{path}: state normalizer reference semantics exist without a dataset")
     misaligned_cameras = {
         camera: length
         for camera, length in camera_lengths.items()

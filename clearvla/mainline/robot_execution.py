@@ -97,6 +97,8 @@ class RobotResponseFeedback:
     observed: Tensor  # bool [B]
     source_step: ExecutedRobotStep | None = None
     current_state: Tensor | None = None
+    observed_delta: Tensor | None = None
+    predicted_delta: Tensor | None = None
 
     def validate(self, *, batch: int, state_dim: int, device: torch.device) -> None:
         if (
@@ -107,6 +109,18 @@ class RobotResponseFeedback:
             raise ValueError("robot response feedback feature chart differs")
         if self.innovation.requires_grad:
             raise ValueError("task gradients cannot rewrite the robot response predictor")
+        if (self.observed_delta is None) != (self.predicted_delta is None):
+            raise ValueError("robot outcome/prediction must be retained together")
+        for value in (self.observed_delta, self.predicted_delta):
+            if value is not None and (
+                value.shape != (batch, state_dim)
+                or value.device != device
+                or not value.is_floating_point()
+                or value.requires_grad
+            ):
+                raise ValueError(
+                    "robot outcome and prediction must be detached in the same state chart"
+                )
         if (
             self.observed.shape != (batch,)
             or self.observed.dtype != torch.bool
