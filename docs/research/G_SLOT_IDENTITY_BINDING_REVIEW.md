@@ -4389,3 +4389,21 @@ nonexistent convenience config method; its failure scope is retained in E,
 then corrected to the actual config_from_mapping/as_dict API. No behavior
 claim follows from these checks. Actual-window, BS8 ordinary-backward, cold
 deployment and meaningful short/panel qualification remain required.
+
+Actual four-window check (B-v1-address-memory-factual-r1) is complete:
+zero-init slots/law exact in all four and each new gain has a finite nonzero
+local synthetic-cotangent VJP. A fixed +.1 raw gain has mixed physical-object
+separation responses (11 top TV .07741 -> .06966, 17 .26308 -> .28394);
+it is not an admitted inference intervention. No parameter/action changes were
+made to baseline. Full-model initialization also passes for both candidate and
+no-memory control: all1584 inherited tensors exact, only3 new scalar parameters,
+clock12036. That read-only check borrows the saved dataset identity; the real
+loader still must independently verify its inventory.
+
+The prepared next step is actual2BS8+2offline, cold4, then1024BS8+256offline
+from original B-v1 (never the mechanical checkpoint), with fresh Adam/100warmup.
+The no-memory continuation receives the same seed/data/exposure. Both get
+standard18/R8/stored_target plus matched natural-command/source controls and
+their own exact-RGB mask replay/phase analysis. No formal long promotion is
+automatic. Individual-gain gradients and sample IDs are recorded on the actual
+ordinary backward without extra optimizer/backward work.
