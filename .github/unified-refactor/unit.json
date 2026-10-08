@@ -1,0 +1,12 @@
+{
+  "schema": "clearvla-reviewed-source-v1",
+  "parent": "410d18686f4e3400802f00bd2aec2744832437e6",
+  "parent_tree": "9508b5e481a9a842606e9adf13e1a76c2ff8126d",
+  "formatted_base_tree": "24c8c237c819b11039d6a73087ee98296da5ebb4",
+  "source_tree": "f2dc16032d692fea9e0a73851ecfb9e93cdf4b98",
+  "format_existing_python": ["tests/test_mainline_policy.py", "tests/test_mainline_structural_contracts.py"],
+  "patch_bytes": 2737,
+  "patch_sha256": "cd4d15b65a1478b0271476810a5f29f6241c3b09b14c0451e53b10deeb43d708",
+  "message": "test: align validation fixtures and causal cache schema with production",
+  "compressed_blobs": [{"sha":"8ec058383e946831611141a08079f6afd79dfe78","size":930}]
+}
