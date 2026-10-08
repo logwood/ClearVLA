@@ -1856,6 +1856,17 @@ short-pipeline-r1 prepares9,258 pairs at the full frozen teacher budget, then
 runs1024 BS8 updates/256 offline and the separate18/R8 panel, subject to the
 recorded mechanical gate. No formal experiment is automatically promoted.
 
+Section34.33.17 bounds confidence-only repair on30 exact-replay long-gap
+windows using the unchanged native DINO matcher. Even independently optimal
+per-source-row real masses leave moving-wrist EPE21.726/28.834px (old16/own14);
+all741 points have an oracle bound above2px. The best coarse candidate is often
+near the endpoint, but the conditional distribution remains diffuse. This
+neither certifies object identity nor promotes argmax/null rescaling. An
+official global-plus-local matcher is only an isolated audit candidate.
+The full v3 final-short masked BS8 VJP is now queued after its own panel;
+resolved annotation identity is pinned, optimizer updates remain zero.
+Formal A/B still require the meaningful short and causal/behavioral review.
+
 For causal-repair decisions, use G_SLOT_IDENTITY_BINDING_REVIEW.md sections
 34.26–34.32 alongside the admitted source/config. Full a2d597d2 behavior is
 11/18; the 512-update repair is 7/18 and retained-Adam 64-update diagnostics are

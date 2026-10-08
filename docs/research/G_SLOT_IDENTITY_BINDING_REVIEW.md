@@ -3560,3 +3560,93 @@ Pinned probe200e38fd extends the separate module-VJP instrument to actual G
 ownership parameters for v3, since separation need not reach the value decoder.
 The final-short full training-entry VJP still needs scheduling with its resolved
 annotation config; it is not replaced by these common-source controls.
+
+
+### 34.33.17 Separating localization from unknown mass (2026-10-08 UTC)
+
+The new B-v3 short is still annotating, not training. At05:42UTC, 3,921/9,258
+declared pairs exist on GPUs4/6. The partial exposure has witnessed negative
+edges in25.5% of top frames and6.45% of wrist frames before training masking.
+These are label availability counts, not label accuracy or learned identity.
+Original full-prompt budgets and all ongoing jobs remain unchanged.
+
+**A confidence-only repair is now bounded directly.** Probe9ebfbf6e uses the
+actual frozen BF16 online encoder, fixed two-camera microbatch, full RGB
+preprocessing and native16x16 observed-correspondence function. All30 old16/
+own14 long-gap current-to-start windows complete with exact repeats and
+unchanged parameters. Simulator geometry is read only after image matching
+for scoring. No checkpoint policy is run or changed by this encoder-only test.
+
+For each independently visible point, bilinear source interpolation touches
+four rows. Hold each row's conditional destination law fixed, allow its real
+mass to be ANY value in[0,1], and compute the closest attainable displacement
+to the geometric endpoint. This is the convex hull of16 projected box
+vertices. It is an optimistic pointwise oracle bound (different points may
+choose incompatible masses), not a proposed matcher. Analytic degenerate/
+rectangle cases and100 independent bounded least-squares checks agree within
+3.71e-12. Reproducing the source-row displacement agrees within1e-10.
+
+| Long-gap moving wrist points | old16 | own14 |
+|---|---:|---:|
+| Visible points |516|225|
+| Actual motion, mean pixels |21.796|30.863|
+| Production measured motion |0.0705|0.0705|
+| Production displacement EPE |21.843|30.892|
+| Set all real masses to1, EPE |38.725|41.131|
+| Best possible confidence-only EPE |21.726|28.834|
+| Points whose best possible EPE exceeds2px |516/516|225/225|
+| Best candidate falls in the four true endpoint cells |415/516|207/225|
+| Conditional mass in those endpoint cells |0.03458|0.03440|
+
+Thus lowering null alone cannot repair these wrist displacement distributions.
+The best discrete cell often lies near the endpoint, but distant conditional
+mass pulls the mean elsewhere. This does not certify the correct physical
+object: four coarse cells can include other objects/background. Top-view
+matching is also imperfect: best-cell EPE10.008/35.470px, confidence-only
+bound4.699/9.566px. Neither a universally correct argmax nor an identity oracle
+has been found.
+
+Source: vision/observed_correspondence.py:31-46. Away from exact descriptor
+matches, with squared normalized distance d, real/null odds are
+mean((.05/d)^2). The independent algebra reproduces production mass.
+Changing that scalar confidence calibration does not itself concentrate the
+conditional destination law. Earlier same-null top1/RGB-seeded DIS failures
+remain valid; this result does not promote those candidates.
+
+Artifacts: descriptor-confidence-bound-{old16,own14}-r1/results.json,
+descriptor-confidence-bound-full30-summary-r1.json and full30-r1 receipt.
+Reproduce with probe_descriptor_transport_bound.py --config <actual short
+config> --plan <pinned fresh plan> --labels <exact current_start rigid labels>
+--output <new directory>, deterministic CUDA control. No tensors are downloaded.
+
+**Next measurement candidate.** The official RoMa v2 implementation separates
+global correspondence and local RGB refinement; its precise800+1280
+bidirectional setting is being prepared as an isolated read-only audit.
+Source95c9968145c8906b7b59383258e9f73b02853d89, paper
+https://arxiv.org/abs/2511.15706 and official code
+https://github.com/Parskatt/RoMaV2. No external matcher enters the policy or
+training. It must independently pass moving/static/visibility/long-gap and
+cost checks; published benchmark accuracy is not CALVIN qualification.
+The first weights transfer interrupted and its partial artifact/failure record
+are retained. The resumed download must match the published GitHub asset
+SHA2561557dec0d21b62366465f7ff4d5fdf228cc695d0582e196ad2b80e05230828b7.
+Probe6fdc433c retains the full precise budget and scores both directions in
+native pixels. Analytic identity/translated fields at200x200 and84x84 verify
+the align_corners=False pixel-center conversion within5.69e-14; this is an
+adapter check, not matching qualification. Isolated dependencies do not change
+the production Python environment.
+
+**Final-short full VJP is scheduled.** B-regions-v3-module-vjp-short-r1
+(PID2034536, probea3e5c2a5) waits for this short's own standard18 panel and an
+idle GPU4. run_resolved_region_vjp.py requires the completed checkpoint's
+exact config/digest and pinned annotation manifest, then changes only output,
+unused fresh optimizer origin0 and one-batch limits. The saved execution clock
+is restored inside the actual masked BS8 forward, with zero updates. Both new
+region losses and ordinary G ownership parameters are included. The config
+adapter passed against the actual mechanical-r2 payload; the final VJP has
+NOT run and cannot be replaced by common-objective-only source controls.
+
+Formal A/B remain unstarted. The measurement confidence bound, v3 label
+availability, original controller/arm/gripper/maintenance questions and the
+new short behavior gate remain distinct. Preserve all receipts and prior
+promotion blocks.
