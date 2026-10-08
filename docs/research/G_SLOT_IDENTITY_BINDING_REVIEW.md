@@ -4407,3 +4407,20 @@ standard18/R8/stored_target plus matched natural-command/source controls and
 their own exact-RGB mask replay/phase analysis. No formal long promotion is
 automatic. Individual-gain gradients and sample IDs are recorded on the actual
 ordinary backward without extra optimizer/backward work.
+
+The continuations are now actually queued (not yet training):
+B-v1-address-memory-short-r1 PID2882377 and
+B-v1-continuation-control-short-r1 PID2882378. Receipts have the same prefixes;
+status is <prefix>-job/status.json. Both currently wait for an idle whole GPU,
+choose among all seven devices, and share locks with the two SAM explorations.
+Production is immutable e4be3be6e6ad9b056299048b753c404661df3764 at
+checkouts/b-v1-address-memory-training-e4be3be6; runner is8d79c5cc at
+checkouts/b-v1-address-qualification-8d79c5cc. Helper:
+ /home/sen.wang/mysh/clearvla-bv1-address-short-20261008.sh memory|control
+Do not start duplicates, retarget old experiments or report these as formal longs.
+Final short clock13060, original B-v1 initialization clock12036, batch8,
+1024updates/8192samples/256offline; standard18 R8 max360 seed0 stored_target.
+The runner retains all NPZ, checks ordinary gain gradients and cold deployment
+before the meaningful short, then gathers actual source controls, old60 natural
+windows and its own fresh phase/mask/node chain. Its final status is evidence
+completion, never a claim that object identity or behavior is repaired.

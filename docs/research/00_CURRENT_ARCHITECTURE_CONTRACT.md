@@ -1702,6 +1702,17 @@ lose supported physical-object separation during later recurrent transitions;
 mean removal, skipped iterations or any new gate. See34.33.25 before editing.
 
 
+### Live B-v1 address continuations
+
+B-v1-address-memory-short-r1 PID2882377 and no-memory control PID2882378
+are queued on any idle whole GPU (all seven allowed; no pinned GPU4).
+Check their receipt and -job/status.json in causal-identity-ab-20261007.
+Fixed production e4be3be6, runner8d79c5cc. They automatically perform
+2BS8/cold4 ->1024BS8/256offline ->standard18 R8 ->source/own-trajectory
+audits; no formal long promotion. Original initialization is the complete
+B-v1 checkpoint step12036; actual short ends13060. Do not duplicate.
+Read34.33.26 for the implementation and admitted scope.
+
 ### Current optional candidate: dense address memory
 
 Research34.33.26 records entity_address_memory_mode=conditional_logits_v1.
