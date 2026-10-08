@@ -4645,3 +4645,155 @@ Preserve logs and existing work. After GPU recovery, check saved checkpoint
 identity and missing stages before resuming, rather than rerunning training
 or assuming a watcher is still waiting. GPU0 remains reserved for others
 after existing work; final panels remain onGPU1.
+
+
+## 34.33.28 Paired B-v1 training audit and lost checkpoint boundary (2026-10-08)
+
+### Identity, completion and measurement scope
+
+The requested pair is B-v1-address-memory-short-bs8-1024-r1 and
+B-v1-continuation-control-short-bs8-1024-r1, both pinned production
+e4be3be6e6ad9b056299048b753c404661df3764. Both initialize original B-v1
+step12036, source3a843999, checkpoint SHA
+ce5753bf98a5e17254e6bbdbdd93fa80d09003a8b9b47d38cf2c3ca76d12ed25.
+Same source snapshot, dataset, language, normalizers, seed, BS8, Adam reset,
+100-step warmup and1024-update declaration; resolved configs differ only in
+output path and the explicit conditional_logits_v1 address selector. The
+candidate adds exactly3 scalar gains. Same declared exposure is verified;
+the logs do not establish every sample/noise tensor as bitwise paired.
+
+Both finish1024 updates/8192samples atstep13060. Each metrics.jsonl contains
+52 train rows:51 windows of20 plus4 tail updates. Loss ledger and preclip
+window maxima cover all1024 updates. G/S/P1/P2/P3 and raw role-gradient
+diagnostics represent only51 logging batches, NOT all-update averages.
+
+Both short1024.log files end inside offline validation with
+AcceleratorError / CUDA unknown error from the pin-memory thread.
+There are zero completed epoch/offline records and **no checkpoints
+directory in either run**, confirmed by direct inventory. Both GPU1
+continuations subsequently fail FileNotFoundError. These are not finished
+closed-loop experiments. Original B-v1 and the separate mechanical weights
+remain available; the1024-update weights cannot be reconstructed from logs.
+
+### Full-log numerical comparison
+
+Dense values below are last224-update weighted means (batches801-1024;
+logged windows end at820...1024). Sparse diagnostics use the11 observed
+logging batches820...1020, without pretending to cover the4-update tail.
+
+| quantity | address candidate | continuation control |
+| --- | ---: | ---: |
+| total loss | .48276768 | .48274110 |
+| arm-only action flow | .40474752 | .40474008 |
+| first8 flow audit | .38370084 | .38368247 |
+| binary gripper command CE | .05864052 | .05869145 |
+| source prediction MSE | .28950568 | .28950471 |
+| sampled G support-weighted null | .98982477 | .98982796 |
+| sampled S public interval variation | .13429819 | .13434702 |
+| sampled P2 target-value interval variation | .19334191 | .19349160 |
+| sampled P3 temporal RMS | .33926623 | .33926141 |
+| sampled raw W gradient L2 | .08061791 | .08055008 |
+
+All archived training scalars are finite. Maximum loss-ledger discrepancy
+is2.53e-8/2.83e-8. Full-window preclip peaks are3.36299/3.35982, both atstep13057.
+These do not show an instability event. Raw group gradients connect G, S, W,
+P1/P2/P3 and bottom, but cannot prove every new parameter or correct target
+selection. Mean batch duration across all windows is6.558/6.335s, roughly
+3.5% different; different physical GPUs prevent a pure architecture timing
+claim. Preflight memory is not the completed train/eval peak.
+
+Across all paired windows, mean absolute action-flow difference is only
+.0130% of the control mean, first8 .0168%, command CE .1672%.
+The measured aggregate trajectories are extremely close. They neither
+establish behavioral improvement nor prove the new route has zero effect.
+
+### Source explanations and limits
+
+1. model/address_memory.py:retain_address centers the previous log law on K,
+   retaining the N/camera axes. Its correction changes real-K conditional
+   identity while preserving joint real total and null at the SAME
+   competition input. Later recurrent updates may affect those totals.
+   canonical_grounding.py:encode_owners applies it at the three recurrent
+   boundaries. This is not a new global camera/spatial average.
+
+2. Both sampled null curves rise from approximately.914 to.990. Meanwhile
+   identity_correspondence decreases from.00970/.00971 to.0009259/.0009266.
+   training/identity.py:58-67 computes JS on joint K+null; the known B-v1
+   null escape therefore remains an available explanation for the lower
+   identity loss. It is shared by both runs, not evidence that the candidate
+   introduced the earlier17->12 regression. No new objective change is
+   justified by this comparison alone. canonical_grounding.py:118
+   renormalizes spatial reads; high joint null alone does not establish
+   empty object values or failed behavior. Object-conditioned audits remain
+   necessary.
+
+3. The historical logs omit all three gain values, their individual ordinary
+   gradients, and the same-input routing deltas. The2-step mechanical
+   checkpoint has tiny nonzero gains (-1.73e-7,6.86e-8,9.03e-8), but those
+   are NOT the missing1024-step final values. Group grounder gradient cannot
+   fill this gap. Do not conclude "gain stayed zero" or "memory worked."
+
+4. training/losses.py:1519 owns binary gripper CE;1611-1618 makes the selected
+   physical flow arm-only. loss_action_gripper_flow_owned (about1.6 and
+   identical in every paired window) is a detached continuous-field audit,
+   not the active binary-gripper objective. Train endpoint transition rates
+   are not deployment gripper switching counts. The earlier inference-only
+   arm recoding remains rejected by its physical local branch.
+
+5. The S coordinate nullspace and current-law loss at the W/P2 interface in
+   34.33.27 remain separate structural findings. Address memory does not
+   alter either consumer boundary. Similar S/P2 RMS or interval differences
+   cannot exclude those spatial ambiguities. Conversely, those old boundaries
+   alone do not explain why changing B-v1 training to v2 reduced success.
+
+### Narrow evidence/persistence repair, not a behavioral repair
+
+Code commit de1e1046ebe06b140e3ee2489eba53eda3c4faa4 changes only the development
+branch. Fixed e4be3be6 and all failed runs remain untouched.
+
+- Address diagnostics now snapshot each signed raw/effective gain and its
+  ordinary total-loss gradient before clipping/optimizer.step. Disconnected
+  is distinct from an exactly zero gradient. Values are cloned to avoid
+  optimizer aliasing.
+- Each existing memory operation reports conditional-K TV, spatial-read TV,
+  producer mass, and real/null conservation against its already computed
+  same-input base competition. No extra encoder/competition, labels, RNG,
+  or forward/gradient modification. These measure that boundary, not true
+  physical identity or independent action contribution.
+- train.py now writes an atomic checkpoints/training_complete.pt BEFORE
+  offline validation, including model/optimizer/schedule/RNG and a
+  validation_pending flag. A separate training_complete JSONL row preserves
+  the training aggregate and training-only memory peak. It never replaces
+  latest.pt/best.pt and is not a completed epoch/validation claim.
+  Exact resume rejects pending snapshots before mutation so it cannot skip
+  the unfinished validation; read-only checkpoint validation is supported.
+  Normal checkpoints retain their old payload. One extra full checkpoint
+  and save operation per epoch is the explicit cost, not an update-budget cut.
+  This cannot recover the weights already lost in the two historical jobs.
+
+Fourteen CPU tests pass: original7 address contracts; exact diagnostic
+forward/backward/RNG/parameter parity, zero/empty support, snapshot ownership,
+zero-preserving JSON archival, an injected offline exception executing the
+actual train.py boundary statements, pending read-only load, fail-closed
+resume, and ordinary checkpoint compatibility. PyTorch emitted the current
+CUDA-driver warning while testing CPU autograd; all tensors ran on CPU with
+CUDA_VISIBLE_DEVICES empty. This is not proof that the server GPU recovered
+or that the new graph improves behavior. Receipt and original warning log
+are retained.
+
+Evidence in E:
+B-v1-paired-training-log-audit-r1.json (standard utility),
+B-v1-paired-source-log-decision-r1.json (identity/coverage/paired statistics),
+B-v1-training-evidence-cpu-tests-r2.log and .receipt.json.
+Reproduce from the candidate checkout with:
+
+    python -m clearvla.tools.audit_policy_logs E/B-v1-address-memory-short-bs8-1024-r1 E/B-v1-continuation-control-short-bs8-1024-r1 --format json --output E/paired-standard-new.json
+    python probes/audit_bv1_paired_training.py --experiment-root E --output E/paired-source-new.json
+    CUDA_VISIBLE_DEVICES='' PYTHONPATH=. python -m unittest probes.test_bv1_address_memory probes.test_bv1_training_evidence -v
+
+Continue from original complete B-v1. Do not promote either interrupted short,
+claim it completed validation, or silently rerun unchanged GPU jobs. Next
+structural work should isolate S spatial-feature expressivity and current-law
+retention through W/P2 as in34.33.27, keeping actual K/null/support and ordinary
+gradients. Qualify any meaningful repeat with the now observable address
+gains/boundary changes and final weights; standard18/R8 remains onGPU1.

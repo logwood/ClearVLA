@@ -1694,6 +1694,36 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### Paired B-v1 audit and durable training boundary (2026-10-08)
+
+Research34.33.28 confirms BOTH e4be3be6 shorts completed1024BS8 updates,
+step13060, but failed during offline validation BEFORE the old save point.
+Neither run has any checkpoint file; both GPU1 continuations failed. Do not
+treat the52 training rows or old handed_off status as a final checkpoint,
+256-offline result, or panel. Original B-v1 remains the recoverable base.
+
+All archived training values are finite; preclip peaks3.363/3.360.
+Candidate/control aggregate action losses are almost identical. Joint null
+rises.914->.990 and joint identity JS falls about.0097->.000926 in BOTH;
+this inherited B-v1 behavior is not evidence of a newly introduced
+address-memory collapse. Spatial reads conditionally normalize real mass.
+No final gain values/gradients were logged, and the2-step mechanical gains
+are not1024-step evidence. Binary-command gripper flow diagnostics are
+excluded from active arm-only flow; use the actual command objective.
+
+Development commit de1e1046 adds observation-only gain/preclip-gradient and
+same-input routing diagnostics, plus atomic training_complete.pt before
+offline validation. It marks validation_pending, preserves model/optimizer/
+schedule/RNG, and writes a separate training_complete row. It is never
+best/latest qualification. Exact resume fails closed on pending validation;
+read-only validation is supported. Ordinary checkpoint schema/forward/
+gradients remain unchanged. Fourteen CPU regressions pass, including actual
+train-boundary failure injection. GPU recovery/behavior is untested; fixed
+productione4be3be6 remains immutable, no GPU job restarted. The structural
+S and W/P2 findings below remain the next research path, not this persistence
+repair. Keep standard18/R8 panels on physicalGPU1.
+
+
 
 ### CPU structural findings during GPU interruption (2026-10-08)
 
@@ -1737,8 +1767,9 @@ step12036, BOTH original jobs failed in offline validation with CUDA unknown
 error in the pin-memory thread. Their two continuation statuses are failed
 (FileNotFoundError), not waiting. Do not infer a complete256-offline/final
 checkpoint/panel from the training update count. Preserve failure logs;
-check saved checkpoint identity and missing stages after GPU recovery before
-resuming. GPU0 remains reserved for others after existing work; later audits
+the later direct inventory confirms no final checkpoint in either run.
+Use the original complete B-v1 and the pending-validation protection above
+before any meaningful repeat after GPU recovery. GPU0 remains reserved for others after existing work; later audits
 useGPU2. Do not reclaimGPU0 without further user instruction.
 BS4 remains an authorized fallback; closed-loop execute_rows remains8.
 
