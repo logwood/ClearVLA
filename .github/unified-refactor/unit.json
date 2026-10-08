@@ -1,0 +1,33 @@
+{
+  "schema": "clearvla-reviewed-source-v1",
+  "parent": "a84a7df0d7865fbaf4544050bebffbab98b05eb5",
+  "parent_tree": "5c90ed51c9c3ebdcda70a9c230b789ba8e85f44a",
+  "formatted_base_tree": "e184c25a577749c43502ea80f83a71cff478096c",
+  "source_tree": "75a29e1d0746f72e8a5b83524bf8d2615d95c20e",
+  "format_existing_python": [
+    "clearvla/mainline/causal_identity.py",
+    "clearvla/mainline/config.py",
+    "clearvla/mainline/model/intent.py",
+    "clearvla/mainline/model/policy.py",
+    "clearvla/mainline/model/top.py",
+    "clearvla/mainline/runtime/causal_identity_migration.py",
+    "clearvla/mainline/runtime/checkpoints.py",
+    "clearvla/mainline/v120_core/decoder.py",
+    "clearvla/policy/decoder.py",
+    "scripts/check_unified_model_flow.py",
+    "scripts/run_unified_real_data_check.py",
+    "tests/test_flow_dino_evidence.py",
+    "tests/test_unified_decoder_config_readonly.py"
+  ],
+  "patch_bytes": 45586,
+  "patch_sha256": "a25013ccd5719bab6c255edf242a6ed3ff5dfbf90787d964017128101b0cfc23",
+  "message": "fix: restore explicit ordinary S gradients and close training qualification contracts",
+  "compressed_blobs": [
+    {"sha":"b42aec0457c946874f70fcc88388f0bf5520e60b","size":2250},
+    {"sha":"c842130ced979f1f75d3b7f3a042277ce887fb5b","size":2250},
+    {"sha":"a248f79ac64346eeacaad624970e301f04c1a644","size":2250},
+    {"sha":"89f0ee73049874eac058da5a3e1d54c0c379eb7f","size":2250},
+    {"sha":"6cd1b8c41ebbab732bd6e6ab01d90139f37409fc","size":2250},
+    {"sha":"36c2b11680d6e00c5080a1657a194abe294cf926","size":2010}
+  ]
+}
