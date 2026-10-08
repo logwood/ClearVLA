@@ -83,7 +83,7 @@ from ..operation_expectation import (
 from ..role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, role_value_metadata
 from ..feedback_values import INNOVATION_ONLY, INNOVATION_AND_STATUS, feedback_value_metadata
 from ..p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, p2_effect_value_metadata
-from ..p2_geometry import POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, p2_geometry_metadata
+from ..p2_geometry import POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, p2_geometry_metadata, NAMED_VIEW_TRANSPORT_MODES, POSTERIOR_VIEW_TRANSPORT
 from ..p3_coordination import POINTWISE_PLAN, TYPED_HORIZON_PLAN, p3_coordination_metadata
 from ..robot_execution import robot_execution_metadata
 from ..task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION, task_execution_metadata
@@ -429,8 +429,8 @@ def build_deployment_abi(
         **({"robot_execution": robot_execution_metadata()} if config.top.robot_feedback_mode != "none" else {}),
         **({"p3_coordination": p3_coordination_metadata()}
            if config.top.p3_coordination_mode == TYPED_HORIZON_PLAN else {}),
-        **({"p2_geometry": p2_geometry_metadata(tuple(config.data.camera_names))}
-           if config.top.p2_geometry_mode == VIEW_CONDITIONED_TRANSPORT else {}),
+        **({"p2_geometry": p2_geometry_metadata(tuple(config.data.camera_names), config.top.p2_geometry_mode)}
+           if config.top.p2_geometry_mode in NAMED_VIEW_TRANSPORT_MODES else {}),
         **({"world_robot": world_robot_metadata(state_mode=config.top.state_feature_mode,
                                                state_dim=config.dimensions.state_dim)}
            if config.top.world_robot_condition_mode == OBSERVED_ROBOT_VIEWS else {}),
@@ -658,11 +658,11 @@ def validate_deployment_abi(value: object) -> dict[str, object]:
     elif value_mode != WORLD_EFFECT_VALUES or "p2_effect_values" in abi:
         raise ValueError("unknown or unselected P2 effect-value ABI")
     geometry_mode = graph_top.get("p2_geometry_mode", POOLED_TRANSPORT)
-    if geometry_mode == VIEW_CONDITIONED_TRANSPORT:
+    if geometry_mode in NAMED_VIEW_TRANSPORT_MODES:
         camera_names = observation.get("camera_names")
         if not isinstance(camera_names, list) or not all(isinstance(n, str) for n in camera_names):
             raise ValueError("P2 geometry requires declared deployment camera names")
-        if abi.get("p2_geometry") != p2_geometry_metadata(tuple(camera_names)):
+        if abi.get("p2_geometry") != p2_geometry_metadata(tuple(camera_names), geometry_mode):
             raise ValueError("deployment P2 geometry value semantics differ from trained graph")
     elif geometry_mode != POOLED_TRANSPORT or "p2_geometry" in abi:
         raise ValueError("unknown or undeclared deployment P2 geometry mode")

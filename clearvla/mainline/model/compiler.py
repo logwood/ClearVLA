@@ -22,7 +22,7 @@ from ..instruction_change import (
 )
 from ..operation_expectation import OBJECT_OUTCOME_INTENT, POSTERIOR_INTENT
 from ..p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, P2_EFFECT_VALUE_MODES
-from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
+from ..p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, NAMED_VIEW_TRANSPORT_MODES, POSTERIOR_VIEW_TRANSPORT
 from ..p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from ..robot_execution import RobotResponseFeedback
 from ..task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION, TaskExecutionPlan
@@ -192,7 +192,7 @@ class SelectedIntervalEvidence:
             raise TypeError("selected P2 support must be boolean")
         if self.geometry_mode not in P2_GEOMETRY_MODES:
             raise ValueError("unknown selected P2 geometry value semantics")
-        geometry_width = expected[-1] if self.geometry_mode == VIEW_CONDITIONED_TRANSPORT else 2
+        geometry_width = expected[-1] if self.geometry_mode in NAMED_VIEW_TRANSPORT_MODES else 2
         value_prefix = expected[:4]
         for name in (
             "semantic_value",
@@ -334,7 +334,7 @@ class ObjectFutureEffectReader(nn.Module):
         if effect_value_mode == CONTEXTUAL_EFFECT_VALUES and (
             target_binding_mode != SHARED_TARGET_BINDING or not self.time_grid.aligned
             or task_execution_mode not in JOINT_TASK_EXECUTION_MODES
-            or geometry_mode != VIEW_CONDITIONED_TRANSPORT
+            or geometry_mode not in NAMED_VIEW_TRANSPORT_MODES
         ):
             raise ValueError("S-conditioned P2 values require aligned joint/shared/named-view sources")
         self.effect_value_mode = effect_value_mode
@@ -379,13 +379,13 @@ class ObjectFutureEffectReader(nn.Module):
         if geometry_mode not in P2_GEOMETRY_MODES:
             raise ValueError("unknown P2 geometry mode")
         self.geometry_mode = geometry_mode
-        if geometry_mode == VIEW_CONDITIONED_TRANSPORT and (
+        if geometry_mode in NAMED_VIEW_TRANSPORT_MODES and (
             target_binding_mode != SHARED_TARGET_BINDING or not self.time_grid.aligned
             or self.world_control_mode != "known_prefix_v1"
         ):
             raise ValueError("view-conditioned P2 needs shared target and aligned known controls")
-        self.view_geometry = (ViewConditionedTransport(hidden=hidden, camera_names=camera_names)
-                              if geometry_mode == VIEW_CONDITIONED_TRANSPORT else None)
+        self.view_geometry = (ViewConditionedTransport(hidden=hidden, camera_names=camera_names, posterior=geometry_mode == POSTERIOR_VIEW_TRANSPORT)
+                              if geometry_mode in NAMED_VIEW_TRANSPORT_MODES else None)
 
     def compile_task_execution(
         self, query: Tensor, candidate: CandidateWorld, intent: PolicyIntentDock,
@@ -683,6 +683,17 @@ class ObjectFutureEffectReader(nn.Module):
             -1.0, 0.0
         )
 
+        if self.geometry_mode == POSTERIOR_VIEW_TRANSPORT:
+            from .spatial_posterior import spatial_compatibility
+            probability = dynamics.camera_position_probability
+            if probability is None:
+                raise ValueError("posterior P2 requires current G spatial support")
+            probability = torch.where(camera_support[..., None, None], probability, 0.)
+            coordinate_score = spatial_compatibility(probability, coordinate_query,
+                dynamics.transport_mean, dynamics.transport_covariance, self._covariance_aware_distance)
+            current_coordinate_score = spatial_compatibility(probability, coordinate_query,
+                torch.zeros_like(dynamics.transport_mean), dynamics.transport_covariance, self._covariance_aware_distance)
+
         # Geometry contributes to semantic K selection only through the
         # transport-specific change in coordinate compatibility.  Current
         # position is subtracted under the same covariance, then legal cameras
@@ -776,7 +787,8 @@ class ObjectFutureEffectReader(nn.Module):
         if view_geometry is not None:
             view_support = camera_support[:, None] & semantic_interval_support[..., None]
             view_context = view_geometry.context_features(
-                dynamics.camera_coordinates, dynamics.transport_covariance, view_support
+                dynamics.camera_coordinates, dynamics.transport_covariance, view_support,
+                probability=dynamics.camera_position_probability,
             )
             # The ONLY geometry value projection is here, while K and C are
             # real axes. No raw 2D vector is pooled across different images.

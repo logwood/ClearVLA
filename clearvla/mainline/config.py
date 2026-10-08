@@ -60,7 +60,7 @@ from .operation_expectation import OBJECT_OUTCOME_INTENT, OPERATION_INTENT_MODES
 from .role_values import ADDRESS_ONLY_ROLE, CONTEXTUAL_ROLE_VALUES, ROLE_VALUE_MODES
 from .feedback_values import INNOVATION_ONLY, INNOVATION_AND_STATUS, FEEDBACK_VALUE_MODES
 from .p2_values import CONTEXTUAL_EFFECT_VALUES, WORLD_EFFECT_VALUES, P2_EFFECT_VALUE_MODES
-from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT
+from .p2_geometry import P2_GEOMETRY_MODES, POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT, NAMED_VIEW_TRANSPORT_MODES, POSTERIOR_VIEW_TRANSPORT
 from .p3_coordination import P3_COORDINATION_MODES, POINTWISE_PLAN, TYPED_HORIZON_PLAN
 from .task_execution import JOINT_TASK_EXECUTION_MODES, NO_TASK_EXECUTION
 from .temporal import TIMED_HISTORY_ENCODING
@@ -643,7 +643,7 @@ class TopConfig:
         if self.p3_coordination_mode not in P3_COORDINATION_MODES:
             raise ValueError("unknown top p3_coordination_mode")
         if self.p3_coordination_mode == TYPED_HORIZON_PLAN and (
-            not grid.aligned or self.p2_geometry_mode != VIEW_CONDITIONED_TRANSPORT
+            not grid.aligned or self.p2_geometry_mode not in NAMED_VIEW_TRANSPORT_MODES
             or self.target_binding_mode != "shared_operation_v1"
         ):
             raise ValueError("typed P3 requires aligned, shared-target, named-view P2 context")
@@ -659,12 +659,12 @@ class TopConfig:
         if self.p2_effect_value_mode == CONTEXTUAL_EFFECT_VALUES and (
             self.task_execution_mode not in JOINT_TASK_EXECUTION_MODES
             or self.target_binding_mode != "shared_operation_v1"
-            or not grid.aligned or self.p2_geometry_mode != VIEW_CONDITIONED_TRANSPORT
+            or not grid.aligned or self.p2_geometry_mode not in NAMED_VIEW_TRANSPORT_MODES
         ):
             raise ValueError("S-conditioned P2 values require joint shared-target aligned named views")
         if self.p2_geometry_mode not in P2_GEOMETRY_MODES:
             raise ValueError("unknown top p2_geometry_mode")
-        if self.p2_geometry_mode == VIEW_CONDITIONED_TRANSPORT and (
+        if self.p2_geometry_mode in NAMED_VIEW_TRANSPORT_MODES and (
             self.target_binding_mode != "shared_operation_v1"
             or self.world_robot_condition_mode != "observed_state_views_v1"
             or not grid.aligned
@@ -968,6 +968,8 @@ class ObjectiveConfig:
     # Explicit training-only StackCube current-region/cross-view matching.
     # Zero preserves the historical objective and online graph exactly.
     maniskill_spatial_grounding: float = 0.0
+    maniskill_spatial_identity: float = 0.0
+    maniskill_target_binding: float = 0.0
     flow_warp: float = 0.03
     flow_identity_advantage: float = 0.02
     flow_static_identity: float = 0.01
@@ -1357,15 +1359,25 @@ class ExperimentConfig:
             raise ValueError(
                 "gripper_first_step_release is valid only for the LIBERO continuous outlet"
             )
-        if self.objectives.maniskill_spatial_grounding > 0 and (
+        if any(x > 0 for x in (self.objectives.maniskill_spatial_grounding,
+                                self.objectives.maniskill_spatial_identity,
+                                self.objectives.maniskill_target_binding)) and (
             profile.name != "maniskill_pd_ee_delta_pose_7d_v2"
             or self.top.entity_chart_mode != "current_image_support_v1"
-            or self.top.task_execution_mode != "joint_object_scene_v1"
+            or self.top.task_execution_mode not in JOINT_TASK_EXECUTION_MODES
             or self.observation.candidate_support_mode != "full_posterior_lattice_v1"
             or self.data.camera_names != ("top", "wrist")
             or self.data.cache_side != 336
         ):
             raise ValueError("spatial grounding supervision requires the audited ManiSkill RGB336 full-support graph")
+        if (self.objectives.maniskill_spatial_identity > 0 or self.objectives.maniskill_target_binding > 0) and self.top.target_binding_mode != "shared_operation_v1":
+            raise ValueError("spatial identity supervision requires one shared target binding")
+        if self.top.p2_geometry_mode == POSTERIOR_VIEW_TRANSPORT and (
+            self.dimensions.patches_per_camera != 256
+            or self.top.entity_chart_mode != "current_image_support_v1"
+            or self.top.task_execution_mode != "joint_spatial_effect_v2"
+        ):
+            raise ValueError("posterior geometry requires native 16x16 current G and spatial S v2")
         if float(self.objectives.gripper_first_step_hold) != 0.0 and profile.name not in (
             continuous_relative_profiles
         ):
@@ -1612,6 +1624,9 @@ class ExperimentConfig:
             objectives.pop("gripper_first_step_release", None)
         if self.objectives.gripper_first_step_hold == 0.0:
             objectives.pop("gripper_first_step_hold", None)
+        for name in ("maniskill_spatial_identity", "maniskill_target_binding"):
+            if getattr(self.objectives, name) == 0.0:
+                objectives.pop(name, None)
         if self.objectives.maniskill_spatial_grounding == 0.0:
             objectives.pop("maniskill_spatial_grounding", None)
         if (

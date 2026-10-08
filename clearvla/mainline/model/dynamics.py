@@ -429,6 +429,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         normalization_floor: float = 0.25,
         camera_names: tuple[str, ...] | None = None,
         camera_condition_mode: str = "motion_prior_only",
+        spatial_posterior_mode: bool = False,
         action_condition_mode: str = "interval_mean_v1",
         control_mode: str = LEGACY_WORLD_CONTROL,
         future_time_grid_mode: str = LEGACY_FUTURE_TIME,
@@ -444,6 +445,8 @@ class ObjectFutureDynamicsCompiler(nn.Module):
         self.normalization_floor = float(normalization_floor)
         if self.normalization_floor <= 0.0:
             raise ValueError("W typed normalization floor must be positive")
+        from .spatial_posterior import SpatialPosteriorContext
+        self.spatial_posterior_context = SpatialPosteriorContext(hidden) if spatial_posterior_mode else None
         self.camera_condition_mode = str(camera_condition_mode)
         if self.camera_condition_mode not in self.CAMERA_CONDITION_MODES:
             raise ValueError(
@@ -1085,6 +1088,11 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             dim=-1,
         )
         context = projection(condition_input)
+        if self.spatial_posterior_context is not None:
+            if not isinstance(facts, ObjectWorldBelief) or facts.camera_position_probability is None:
+                raise ValueError("posterior W lost its compact current image law")
+            context = context + self.spatial_posterior_context(
+                facts.camera_position_probability, object_camera_support[..., 0]).to(context.dtype)
         return torch.where(
             object_camera_support,
             context,
@@ -1203,6 +1211,7 @@ class ObjectFutureDynamicsCompiler(nn.Module):
             time_grid_mode=self.time_grid.mode,
             current_reference=current_reference,
             source_content=facts.content,
+            camera_position_probability=(facts.camera_position_probability if isinstance(facts, ObjectWorldBelief) else None),
             successor_content=current_reference[:, None] + semantic_delta,
             semantic_delta=semantic_delta,
             transport_mean=transport,

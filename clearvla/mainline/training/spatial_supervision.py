@@ -123,3 +123,51 @@ def stackcube_grounding_terms(facts: ObjectFactSet,current_rgb: Tensor) -> dict[
         labels = stackcube_region_labels(current_rgb)
         measure = facts.current_image_source.on_image(rows=current_rgb.shape[-2],columns=current_rgb.shape[-1])
         return matched_region_terms(measure,labels)
+
+
+def matched_identity_binding_terms(measure: ImageLogMeasure, labels: StackCubeRegionLabels,
+                                   binding) -> dict[str, Tensor]:
+    """Proper spatial scoring and one shared target label, training plane only.
+
+    One two-object assignment must explain every visible camera. A density
+    label penalizes a second distant mode even when the first is in the right
+    region. No location, binding, or null label is invented for an unseen cube.
+    The operated object is red in this explicitly StackCube-only objective.
+    """
+    b, k, c, h, w = measure.log_mass.shape
+    binding.validate(batch=b, objects=k, device=measure.log_mass.device)
+    if labels.masks.requires_grad or labels.visible.requires_grad:
+        raise ValueError("identity labels must be detached")
+    if labels.masks.shape[:3] != (b, 2, c) or labels.visible.shape != (b, 2, c):
+        raise ValueError("identity labels lost the object/view axes")
+    # Area resampling conserves small visible regions at native DINO resolution.
+    density = F.interpolate(labels.masks.float().reshape(b*2*c, 1, *labels.masks.shape[-2:]),
+                            size=(h, w), mode="area").reshape(b, 2, c, h, w)
+    density = density / density.sum((-2, -1), keepdim=True).clamp_min(1e-30)
+    _, logp = measure.normalized((-2, -1))
+    admitted = labels.visible[:, None]
+    if bool(((density[:, None] > 0) & ~measure.supported[:, :, None]
+             & admitted[..., None, None]).any()):
+        raise ValueError("visible identity label lies outside current G spatial support")
+    per_view = -(density[:, None] * logp[:, :, None]).sum((-2, -1))
+    cost = torch.where(admitted, per_view, 0.).sum(-1) / labels.visible.sum(-1).clamp_min(1)[:, None]
+    present = labels.visible.any(-1)
+    choices = torch.tensor(list(permutations(range(k), 2)), device=logp.device)
+    selected = choices[(cost[:, choices[:, 0], 0] + cost[:, choices[:, 1], 1]).detach().argmin(-1)]
+    batch = torch.arange(b, device=logp.device)
+    selected_cost = cost[batch[:, None], selected, torch.arange(2, device=logp.device)[None]]
+    spatial = torch.where(present, selected_cost, 0.).sum() / present.sum().clamp_min(1)
+    red_logp = binding.log_probability[batch, selected[:, 0]]
+    target = -torch.where(present[:, 0], red_logp, 0.).sum() / present[:, 0].sum().clamp_min(1)
+    return {"spatial_identity": spatial, "spatial_target_binding": target,
+            "spatial_visible_target_mass": torch.where(present[:, 0], red_logp.exp(), 0.).sum().detach()
+                / present[:, 0].sum().clamp_min(1),
+            "spatial_identity_visible_views": labels.visible.sum().float()}
+
+
+def stackcube_identity_binding_terms(facts: ObjectFactSet, current_rgb: Tensor, binding) -> dict[str, Tensor]:
+    if facts.current_image_source is None or binding is None:
+        raise ValueError("identity supervision requires current G law and the shared target binding")
+    with torch.autocast(device_type=current_rgb.device.type, enabled=False):
+        return matched_identity_binding_terms(facts.current_image_source.on_image(rows=16, columns=16),
+                                             stackcube_region_labels(current_rgb), binding)

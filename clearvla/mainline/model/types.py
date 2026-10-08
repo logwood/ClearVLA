@@ -731,7 +731,7 @@ class ObjectFactSet:
             reconstruction_error=self.reconstruction_error,
         )
 
-    def world_belief(self, *, robot_observation: RobotWorldObservation | None = None) -> "ObjectWorldBelief":
+    def world_belief(self, *, robot_observation: RobotWorldObservation | None = None, retain_spatial_law: bool = False) -> "ObjectWorldBelief":
         """Export only the current object evidence needed by a W rerun.
 
         Deployment may perform one outer action-world refinement.  Retaining
@@ -741,7 +741,13 @@ class ObjectFactSet:
         """
 
         self.validate()
+        probability = None
+        if retain_spatial_law:
+            if self.current_image_source is None:
+                raise ValueError("posterior W requires the original current G image law")
+            probability, _ = self.current_image_source.on_image(rows=16, columns=16).normalized((-2, -1))
         return ObjectWorldBelief(
+            camera_position_probability=probability,
             robot_observation=robot_observation,
             content=self.content,
             semantic=self.semantic,
@@ -780,6 +786,7 @@ class ObjectWorldBelief:
     log_validity: Tensor  # [B,K,1]
     latest_flow_steps: Tensor | None = None
     robot_observation: RobotWorldObservation | None = None
+    camera_position_probability: Tensor | None = None  # FP32 [B,K,C,16,16], current G only
 
     @property
     def batch(self) -> int:
@@ -808,6 +815,9 @@ class ObjectWorldBelief:
         )
 
     def validate(self) -> None:
+        if self.camera_position_probability is not None:
+            from .spatial_posterior import validate_spatial_probability
+            validate_spatial_probability(self.camera_position_probability, self.camera_coordinates)
         if self.robot_observation is not None:
             self.robot_observation.validate(batch=self.batch, device=self.content.device)
         if self.latest_flow_steps is not None:
@@ -852,6 +862,7 @@ class ObjectWorldBelief:
             raise ValueError("world-belief permutation must contain every object")
         index = permutation.to(device=self.content.device, dtype=torch.long)
         return ObjectWorldBelief(
+            camera_position_probability=(None if self.camera_position_probability is None else self.camera_position_probability[:, index]),
             robot_observation=self.robot_observation,
             content=self.content[:, index],
             semantic=self.semantic[:, index],
@@ -2264,6 +2275,7 @@ class FutureObjectDynamics:
 
     time_grid_mode: str = LEGACY_FUTURE_TIME
     source_content: Tensor | None = None  # exact G chart owner before masked/detached reference
+    camera_position_probability: Tensor | None = None  # exact compact current G law
 
     @property
     def intervals(self) -> int:
@@ -2322,6 +2334,9 @@ class FutureObjectDynamics:
         return self._interval_innovation(self.transport_mean)
 
     def validate(self, *, expected_intervals: int = 4) -> None:
+        if self.camera_position_probability is not None:
+            from .spatial_posterior import validate_spatial_probability
+            validate_spatial_probability(self.camera_position_probability, self.camera_coordinates)
         grid = resolve_future_time(self.time_grid_mode)
         if self.control_domain is not None:
             self.control_domain.validate(intervals=expected_intervals)
@@ -2416,6 +2431,7 @@ class FutureObjectDynamics:
             ),
             control_domain=self.control_domain,
             source_content=None if self.source_content is None else self.source_content[:, index],
+            camera_position_probability=(None if self.camera_position_probability is None else self.camera_position_probability[:, index]),
         )
 
     @classmethod

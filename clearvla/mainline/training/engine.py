@@ -1069,6 +1069,12 @@ class MainlineTrainingEngine:
             spatial_terms = stackcube_grounding_terms(
                 encoded.training_state.top.facts, batch.online.observation.raw_rgb[:, -1],
             )
+        if self.config.objectives.maniskill_spatial_identity > 0 or self.config.objectives.maniskill_target_binding > 0:
+            from .spatial_supervision import stackcube_identity_binding_terms
+            spatial_terms = {} if spatial_terms is None else spatial_terms
+            spatial_terms.update(stackcube_identity_binding_terms(
+                encoded.training_state.top.facts, batch.online.observation.raw_rgb[:, -1],
+                encoded.training_state.top.intent.target_binding))
         ledger = compose_losses(
             self.config,
             policy_output=output,

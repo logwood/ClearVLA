@@ -6,7 +6,9 @@ from .future_time import CONTROL_ALIGNED_FUTURE_TIME, resolve_future_time
 
 POOLED_TRANSPORT = "pooled_transport_v1"
 VIEW_CONDITIONED_TRANSPORT = "view_conditioned_transport_v1"
-P2_GEOMETRY_MODES = (POOLED_TRANSPORT, VIEW_CONDITIONED_TRANSPORT)
+POSTERIOR_VIEW_TRANSPORT = "posterior_view_transport_v2"
+NAMED_VIEW_TRANSPORT_MODES = (VIEW_CONDITIONED_TRANSPORT, POSTERIOR_VIEW_TRANSPORT)
+P2_GEOMETRY_MODES = (POOLED_TRANSPORT, *NAMED_VIEW_TRANSPORT_MODES)
 
 
 def validate_camera_names(names: tuple[str, ...]) -> None:
@@ -18,11 +20,16 @@ def validate_camera_names(names: tuple[str, ...]) -> None:
         raise ValueError("P2 geometry requires nonempty unique camera chart names")
 
 
-def p2_geometry_metadata(camera_names: tuple[str, ...]) -> dict[str, object]:
+def p2_geometry_metadata(camera_names: tuple[str, ...], mode: str = VIEW_CONDITIONED_TRANSPORT) -> dict[str, object]:
     validate_camera_names(camera_names)
+    if mode not in NAMED_VIEW_TRANSPORT_MODES:
+        raise ValueError("unknown named-view geometry mode")
     return {
-        "schema": "p2-view-conditioned-transport-v1",
-        "mode": VIEW_CONDITIONED_TRANSPORT,
+        **({"current_spatial_law": "native-16x16-per-K-per-camera-FP32",
+            "location_read": "full-raster-Hellinger-context-and-log-expected-compatibility"}
+           if mode == POSTERIOR_VIEW_TRANSPORT else {}),
+        "schema": ("p2-posterior-view-transport-v2" if mode == POSTERIOR_VIEW_TRANSPORT else "p2-view-conditioned-transport-v1"),
+        "mode": mode,
         "camera_names": list(camera_names),
         "role_basis": sorted(camera_names),
         "input": "current-image-normalized-xy-displacement-per-named-camera",

@@ -15,7 +15,7 @@ from ..instruction_change import POSTERIOR_REFERENCE_CHANGE, TYPED_CHANGE_MODES
 from ..instruction_reference import InstructionReference
 from ..interfaces import CurrentObservation, FutureSupervision, ObservableHistory, OnlinePolicyInput
 from ..operation_expectation import OBJECT_OUTCOME_INTENT
-from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT
+from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT, NAMED_VIEW_TRANSPORT_MODES, POSTERIOR_VIEW_TRANSPORT
 from ..robot_execution import RobotResponseFeedback
 from ..supervision import quarantine, supported_mean
 from ..task_execution import JOINT_TASK_EXECUTION_MODES
@@ -233,7 +233,7 @@ class OnlinePolicyCache:
             horizon=config.dimensions.action_horizon,
         )
         _validate_configured_world_action_condition(self.top.action_condition, config)
-        if config.top.p2_geometry_mode == VIEW_CONDITIONED_TRANSPORT and self.top.predicted_dynamics.camera_names != tuple(config.data.camera_names):
+        if config.top.p2_geometry_mode in NAMED_VIEW_TRANSPORT_MODES and self.top.predicted_dynamics.camera_names != tuple(config.data.camera_names):
             raise ValueError("cached W camera charts differ from P2 configuration")
         if self.top.predicted_dynamics.time_grid_mode != config.top.future_time_grid_mode or self.top.intent.time_grid_mode != config.top.future_time_grid_mode:
             raise ValueError("cached intent/world time grid differs from selected graph")
@@ -295,7 +295,7 @@ class OnlineTrainingState:
             horizon=config.dimensions.action_horizon,
         )
         _validate_configured_world_action_condition(self.top.action_condition, config)
-        if config.top.p2_geometry_mode == VIEW_CONDITIONED_TRANSPORT and self.top.predicted_dynamics.camera_names != tuple(config.data.camera_names):
+        if config.top.p2_geometry_mode in NAMED_VIEW_TRANSPORT_MODES and self.top.predicted_dynamics.camera_names != tuple(config.data.camera_names):
             raise ValueError("cached W camera charts differ from P2 configuration")
         if self.top.predicted_dynamics.time_grid_mode != config.top.future_time_grid_mode or self.top.intent.time_grid_mode != config.top.future_time_grid_mode:
             raise ValueError("cached intent/world time grid differs from selected graph")
@@ -669,7 +669,8 @@ class ClearVLAMainlinePolicy(nn.Module):
         past_facts,_=self.grounding.materialize_facts(evidence.local_facts,collect_diagnostics=False)
         controls=self.outlet_adapter.executed_world_condition(safe(window.commands),safe(window.action_state),window.observed)
         predicted=self.world.dynamics.predict_executed_endpoint(
-            facts=past_facts.world_belief(robot_observation=RobotWorldObservation(
+            facts=past_facts.world_belief(retain_spatial_law=self.config.top.p2_geometry_mode == POSTERIOR_VIEW_TRANSPORT,
+                robot_observation=RobotWorldObservation(
                 state=safe(window.state),feature_mode=self.config.top.state_feature_mode)),action=controls)
         current=policy_input.observation.dino_history
         grid=self.observation.observation_supports(safe(current[:,-1:]))
@@ -843,7 +844,8 @@ class ClearVLAMainlinePolicy(nn.Module):
         )
         self.outlet_adapter.validate_world_condition(action_condition)
         world_belief = (
-            facts.world_belief(robot_observation=RobotWorldObservation(
+            facts.world_belief(retain_spatial_law=self.config.top.p2_geometry_mode == POSTERIOR_VIEW_TRANSPORT,
+                robot_observation=RobotWorldObservation(
                 state=conditioned_policy_input.history.state,
                 feature_mode=self.config.top.state_feature_mode,
             )) if self.config.top.world_robot_condition_mode == OBSERVED_ROBOT_VIEWS else None

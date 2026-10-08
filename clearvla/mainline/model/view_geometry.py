@@ -14,11 +14,13 @@ from ..p2_geometry import validate_camera_names
 
 
 class ViewConditionedTransport(nn.Module):
-    def __init__(self, *, hidden: int, camera_names: tuple[str, ...]) -> None:
+    def __init__(self, *, hidden: int, camera_names: tuple[str, ...], posterior: bool = False) -> None:
         super().__init__()
         validate_camera_names(camera_names)
         if hidden < 1:
             raise ValueError("P2 view geometry hidden width must be positive")
+        from .spatial_posterior import SpatialPosteriorContext
+        self.spatial_posterior_context = SpatialPosteriorContext(hidden) if posterior else None
         self.hidden = hidden
         self.camera_names = tuple(camera_names)
         # Role columns have canonical named order, NOT input tensor order.
@@ -43,7 +45,7 @@ class ViewConditionedTransport(nn.Module):
         if names != self.camera_names:
             raise ValueError("W/P2 named camera charts differ or are missing")
 
-    def context_features(self, coordinates: Tensor, covariance: Tensor, support: Tensor) -> Tensor:
+    def context_features(self, coordinates: Tensor, covariance: Tensor, support: Tensor, probability: Tensor | None = None) -> Tensor:
         """[B,K,C,2], [B,I,K,C,3], Bool[B,I,K,C] -> [B,I,K,C,H]."""
         if covariance.ndim != 5 or covariance.shape[-1] != 3:
             raise ValueError("P2 covariance must retain [B,I,K,C,3]")
@@ -63,6 +65,14 @@ class ViewConditionedTransport(nn.Module):
         first = self.context[0]
         assert isinstance(first, nn.Linear)
         context = self.context(inputs.to(dtype=first.weight.dtype))
+        if self.spatial_posterior_context is not None:
+            if probability is None:
+                raise ValueError("posterior P2 lost the current spatial law")
+            from .spatial_posterior import validate_spatial_probability
+            validate_spatial_probability(probability, coordinates)
+            context = context + self.spatial_posterior_context(probability, support.any(1))[:, None].to(context.dtype)
+        elif probability is not None:
+            raise ValueError("legacy P2 cannot silently consume a new spatial law")
         return torch.where(support[..., None], context, 0.0)
 
     def image_queries(self, action_query: Tensor, projection: nn.Linear) -> Tensor:

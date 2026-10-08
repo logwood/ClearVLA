@@ -1694,6 +1694,36 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### 2026-10-08 ManiSkill structural spatial repair (explicit opt-in)
+
+`maniskill_spatial_policy_full_20261008.json` selects `joint_spatial_effect_v2`
+and `posterior_view_transport_v2`. S evaluates task/robot-conditioned spatial
+features before expectation. W's compact belief and W->P2 values retain the
+same current G FP32 `[B,K,C,16,16]` conditional law; this is not a dense DINO
+chart, new tracker, future label, or second object owner. W and P2 read full
+raster Hellinger features inside each K/C, and P2 integrates image-query
+compatibility over the full law instead of scoring only its centroid. Zero W
+effects still produce zero geometry values. Mean coordinates retain their
+legacy diagnostics/transport-reference meaning and are not metric robot poses.
+
+Training-only `maniskill_spatial_identity` scores current RGB cube-region
+densities on the native chart under one joint-camera two-object assignment.
+`maniskill_target_binding` supervises the existing K+null law using that same
+assignment for the StackCube operated red cube. Invisible object/views own no
+spatial or binding label; unmatched slots and null remain unforced. No masks,
+colors, assignments, or oracle poses enter deployment. Legacy modes and zero
+objective serialization remain unchanged; the new P2 mode has a distinct ABI.
+
+This repair responds to the saved 364-query structural audit: equal-centroid
+laws aliased at W/P2, 18 confident cross-view identity conflicts occurred among
+76 eligible candidate slot comparisons, and shared target binding averaged
+about 3.8 effective slots. It is a representation/training repair, not evidence
+of task success. Qualification: `tests/test_maniskill_spatial_policy_*.py`,
+native spatial-v2 regression tests, then real RGB/DINO policy update preflight.
+The full run starts fresh for 20 full epochs with full validation; no old pilot
+checkpoint is relabeled or warm-started. Training/evaluation receipts belong
+under the experiment directory, not this document.
+
 The historical default and the accumulated structural candidate are different
 explicit graphs. Do not read legacy scalar constants below as overriding a
 serialized candidate selection. Neither graph is promoted by passing unit tests.

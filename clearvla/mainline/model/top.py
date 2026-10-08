@@ -166,6 +166,8 @@ class DeploymentTopCache:
 
     def validate(self, *, hidden: int, horizon: int) -> None:
         self.belief.validate()
+        if self.predicted_dynamics.camera_position_probability is not self.belief.camera_position_probability:
+            raise ValueError("cached W must retain the exact current G spatial law")
         self.intent.validate(horizon=horizon, hidden=hidden)
         if self.intent.time_grid_mode != self.predicted_dynamics.time_grid_mode:
             raise ValueError("top S/W time grid mismatch")
@@ -327,6 +329,7 @@ class ObjectIntentDynamicsTop(nn.Module):
             task_execution_mode=task_execution_mode, role_value_mode=task_role_value_mode,
         )
         self.dynamics = ObjectFutureDynamicsCompiler(
+            spatial_posterior_mode=p2_geometry_mode == "posterior_view_transport_v2",
             future_time_grid_mode=future_time_grid_mode,
             hidden=hidden,
             content_dim=content_dim,

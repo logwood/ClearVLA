@@ -2560,7 +2560,8 @@ def compose_losses(
         collect_diagnostics=collect_diagnostics,
     )
     objective = config.objectives
-    if (objective.maniskill_spatial_grounding > 0) != (spatial_grounding_terms is not None):
+    if any(x > 0 for x in (objective.maniskill_spatial_grounding, objective.maniskill_spatial_identity,
+                           objective.maniskill_target_binding)) != (spatial_grounding_terms is not None):
         raise ValueError("spatial labels/loss differ from the selected training objective")
     action_group = (
         action["action_flow"]
@@ -2614,10 +2615,14 @@ def compose_losses(
     elif goal_terms is not None:
         raise ValueError("unselected endpoint objective supplied")
     execution_group = objective.execution_value * execution["execution_value"]
-    spatial_contribution = None
+    spatial_contributions = {}
     if spatial_grounding_terms is not None:
-        spatial_contribution = objective.maniskill_spatial_grounding * spatial_grounding_terms["spatial_grounding"]
-        representation_group = representation_group + spatial_contribution
+        for term, weight in (("spatial_grounding", objective.maniskill_spatial_grounding),
+                             ("spatial_identity", objective.maniskill_spatial_identity),
+                             ("spatial_target_binding", objective.maniskill_target_binding)):
+            if weight > 0:
+                spatial_contributions[term] = weight * spatial_grounding_terms[term]
+                representation_group = representation_group + spatial_contributions[term]
     response = top_targets.robot_response_loss
     if config.top.robot_feedback_mode != "none":
         if response is None or response.ndim != 0:
@@ -2716,7 +2721,7 @@ def compose_losses(
         contributions["annotated_goal"] = objective.annotated_goal * goal_terms["annotated_goal_total"]
     if spatial_grounding_terms is not None:
         terms.update(spatial_grounding_terms)
-        contributions["spatial_grounding"] = spatial_contribution
+        contributions.update(spatial_contributions)
     if top_targets.operation_terms is not None:
         terms.update(top_targets.operation_terms)
     if response is not None:
