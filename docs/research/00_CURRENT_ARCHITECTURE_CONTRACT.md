@@ -1694,6 +1694,21 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+
+### Independent future-frame support candidate (2026-10-08)
+
+Section34.33.19 confirms that current training augmentation was copied to
+independently observed future target coordinates. Explicit
+source_consistent_v2 (7899ec6b) restricts the source with its own mask and the
+target with its actual frame availability. No source is unmasked and missing
+frames remain unknown. Fully observed calls are bitwise equal; v1 config/ABI
+replay is preserved. The real four-BS8 target audit and six regressions pass,
+but two-update/cold-load A/B mechanical qualification is still queued.
+No formal training has started. Preserve the immutable T3 identity short and
+its complete evaluation queues. This support repair does not fix diffuse
+descriptor destinations, long-gap visibility, endpoint conditioning or control.
+
+
 ### Command-preserving endpoint recoding audit (2026-10-08)
 
 Section 34.33.18 isolates the redundant arm-field axis at the binary endpoint

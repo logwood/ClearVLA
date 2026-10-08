@@ -3814,3 +3814,67 @@ all failures, or prove the alternative policy's later replanning behavior.
 Keep the production endpoint untouched. Evidence:
 AB-endpoint-gripper-local-branch-r1, probe545d06f3, exact two-row plan/trajectory
 hashes and isolated baseline/repeat/changed logs retained in its receipt.
+
+
+### 34.33.19 Independent successor support under current augmentation (2026-10-08)
+
+A separate target-construction defect is now reproduced in the actual masked
+BS8 training entry. source_measurement.py copied the current source pixel mask
+onto every independently supplied future frame. Current support comes from
+restored_observation.py's inverse context mask; it limits which source cells
+G may read. Future teacher content is pooled and normalized from the complete
+future frames in flow_dino_evidence.py:11888-11941 and passed through
+policy.py:1055-1070. Availability there is per future frame, not a copy of the
+current spatial augmentation. A valid source that moves into a source-mask
+hole therefore loses a supplied target candidate for an unrelated reason.
+
+The read-only B-v2 audit uses four actual BS8 batches, explicit training_mask,
+the complete step12036 checkpoint and unchanged W predictions/loss reduction.
+Source support is0.625 in each batch; the excluded independently supplied
+future values are finite with RMS about0.999962. Removing only the copied
+target mask changes the actual future_dynamics objective by+5.31%,+3.15%,
++3.30%,+3.70% and a successor semantic component by up to0.044939. These are
+changed targets for a fixed prediction, not reduced loss or learned improvement.
+All unmasked executed-history measurement fields and current references remain
+exactly equal. The probe makes no backward or optimizer update.
+
+Evidence: B-nullv2-future-measurement-support-r1/{results,decision-summary}.json;
+probe c3b31263, production runtime0e861f56. Reproduce using that receipt and
+probe_future_measurement_support.py. Its descriptor-translation fixture
+separately shows a known visible point can move into a masked source location:
+correct target mass changes0 to1. This is an algebraic control, not a claim
+that natural-scene correspondences are exact.
+
+The explicit top.observation_measurement_mode=source_consistent_v2 repair
+(7899ec6b) keeps the source mask, source G restriction and actual target-frame
+availability; it never copies source augmentation to target coordinates.
+Missing future frames stay unknown. Hidden source values are not restored from
+future data. No new parameter, selector, online input, cached value, solver
+budget or learned confidence threshold is introduced. Fully observed calls
+are bitwise equal to source_consistent_v1. The instruction-start matcher and
+its diffuse long-gap destination distribution are unchanged and remain open.
+
+Six numerical/support tests pass, including moved endpoints, missing target
+NaN quarantine, hidden source, same-image/static and full-support parity.
+Old A, B-v2 and B-regions-v3 serialized config payloads/digests are exactly
+equal to their own original runtimes; the new selector has an explicit ABI
+and passes the mature-a2 migration configuration contract. These checks are
+recorded in independent-observation-support-regression-r1.json. Preserve v1
+for exact replay. Earlier test-harness tuple/list comparison failures and the
+float32 null-sum tolerance correction are retained separately; neither was a
+production failure.
+
+AB-source-support-v2-mechanical-r1 is queued on an idle GPU6. Its fixed runtime
+is causal-identity-training-7899ec6b and runner78e27f81. It will independently
+run A and B-regions-v3 through two real BS8 updates plus two offline batches
+from the same mature step11012 checkpoint, then each saved checkpoint through
+four cold factual windows. B retains the complete pinned76-pair mechanical
+annotation manifest and both added region objectives. This is mechanical
+qualification only, not formal promotion or evidence of improved behavior.
+
+The existing T3/56c217d5 B-v3 annotation/1024-update short, standard18 panel,
+broad qualifier and final full-VJP queue remain untouched. The new mask fix
+must not silently change that immutable experiment. Its compact region labels
+can be reused for a future explicitly identified combined candidate; neither
+RGB/DINO value reuse nor reduced exposure is allowed. Both formal A/B runs
+remain pending the meaningful short-run structural and behavior gates.
