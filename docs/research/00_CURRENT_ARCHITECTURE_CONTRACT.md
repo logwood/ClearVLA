@@ -1695,6 +1695,30 @@ execution adaptation from being accidentally disabled by a short repair test.
 ## Agent quick contract
 
 
+### Identity-loss migration is a behavioral hypothesis, not an admitted repair (2026-10-08)
+
+Research34.33.24 isolates the B-v1 -> B-v2 transition: support filtering,
+conditional real-K instead of joint K+null JS, and a supported-count denominator
+changed together. Same mature initialization/exposure, online graph and panel;
+the two runs were independently trained. Standard17/18 ->12/18 loses five
+cases. In the same60 physical observations, top-view different-object conditional
+K TV median .4133 -> .0548 (78 identical supported pairs); this excludes absolute
+null mass and does not certify v1 semantic identity.
+
+Two fixed-final-checkpoint real-BS8 CPU FP32 local-logit probes reproduce both
+production objectives exactly. At final v1 weights, support filtering alone
+gives online derivative L2 .65-.78x/cosine~.90; subsequent denominator and
+conditional changes yield full v2 9.10-10.15x/cosine .066-.078.
+These are NOT whole-model gradients, historical initial updates, or Adam steps.
+Matched object separation and objective pressure justify reexamining the repair;
+five-case causal attribution still requires a controlled training split.
+Preserve17/18 as the behavior reference, legal supports and known null-escape
+closure. Split objective/reduction choices; do not silently revert the escape,
+unmask policy evidence, balance slots or amplify common S/P3 values.
+No new production mode or training was admitted by this audit.
+
+
+
 ### B-v3 completed panel and supervision routing (2026-10-08)
 
 Research34.33.23 records the immutable T3/56c217d5 short at epoch1/step12036:
@@ -1715,9 +1739,16 @@ parameter checks pass. This is not a production BF16 parameter VJP or a physical
 object/behavior qualification. Independent source keys omit the actual online
 typed/context/history branches; shared gradients remain possible.
 
-The existing ready-short runner is awaiting an idle GPU for full ordinary VJP
-and old/own physical-object/natural-command qualification. Do not duplicate jobs.
-Inspect online-specific parameter and factual evidence before selecting a repair;
+The existing ready-short runner completed the full ordinary GPU VJP at12:29UTC
+and is running broad qualification onGPU6 (matched60 at12:40UTC). Do not duplicate
+jobs. On the first actual BS8 batch, new region-separation gradients reach shared
+slot/content/coordinate parameters, but online-only typed/context/history keys
+are connected with exactly zero derivative; their total-loss gradients are
+finite nonzero. Source-only region prediction has no direct online-key path by
+design. This one batch supports the coverage diagnosis, not an all-update claim.
+Common-source controls completed24windows, preserving exact K-renumbering and
+production loss reproduction; they exclude v3's extra region objectives.
+Inspect full factual evidence before selecting a repair;
 do not unmask hidden policy inputs, weaken support validity, or inflate the
 weight merely to raise pair counts. T4 source_consistent_v2 is separately
 mechanically qualified and NOT included in this T3 result. Original formal A/B

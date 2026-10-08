@@ -4162,3 +4162,140 @@ SAM B-v2结构长跑继续独立：region-fusion正在训练，slot-feedback仍�
 - `python probes/audit_standard_identity_panel.py --panel E/B-regions-v3-short-bs8-1024-r1-closed-loop-replan8 --reference A=E/A-short-bs8-1024-r1-closed-loop-replan8 --reference B_v1=E/B-short-bs8-1024-r1-closed-loop-replan8 --reference B_v2=E/B-nullv2-short-bs8-1024-r1-closed-loop-replan8 --output NEW_AUDIT.json`
 - `python probes/probe_identity_region_operands.py --checkpoint E/B-regions-v3-short-bs8-1024-r1/checkpoints/best.pt --plan E/B-regions-v3-short-exposure-r1.json --output NEW_DIR --device cpu --batches 4`
 - 完整任务receipt、原始结果和NPZ保留E；本节仅记录决策统计，CPU操作数探针源为`74b56cbb`。
+
+### 34.33.24 Reconsidering the v1 -> v2 behavioral regression (2026-10-08)
+
+The user asks whether earlier repairs themselves damaged behavior. The strongest
+new evidence concerns the B-v1 -> B-v2 objective transition, before v3's added
+region losses. Both runs separately initialize from the same mature a2 step11012;
+B-v2 did NOT continue training the completed B-v1 weights. They declare the same
+1024BS8/8192 samples, fresh Adam/100warmup,256offline, and standard18-R8 setup.
+Their serialized configs differ only in output_dir and identity_supervision_mode.
+The actual3a843999 ->0e861f56 change affects training/identity.py and explicit
+mode admission/metadata; no online forward consumer or architecture is changed.
+
+The transition bundled three distinct changes:
+1. Exclude identity pairs outside the actual online producer's support.
+2. Replace joint K+null JS with conditional real-K JS before interpolation.
+3. Divide by the remaining supported-pair count instead of the original
+   sensor-admitted count.
+
+The invalid-support and null-escape defects remain established. However,
+removing a mathematical escape is not evidence that the replacement objective
+preserves task behavior. The conditional positive-only objective still permits
+different physical objects to share the same K law.
+
+**Matched physical and behavioral evidence.** The same60 recorded observations
+have identical physical masks and producer-supported pixels in the v1/v2 probe.
+Their physical-read implementation is unchanged; the later probe only adds
+canonical atom diagnostics. Eligible pair sets agree exactly.
+
+| Conditional real-K read statistic | B-v1 | B-v2 |
+| --- | ---: | ---: |
+| Different-object TV median, top78 pairs | .413323 | .054797 |
+| Different objects sharing dominant K, top | 55.13% | 85.90% |
+| Different-object TV median, wrist9 pairs | .114230 | .065316 |
+| Different objects sharing dominant K, wrist | 88.89% | 100% |
+
+These reads are conditioned on real allocation within supported physical-object
+pixels. They exclude absolute real/null mass and do not certify semantic identity
+in v1. The large top-view decrease nevertheless demonstrates that the same
+distinct visible objects have become less distinguishable through this K read.
+Cross-view agreement alone must not be treated as improved identity.
+
+The standard score falls17/18 ->12/18, losing03/09/10/14/15 and gaining none.
+The indirect successes05/11 occur in both versions and cannot explain these five
+lost cases. All five already differ in their first native-arm plan under the
+identical initial observation: first8 RMS .00232-.00307 in native action units,
+not meters. First recorded TCP differences above1mm occur at states14/13/21/35/12;
+first gripper disagreements at81/46/17/44/44. The1mm marker is audit-only.
+After the initial plan, same-clock differences contain changed state feedback
+and are not controlled module interventions. Later controller accumulation
+cannot account for the earliest learned-plan difference; the precise causal
+contribution of each later contact/gripper/withdrawal event is still unresolved.
+Reproducible comparator: probes/compare_identity_migration_evidence.py
+(source5b86bac6); result B-v1-v2-repair-regression-evidence-r1.json.
+Separate progress/contact details remain in
+B-v1-v2-regression-trajectory-comparison-r1.json.
+
+**Separate the objective changes on fixed real evidence.**
+probes/probe_identity_migration_components.py (fixed source52154e64) runs two
+identical real BS8 batches per completed checkpoint, explicit training_mask,
+clock12036, CPU FP32, and zero parameter/optimizer updates. The original live
+online/source encoders supply the evidence. Both actual v1/v2 production
+identity objectives reproduce with exactly zero scalar error in all four
+batch/checkpoint combinations; their unchanged source MSE is exactly identical.
+The independently reconstructed joint law differs by at most2.39e-7.
+The r1 proxy omitted the existing observation normalizer and failed; preserve
+its failed receipts/logs and LAUNCH_CORRECTION. The r2 fix only restores that
+reference in the read-only production replay.
+
+At the FINAL B-v1 checkpoint, online allocation-logit gradients are:
+
+| Controlled change | L2 ratio, two BS8 batches | Cosine with preceding gradient |
+| --- | ---: | ---: |
+| Support filter only, retain original denominator | .785 / .649 | .900 / .896 |
+| Then divide by supported count | 4.050 / 4.263 | .960 / .892 |
+| Then conditional real-K objective | 2.864 / 3.667 | .079 / .068 |
+| Complete v2 versus original v1 | 9.099 / 10.152 | .078 / .066 |
+
+The first batch keeps cross-camera207/899 and897/4946 pairs; its retained
+cross-camera pairs receive4.34x and5.51x reduction weights. Temporal pairs keep
+3934/7180 and2671/5491. This does not prove that retaining the old denominator is
+the right repair; it establishes an implicit supervision reweighting.
+At final B-v2 weights the complete online gradient ratio is2.98/2.57, cosine
+.743/.785. The conditional-versus-supported-joint gradients are now almost
+parallel (.999/.997), consistent with real mass already near one.
+
+These are derivatives of the raw identity loss with respect to final
+source/online K+null LOGITS, not parameter VJPs or Adam steps. They were measured
+at separately trained final checkpoints, not at the shared historical
+initialization. No claim of a10x full-model update or a causal five-case rescue
+is justified. The large local objective change, coupled with matched physical
+separation loss, prioritizes this transition for a controlled training split.
+Combined identity/limits/results:
+B-v1-v2-identity-migration-components-summary-r1.json; raw runs
+B-{v1,v2}-identity-migration-components-cpu-r2.
+Reproduce using runtimeT2 and fixed probe52154e64:
+`python probes/probe_identity_migration_components.py --checkpoint CHECKPOINT --plan E/B-regions-v3-short-exposure-r1.json --batches 2 --output NEW_DIR`.
+
+**v3 ordinary VJP continuation now complete.** At12:29UTC the existing ready
+runner acquired GPU6 without stopping another job and completed the full
+ordinary training-loss VJP, then began broad qualification. Same first declared
+BS8 sample IDs as the CPU audit, actual T3 checkpoint12036, explicit training
+mask, no optimizer update or parameter .grad write.
+New region-separation weighted loss .00054560 reaches slot_seed/content/coordinate
+(L2 .00423/.00248/.000307), while online-only semantic/appearance/geometry/context/
+history keys are connected but have exactly zero derivative on THIS batch.
+Their total-loss gradients are finite nonzero. Region prediction .00590976
+does not connect to these online-only keys by its source-only design.
+Thus this is not a dead entire G; it confirms the direct branch coverage gap
+from34.33.23 at the ordinary parameter-gradient boundary for one batch.
+Do not generalize one VJP to every historical update. Output remains
+B-regions-v3-module-vjp-short-r1/results.json; orchestration status is
+B-regions-v3-module-vjp-short-r2-job/status.json.
+
+The v3 common source controls also finished:12episodes/24windows, production
+reproduction <=2.98e-8, shared K-renumbering error0. Other-episode whole-source
+substitution increases directional MSE1.78/5.25/3.90/3.63%, K-value mismatch
+29.36/47.64/40.64/26.49%. These are equal means over6 actual four-window batches,
+not an audit of additional region objectives or proof of physical identity.
+See B-regions-v3-source-dependence-short-r1/decision-summary.json.
+At12:40UTC the preserved broad runner is processing matched60 factual windows;
+its own-trajectory stages remain queued, not complete.
+
+**Decision.** Retain17/18 as the behavioral reference, preserve the justified
+support fix, and separate conditional normalization from loss reduction before
+another mainline promotion. Candidate testing should explicitly compare original
+sensor-exposure and supported-pair reductions while retaining producer validity;
+the former is a hypothesis, not an admitted repair. Supported joint K+null can
+be an explanatory ablation only, because its null escape remains. Examine
+gradient competition with action/world and ensure independently justified
+different-object constraints reach the actual online G. Do not unmask policy
+inputs, restore the known escape as a final solution, force balanced occupancy,
+or enlarge S/P3 merely to improve a scalar. A causal training split from the
+same initialization/exposure and real natural-target/contact/maintenance evidence
+are still required. No new production mode or experiment was launched here.
+The existing v3 broad audit and separately authorized B-v2 SAM long trials
+continue. T4 future-support repair and other measurement/controller questions
+keep their separate scope.
