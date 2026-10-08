@@ -3724,3 +3724,93 @@ shards2/3 continue on GPUs4/6 (PID2093169/2116886). The short-training config
 has not yet been generated. Pipeline/panel/broad qualification/full-VJP
 watchers are alive and unchanged. Formal A/B remain subject to the complete
 short-run structural and behavior review.
+
+
+### 34.33.18 Command-preserving endpoint representation audit (2026-10-08)
+
+The endpoint head consumes the two arm representations before physical decoding:
+training/engine.py:1053, endpoint_supervision.py:60-74,
+runtime/sampling.py:263-292, model/components.py:1977,2097-2120 and
+model/action_codec.py:240-255. Clean labels have consistent value/difference
+coordinates; the integrated field need not. This is a narrower question than
+the different-arm exposure comparison in 34.22.
+
+probe_endpoint_arm_representation.py uses the actual outlet decode/encode,
+retains all six unused gripper lanes and holds the entire decoded arm plan fixed.
+It evaluates raw, halfway and consistent representations on the same coarse and
+refined W caches, with no additional integration or parameter update. Preflight
+samples are excluded. Actual codec CPU round trips have FP32 error below 7.16e-7;
+the complete B-v2 16-BS8 validation audit has maximum preservation error 4.77e-7,
+exact endpoint repeats and exact original-sampler logits. Consistent-label
+round trips change no command. This is an input sensitivity test, not a proof
+that a generated arm should receive the expert gripper.
+
+| B-v2 endpoint input (128 samples) | all 2536 observed rows agreement | first 958 prefix rows agreement | all-row mean CE |
+|---|---:|---:|---:|
+| labelled arm | 94.716% | 96.451% | 0.155942 |
+| generated arm, original representation | 87.855% | 91.858% | 0.523494 |
+| same generated arm, consistent representation | 88.289% | 93.006% | 0.527318 |
+
+The recoding changes 41 observed commands (26 closer to expert, 15 farther);
+prefix changes are 15 (13 closer, 2 farther). Changing coarse/refined W with
+the consistent arm changes zero commands here. Thus redundant representation
+sensitivity is real, but it does not close the larger generated-plan gap and
+all-row CE worsens slightly. No production endpoint, solver or gripper rule
+has changed. A's matched 16-BS8 panel is also complete, with exactly the
+same sample/episode IDs, zero repeats and maximum arm preservation error 4.77e-7.
+Its prefix agreement is 96.451% with labelled arm, 91.545% with the raw generated
+arm and 92.589% after command-preserving recoding. It changes 43/2536 commands
+(26 closer, 17 farther), including 18/958 prefix commands (14 closer, 4 farther);
+all-row CE rises from 0.531027 to 0.533131. Both models therefore retain the
+larger conditional-plan gap. Each checkpoint's own factual contact/withdrawal
+controls are separate evidence; offline agreement does not attribute a
+particular trajectory failure to this axis.
+
+Evidence: B-nullv2-endpoint-arm-representation-{smoke-r1,val16-r1} and
+endpoint-arm-representation-algebra-r1.json. Probe source d17db47a; factual
+replay source 02f89402. Reproduce with the pinned receipts using
+run_causal_identity_qualification.py --receipt <receipt>.
+The own-trajectory probe retains the original instruction-start reference,
+every actual executed command, the original noise sequence, complete arm plan
+and final W cache. Recomputed head logits must exactly repeat; differences
+from the original non-deterministic panel are reported separately.
+
+Annotation coverage is also measured rather than assumed: at 06:49 UTC,
+6555/9258 unique pairs existed. Of the 398 fully covered training batches,
+373 had at least one sampled negative edge; 1006/3184 exposed samples had an
+edge. This is BEFORE explicit training masks/model support and excludes
+incomplete batches. It is not a statement about learned identity or gradient
+coverage. See B-regions-v3-annotation-coverage-partial-0649.json.
+The B-v3 pipeline remains in annotation, and neither formal A/B run is started.
+
+
+Own-trajectory endpoint audits are complete: A has 12 windows (success 04,
+failures 10/14/17); B-v2 has 14 (success 01, regressions 03/09). Both retain exact
+head repeats and arm command error <=2.39e-7. Only one executed-prefix command
+changes per model: A10/state136 opens at row 5 instead of 6; B09/state128 closes
+at row 3 instead of 2. The unchanged-parameter deterministic replay differs from
+the original panel by up to 0.000721/0.000825 native arm RMS, with zero original
+gripper disagreement; this operator difference is separate from the controlled
+representation intervention. Results: A/B-nullv2-endpoint-arm-representation-fresh-r1.
+
+The two changed command rows were then physically branched in fresh simulator
+processes, from exactly reproduced original two-camera observations. All original
+arm controls and subsequent controls remain fixed for 32 steps. This is a local
+open-loop causal response, not a new policy rollout or the standard 18-case panel.
+Baseline and independent repeat states are exact; baseline ending RGBs also
+exactly match the recorded trajectory (robot/scene error <=1.14e-7/5.80e-8).
+
+| local branch | changed absolute command | original max signed progress | changed max signed progress |
+|---|---|---:|---:|
+| B-v2 09, state128-160 | step130 stays open, closing delayed one row | 4.2348 cm | -0.2155 cm |
+| A 10, state136-168 | step141 opens, release advanced one row | 8.1416 cm | 8.5216 cm |
+
+B09 ending progress changes from 4.2156 cm to -0.8388 cm; A10 gains only 3.80 mm
+of peak progress and remains short of the 10 cm criterion in this local window.
+This rejects direct inference-only recoding as an accepted repair. A small
+offline prefix improvement cannot substitute for arm/gripper compatibility at
+contact. It does not rule out every learned joint-conditioning repair, explain
+all failures, or prove the alternative policy's later replanning behavior.
+Keep the production endpoint untouched. Evidence:
+AB-endpoint-gripper-local-branch-r1, probe545d06f3, exact two-row plan/trajectory
+hashes and isolated baseline/repeat/changed logs retained in its receipt.

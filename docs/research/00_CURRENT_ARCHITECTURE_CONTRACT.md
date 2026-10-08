@@ -1694,6 +1694,23 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### Command-preserving endpoint recoding audit (2026-10-08)
+
+Section 34.33.18 isolates the redundant arm-field axis at the binary endpoint
+head. The actual outlet decode/re-encode preserves generated native arm commands
+within FP32 roundoff. On B-v2's 128 validation samples it changes 15/958 prefix
+commands, modestly improving expert agreement while slightly worsening full-row
+CE. This is a fixed-input sensitivity result, not a physical gripper correction.
+Production retains the original head input; do not add inference-only recoding,
+extra ODE steps or gripper rules without the own-trajectory/behavior qualification.
+A's matched 128-sample panel shows the same modest prefix improvement and mixed
+full-row result. The 12 A and 14 B-v2 factual windows change one executed gripper
+row each. Exact 32-step fixed-control physical branches worsen B09 peak progress
+from 4.23 cm to a negative value and improve A10 only 3.80 mm. This rejects direct
+inference-only recoding as a qualified repair; retain the original endpoint.
+These local branches are not a new 18-case policy score.
+
+
 ### A/B repair qualification (2026-10-07; formal promotion pending)
 
 See audit section 34.33. A now connects ordinary normalized transport,
