@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from clearvla.mainline.config import load_config, config_from_mapping
-from clearvla.mainline.model.compiler import FactorizedFutureEffectReader
+from clearvla.mainline.model.compiler import ObjectFutureEffectReader
 from clearvla.mainline.model.spatial_posterior import SpatialPosteriorContext, spatial_compatibility
 from clearvla.mainline.model.view_geometry import ViewConditionedTransport
 from clearvla.mainline.model.target_binding import TargetBinding
@@ -46,7 +46,7 @@ def test_full_law_compatibility_matches_direct_integral_and_has_gradient():
     q=torch.rand(2,3,2,1,1,2,2).requires_grad_()
     d=torch.rand(2,4,3,2,2).mul(.1).requires_grad_()
     cov=torch.zeros(2,4,3,2,3)
-    metric=FactorizedFutureEffectReader._covariance_aware_distance
+    metric=ObjectFutureEffectReader._covariance_aware_distance
     score=spatial_compatibility(p,q,d,cov,metric)
     grid=current_image_grid(16,16,device=p.device).flatten(0,1)
     delta=q[...,None,:]-(grid+d[...,None,:]).clamp(-1,1)[:,None,None]
