@@ -56,7 +56,8 @@ def identity_terms(model,online,facts,labels):
     key=module.content_key(source)+module.coordinate_key(_coordinate_basis(grid.to(source),16))[None]
     key=module.candidate_norm(key)
     mass=torch.ones(b*t*c,n,device=source.device)
-    state,log_owner=encode_owners(module,key,mass,mass.bool())
+    layout = {} if module.image_feedback is None else {"image_shape": (1,side,side)}
+    state,log_owner=encode_owners(module,key,mass,mass.bool(),**layout)
     owner=log_owner.exp().reshape(b,t,c,side,side,k+1).permute(0,1,2,5,3,4)
     conditional=torch.softmax(log_owner[...,:k].float(),-1).reshape(b,t,c,side,side,k).permute(0,1,2,5,3,4)
     state=state.reshape(b,t,c,k,module.hidden)

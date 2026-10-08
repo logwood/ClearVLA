@@ -32,14 +32,17 @@ class SharedIdentityViewDecoder(nn.Module):
         return value,self.background(role)
 
 
-def encode_owners(module,candidates,mass,legal):
+def encode_owners(module,candidates,mass,legal,*,image_shape=None):
     """One shared slot transition and one K+null competition on canonical cells."""
     b,n,h=candidates.shape
     prior=mass.float()[...,None]
     log_prior=torch.where(prior>0,prior,1.).log()
     valid=legal.float()[...,None]
     slots=module.slot_seed.to(candidates).expand(b,-1,-1)
-    for _ in range(module.iterations):
+    feedback = module.image_feedback
+    if feedback is not None and (image_shape is None or math.prod(image_shape) != n):
+        raise ValueError("image feedback requires the actual camera/grid layout")
+    for iteration in range(module.iterations):
         _,_,_,read,_,_=module._competition(slots,candidates,valid,prior,log_prior,legal)
         update=read.to(candidates)@candidates
         update,_=smooth_rms_contract(update,module.maximum_update_rms)
@@ -49,6 +52,9 @@ def encode_owners(module,candidates,mass,legal):
             identity=F.normalize(module.slot_seed.float()-module.slot_seed.float().mean(1,keepdim=True),dim=-1,eps=1e-6)
             scale=torch.linalg.vector_norm((nxt+ffn).float(),dim=-1,keepdim=True).detach().clamp_min(1e-6)
         slots=nxt+ffn+(.5*scale*identity).to(nxt)
+        if feedback is not None and iteration + 1 < module.iterations:
+            ownership = module._competition(slots,candidates,valid,prior,log_prior,legal)[0]
+            candidates = feedback(candidates,slots,ownership[...,:module.objects],legal,image_shape)
     _,_,_,_,parent_log,_=module._competition(slots,candidates,valid,prior,log_prior,legal)
     pair=torch.cat((slots[:,None].expand(-1,n,-1,-1),candidates[:,:,None].expand(-1,-1,module.objects,-1)),-1)
     residual=.5*torch.tanh(module.g3_residual(pair).squeeze(-1).float())
@@ -98,7 +104,8 @@ def canonical_grounding(module,local,chart,history_context,*,collect_diagnostics
         history=rasterize_value(source,mass,history_context,chart.candidate_validity)
         value=value+module.history_key(history.to(value))
     candidates=torch.where(legal[...,None],module.candidate_norm(value),0.).reshape(b,c*u,-1)
-    identity,owner_log=encode_owners(module,candidates,mass.reshape(b,-1),legal.reshape(b,-1))
+    layout = {} if module.image_feedback is None else {"image_shape": (c,h,w)}
+    identity,owner_log=encode_owners(module,candidates,mass.reshape(b,-1),legal.reshape(b,-1),**layout)
     owner_log=owner_log.reshape(b,c,h,w,k+1).permute(0,4,1,2,3)
     log_mass=torch.where(mass>0,mass,1.).log().reshape(b,1,c,h,w)
     supported=legal.reshape(b,1,c,h,w).expand(-1,k,-1,-1,-1)

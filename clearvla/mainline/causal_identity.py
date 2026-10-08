@@ -37,6 +37,13 @@ def causal_identity_metadata(top):
         result['identity_supervision'].update(regions='sam-surface-motion-negative-only;unknown-retained',
             objectives='retain-all-original-positives-and-source-MSE;add-negative-JS-margin-and-equal-region-source-MSE',
             annotations='pinned-compact-training-labels;no-RGB-or-DINO-cache;no-online-policy-input')
+    feedback=top.get('entity_image_feedback_mode','none') if isinstance(top,Mapping) else getattr(top,'entity_image_feedback_mode','none')
+    if feedback not in {'none','slot_to_image_v1','region_fusion_v1'}:
+        raise ValueError('unknown image feedback ABI')
+    if feedback != 'none':
+        result['image_feedback']={'mode':feedback,'rank':32,'scope':'canonical-address-only;between-existing-GRU-iterations',
+            'allocation':'existing-K-plus-null;no-new-selector','values':'original-observed-values-unchanged',
+            'initialization':'zero-output;isolated-CPU-RNG-seed1729','gradient':'ordinary'}
     if modes['observation_measurement_mode']=='source_consistent_v2':
         result['observation_target_support']='independent-supplied-frame;source-augmentation-mask-never-copied-to-target'
     return result

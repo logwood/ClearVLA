@@ -29,6 +29,7 @@ from .interfaces import TrainingBatch
 from .model.policy import ClearVLAMainlinePolicy, OnlinePolicyCache
 from .model.types import PhysicalActionCondition, PhysicalActionSequenceCondition
 from .runtime.causal_identity_migration import CAUSAL_IDENTITY_AB_V1
+from .runtime.sam_structure_migration import SAM_STRUCTURE_V1
 from .runtime.checkpoints import (
     LIBERO_RELEASE_FIRST_REPAIR_MIGRATION,
     LIBERO_RETARGET_TRAINING_OVERLAY_MIGRATION,
@@ -156,6 +157,7 @@ def _parser() -> argparse.ArgumentParser:
             JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
             CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
             CAUSAL_IDENTITY_AB_V1,
+            SAM_STRUCTURE_V1,
             DINOV3_DEEP_REPAIR_V1_MIGRATION,
             S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
             G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
@@ -435,7 +437,7 @@ def _overrides(config: ExperimentConfig, args: argparse.Namespace) -> Experiment
         )
     if getattr(args, "init_training_clock", "fresh") == "checkpoint" and (
         args.init_checkpoint is None
-        or args.init_model_contract_migration not in {CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION, CAUSAL_IDENTITY_AB_V1}
+        or args.init_model_contract_migration not in {CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION, CAUSAL_IDENTITY_AB_V1, SAM_STRUCTURE_V1}
     ):
         raise ValueError("checkpoint training clock requires the parameter-preserving CALVIN endpoint/trajectory migration")
     if getattr(args, "init_optimizer_state", "fresh") == "checkpoint" and (
@@ -463,7 +465,7 @@ def _initialize_training_clock(
         engine.global_step = 0
         engine.model.set_training_step(0)
         return
-    if mode == "checkpoint" and initialization.model_contract_migration == CAUSAL_IDENTITY_AB_V1:
+    if mode == "checkpoint" and initialization.model_contract_migration in {CAUSAL_IDENTITY_AB_V1, SAM_STRUCTURE_V1}:
         # Preserve mature execution/teacher phases, but new parameters and all
         # moments receive a declared fresh optimizer warmup. Not exact resume.
         step=initialization.global_step

@@ -239,6 +239,7 @@ class DenseObjectGrounder(nn.Module):
         entity_chart_mode: str = QUERY_CHART,
         entity_transport_gradient_mode: str = "positive_corners_v1",
         entity_ownership_mode: str = "local_mixture_v1",
+        entity_image_feedback_mode: str = "none",
         entity_competition_scale_mode: str = "batch_global_v1",
         observation_measurement_mode: str = "legacy_v1",
         camera_names: tuple[str,...] = (),
@@ -347,6 +348,16 @@ class DenseObjectGrounder(nn.Module):
             self.decode_content_residual = None
         else:
             self.canonical_decoder = None
+        self.image_feedback = None
+        if entity_image_feedback_mode != "none":
+            from .image_feedback import SlotToImageFeedback, RegionImageFusion
+            choices = {"slot_to_image_v1": SlotToImageFeedback, "region_fusion_v1": RegionImageFusion}
+            if entity_image_feedback_mode not in choices or entity_ownership_mode != "canonical_image_v1" or self.iterations < 2:
+                raise ValueError("image feedback requires an admitted iterative canonical mode")
+            # Adding the adapter must not change common-module initialization.
+            with torch.random.fork_rng(devices=[]):
+                torch.random.default_generator.manual_seed(1729)
+                self.image_feedback = choices[entity_image_feedback_mode](hidden, rank=32)
 
     def _candidate_tokens(self, chart: DenseFactChart, history_context: Tensor | None = None) -> Tensor:
         """Return the exact shared V120 key/value candidate representation."""

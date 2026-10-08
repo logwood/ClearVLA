@@ -4042,3 +4042,15 @@ to restart the active short or add every borrowed component. Only if its
 actual failure chain indicates a missing local operation should the retained
 prototype proceed to real-loss/cost qualification and meaningful training.
 
+
+
+### 34.33.22 B-v2 底座的两个结构长训（用户授权，尚待机械启动核验）
+
+用户明确选择 B-v2 完整短跑 checkpoint（step12036，SHA ee6271e…17fc）
+作为共同底座，允许在收益未证明时先长训探索。两支分别选
+slot_to_image_v1 与 region_fusion_v1；rank32、零输出初始化、普通梯度。
+在原 G 三次 GRU 之间两次更新地址特征，沿用实际 K+null 分配。
+相机内卷积、原始事实值、support、B-v2 正对/source损失与全部预算保留。
+未合入 v3 区域监督，也未顺带切换未来支持域修复，因此只有结构变量。
+明确新增 sam_structure_v1 窄迁移，源指纹882ec913…87815，旧权重逐项继承。
+实际训练/冷加载和运行身份将追加本节；机械通过不代表对象身份已改善。

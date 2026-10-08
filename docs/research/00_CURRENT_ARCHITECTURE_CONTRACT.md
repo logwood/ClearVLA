@@ -1695,6 +1695,25 @@ execution adaptation from being accidentally disabled by a short repair test.
 ## Agent quick contract
 
 
+### User-authorized B-v2 structure long trials (2026-10-08)
+
+The user selected the completed B-v2 checkpoint as the common base and explicitly
+authorized two exploratory long trainings before demonstrated behavioral benefit.
+The slot-to-image and region-fusion variants use separate explicit
+entity_image_feedback_mode selectors. Rank32 residuals update only G addressing
+between its existing GRU iterations, with the same shared K/null competition.
+Original observed fact values, support, B-v2 losses, source_consistent_v1,
+data exposure and online inputs remain unchanged; no SAM network is embedded.
+Source-only identity encodings use the same adapter with one camera per sample.
+Zero output and isolated CPU RNG preserve the inherited initial G function.
+sam_structure_v1 initialization requires the pinned B-v2 source, identical
+dataset/config except this selector, and exact inherited tensor inventory.
+
+These runs are exploratory, separate from mainline A/B qualification. Actual
+BS8 backward, per-adapter loss VJPs, save/cold-load and finite-state checks are
+required before launch. A favorable result is not claimed in advance.
+The mainline B-v3 short and full qualification keep their reserved continuation.
+
 ### SAM structure reuse remains an evidence-led option (2026-10-08)
 
 The user explicitly allows individual SAM mechanisms inside ClearVLA when

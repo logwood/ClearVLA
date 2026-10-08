@@ -548,6 +548,7 @@ class TopConfig:
     entity_chart_mode: str = "query_lattice_v1"
     entity_transport_gradient_mode: str = "positive_corners_v1"
     entity_ownership_mode: str = "local_mixture_v1"
+    entity_image_feedback_mode: str = "none"
     entity_competition_scale_mode: str = "batch_global_v1"
     identity_supervision_mode: str = "none"
     identity_region_js_margin: float = 0.1
@@ -721,6 +722,10 @@ class TopConfig:
             raise ValueError("unknown top entity_history_mode")
         if self.entity_competition_scale_mode not in {"batch_global_v1", "per_observation_v1"}:
             raise ValueError("unknown entity competition scale scope")
+        if self.entity_image_feedback_mode not in {"none", "slot_to_image_v1", "region_fusion_v1"}:
+            raise ValueError("unknown entity image feedback mode")
+        if self.entity_image_feedback_mode != "none" and (self.entity_ownership_mode != "canonical_image_v1" or self.grounder_iterations < 2):
+            raise ValueError("image feedback requires iterative canonical ownership")
         if self.entity_ownership_mode not in {"local_mixture_v1", "canonical_image_v1"}:
             raise ValueError("unknown global entity ownership law")
         if self.entity_ownership_mode == "canonical_image_v1" and (self.entity_chart_mode != "current_image_support_v1" or self.entity_context_mode != "completed_g3_v1" or self.object_view_mode != "per_camera_values_v1" or self.target_binding_input_mode != "full_tokens_views_v1" or self.observation_measurement_mode not in {"source_consistent_v1", "source_consistent_v2"}):
@@ -1601,6 +1606,8 @@ class ExperimentConfig:
             if not getattr(self.data,name):cast(dict[str,object],payload['data']).pop(name)
         if self.top.entity_competition_scale_mode == "batch_global_v1":
             cast(dict[str, object], payload["top"]).pop("entity_competition_scale_mode")
+        if self.top.entity_image_feedback_mode == "none":
+            cast(dict[str, object], payload["top"]).pop("entity_image_feedback_mode")
         if self.top.entity_ownership_mode == "local_mixture_v1":
             cast(dict[str, object], payload["top"]).pop("entity_ownership_mode")
         if self.top.entity_transport_gradient_mode == "positive_corners_v1":

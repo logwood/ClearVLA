@@ -400,6 +400,7 @@ class ClearVLAMainlinePolicy(nn.Module):
             entity_chart_mode=top.entity_chart_mode,
             entity_transport_gradient_mode=top.entity_transport_gradient_mode,
             entity_ownership_mode=top.entity_ownership_mode,
+            entity_image_feedback_mode=top.entity_image_feedback_mode,
             entity_competition_scale_mode=top.entity_competition_scale_mode,
             entity_history_mode=top.entity_history_mode,
             entity_motion_mode=top.entity_motion_mode,
