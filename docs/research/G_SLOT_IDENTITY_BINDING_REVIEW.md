@@ -3232,17 +3232,27 @@ support for that many groups. This only rejects naive hard assignment or
 zero-affinity targets for every fragment; it does NOT prove that soft
 discrimination of more than4 regions is impossible. Do not enlarge K or
 arbitrarily discard groups to hide this mismatch. Whole-body and rigid-link
-scoring is running under receipt mask-surface-allbody-full190-r2 (37174395):
-oracle UID/link masks are exported only after proposal construction. Confirm
-the group maps are exactly unchanged from r1 before interpreting the new audit.
-This separates articulated parts, repeated fragments and task objects without
-letting simulator identities select labels. Artifact:
-mask-surface-agreement-capacity-r1.json.
+scoring is complete under receipt mask-surface-allbody-full190-r2 (37174395).
+All120 old /260 own group arrays are exactly unchanged from r1; oracle UID/link
+masks were exported only after proposal construction. Whole-body negative-pair
+conflicts are common, including articulated parts. Even the stricter rigid-link
+check finds same-part negatives in13/60 old top and13/130 own top windows,
+and1/130 own wrist window (0/60 old wrist). Therefore block-only qualification
+cannot certify every proposed foreground region as an independent instance.
+Do not use oracle body filtering to manufacture a passing producer.
+Artifacts: mask-surface-agreement-capacity-r1.json and
+mask-surface-allbody-{old60,own130}-r2/decision-summary.json.
 
 Proposed next label-plane direction, conditional on admission: preserve existing
 sensor positive pairs, define compatible whole-instance/foreground semantics,
 add supported different-instance constraints, and test region-balanced source
-prediction. The current agreement positives are not accepted training labels.
+prediction. The current agreement positives and unrestricted negatives are not
+accepted training labels. Attribute the remaining non-block conflicts from
+the saved audit maps, then qualify a task-independent whole-instance/foreground
+rule, including known robot/self geometry when justified by observed kinematics.
+That is a proposed sensor-based repair, not permission to use simulator masks
+or body IDs as training/deployment inputs. Preserve unknown and original
+sensor-positive budgets; test actual canonical support and ordinary gradients.
 Do not prescribe a color to K, force equal slot occupancy, remove source labels,
 or put a frozen segmentation model into production without a resource/behavior
 qualification. Both formal experiments remain unstarted.
@@ -3263,3 +3273,113 @@ contribution percentages. Source prediction remains background dominated
 not a blind coordinate-branch removal. Artifact:
 B-nullv2-source-components-r1/decision-summary.json, pinned93135060;
 source training/identity.py:96-105 and probe_identity_source_dependence.py.
+
+### 34.33.15 Negative-label boundaries, sampling and pretrained motion (2026-10-08 UTC)
+
+**No formal promotion or production change.** All v2 short/panel/qualification
+jobs are complete. The following are read-only candidates on fixed evidence.
+These190 windows have been used to develop the rules; a zero observed error
+here is not independent held-out certification or proof of downstream benefit.
+
+Whole-body attribution locates the remaining rigid-part conflicts at the
+playtable slide/base, not the blocks. Audit-only simulator inventory confirms
+UID5=playtable_8, link2=slide_link; UID0=panda. These identities never select
+producer pixels. Artifacts: mask-surface-allbody-attribution-r1.json and
+mask-surface-oracle-body-inventory-r1.json.
+
+The explicit geometry_only_v3 control removes the RGB-distance edge gate,
+retaining all plane/geometry settings. Slide fragmentation disappears; residual
+same-rigid-part negative windows are5/60 and4/130 top, plus1/130 wrist.
+Boundary contamination of block proposals includes1-5 scene pixels. Geometry
+alone can merge touching blocks, so its proposed positive pairs are NOT used.
+Receipt mask-surface-geometry-v3-full190-r1, pinned94ab15c3.
+
+A fixed one-native-pixel interior now requires the entire3x3 neighborhood to
+agree on both proposal identities; outside-image/overlap/disagreement is
+unknown. It never sees an oracle. Across old60/own130, mask+geometry interiors
+have zero observed wrong-negative block OR rigid-link pairs, and no positive
+block/background pairs. Supported block pixels are21042/34270 and9798/15488
+old top/wrist;36846/72079 and20725/34711 own. Coverage is51-63%, not100%.
+Merged masks still produce51052/57105 wrong-object positive endpoint pairs in
+top views: preserve existing RGB-D/temporal positives; only the new negative
+proposal is a candidate. Articulated whole-body identity is a separate issue
+from rigid-part equality. Artifacts mask-surface-interior-{old60,own130}-r1;
+receipt mask-surface-interior-full190-r1, pinnedaa7a5517.
+
+Removing the frozen mask prior is not an admitted speed shortcut. The same
+geometry-only interior yields wrong-rigid negatives in51/60 old top and80/130
+own top windows, and1/60 /3/130 wrist; own top also splits a block (528
+correlated negative endpoint pairs). Positive block/background contamination
+returns. Receipt sensor-only-interior-full190-r1, pinned7bb38b8d. Keep all
+failed controls. Geometry components are not whole-instance labels.
+
+**Actual sampler/support audit.** probe_identity_label_stencils.py uses the
+production IdentityLabelProducer._sample32x32 and exact align_corners=True
+16x16 interpolation. The stencils reproduce torch.grid_sample numerically.
+After the mask+geometry interior, sampled groups are203/392 top and101/213
+wrist (old/own);93/194 top groups have no canonical atom center inside their
+proposal. Mean read mass on own-region atom centers is .279/.256 top and
+.578/.576 wrist. This is a spatial support warning, not a semantic-information
+bound. Pairwise stencil-TV upper bounds on possible mean K-read TV have
+median1, minimum .513/.561 top: coarse resolution alone does not prove that
+the observed near-common K3 allocation is unavoidable. The bound concerns
+one read pair, not simultaneous realizability or the whole network. Sampled
+negative clique medians fall to3 top/2 wrist, maxima5/4; do not require hard
+exclusive assignment of every group to four K slots. At this sampler there
+are no observed wrong-rigid negative pairs. Artifacts:
+identity-label-stencils-{old60,own130}-r1; pinned a39ef1f7.
+
+**Official flow is a useful control, not the replacement.** Frozen Torchvision
+RAFT-small C_T_V2 uses strict loading, FP32,12 recurrent updates and fixed
+replicate padding to >=128/multiple8 without rescaling native pixels. Original
+FB<.75px/photo<.08 gates remain; no policy/label changes. Official weight SHA
+01064c6dba73b0fc9fc8edf772248560a00a3acfd62ac6677e9eeebad9680e27 is recorded;
+the official download publishes an8-character hash prefix, not a full external
+digest. Source: [Torchvision implementation](https://docs.pytorch.org/vision/main/_modules/torchvision/models/optical_flow/raft.html),
+[original RAFT paper](https://www.ecva.net/papers/eccv_2020/papers_ECCV/html/3526_ECCV_2020_paper.php).
+
+In old16 past4/current windows, moving-point raw EPE is .683/1.020px top/wrist;
+24/34 and248/353 pass gates, admitted EPE .736/.923px. Unknown-as-zero EPE is
+1.464/2.000px, and22/31 geometrically occluded wrist points are still accepted.
+Long current/start wrist fails in both old16 and own14:0/516 and0/225 moving
+points admitted; raw EPE25.474/32.987px versus zero-motion21.796/30.863px.
+This failure precedes gating. Same-image raw motion is not exactly zero
+(mean .04-.075px, some maxima .50px). Repeats are exact, weights unchanged;
+median bidirectional pair cost .031-.036s, peak allocated memory67.2MB.
+Thus local unpretrained flow is not the sole explanation, and reducing unknown
+or replacing the matcher with this control would still be unsupported.
+Receipt official-raft-motion-qualification-r1; results official-raft-{old16-past4,
+old16-reference,own14-reference}-r1; pinned56373092.
+
+Remaining gates: independent training-distribution label quality; declared
+whole-instance/foreground semantics and cross-view/time links; actual masked
+canonical support and ordinary gradients; source prediction with appropriate
+instance weighting without deleting original labels; natural target choice
+and first8 arm/gripper behavior. A negative objective must penalize a shared
+uniform/single-K solution without prescribing colors or equal slot occupancy.
+No candidate is admitted by a native-pixel error count alone. Long-gap observed
+measurement, controller state and action/task maintenance remain separate open
+repairs. Do not lose them while developing identity labels.
+
+Resource check is complete: sam2-full-budget-batching-pilot-r1, pinned716d74dc.
+Point minibatches128/256 retain32x32 prompts, all masks and acceptance gates.
+All22 image mask sets AND their order are exactly equal to the64 baseline;
+matched score differences are <=4.18e-7. Median time improves only from1.239s
+to1.176/1.174s per image; peak memory rises to5.62/10.99GB. This is insufficient
+to justify a serial full-image teacher in a BS8 training step. Do not claim
+budget cuts or lower teacher frequency as unchanged exposure. A practical
+label pipeline still needs an explicit cost/exposure design, and any stored
+small label annotations must remain distinct from forbidden RGB/DINO caches.
+Artifact sam2-full-budget-batching-pilot-summary.json. Formal training remains
+unstarted; mechanical checks and label quality do not authorize automatic
+promotion.
+
+The next independent label audit is prepared in
+identity-label-independent-val24-plan.json:12 admitted validation episodes,
+24 windows,48 checked raw-file hashes, selected identically to the source
+controls before this label rule. All raw sources are training/, as verified
+from each HDF source_split/context_start; admitted val does not imply raw
+validation/. Retain the invalid first preflight that assumed the latter.
+This is a plan only, not completed mask/geometry admission. Producer allowlist
+is RGB/depth/robot state; raw scene_obs can enter a separate exact-render oracle
+scorer only. Verify raw/render RGB identity before assigning audit masks.

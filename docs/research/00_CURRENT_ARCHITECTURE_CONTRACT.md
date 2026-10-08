@@ -1794,11 +1794,28 @@ agreement rule keeps disagreement unknown. Full190 block scoring finds no
 wrong negatives but retains a few positive/boundary errors. Raw proposals
 also contain more than4 mutually negative regions in most top views, rejecting
 a naive exclusive-slot target for every fragment, not all soft discrimination.
-Whole-body/rigid-link scoring is running to clarify fragment semantics. No
-simulator mask/pose enters a producer. Background/robot, temporal/view linking
-and canonical-cell support still need qualification. The auxiliary source-value ledger rejects a simple
+Whole-body/rigid-link scoring is complete and still finds negatives between
+fragments of one rigid part (top13/60 old and13/130 own windows). Block-only
+success cannot certify unrestricted foreground labels. No simulator mask/pose
+enters a producer. Whole-instance/foreground semantics, temporal/view linking
+and canonical-cell support still need qualification. The auxiliary source-value
+ledger rejects a simple
 coordinate-only shortcut explanation: coordinates/background alone have high
 prediction error, despite low sensitivity to another episode's full source.
+
+Section34.33.15 retains the mask/surface disagreement as unknown and tests a
+fixed one-native-pixel interior. Old60/own130 now show no wrong-negative rigid
+parts on this development evidence, at51-63% block coverage. Candidate positive
+pairs still merge objects and are not admitted. Sensor-only geometry restores
+many wrong negatives, so do not discard the independent mask check for speed.
+The real32x32 sampler/16x16 K chart loses some spatial support, but pairwise
+stencil bounds do not prove that a common K3 allocation is unavoidable.
+Training-distribution quality, whole-instance meaning, masked gradients and
+behavior remain gates; preserve every existing sensor-positive budget.
+Official pretrained RAFT-small improves short-gap flow yet also fails the
+long-gap wrist reference audit (0/516 and0/225 admitted moving points).
+There is no qualified matcher replacement. No new label, policy input, cache,
+K count, loss or production graph has been promoted. Formal A/B remain pending.
 
 
 ### Current CALVIN audit constraint (2026-10-07)
