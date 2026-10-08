@@ -10,7 +10,7 @@ from clearvla.mainline.model.spatial_posterior import SpatialPosteriorContext, s
 from clearvla.mainline.model.view_geometry import ViewConditionedTransport
 from clearvla.mainline.model.target_binding import TargetBinding
 from clearvla.mainline.p2_geometry import POSTERIOR_VIEW_TRANSPORT, p2_geometry_metadata
-from clearvla.mainline.training.spatial_supervision import StackCubeRegionLabels, matched_identity_binding_terms
+from clearvla.mainline.training.spatial_supervision import StackCubeRegionLabels, matched_identity_binding_terms, native_region_density
 from clearvla.vision.entity_chart import ImageLogMeasure, current_image_grid
 
 
@@ -78,6 +78,18 @@ def label_fixture():
     binding=TargetBinding.from_logits(torch.tensor([[4.,-2.,-2.,-2.]],requires_grad=True),
                                     torch.zeros(1,1,requires_grad=True),torch.ones(1,4,dtype=torch.bool))
     return log.requires_grad_(),labels,binding
+
+
+def test_label_projection_preserves_image_coordinates_at_edges_and_inside():
+    mask=torch.zeros(1,2,2,63,81)
+    mask[...,0,0]=1;mask[...,9:13,59:64]=1;mask[...,-1,-1]=1
+    density=native_region_density(mask,16,16)
+    original=mask/mask.sum((-2,-1),keepdim=True)
+    fine=current_image_grid(63,81,device=mask.device)
+    native=current_image_grid(16,16,device=mask.device)
+    torch.testing.assert_close((original[...,None]*fine).sum((-3,-2)),
+                               (density[...,None]*native).sum((-3,-2)),atol=2e-7,rtol=0)
+    torch.testing.assert_close(density.sum((-2,-1)),torch.ones(1,2,2))
 
 
 def terms(log,labels,binding):

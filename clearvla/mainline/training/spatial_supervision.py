@@ -125,6 +125,27 @@ def stackcube_grounding_terms(facts: ObjectFactSet,current_rgb: Tensor) -> dict[
         return matched_region_terms(measure,labels)
 
 
+@torch.no_grad()
+def native_region_density(masks: Tensor, height: int, width: int) -> Tensor:
+    """Bilinearly splat pixel mass onto the same align-corners G chart.
+
+    Area/image resizing treats bins as different pixel centers and introduces
+    a systematic position shift. This pushforward preserves both total mass
+    and first moments, including boundary pixels and tiny visible regions.
+    """
+    def projection(source, target):
+        position = torch.linspace(0., target-1., source, device=masks.device)
+        low = position.floor().long()
+        high = (low+1).clamp_max(target-1)
+        fraction = position-low
+        return (F.one_hot(low, target).float()*(1-fraction[:, None])
+                + F.one_hot(high, target).float()*fraction[:, None])
+    y = projection(masks.shape[-2], height)
+    x = projection(masks.shape[-1], width)
+    mass = y.T @ (masks.float() @ x)
+    return mass / mass.sum((-2, -1), keepdim=True).clamp_min(1e-30)
+
+
 def matched_identity_binding_terms(measure: ImageLogMeasure, labels: StackCubeRegionLabels,
                                    binding) -> dict[str, Tensor]:
     """Proper spatial scoring and one shared target label, training plane only.
@@ -140,10 +161,7 @@ def matched_identity_binding_terms(measure: ImageLogMeasure, labels: StackCubeRe
         raise ValueError("identity labels must be detached")
     if labels.masks.shape[:3] != (b, 2, c) or labels.visible.shape != (b, 2, c):
         raise ValueError("identity labels lost the object/view axes")
-    # Area resampling conserves small visible regions at native DINO resolution.
-    density = F.interpolate(labels.masks.float().reshape(b*2*c, 1, *labels.masks.shape[-2:]),
-                            size=(h, w), mode="area").reshape(b, 2, c, h, w)
-    density = density / density.sum((-2, -1), keepdim=True).clamp_min(1e-30)
+    density = native_region_density(labels.masks, h, w)
     _, logp = measure.normalized((-2, -1))
     admitted = labels.visible[:, None]
     if bool(((density[:, None] > 0) & ~measure.supported[:, :, None]

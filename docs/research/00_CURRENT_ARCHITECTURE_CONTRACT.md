@@ -1708,6 +1708,8 @@ legacy diagnostics/transport-reference meaning and are not metric robot poses.
 
 Training-only `maniskill_spatial_identity` scores current RGB cube-region
 densities on the native chart under one joint-camera two-object assignment.
+Pixel mass is bilinearly splatted onto that align-corners chart, preserving
+location first moments rather than introducing an area-resize coordinate bias.
 `maniskill_target_binding` supervises the existing K+null law using that same
 assignment for the StackCube operated red cube. Invisible object/views own no
 spatial or binding label; unmatched slots and null remain unforced. No masks,
