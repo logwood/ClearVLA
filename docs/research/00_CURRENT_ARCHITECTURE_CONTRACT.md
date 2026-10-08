@@ -1757,6 +1757,31 @@ Evidence: remote `artifacts/maniskill-latest-train-20261007/trajectory-investiga
 under `/data/senwang/clearvla`; probes also include `scripts/probe_maniskill_ingress.py`
 and `scripts/probe_maniskill_history.py`.
 
+## ManiSkill current-region supervision candidate (2026-10-08)
+
+`objectives.maniskill_spatial_grounding=0.01` is an explicit training-only
+experiment on the audited native-v2, RGB336, full-posterior graph. Detached
+current RGB color masks provide weak labels, with at least 20 pixels per
+visible object/view. One permutation matches two distinct existing G slots
+across all admitted cameras. The objective combines balanced joint-view
+regional negative log mass (12-pixel tolerance) with conditional image-centroid
+error, using the actual retained G image measure rather than a barycenter proxy.
+Unobserved labels contribute zero; no synthetic visibility or pose is supplied.
+
+This changes only supervision. Online types, parameters, G/S/W/P consumers,
+shared K+null binding, native action charts and Q5/replan-8 execution remain
+unchanged. Masks, matching indices and color identities are loss-local values
+and never populate the online cache. The zero-weight control bypasses this
+objective exactly. `maniskill_spatial_repair_v1` admits only the declared
+0/0.01 objective difference on identical data/normalizers and tensor ABI; it
+may retain the verified named Adam state and completed-update clock.
+
+This is not a calibrated 3D/object tracker or a qualified policy repair.
+The matched pilot, real parameter VJPs, label precision, held-out grounding,
+signed native actions and full closed-loop trajectories must decide efficacy.
+The executable experiment specification is
+`configs/mainline/maniskill_spatial_repair_experiment_20261008.json`.
+
 ## Default and opt-in selections
 
 These are source/config selections, not claims about trained-model success.

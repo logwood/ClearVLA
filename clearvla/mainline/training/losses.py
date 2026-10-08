@@ -2518,6 +2518,7 @@ def compose_losses(
     top_targets: ObjectTopTrainingTargets,
     predicted_dynamics: FutureObjectDynamics,
     action_codec: PhysicalActionFieldCodec | OutletAdapter,
+    spatial_grounding_terms: dict[str, Tensor] | None = None,
     endpoint_supervision: EndpointHeadSupervision | None = None,
     collect_diagnostics: bool = False,
 ) -> LossLedger:
@@ -2559,6 +2560,8 @@ def compose_losses(
         collect_diagnostics=collect_diagnostics,
     )
     objective = config.objectives
+    if (objective.maniskill_spatial_grounding > 0) != (spatial_grounding_terms is not None):
+        raise ValueError("spatial labels/loss differ from the selected training objective")
     action_group = (
         action["action_flow"]
         + objective.decoded_action * action["decoded_action"]
@@ -2611,6 +2614,10 @@ def compose_losses(
     elif goal_terms is not None:
         raise ValueError("unselected endpoint objective supplied")
     execution_group = objective.execution_value * execution["execution_value"]
+    spatial_contribution = None
+    if spatial_grounding_terms is not None:
+        spatial_contribution = objective.maniskill_spatial_grounding * spatial_grounding_terms["spatial_grounding"]
+        representation_group = representation_group + spatial_contribution
     response = top_targets.robot_response_loss
     if config.top.robot_feedback_mode != "none":
         if response is None or response.ndim != 0:
@@ -2707,6 +2714,9 @@ def compose_losses(
     if goal_terms is not None:
         terms.update(goal_terms)
         contributions["annotated_goal"] = objective.annotated_goal * goal_terms["annotated_goal_total"]
+    if spatial_grounding_terms is not None:
+        terms.update(spatial_grounding_terms)
+        contributions["spatial_grounding"] = spatial_contribution
     if top_targets.operation_terms is not None:
         terms.update(top_targets.operation_terms)
     if response is not None:

@@ -218,10 +218,11 @@ def run(args):
                 masks,poses=simulator_labels(env)
                 rows.append(save_case(args,capture,f"seed_{seed}",history.snapshot(),masks,poses,dict(seed=seed)))
                 atomic_json(args.output/"summary.json",dict(note=__doc__,rows=rows))
-        elif args.mode == "experts":
+        elif args.mode in ("experts", "heldout"):
             splits=json.loads((args.data/"prepared/splits.json").read_text())["splits"]
-            for split in ("train","val"):
-                for name in splits[split][:3]:
+            for split in (("val","test") if args.mode == "heldout" else ("train","val")):
+                names=splits[split] if args.mode == "heldout" else splits[split][:3]
+                for name in names:
                     with h5py.File(args.data/"experts"/(name+".hdf5")) as h:
                         actions=h["action"][:]
                         close=np.flatnonzero((actions[:,-1]<0)&(h["action_state"][:,-1]>0))
@@ -253,7 +254,7 @@ def run(args):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("mode",choices=("placements","resets","experts"))
+    p.add_argument("mode",choices=("placements","resets","experts","heldout"))
     p.add_argument("--data",type=Path,required=True)
     p.add_argument("--checkpoint",type=Path,required=True)
     p.add_argument("--dino",type=Path,required=True)

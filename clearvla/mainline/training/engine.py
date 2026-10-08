@@ -1063,10 +1063,17 @@ class MainlineTrainingEngine:
                 collect_diagnostics=False,
             )
             endpoint_supervision = EndpointHeadSupervision(endpoint_output, endpoint_time, endpoint_context)
+        spatial_terms = None
+        if self.config.objectives.maniskill_spatial_grounding > 0:
+            from .spatial_supervision import stackcube_grounding_terms
+            spatial_terms = stackcube_grounding_terms(
+                encoded.training_state.top.facts, batch.online.observation.raw_rgb[:, -1],
+            )
         ledger = compose_losses(
             self.config,
             policy_output=output,
             endpoint_supervision=endpoint_supervision,
+            spatial_grounding_terms=spatial_terms,
             action_target=batch.action_target,
             history=batch.online.history,
             flow_state=flow_state,

@@ -965,6 +965,9 @@ class ObjectiveConfig:
     robot_response: float = 0.0
     future_dynamics: float = 0.10
     intent_structure: float = 0.02
+    # Explicit training-only StackCube current-region/cross-view matching.
+    # Zero preserves the historical objective and online graph exactly.
+    maniskill_spatial_grounding: float = 0.0
     flow_warp: float = 0.03
     flow_identity_advantage: float = 0.02
     flow_static_identity: float = 0.01
@@ -1354,6 +1357,15 @@ class ExperimentConfig:
             raise ValueError(
                 "gripper_first_step_release is valid only for the LIBERO continuous outlet"
             )
+        if self.objectives.maniskill_spatial_grounding > 0 and (
+            profile.name != "maniskill_pd_ee_delta_pose_7d_v2"
+            or self.top.entity_chart_mode != "current_image_support_v1"
+            or self.top.task_execution_mode != "joint_object_scene_v1"
+            or self.observation.candidate_support_mode != "full_posterior_lattice_v1"
+            or self.data.camera_names != ("top", "wrist")
+            or self.data.cache_side != 336
+        ):
+            raise ValueError("spatial grounding supervision requires the audited ManiSkill RGB336 full-support graph")
         if float(self.objectives.gripper_first_step_hold) != 0.0 and profile.name not in (
             continuous_relative_profiles
         ):
@@ -1600,6 +1612,8 @@ class ExperimentConfig:
             objectives.pop("gripper_first_step_release", None)
         if self.objectives.gripper_first_step_hold == 0.0:
             objectives.pop("gripper_first_step_hold", None)
+        if self.objectives.maniskill_spatial_grounding == 0.0:
+            objectives.pop("maniskill_spatial_grounding", None)
         if (
             self.objectives.phase_control_mode == "none"
             and self.objectives.phase_arm_flow == 0.0

@@ -52,9 +52,17 @@ JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION = (
 )
 CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION = "calvin_endpoint_trajectory_repair_v1"
 MANISKILL_COLD_START_REPAIR_V1_MIGRATION = "maniskill_cold_start_repair_v1"
+MANISKILL_SPATIAL_REPAIR_V1_MIGRATION = "maniskill_spatial_repair_v1"
 PARAMETER_PRESERVING_INITIALIZATION_MIGRATIONS = frozenset({
     CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
     MANISKILL_COLD_START_REPAIR_V1_MIGRATION,
+    MANISKILL_SPATIAL_REPAIR_V1_MIGRATION,
+})
+MANISKILL_SPATIAL_REPAIR_V1_SOURCE_PATHS = frozenset({
+    "clearvla/data/samplers.py", "clearvla/mainline/config.py",
+    "clearvla/mainline/data/loading.py", "clearvla/mainline/runtime/checkpoints.py",
+    "clearvla/mainline/train.py", "clearvla/mainline/training/engine.py",
+    "clearvla/mainline/training/losses.py", "clearvla/mainline/training/spatial_supervision.py",
 })
 MANISKILL_COLD_START_REPAIR_V1_SOURCE_PATHS = frozenset({
     "clearvla/data/samplers.py", "clearvla/mainline/config.py",
@@ -986,6 +994,22 @@ def _initialization_config_view(config: ExperimentConfig) -> dict[str, object]:
     return payload
 
 
+def _validate_maniskill_spatial_repair(saved: ExperimentConfig, current: ExperimentConfig) -> None:
+    """Only the training region objective may differ; all online semantics stay fixed."""
+    profile = "maniskill_pd_ee_delta_pose_7d_v2"
+    if saved.data.data_profile != profile or current.data.data_profile != profile:
+        raise ValueError("spatial repair requires identical ManiSkill v2 outlets")
+    if saved.objectives.maniskill_spatial_grounding != 0:
+        raise ValueError("spatial initialization requires the unmodified audited objective")
+    if current.objectives.maniskill_spatial_grounding not in (0., .01):
+        raise ValueError("spatial repair weight is outside the predeclared 0/0.01 panel")
+    left,right = _initialization_config_view(saved),_initialization_config_view(current)
+    for view in (left,right):
+        cast(dict[str,object],view["objectives"]).pop("maniskill_spatial_grounding",None)
+    if left != right:
+        raise ValueError("spatial repair differs outside current-region supervision")
+
+
 def _validate_maniskill_cold_start_repair(saved: ExperimentConfig, current: ExperimentConfig) -> None:
     """Admit only the declared training sampler/dropout experiment, including its control.
 
@@ -1228,6 +1252,7 @@ def load_checkpoint_for_initialization(
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
         CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
         MANISKILL_COLD_START_REPAIR_V1_MIGRATION,
+        MANISKILL_SPATIAL_REPAIR_V1_MIGRATION,
         DINOV3_DEEP_REPAIR_V1_MIGRATION,
         S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
         G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
@@ -1506,6 +1531,10 @@ def load_checkpoint_for_initialization(
             raise ValueError(
                 "joint task-object binding migration requires identical dataset identity"
             )
+    elif selected_model_migration == MANISKILL_SPATIAL_REPAIR_V1_MIGRATION:
+        _validate_maniskill_spatial_repair(saved_config, config)
+        if saved_identity.dataset != identity.dataset:
+            raise ValueError("spatial repair requires identical dataset/normalizers")
     elif selected_model_migration == MANISKILL_COLD_START_REPAIR_V1_MIGRATION:
         _validate_maniskill_cold_start_repair(saved_config, config)
         if saved_identity.dataset != identity.dataset:
@@ -1649,7 +1678,9 @@ def load_checkpoint_for_initialization(
             if saved_sources.get(source_path) != current_sources.get(source_path)
         )
     )
-    if selected_model_migration == MANISKILL_COLD_START_REPAIR_V1_MIGRATION:
+    if selected_model_migration == MANISKILL_SPATIAL_REPAIR_V1_MIGRATION:
+        allowed_source_paths = MANISKILL_SPATIAL_REPAIR_V1_SOURCE_PATHS
+    elif selected_model_migration == MANISKILL_COLD_START_REPAIR_V1_MIGRATION:
         allowed_source_paths = MANISKILL_COLD_START_REPAIR_V1_SOURCE_PATHS
     elif selected_model_migration == CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION:
         allowed_source_paths = CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_SOURCE_PATHS

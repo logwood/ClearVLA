@@ -1,0 +1,56 @@
+{
+  "schema": "maniskill-spatial-repair-experiment-v1",
+  "branch": "codex/maniskill-spatial-repair-20261008",
+  "initial_checkpoint_sha256": "a6e4158bb995083ebd8bf9a914e2085b31e476f649b44b7b18c2fe9271a43c97",
+  "hypothesis": "Training G to cover each observed cube with one slot consistent across views improves held-out spatial grounding; action benefit must be measured separately.",
+  "control": "Identical continued training with zero new objective weight",
+  "candidate": "Only new objective weight 0.01; region NLL + normalized image centroid squared distance; minimum 20 current color pixels; 12-pixel dilation; one shared permutation across views",
+  "labels": "Detached current RGB weak color labels, validated against renderer actor masks; no simulator coordinates, future labels, slot assignment or color pointers enter inference",
+  "fixed": {
+    "dataset": "stackcube_bc_20260910_v2",
+    "train_val_test_episodes": [
+      59,
+      7,
+      7
+    ],
+    "batch_size": 2,
+    "updates": 256,
+    "clock_start": 6392,
+    "optimizer": "Named Adam moments retained, matched existing LR schedule continuation",
+    "seed": 0,
+    "validation_batches": 64,
+    "replan_steps": 8,
+    "steps_per_episode": 400,
+    "policy_seed": 0,
+    "execution": "soft",
+    "solver": "Q5 proposal/one W rebuild/refinement"
+  },
+  "preflight": [
+    "finite permutation/occlusion/underflow gradients",
+    "migration rejects any extra online or objective change",
+    "RGB weak-label precision and coverage versus exact renderer masks",
+    "nonzero raw VJP on actual G binder and progressive visual producer parameters",
+    "unchanged outputs at restored weights and exact save/reload",
+    "two ordinary updates per arm"
+  ],
+  "pilot_selection": "Always compare both final 256-update checkpoints; no selection on test scenes or evaluation seeds",
+  "measurement": [
+    "same full validation scenes and seed/noise for each arm",
+    "region mass and centroid error, visibility coverage per object/camera/stage",
+    "native signed XY response in controlled placements",
+    "full 18 common closed-loop episodes per arm, no success/failure filtering",
+    "first close XY miss, red lift, transport, stack success, full NPZ/video"
+  ],
+  "qualification": {
+    "mechanism": "held-out region mass increases and centroid error decreases relative to matched control; report per-scene results",
+    "behavior": "improved close-loop reach/lift/stack outcomes; loss reduction alone does not qualify",
+    "promotion": "requires successful full closed-loop trajectories and fresh seeds 6000000..6000017 after common-panel improvement"
+  },
+  "if_grounding_only_improves": "Keep that result separate. Add operation-binding or native action supervision as a separate next factor with a new matched control; do not call attention improvement a repaired policy.",
+  "if_neither_improves": "Reject the pilot, inspect gradient owners and weak-label/support coverage before a longer run; no automatic long training.",
+  "deferred_factors": [
+    "raw_chart_v1 Teacher in its own matched arm",
+    "corrective recovery demonstrations with episode-level held-out layouts"
+  ],
+  "artifact_root": "/data/senwang/clearvla/experiments/maniskill/20261008-spatial-repair-ab"
+}
