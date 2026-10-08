@@ -36,9 +36,13 @@ def world_points(depth, view, projection):
     return xyz, valid
 
 
-def propose_groups(depths, rgbs, views, projections, *, support_mode='dominant_v1', workspace_point=None):
+def propose_groups(depths, rgbs, views, projections, *, support_mode='dominant_v1', workspace_point=None,
+                   connectivity_mode='geometry_rgb_v1'):
     settings = dict(SETTINGS)
     settings['support_mode'] = support_mode
+    settings['connectivity_mode'] = connectivity_mode
+    if connectivity_mode not in ('geometry_rgb_v1', 'geometry_only_v3'):
+        raise ValueError('undeclared connectivity rule')
     if support_mode not in ('dominant_v1', 'under_tcp_v2'):
         raise ValueError('undeclared support plane rule')
     if support_mode == 'under_tcp_v2':
@@ -123,7 +127,7 @@ def propose_groups(depths, rgbs, views, projections, *, support_mode='dominant_v
     if len(selected):
         xyz = points[selected]; rgb = colors[selected]
         pairs = cKDTree(xyz).query_pairs(settings['neighbor_radius_m'], output_type='ndarray')
-        if len(pairs):
+        if len(pairs) and connectivity_mode == 'geometry_rgb_v1':
             pairs = pairs[np.linalg.norm(rgb[pairs[:, 0]]-rgb[pairs[:, 1]], axis=1) <= settings['rgb_distance']]
         edges = coo_matrix((np.ones(len(pairs), np.uint8), (pairs[:, 0], pairs[:, 1])), shape=(len(xyz), len(xyz)))
         n, component = connected_components(edges, directed=False)
