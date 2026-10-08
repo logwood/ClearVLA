@@ -121,7 +121,7 @@ jobs:
           python-version: '3.12'
       - run: |
           python -m pip install 'torch==2.11.0' --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install 'pytest>=8,<10' 'numpy>=1.26,<3' 'h5py>=3.10,<4' 'pillow>=10,<13' 'rich>=13,<15' 'opencv-python-headless>=4.9,<5'
+          python -m pip install 'pytest>=8,<10' 'numpy>=1.26,<3' 'h5py>=3.10,<4' 'pillow>=10,<13' 'rich>=13,<15' 'opencv-python-headless>=4.9,<5' 'scipy>=1.11,<2' 'matplotlib>=3.8,<4' 'ruff==0.16.0' 'pyright==1.1.411'
       - run: python scripts/run_unified_refactor_checks.py --output "$RUNNER_TEMP/regression" --shards 4 --shard ${{ matrix.shard }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -157,10 +157,12 @@ jobs:
           git archive 90427db452a947c21afe8c4ec827055766252829 | tar -x -C "$RUNNER_TEMP/baseline"
           git diff --name-only 90427db452a947c21afe8c4ec827055766252829 HEAD -- '*.py' > "$RUNNER_TEMP/static/changed.txt"
           python scripts/audit_structural_static.py --baseline "$RUNNER_TEMP/baseline" --current . --output "$RUNNER_TEMP/static" --files "$RUNNER_TEMP/static/changed.txt"
-      - name: Two ordinary updates and full two-pass sampler in each topology
+      - name: Ordinary updates and complete two-pass sampler in each topology
         run: |
           python scripts/check_unified_model_flow.py --variant A --output "$RUNNER_TEMP/static/flow-A.json"
           python scripts/check_unified_model_flow.py --variant B --output "$RUNNER_TEMP/static/flow-B.json"
+          python scripts/check_unified_model_flow.py --shape production --variant A --updates 2 --raw-side 256 --output "$RUNNER_TEMP/static/production-flow-A.json"
+          python scripts/check_unified_model_flow.py --shape production --variant B --updates 2 --raw-side 256 --output "$RUNNER_TEMP/static/production-flow-B.json"
       - name: Record real-data admission without synthetic substitution
         shell: bash
         run: |
