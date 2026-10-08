@@ -194,3 +194,48 @@ inputs and random weights, not real pretrained BS8 training. The local 4-GiB
 container could complete B1 BF16 but its initial BS8 attempt was terminated
 under memory pressure; that is a resource-blocked attempt, not a passing check.
 Retain the remote runtime/RSS and test receipts before qualifying BS8.
+
+
+## Independent current/reference observation support (2026-10-08)
+
+The source-consistent S reader still restricted current G probability by
+`current_observed & reference_observed` at identical pixel coordinates. A
+current cell at x=-1 was therefore discarded even when its exact descriptor
+was observed at reference x=+1. The pre-fix actual S component returned zero
+source mass and zero displacement for this constructed -2 chart-coordinate
+move. This is distinct from the already fixed successor Teacher mask issue.
+
+Current G/current image support and reference destination support now own
+their separate masks. Their same-coordinate intersection remains diagnostic
+only. `InstructionPosterior` retains both masks, checks each probability
+against its own producer, and preserves source = real + unknown mass. P3's
+prepared nonlinear content/joint projections quarantine each image using its
+own mask. The endpoint goal/current comparison also uses current support,
+not the old intersection. Current masking follows canonical G's existing
+nearest source-mask projection onto the declared endpoint chart. Missing
+reference images keep current source mass with unknown=1, and emit no visual
+change. This does not invent a correspondence for ambiguous descriptors.
+
+Legacy learned matching keeps its old shared-mask calculation and omitted
+optional fields. The source-consistent instruction metadata advances to v2;
+the causal ABI states `independent-current-reference-v1`. Changed-source
+initialization is admitted only through `causal_unified_reference_v1`, which
+extends the values migration with the posterior source type and endpoint
+comparison files. Previous A/B/source/values allowlists are not broadened.
+The new mode still requires the original mature source identity, explicit
+conditional values and the previously required complete repair selections.
+It adds no parameters, labels, cameras, loss weights or policy selectors.
+
+Focused tests cover disjoint but matched domains, missing current/reference,
+independent NaN quarantine, strict probability-domain rejection, K permutation,
+same-source no change, the original legacy counterexample, S/P3 ordinary
+backward, actual source-log-measure VJP versus finite differences, the endpoint
+consumer, metadata and migration rejection. Descriptor matches and -2 values
+are synthetic chart-coordinate checks, not physical meters or new checkpoint
+motion accuracy. Full-topology and real-data qualification remain separate.
+
+Real-data command on an asset-owning CUDA host (use an actual source checkpoint):
+`python scripts/run_unified_real_data_check.py --config configs/mainline/unified_values_b_calvin_check.json --migration causal_unified_reference_v1 --checkpoint <mature-source.pt> --output-dir <new-run-directory> --report <new-report.json> --device cuda:0 --execute`.
+Missing private data/weights/CUDA is still blocked, not replaced with artificial
+features or relabelled as training success. Historical behavior scores remain
+unchanged until the corresponding newly trained policy is actually evaluated.

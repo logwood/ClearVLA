@@ -1694,6 +1694,19 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### Independent instruction-reference support (2026-10-08; not promoted)
+
+The source-consistent S/current-reference comparison now uses independent
+source-owned current and reference masks. Same-coordinate mask intersection
+is diagnostic, never an admissibility test for a moved physical point. The
+posterior type and prepared S/P3/goal reads retain those domains; missing
+reference stays unknown without erasing a valid current source. Legacy learned
+matching is unchanged. Initialization uses only the explicit
+`causal_unified_reference_v1` contract, not a broadened old migration. This is
+a source-domain repair, not a qualified long-gap matcher, physical identity
+or task-success claim. See `UNIFIED_REFACTOR_QUALIFICATION.md`.
+
+
 ### Unified conditional-value source candidate (2026-10-08)
 
 On `codex/causal-unified-refactor-20261008`, the explicit

@@ -13,7 +13,7 @@ import math
 import torch
 from torch import Tensor, nn
 
-from clearvla.vision.entity_chart import ImageLogMeasure, current_image_grid
+from clearvla.vision.entity_chart import current_image_grid
 
 from ..instruction_change import InstructionChangeEvidence
 from ..instruction_posterior import InstructionChangeValues, InstructionPosterior
@@ -76,20 +76,21 @@ class PosteriorChangeValueRead(nn.Module):
         dtype = self.robot.weight.dtype
         # Mask BEFORE projections/nonlinearities: unsupported NaN payload must
         # never produce a NaN*0 parameter gradient.
-        now = torch.where(posterior.observed[..., None], posterior.current, 0.0).to(dtype)
-        start = torch.where(posterior.observed[..., None], posterior.reference, 0.0).to(dtype)
+        now = torch.where(posterior.current_support[..., None], posterior.current, 0.0).to(dtype)
+        start = torch.where(posterior.reference_support[..., None], posterior.reference, 0.0).to(
+            dtype
+        )
         xy = posterior.coordinates.to(dtype)
         content_now = self.content(now)
         content_start = self.content(start)
         image = self.image(xy)
         position = self.joint_image(xy)[None, None]
-        joint_now = self.joint_output(
-            torch.nn.functional.silu(self.joint_content(now) + position)
-        )
+        joint_now = self.joint_output(torch.nn.functional.silu(self.joint_content(now) + position))
         joint_start = self.joint_output(
             torch.nn.functional.silu(self.joint_content(start) + position)
         )
         with torch.autocast(device_type=now.device.type, enabled=False):
+
             def contrast(current: Tensor, reference: Tensor) -> Tensor:
                 return torch.einsum(
                     "bkcn,bcnh->bkch", posterior.current_probability, current.float()
@@ -146,8 +147,11 @@ class PosteriorChangeValueRead(nn.Module):
         # Correspondence-null and operated-target-null are separate. Neither is
         # renormalized into a confident real-object observation.
         return (
-            reduce(values.content), reduce(values.image), reduce(values.joint),
-            robot, status,
+            reduce(values.content),
+            reduce(values.image),
+            reduce(values.joint),
+            robot,
+            status,
         )
 
 
@@ -166,34 +170,32 @@ class PosteriorInstructionReferenceRead(nn.Module):
         super().__init__()
         self.observation_measurement_mode = observation_measurement_mode
         self.camera_names = camera_names
-        self.scale = hidden ** -0.5
+        self.scale = hidden**-0.5
         self.query = nn.Linear(content_dim, hidden, bias=False)
         self.key = nn.Linear(content_dim, hidden, bias=False)
         self.query_position = nn.Linear(2, hidden, bias=False)
         self.key_position = nn.Linear(2, hidden, bias=False)
         self.null_key = nn.Parameter(torch.zeros(hidden))
         self.values = PosteriorChangeValueRead(
-            hidden=hidden, content_dim=content_dim,
-            state_dim=state_dim, camera_names=camera_names,
+            hidden=hidden,
+            content_dim=content_dim,
+            state_dim=state_dim,
+            camera_names=camera_names,
         )
         self.output = nn.Linear(5 * hidden, hidden, bias=False)
         if observation_measurement_mode == "source_consistent_v1":
             for name in ("query", "key", "query_position", "key_position", "null_key"):
-                self.register_parameter(name, None) if isinstance(getattr(self, name), nn.Parameter) else setattr(self, name, None)
+                self.register_parameter(name, None) if isinstance(
+                    getattr(self, name), nn.Parameter
+                ) else setattr(self, name, None)
 
-    def _kernel(
-        self, query: Tensor, content: Tensor, observed: Tensor, grid: Tensor
-    ) -> Tensor:
+    def _kernel(self, query: Tensor, content: Tensor, observed: Tensor, grid: Tensor) -> Tensor:
         safe = torch.where(observed[..., None], content, 0.0).to(self.key.weight.dtype)
-        key = self.key(safe) + self.key_position(
-            grid.to(self.key.weight.dtype)
-        )[None, None]
+        key = self.key(safe) + self.key_position(grid.to(self.key.weight.dtype))[None, None]
         with torch.autocast(device_type=query.device.type, enabled=False):
             logits = torch.einsum("bcnh,bcmh->bcnm", query.float(), key.float()) * self.scale
             logits = logits.masked_fill(~observed[:, :, None], -torch.inf)
-            null = torch.einsum(
-                "bcnh,h->bcn", query.float(), self.null_key.float()
-            ) * self.scale
+            null = torch.einsum("bcnh,h->bcn", query.float(), self.null_key.float()) * self.scale
             return torch.softmax(torch.cat((logits, null[..., None]), -1), dim=-1)
 
     def forward(
@@ -219,37 +221,62 @@ class PosteriorInstructionReferenceRead(nn.Module):
             raise ValueError("posterior comparison requires the actual G3 image source")
         camera = (facts.camera_validity[..., 0] > 0).any(1)
         now_source = camera[..., None].expand(batch, cameras, patches)
+        independent_support = self.observation_measurement_mode == "source_consistent_v1"
+        if independent_support:
+            # Current training/source masks belong to CURRENT evidence. Their
+            # endpoint-grid projection follows canonical G's existing nearest
+            # mask convention; reference support is never used to erase it.
+            cells = facts.dense_chart.cell_observed[..., 0]
+            current_cells = (
+                torch.nn.functional.interpolate(
+                    cells.float().reshape(batch * cameras, 1, *cells.shape[-2:]),
+                    size=(side, side),
+                    mode="nearest",
+                )
+                .reshape(batch, cameras, patches)
+                .bool()
+            )
+            now_source = now_source & current_cells
         common = now_source & reference.observed
+        source_mask = now_source if independent_support else common
+        reference_mask = reference.observed if independent_support else common
         # Reproject the ORIGINAL log measure, not an upsampled 8x8 barycenter.
         image = source.on_image(rows=side, columns=side)
         spatial_support = (
             image.supported
-            & common[:, None].reshape(batch, 1, cameras, side, side)
+            & source_mask[:, None].reshape(batch, 1, cameras, side, side)
             & binding.supported[:, :, None, None, None]
         )
         source_probability, _ = image.restrict(
-            common[:, None].reshape(batch, 1, cameras, side, side)
+            source_mask[:, None].reshape(batch, 1, cameras, side, side)
             & binding.supported[:, :, None, None, None]
         ).normalized((-2, -1))
         source_probability = source_probability.flatten(-2)
-        view_ok = spatial_support.flatten(-2).any(-1) & (facts.camera_validity[..., 0] > 0)
-        source_probability = torch.where(view_ok[..., None], source_probability, 0.0)
-        grid = current_image_grid(
-            side, side, device=current_dino.device
-        ).reshape(patches, 2).float()
+        source_view_ok = spatial_support.flatten(-2).any(-1) & (facts.camera_validity[..., 0] > 0)
+        source_probability = torch.where(source_view_ok[..., None], source_probability, 0.0)
+        # No reference image is unknown correspondence, not loss of the
+        # current source. Retain its unit source/null law but emit no change.
+        view_ok = source_view_ok & reference_mask.any(-1)[:, None]
+        grid = (
+            current_image_grid(side, side, device=current_dino.device).reshape(patches, 2).float()
+        )
         if self.observation_measurement_mode == "source_consistent_v1":
             from clearvla.vision.observed_correspondence import observed_feature_correspondence
+
             kernel_start = observed_feature_correspondence(
-                current_dino, reference.dino, common, common)
+                current_dino, reference.dino, source_mask, reference_mask
+            )
             kernel_now = None
         else:
             safe_now = torch.where(common[..., None], current_dino, 0.0).to(self.query.weight.dtype)
-            query = self.query(safe_now) + self.query_position(
-                grid.to(self.query.weight.dtype)
-            )[None, None]
+            query = (
+                self.query(safe_now)
+                + self.query_position(grid.to(self.query.weight.dtype))[None, None]
+            )
             kernel_now = self._kernel(query, current_dino, common, grid)
             kernel_start = self._kernel(query, reference.dino, common, grid)
         with torch.autocast(device_type=current_dino.device.type, enabled=False):
+
             def mixture(kernel: Tensor) -> tuple[Tensor, Tensor]:
                 return (
                     torch.einsum("bkcn,bcnm->bkcm", source_probability, kernel[..., :-1]),
@@ -265,12 +292,14 @@ class PosteriorInstructionReferenceRead(nn.Module):
             else:
                 p_now, null_now = mixture(kernel_now)
             now = torch.einsum(
-                "bkcn,bcnd->bkcd", p_now,
-                torch.where(common[..., None], current_dino.float(), 0.0),
+                "bkcn,bcnd->bkcd",
+                p_now,
+                torch.where(source_mask[..., None], current_dino.float(), 0.0),
             )
             start = torch.einsum(
-                "bkcn,bcnd->bkcd", p_start,
-                torch.where(common[..., None], reference.dino.float(), 0.0),
+                "bkcn,bcnd->bkcd",
+                p_start,
+                torch.where(reference_mask[..., None], reference.dino.float(), 0.0),
             )
             xy = torch.einsum("bkcn,nd->bkcd", p_now - p_start, grid)
 
@@ -282,17 +311,30 @@ class PosteriorInstructionReferenceRead(nn.Module):
             shape = p_now.shape[:-1]
             status = torch.stack(
                 (
-                    entropy(p_now, null_now), entropy(p_start, null_start), view_ok.float(),
+                    entropy(p_now, null_now),
+                    entropy(p_start, null_start),
+                    view_ok.float(),
                     now_source.float().mean(-1)[:, None].expand(shape),
                     reference.observed.float().mean(-1)[:, None].expand(shape),
                     common.float().mean(-1)[:, None].expand(shape),
-                    null_now, null_start,
+                    null_now,
+                    null_start,
                 ),
                 -1,
             )
         posterior = InstructionPosterior(
-            current_dino, reference.dino, common, grid, source_probability,
-            p_now, p_start, null_now, null_start, source,
+            current_dino,
+            reference.dino,
+            common,
+            grid,
+            source_probability,
+            p_now,
+            p_start,
+            null_now,
+            null_start,
+            source,
+            current_observed=source_mask if independent_support else None,
+            reference_observed=reference_mask if independent_support else None,
         )
         evidence = InstructionChangeEvidence(
             content_delta=torch.where(view_ok[..., None], now - start, 0.0),
@@ -301,8 +343,11 @@ class PosteriorInstructionReferenceRead(nn.Module):
             match_status=torch.where(binding.supported[..., None, None], status, 0.0),
             view_observed=view_ok,
             view_weight=masked_probability(facts.log_camera_validity[..., 0], view_ok),
-            binding=binding, current_state=current_state, reference=reference,
-            camera_names=self.camera_names, posterior=posterior,
+            binding=binding,
+            current_state=current_state,
+            reference=reference,
+            camera_names=self.camera_names,
+            posterior=posterior,
         )
         evidence.validate(hidden_content=channels, strict=True)
         values = self.values(evidence)
@@ -325,13 +370,13 @@ class PosteriorInstructionChangePlanRead(nn.Module):
     ) -> None:
         super().__init__()
         self.values = PosteriorChangeValueRead(
-            hidden=hidden, content_dim=content_dim,
-            state_dim=state_dim, camera_names=camera_names,
+            hidden=hidden,
+            content_dim=content_dim,
+            state_dim=state_dim,
+            camera_names=camera_names,
         )
         self.query = nn.Linear(hidden, hidden, bias=False)
-        self.modulations = nn.ModuleList(
-            nn.Linear(hidden, hidden, bias=False) for _ in range(4)
-        )
+        self.modulations = nn.ModuleList(nn.Linear(hidden, hidden, bias=False) for _ in range(4))
         self.output = nn.Linear(4 * hidden, hidden, bias=False)
 
     def prepare(self, evidence: InstructionChangeEvidence) -> InstructionChangeValues:
@@ -344,7 +389,9 @@ class PosteriorInstructionChangePlanRead(nn.Module):
         prepared: InstructionChangeValues | None = None,
     ) -> Tensor:
         if prepared is None:
-            raise ValueError("P3 posterior projections must be prepared once during online encoding")
+            raise ValueError(
+                "P3 posterior projections must be prepared once during online encoding"
+            )
         if (
             query.ndim != 4
             or query.shape[0] != evidence.current_state.shape[0]

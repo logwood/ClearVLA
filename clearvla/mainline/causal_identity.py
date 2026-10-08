@@ -72,6 +72,8 @@ def causal_identity_metadata(top):
         "policy_inputs": "unchanged-RGB-language-observed-proprioception-and-executed-controls",
         "identity_claim": "candidate-learned-correspondence-not-certified-physical-objects",
     }
+    if modes["observation_measurement_mode"] == "source_consistent_v1":
+        result["instruction_observation_support"] = "independent-current-reference-v1"
     if modes["identity_supervision_mode"] == "rgbd_temporal_conditional_v2":
         result["identity_supervision"]["correspondence"] = (
             "real-K-conditional-before-interpolation;producer-support-only;null-is-not-an-identity-label"

@@ -25,7 +25,11 @@ TYPED_CHANGE_MODES = (TYPED_REFERENCE_CHANGE, POSTERIOR_REFERENCE_CHANGE)
 INSTRUCTION_CHANGE_MODES = (MIXED_REFERENCE_CHANGE, *TYPED_CHANGE_MODES)
 
 
-def instruction_change_metadata(camera_names: tuple[str, ...], mode: str = TYPED_REFERENCE_CHANGE, measurement_mode: str = "legacy_v1") -> dict[str, object]:
+def instruction_change_metadata(
+    camera_names: tuple[str, ...],
+    mode: str = TYPED_REFERENCE_CHANGE,
+    measurement_mode: str = "legacy_v1",
+) -> dict[str, object]:
     if (
         not camera_names
         or len(set(camera_names)) != len(camera_names)
@@ -34,26 +38,38 @@ def instruction_change_metadata(camera_names: tuple[str, ...], mode: str = TYPED
         raise ValueError("instruction change requires unique named camera charts")
     if mode not in TYPED_CHANGE_MODES:
         raise ValueError("unknown typed instruction change mode")
-    if measurement_mode not in {"legacy_v1","source_consistent_v1"}:
+    if measurement_mode not in {"legacy_v1", "source_consistent_v1"}:
         raise ValueError("unknown instruction measurement ABI")
     if measurement_mode == "source_consistent_v1":
-        base=instruction_change_metadata(camera_names,mode)
-        return {**base,"schema":"source-consistent-instruction-change-v1",
-                "matching":"frozen-observed-descriptor-law-before-G-read-fixed-across-physical-offsets",
-                "source":"actual-full-RGB-endpoint-derived-chart-with-authoritative-G-image-read",
-                "null":"explicit-unknown-no-argmax-no-fabricated-centroid-motion",
-                "limits":"appearance-correspondence-not-certified-object-tracking"}
+        base = instruction_change_metadata(camera_names, mode)
+        return {
+            **base,
+            "schema": "source-consistent-instruction-change-v2",
+            "patch_support": "independent-current-and-reference-observed-domains;intersection-is-diagnostic-only",
+            "matching": "frozen-observed-descriptor-law-before-G-read-fixed-across-physical-offsets",
+            "source": "actual-full-RGB-endpoint-derived-chart-with-authoritative-G-image-read",
+            "null": "explicit-unknown-no-argmax-no-fabricated-centroid-motion",
+            "limits": "appearance-correspondence-not-certified-object-tracking",
+        }
     if mode == POSTERIOR_REFERENCE_CHANGE:
         base = instruction_change_metadata(camera_names, TYPED_REFERENCE_CHANGE)
-        return {**base, "schema": "g3-posterior-instruction-change-v1", "mode": mode,
-                "matching": "full-G3-current-image-law-mixture-of-shared-current-patch-queries-with-learned-null",
-                "values": ["nonlinear-content-posterior-difference", "nonlinear-image-posterior-difference",
-                           "nonlinear-joint-content-image-posterior-difference", "robot-state-feature-difference",
-                           "separate-entropy-null-and-source-status"],
-                "source": "G3-log-read-pushforward-directly-to-native-chart-not-public-canvas-upsample",
-                "null": "correspondence-null-distinct-from-S-target-null-neither-renormalized-away",
-                "P3": "independent-projections-prepared-once-no-visual-bank-reopen-in-ODE",
-                "limits": "apparent-null-aware-evidence-not-calibrated-motion-goal-error-success-or-persistent-ID"}
+        return {
+            **base,
+            "schema": "g3-posterior-instruction-change-v1",
+            "mode": mode,
+            "matching": "full-G3-current-image-law-mixture-of-shared-current-patch-queries-with-learned-null",
+            "values": [
+                "nonlinear-content-posterior-difference",
+                "nonlinear-image-posterior-difference",
+                "nonlinear-joint-content-image-posterior-difference",
+                "robot-state-feature-difference",
+                "separate-entropy-null-and-source-status",
+            ],
+            "source": "G3-log-read-pushforward-directly-to-native-chart-not-public-canvas-upsample",
+            "null": "correspondence-null-distinct-from-S-target-null-neither-renormalized-away",
+            "P3": "independent-projections-prepared-once-no-visual-bank-reopen-in-ODE",
+            "limits": "apparent-null-aware-evidence-not-calibrated-motion-goal-error-success-or-persistent-ID",
+        }
     return {
         "schema": "typed-instruction-observation-change-v1",
         "mode": TYPED_REFERENCE_CHANGE,
@@ -139,7 +155,10 @@ class InstructionChangeEvidence:
             self.posterior.validate(strict=strict)
             if self.posterior.reference is not self.reference.dino:
                 raise ValueError("posterior lost its instruction reference source")
-            if self.posterior.current.shape[0:2] != (batch,cameras) or self.posterior.current.shape[-1] != width:
+            if (
+                self.posterior.current.shape[0:2] != (batch, cameras)
+                or self.posterior.current.shape[-1] != width
+            ):
                 raise ValueError("posterior source chart differs from typed evidence")
         if strict:
             self.binding.validate(batch=batch, objects=objects, device=self.current_state.device)

@@ -173,6 +173,7 @@ def verify_training_receipt(output: Path, admission: dict) -> dict:
 
 def main() -> int:
     from clearvla.mainline.runtime.causal_identity_migration import (
+        CAUSAL_UNIFIED_REFERENCE_V1,
         CAUSAL_UNIFIED_SOURCE_V1,
         CAUSAL_UNIFIED_VALUES_V1,
     )
@@ -186,7 +187,7 @@ def main() -> int:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
         "--migration",
-        choices=(CAUSAL_UNIFIED_SOURCE_V1, CAUSAL_UNIFIED_VALUES_V1),
+        choices=(CAUSAL_UNIFIED_SOURCE_V1, CAUSAL_UNIFIED_VALUES_V1, CAUSAL_UNIFIED_REFERENCE_V1),
         default=CAUSAL_UNIFIED_SOURCE_V1,
     )
     args = parser.parse_args()

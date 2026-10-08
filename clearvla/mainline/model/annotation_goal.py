@@ -197,7 +197,7 @@ def compare_goal_to_current(
     if posterior is None or change.reference is not prediction.reference:
         raise ValueError("goal comparison requires its own G3/reference evidence")
     # Existing source masks distinguish absent images from a measured change.
-    observed = posterior.observed
+    observed = posterior.current_support
     probability = reference_observation_law(prediction.reference, posterior.current, observed)
     content = normalized_observation(posterior.current.detach(), observed).detach()
     evidence = AnnotatedGoalEvidence(prediction, probability, content, observed, change)
