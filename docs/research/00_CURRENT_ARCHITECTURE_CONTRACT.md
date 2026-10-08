@@ -3355,3 +3355,12 @@ for replay; its recombined surrogate derivative is I+P, not ordinary autograd.
 No parameter, forward value, selector or gain is changed. Config/ABI identify the
 mode, and original A/B initialization cannot silently admit it. Source/init
 admission is not a learned behavior claim; full test and real-data gates remain.
+
+### Unified source type boundary follow-up
+
+Temporary monolith-to-stage transfer validates the declared component type
+before removing the registered child, then moves the same object without copy
+or constructor calls. All-or-none observed/predicted world outcome records are
+narrowed explicitly before arithmetic. These checks preserve numerical behavior,
+parameter ordering and checkpoint tensor meanings; no broader migration mode or
+runtime type suppression is introduced.

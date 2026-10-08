@@ -175,17 +175,22 @@ class ExecutedWorldFeedback:
             raise ValueError("executed W observation lost declared measurement support")
         if self.view_observed.shape != (b, k, c) or self.view_observed.dtype != torch.bool:
             raise ValueError("executed W source support must remain boolean")
-        outcomes = (
-            self.observed_semantic,
-            self.observed_image,
-            self.predicted_semantic,
-            self.predicted_image,
-        )
+        observed_semantic = self.observed_semantic
+        observed_image = self.observed_image
+        predicted_semantic = self.predicted_semantic
+        predicted_image = self.predicted_image
+        outcomes = (observed_semantic, observed_image, predicted_semantic, predicted_image)
         if any(v is not None for v in outcomes):
-            if any(v is None for v in outcomes):
+            if (
+                observed_semantic is None
+                or observed_image is None
+                or predicted_semantic is None
+                or predicted_image is None
+            ):
                 raise ValueError("observed, predicted and innovation records must be complete")
+            complete = (observed_semantic, observed_image, predicted_semantic, predicted_image)
             for value, expected in zip(
-                outcomes, (self.semantic, self.image, self.semantic, self.image)
+                complete, (self.semantic, self.image, self.semantic, self.image)
             ):
                 if (
                     value.shape != expected.shape
@@ -197,15 +202,12 @@ class ExecutedWorldFeedback:
                         "outcome record lost detached observation units or source axes"
                     )
             if strict:
-                if not all(bool(torch.isfinite(v).all()) for v in outcomes):
+                if not all(bool(torch.isfinite(v).all()) for v in complete):
                     raise ValueError("nonfinite outcome record")
                 if not torch.allclose(
-                    self.semantic,
-                    self.observed_semantic - self.predicted_semantic,
-                    atol=2e-6,
-                    rtol=1e-5,
+                    self.semantic, observed_semantic - predicted_semantic, atol=2e-6, rtol=1e-5
                 ) or not torch.allclose(
-                    self.image, self.observed_image - self.predicted_image, atol=2e-6, rtol=1e-5
+                    self.image, observed_image - predicted_image, atol=2e-6, rtol=1e-5
                 ):
                     raise ValueError("innovation is not observed minus predicted outcome")
         for t in (

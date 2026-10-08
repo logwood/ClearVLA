@@ -305,3 +305,21 @@ Physical instance identity, target choice, contact-compatible arm/gripper,
 long-gap correspondence, controller state and sustained task maintenance retain
 their outstanding scientific gates. An actual asset-owning CUDA training run
 and new closed loops are still required.
+
+## Typed registration transfer and complete optional outcomes
+
+The constructor's temporary-owner extraction returned `object` and did not
+validate concrete stage types before removing them from the old registry.
+It now requires an explicit expected type, rejects mismatches before mutation,
+and returns the same registered object. Parameter identity/order, constructor
+RNG and state_dict values are preserved in full A/B constructor comparisons.
+No new numerical expression, model tensor or controller policy is introduced.
+
+World feedback validation now explicitly narrows all four optional outcome
+fields before tensor operations. The all-absent legacy record remains legal;
+every partial record is rejected. This retains the old all-or-none rule rather
+than ignoring Optional diagnostics. Focused checks retain wrong-type sources,
+verify exact module/parameter/buffer moves, and exercise complete, missing and
+inconsistent world outcome records. The 23 inherited type errors in these two
+changed producer/constructor files are eliminated; this is not a claim that
+every untyped member warning across the repository is resolved.

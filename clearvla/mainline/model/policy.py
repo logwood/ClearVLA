@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import TypeVar
 
 import torch
 import torch.nn.functional as F
@@ -19,10 +20,17 @@ from ..p2_geometry import VIEW_CONDITIONED_TRANSPORT
 from ..robot_execution import RobotResponseFeedback
 from ..supervision import quarantine, supported_mean
 from ..task_execution import JOINT_TASK_EXECUTION_MODES
+from ..v120_core.primitives import TimeEmbedding
+from ..v120_core.trunk_primitives import TemporalDynamicsBoundDiTBlock
 from ..world_robot import OBSERVED_ROBOT_VIEWS, RobotWorldObservation
 from .action_codec import PhysicalActionFieldCodec, anchor_horizon_weights
-from .action_contract import BottomOutput, V120SeedContext
+from .action_contract import ActionQueryEncoder, BottomOutput, V120SeedContext
 from .annotation_goal import supervise_annotated_goal
+from .compiler import (
+    ObjectFutureEffectReader,
+    ObjectPolicyPlanCompiler,
+    ZeroPreservingObjectConsequence,
+)
 from .component_contracts import ComponentSelection, modular_to_legacy_name
 from .components import (
     BridgeStage,
@@ -37,7 +45,8 @@ from .components import (
     TrainingTargetsStage,
     WorldStage,
 )
-from .intent import FuturePlanRecognizer
+from .grounding import DenseObjectGrounder
+from .intent import CoarseActionIntent, FuturePlanRecognizer, StatelessObjectIntentOrganizer
 from .observation_contract import ObservationEvidence
 from .operation_expectation import OperationExpectationSupervisor
 from .proposal import HistoryActionProposal
@@ -66,19 +75,22 @@ from .types import (
 )
 from .v120_p1 import LateRawDetailPolicyReader
 
+_Registered = TypeVar("_Registered")
 
-def _detach_registered(source: nn.Module, name: str) -> object:
-    """Take one already-constructed child out of a temporary source owner."""
 
-    if name in source._modules:
-        value = source._modules.pop(name)
-        return value
-    if name in source._parameters:
-        value = source._parameters.pop(name)
-        return value
-    if name in source._buffers:
-        value = source._buffers.pop(name)
-        return value
+def _detach_registered(source: nn.Module, name: str, expected: type[_Registered]) -> _Registered:
+    """Move an existing typed child; reject invalid ownership before mutation.
+
+    No constructor, copy, cast or new registration is inserted in the successful
+    route. The object and its parameters retain their original identities/order.
+    """
+    for registry in (source._modules, source._parameters, source._buffers):
+        if name in registry:
+            value = registry[name]
+            if not isinstance(value, expected):
+                raise TypeError(f"temporary source child {name!r} is not {expected.__name__}")
+            del registry[name]
+            return value
     raise KeyError(f"temporary source has no registered child {name!r}")
 
 
@@ -536,32 +548,36 @@ class ClearVLAMainlinePolicy(nn.Module):
         # Move every top child without constructing a second parameterized
         # implementation.  Direct parameters are detached from the temporary
         # owner in the same way as modules.
-        grounding_blocks = _detach_registered(raw_top, "grounding_blocks")
-        grounding_content_mod = _detach_registered(raw_top, "grounding_content_mod")
-        grounding_content_mod_scale = _detach_registered(raw_top, "grounding_content_mod_scale")
-        grounder = _detach_registered(raw_top, "grounder")
-        organizer = _detach_registered(raw_top, "intent")
-        coarse_action = _detach_registered(raw_top, "coarse_action")
-        dynamics = _detach_registered(raw_top, "dynamics")
-        teacher = _detach_registered(raw_top, "teacher")
-        recognizer = _detach_registered(raw_top, "recognizer")
+        grounding_blocks = _detach_registered(raw_top, "grounding_blocks", nn.ModuleList)
+        grounding_content_mod = _detach_registered(raw_top, "grounding_content_mod", nn.Sequential)
+        grounding_content_mod_scale = _detach_registered(
+            raw_top, "grounding_content_mod_scale", nn.Parameter
+        )
+        grounder = _detach_registered(raw_top, "grounder", DenseObjectGrounder)
+        organizer = _detach_registered(raw_top, "intent", StatelessObjectIntentOrganizer)
+        coarse_action = _detach_registered(raw_top, "coarse_action", CoarseActionIntent)
+        dynamics = _detach_registered(raw_top, "dynamics", nn.Module)
+        teacher = _detach_registered(raw_top, "teacher", ObjectFutureTeacher)
+        recognizer = _detach_registered(raw_top, "recognizer", nn.Module)
         if not isinstance(teacher, ObjectFutureTeacher) or not isinstance(
             recognizer, (FuturePlanRecognizer, OperationExpectationSupervisor)
         ):
             raise TypeError("training target owners must implement the declared physical time grid")
-        effect_reader = _detach_registered(raw_top, "effect_reader")
-        consequence = _detach_registered(raw_top, "consequence")
-        plan_compiler = _detach_registered(raw_top, "plan_compiler")
+        effect_reader = _detach_registered(raw_top, "effect_reader", ObjectFutureEffectReader)
+        consequence = _detach_registered(raw_top, "consequence", ZeroPreservingObjectConsequence)
+        plan_compiler = _detach_registered(raw_top, "plan_compiler", ObjectPolicyPlanCompiler)
 
         # Bottom children are detached only after their construction order has
         # been recorded.  The decoder already owns its terminal controller.
-        query_encoder = _detach_registered(raw_bottom, "query_encoder")
-        p1_time = _detach_registered(raw_bottom, "p1_time")
-        p1_content_mod = _detach_registered(raw_bottom, "p1_content_mod")
-        p1_content_mod_scale = _detach_registered(raw_bottom, "p1_content_mod_scale")
-        p1_policy_block = _detach_registered(raw_bottom, "p1_policy_block")
-        layer_contract_heads = _detach_registered(raw_bottom, "layer_contract_heads")
-        decoder = _detach_registered(raw_bottom, "decoder")
+        query_encoder = _detach_registered(raw_bottom, "query_encoder", ActionQueryEncoder)
+        p1_time = _detach_registered(raw_bottom, "p1_time", TimeEmbedding)
+        p1_content_mod = _detach_registered(raw_bottom, "p1_content_mod", nn.Sequential)
+        p1_content_mod_scale = _detach_registered(raw_bottom, "p1_content_mod_scale", nn.Parameter)
+        p1_policy_block = _detach_registered(
+            raw_bottom, "p1_policy_block", TemporalDynamicsBoundDiTBlock
+        )
+        layer_contract_heads = _detach_registered(raw_bottom, "layer_contract_heads", nn.ModuleList)
+        decoder = _detach_registered(raw_bottom, "decoder", nn.Module)
 
         # Final registered hierarchy.  Each child appears under one owner only.
         self.conditioning = ConditioningStage(raw_history_proposal)
