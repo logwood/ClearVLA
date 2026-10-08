@@ -17,6 +17,43 @@ No GitHub writes this turn; source and local history are fully archived.
 
 # ClearVLA current decision ledger
 
+## ManiSkill frozen-baseline spatial diagnosis (2026-10-08)
+
+The epoch-8 baseline (checkpoint SHA prefix `a6e4158bb995083e`) remains
+0/18 under the common 400-step/replan-8 panel. Replay of all 18 complete
+applied-action streams matches the recorded policy robot state and both cube
+positions exactly. Spatial probes cover 72 failed-stage queries, 42 expert-stage
+queries, 12 physical placements, 18 red/green pose exchanges, six complete
+three-boundary cache factorials, and 73 frozen-feature reset readouts.
+
+Full renderer-mask/posterior measurements confirm location- and phase-dependent
+grounding; a read barycenter alone is not a localization accuracy measure.
+Strong G cube coverage can still accompany a negative X command toward a
+positive-X target. All 18 identity exchanges shift the action toward the new
+red position, so complete color blindness is rejected. Removing G1 updates,
+G2 parent priors, or making G2 uniform does not repair the directional bias.
+Cache-factorial endpoints reproduce both original/donor actions exactly.
+Archived action replay is exact for 67/72 stage queries; retain the small
+nonzero differences (max including reset 0.004927 native units).
+
+Training-fitted RGB color/planar calibration localizes seven held-out test
+resets at mean red/green XY error 0.086/0.476 cm (all 14 visible objects),
+versus 7.80/7.75 cm for a train/validation-selected linear readout of G.
+This is a task-specific diagnostic and a limited linear readout, not proof of
+information loss or a new controller. Low-visibility calibration failures are
+explicit. The active Teacher has direct learned-content reference sensitivity;
+`raw_chart_v1` removes that dependence but leaves spatial association bias.
+
+Next repair must separately qualify object-balanced current-region/multiview
+supervision, native spatial-to-action accuracy, and recovery data. Preserve
+one K+null binding and keep masks/poses as training or audit labels only.
+No checkpoint is promoted and no new architecture is selected by this audit.
+Reproduce with `scripts/probe_maniskill_spatial_*.py`,
+`scripts/probe_maniskill_rgb_calibration.py`, and
+`scripts/analyze_maniskill_spatial_grounding.py`. Full NPZ/video evidence lives
+under remote `artifacts/maniskill-latest-train-20261007/spatial-grounding-20261008`
+in `/data/senwang/clearvla`; no raw probe data belongs in this ledger.
+
 ## M7f–M7l local closure, not model-performance acceptance
 
 Source admission, adjacent-command consistency, ordinary source/weight mutation,

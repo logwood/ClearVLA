@@ -1747,8 +1747,12 @@ this as a full retraining result. The frozen baseline remains 0/18, while
 6/6 expert replays succeed. Eighteen matched real training/deployment windows
 have identical inputs; repeated action parity is exact. The recorded spatial
 interventions point to weak localization/use of geometry, not total G content
-collapse. Teacher-reference choice, visual resolution and corrective-data
+collapse. Teacher-reference choice, visual representation and corrective-data
 coverage remain competing explanations; none is established as the sole cause.
+The subsequent full-posterior/renderer-mask audit also finds inaccurate
+spatial-to-action use when object coverage is strong; the shared color/target
+path is active. Its bounded evidence and repair gates are recorded in
+`CURRENT_MAINLINE_ISSUES.md` under the 2026-10-08 ManiSkill spatial diagnosis.
 Evidence: remote `artifacts/maniskill-latest-train-20261007/trajectory-investigation`
 under `/data/senwang/clearvla`; probes also include `scripts/probe_maniskill_ingress.py`
 and `scripts/probe_maniskill_history.py`.
