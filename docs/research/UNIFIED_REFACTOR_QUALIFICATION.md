@@ -121,3 +121,16 @@ constructor RNG and initial sampling outputs remain unchanged; training updates
 will differ and require fresh qualification. No gain or binding distribution is
 changed. Direct VJP/JVP/gradcheck and actual online-S reconstruction tests exercise
 the difference, rather than certifying the lane from an aggregate gradient norm.
+
+## Execution-phase gradient qualification
+
+Warmup deliberately disables nine execution-controller/operator parameter
+paths in the small full-topology fixture. The new `--completed-step` fixture
+option selects the execution gates while retaining a fresh local optimizer
+warmup; it does not pretend that random parameters were trained for that many
+updates. A/B tests compare clock 0 and clock 1200 using ordinary production
+losses, two optimizer updates and the full proposal/W/refined sampler. The
+nine missing warmup paths must become present, nonzero and actually updated
+after gate opening. Every other trainable parameter must also have a gradient
+tensor then; exact branch-specific zeros remain visible in the ledger and
+are not converted into false activity claims.

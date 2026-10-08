@@ -146,6 +146,8 @@ def test_deployment_abi_cannot_drop_or_relabel_interval_gradient(tmp_path):
     _, abi, _ = abi_for(c, tmp_path)
     validate_deployment_abi(abi)
     corrupt = deepcopy(abi)
-    corrupt["causal_identity"].pop("typed_interval_gradient")
+    identity = corrupt["causal_identity"]
+    assert isinstance(identity, dict)
+    identity.pop("typed_interval_gradient")
     with pytest.raises(ValueError):
         validate_deployment_abi(corrupt)

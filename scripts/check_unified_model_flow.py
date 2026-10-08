@@ -69,7 +69,7 @@ def configuration(shape: str, variant: str):
     return config
 
 
-def run(shape: str, variant: str, updates: int, raw_side: int) -> dict:
+def run(shape: str, variant: str, updates: int, raw_side: int, completed_step: int = 0) -> dict:
     import torch
 
     from clearvla.mainline.identity_supervision import IdentityCorrespondence
@@ -82,6 +82,8 @@ def run(shape: str, variant: str, updates: int, raw_side: int) -> dict:
     )
     from clearvla.mainline.training.optimizer import WarmupCosineSchedule, build_optimizer
 
+    if type(completed_step) is not int or completed_step < 0:
+        raise ValueError("fixture completed step must be a nonnegative integer")
     torch.set_num_threads(1)
     torch.manual_seed(28431)
     config = configuration(shape, variant)
@@ -131,7 +133,11 @@ def run(shape: str, variant: str, updates: int, raw_side: int) -> dict:
     )
     optimizer, _ = build_optimizer(model, config)
     schedule = WarmupCosineSchedule(
-        optimizer, warmup_steps=2, total_steps=max(updates, 4), minimum_ratio=0.1
+        optimizer,
+        warmup_steps=2,
+        total_steps=completed_step + max(updates, 4),
+        minimum_ratio=0.1,
+        update_origin=completed_step,
     )
     engine = MainlineTrainingEngine(
         model=model,
@@ -140,6 +146,10 @@ def run(shape: str, variant: str, updates: int, raw_side: int) -> dict:
         schedule=schedule,
         device=torch.device("cpu"),
     )
+    # Select execution gates on randomly initialized fixture parameters.
+    # This does not claim prior training or a restored learned checkpoint.
+    engine.global_step = completed_step
+    model.set_training_step(completed_step)
     rows = []
     parameter_ledger = []
     for step in range(updates):
@@ -199,7 +209,7 @@ def run(shape: str, variant: str, updates: int, raw_side: int) -> dict:
         del before
         rows.append(row)
         print(json.dumps(row), flush=True)
-    assert engine.global_step == updates and optimizer.state
+    assert engine.global_step == completed_step + updates and optimizer.state
     optimizer.zero_grad(set_to_none=True)
     model.eval()
     with torch.no_grad():
@@ -217,6 +227,8 @@ def run(shape: str, variant: str, updates: int, raw_side: int) -> dict:
         variant=variant,
         dimensions=config.dimensions.__dict__,
         raw_rgb_side=raw_side,
+        synthetic_completed_step=completed_step,
+        completed_step_semantics="execution-phase fixture only; no preceding learned updates",
         input_provenance="synthetic descriptors/RGB/actions/positive-pair labels; no real dataset, pretrained encoder, or task success claim",
         scope="full production topology, ordinary training loss backward and AdamW updates, complete two-pass action generation",
         parameter_count=sum(p.numel() for p in model.parameters()),
@@ -235,13 +247,19 @@ def main():
     parser.add_argument("--variant", choices=("A", "B"), required=True)
     parser.add_argument("--updates", type=int, default=2)
     parser.add_argument("--raw-side", type=int, default=32)
+    parser.add_argument(
+        "--completed-step",
+        type=int,
+        default=0,
+        help="synthetic execution-phase fixture, not an actual training history",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists() or args.updates < 1:
         raise ValueError("new output and positive update count required")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        result = run(args.shape, args.variant, args.updates, args.raw_side)
+        result = run(args.shape, args.variant, args.updates, args.raw_side, args.completed_step)
     except Exception as error:
         args.output.write_text(
             json.dumps(
