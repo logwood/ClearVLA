@@ -1,6 +1,156 @@
 # Unified refactor continuation — source and test qualification
 
 Branch: `codex/causal-unified-refactor-20261008`.
+
+## Latest takeover verification (2026-10-09 UTC)
+
+This is a bounded source/test handoff, not promotion of the complete refactor.
+Before any production edit, both the remote Git ref API and `git ls-remote`
+returned `1f81e0021ff9b41f623486913ab43ab32517e087`; a normal checkout of the
+existing branch agreed. Its tree is `9a63541521a986b305408c7231ce813d974a4fd6`.
+The old handoff SHA was verified again, not assumed. `AGENTS.md`, the current
+architecture quick contract/invariants, this qualification record, the recent
+commit chain and the existing workflow definitions/logs were read.
+
+Recent production commits, newest first:
+
+| Source | Production boundary |
+| --- | --- |
+| `1f81e002` | Quarantine missing execution context before P3 projections |
+| `de390553` | Validate typed stage ownership before registered transfer |
+| `9c41affc` | Consume measured robot outcomes inside S before proposal |
+| `d90f0f5c` | Qualify the selected full-width graph with independent reference support |
+| `7f69c46e` | Preserve independent current/reference domains through S/P3/goal reads |
+
+### Baseline Actions: exact tested source and distinct outcomes
+
+[Publish run 37873935842](https://github.com/logwood/ClearVLA/actions/runs/37873935842)
+was triggered by payload commit `4fdb19e013dae2e70fd19e0ea40373f831d84472`.
+Its preserve job published `1f81e002...`; all four regression jobs and the
+static/full-topology job explicitly checked out that full source SHA. Thus its
+green result does cover the takeover HEAD, despite the trigger SHA in the run
+list. All six jobs completed successfully.
+
+| Baseline check | Tests, including skips | Skipped | Failures / errors |
+| --- | ---: | ---: | ---: |
+| [Regression shard 0](https://github.com/logwood/ClearVLA/actions/runs/37873935842/job/113638106490) | 709 | 5 | 0 / 0 |
+| [Regression shard 1](https://github.com/logwood/ClearVLA/actions/runs/37873935842/job/113638106397) | 930 | 7 | 0 / 0 |
+| [Regression shard 2](https://github.com/logwood/ClearVLA/actions/runs/37873935842/job/113638106391) | 758 | 1 | 0 / 0 |
+| [Regression shard 3](https://github.com/logwood/ClearVLA/actions/runs/37873935842/job/113638106372) | 733 | 3 | 0 / 0 |
+| Total | 3130 | 16 | 0 / 0 |
+
+There were **3114 non-skipped passing cases**, not 3130 unconditional passes.
+Individual reasons for the 16 skips were not verified in this handoff. The
+default all-tracked-file inventory also checks collection, syntax and unchanged
+source fingerprints. The [static job](https://github.com/logwood/ClearVLA/actions/runs/37873935842/job/113638106331)
+reported zero changed-file Ruff diagnostics and zero new type errors relative
+to `90427db452a947c21afe8c4ec827055766252829`; this is not global type closure.
+Its small and H512 production A/B checks performed two ordinary updates and
+complete proposal/W-rebuild/refined sampling with artificial inputs. The
+production command there used raw-side 256. The separate tracked
+`test_unified_robot_stage_full_topology.py` selects the latest outcome/conditional
+candidate, alternating reference support, small BS8/BF16 and H512 BS1/FP32 with
+336px RGB. These are CPU/source integration checks with random weights.
+
+[Independent audit 37873935892](https://github.com/logwood/ClearVLA/actions/runs/37873935892)
+tested its direct checkout `4fdb19e...` and was **cancelled**, not passed. Logs
+record cancellation near its configured 60-minute limit, without identifying
+the cancellation reason. There is no evidence of an assertion failure from
+that cancellation. The preceding independent audit and publish runs passed on
+their respective older sources; they do not replace current-source evidence.
+
+### Real training, closed loops and remaining work
+
+The green static job explicitly recorded real-data admission as `blocked`,
+`training_executed=false`, `training_passed=false`, and expected exit code 2.
+It used the older source-B check configuration. During this takeover the actual
+latest `unified_outcomes_{a,b}_calvin_check.json` configurations were each
+preflighted with `--migration causal_unified_outcome_v1`, without `--execute`.
+Both again exited 2 with the same blocked/not-executed/not-passed states.
+Python 3.12.14 and Torch 2.11.0+cpu met their version admission requirements.
+
+Both current-candidate preflights lack HDF5 episodes, split manifest, T5 bank,
+the supplied-path mature checkpoint, DINOv3 model assets and CALVIN raw source;
+CUDA and the `transformers` training dependency are also unavailable. The
+checkpoint path checked is the existing CI example, not a newly supplied or
+authenticated mature checkpoint. No real training was launched. Missing
+assets do not become passed tests through artificial replacements.
+
+No new closed-loop acceptance is present for this source. Physical instance
+identity, natural target choice, long-gap observed motion, task maintenance,
+arm/gripper contact compatibility, native controller state, cross-dataset
+learned behavior and CUDA/resource qualification remain open. Historical A/B
+scores and promotion blocks remain historical evidence. A bounded real BS8
+training receipt and source-matched closed loops must be qualified separately.
+
+### First bounded production repair: S past-world null support
+
+`model/observed_outcome.py` used the raw past-K null payload in its
+entropy/unknown calculation. The existing producer contract permits unavailable
+payloads outside `view_observed.any(-1)`, but zero matching mass cannot suppress
+NaN/Inf after arithmetic. The new regression uses real online encoder packets
+from artificial A/B inputs, then changes only an explicitly unavailable past K.
+Before the production edit, it recorded **16 failures / 8 passes**, including
+nonfinite shared `status.weight` gradients when loss uses only the other,
+uncontaminated batch row. This is a reproduced source-boundary counterexample,
+not an observed trained-policy failure.
+
+The repair masks null with that same existing producer support before either
+entropy or unknown arithmetic. Absent past-K null is represented by 1, matching
+the validator and P3. Observed invalid null is still rejected. A reset remains
+zero; an observed current window with no past match retains unknown status.
+No matching/binding law, parameter, initialization, loss, gain or controller
+rule changes. The existing migration source allowlist already includes this
+file and was not broadened.
+
+Local post-fix verification, Python 3.12.14 / Torch 2.11.0+cpu:
+
+| Test file | Passed | Failed / skipped |
+| --- | ---: | ---: |
+| `test_unified_world_outcome_support.py` | 24 | 0 / 0 |
+| `test_causal_identity_contract.py` | 5 | 0 / 0 |
+| `test_causal_observed_status.py` | 6 | 0 / 0 |
+| `test_unified_feedback_context_support.py` | 19 | 0 / 0 |
+| `test_unified_robot_stage_outcome.py` | 12 | 0 / 0 |
+| Total, 63.76 seconds | 66 | 0 / 0 |
+
+The new A/B cases exercise NaN/+Inf/-Inf on missing null, FP32 and actual CPU
+BF16 autocast, exact clean/dirty forward and ordinary first-order parameter,
+current-image-source and shared K+null binding VJPs, cross-batch gradient
+isolation, reset/unknown distinction, and rejection of invalid observed null.
+Only test instances open the zero-start reader output to expose source VJPs.
+Adjacent tests retain their own forecast noninterference, high-order context,
+source lifecycle and strict migration coverage. They also execute the selected
+small A/B outcome/conditional graph with two ordinary updates and complete
+proposal/W-rebuild/refined sampling. This run does not claim new H512/BS8/CUDA
+qualification or real data/closed-loop acceptance.
+
+Changed-file Ruff passed with zero diagnostics. Pyright on the changed Python
+files returned zero errors and 189 warnings; those warnings were not hidden or
+advertised as full type closure. Independent source review found no blocking
+issue. No workflow or source-publishing payload was changed.
+
+Reproduce the post-fix scope from the checkout using the declared CPU runtime:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 python -m pytest -q \
+  tests/test_unified_world_outcome_support.py \
+  tests/test_causal_identity_contract.py tests/test_causal_observed_status.py \
+  tests/test_unified_feedback_context_support.py \
+  tests/test_unified_robot_stage_outcome.py --junitxml=/tmp/world-outcome-after.xml
+```
+
+The pre-fix result comes from the new test file run against unchanged production
+source `1f81e002...`. Local JUnit SHA256 receipts are
+`3f875ae192c1ec1152e7c7d5040dce1d9bb90b519b127316c9945da5467b714c`
+(before) and
+`09791320313d4ab885d0371ce4f1ec9f36cd2d6ecb6b2b7388287816345f2589`
+(after). Original raw logs/JUnit remain outside repository memory. The prior
+3114-pass Actions result above belongs to the takeover baseline; it must not be
+relabelled as an Actions run of this new repair.
+
+## Earlier continuation provenance
+
 Continuation input tree: `c88b6ca9ba1103b97a8937c4c2ce7fd98e51baad`
 (remote source `6fe0a5d8`; inherited implementation `be48d7fd`,
 fixture correction `0644e694`).

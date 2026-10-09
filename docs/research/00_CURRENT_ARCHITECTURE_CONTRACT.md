@@ -1694,6 +1694,18 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### S measured-world null support (2026-10-09 source repair)
+
+The S observed-world outcome reader applies the existing past-K source support
+to null payloads before entropy/unknown arithmetic, just as the source validator
+and P3 reader do. An unavailable K cannot contaminate a supported result or
+shared parameter gradients through zero-times-NaN. Supported null values remain
+strictly validated; a reset has no result, while an observed current window
+without a past match retains unknown status. Binding, matching, ordinary source
+gradients, parameters and finite supported-value semantics are unchanged. This
+is an artificial-input source-boundary qualification, not real training or
+learned-behavior acceptance. See `UNIFIED_REFACTOR_QUALIFICATION.md`.
+
 ### P3 missing execution context (2026-10-08 support repair)
 
 Robot and world feedback readers apply source-observed masks to context BEFORE

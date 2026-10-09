@@ -5,6 +5,7 @@ K; S's single binding then selects the target. Prediction and innovation are
 deliberately not inputs. Unknown correspondence remains a separate value.
 """
 import math
+
 import torch
 from torch import nn
 
@@ -47,9 +48,12 @@ class ObservedOutcomeRead(nn.Module):
         spatial=self.image(torch.where(feedback.view_observed[...,None],feedback.observed_image,0.).to(dtype))
         role=1+torch.tanh(self.view(self.view_basis.to(dtype)))
         spatial=torch.where(feedback.view_observed[...,None],spatial*role[None,None],0.).sum(2)/feedback.view_observed.sum(-1,keepdim=True).clamp_min(1)
-        law=torch.cat((past.flatten(2),feedback.null),-1)
+        # Missing past K has no readable null payload. Quarantine before
+        # entropy and matching: zero overlap cannot suppress 0 * NaN/Inf.
+        null=torch.where(supported[...,None],feedback.null,1.)
+        law=torch.cat((past.flatten(2),null),-1)
         entropy=-(law*law.clamp_min(1e-8).log()).sum(-1)/math.log(law.shape[-1])
-        unknown=feedback.null[...,0]+(1-feedback.null[...,0])*entropy
+        unknown=null[...,0]+(1-null[...,0])*entropy
         sem=torch.einsum('bkj,bjh->bkh',match,semantic.float())
         geo=torch.einsum('bkj,bjh->bkh',match,spatial.float())
         status=torch.stack((1-match.sum(-1),torch.einsum('bkj,bj->bk',match,unknown),match.sum(-1)),-1)
