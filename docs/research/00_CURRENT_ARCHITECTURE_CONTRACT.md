@@ -1709,6 +1709,18 @@ gradients, parameters and finite supported-value semantics are unchanged. This
 is an artificial-input source-boundary qualification, not real training or
 learned-behavior acceptance. See `UNIFIED_REFACTOR_QUALIFICATION.md`.
 
+### A camera mass at the shared S binder (2026-10-09 source repair)
+
+The local-mixture full-token/view path retains the G3 source's camera marginal
+in log space until the existing task compatibility calculation. A tiny positive
+source mass must not become absent merely because its linear telemetry
+underflows. The marginal is reduced over the original local source's spatial
+and mixture axes: its conditional bilinear pushforward conserves camera mass,
+including at pixel knots. Missing support has a finite backward and stays
+absent; no view/object selector, score, parameter or gain is introduced. B keeps
+its existing canonical `view_log_mass` path. This corrects source arithmetic,
+not physical instance identity or learned target choice.
+
 ### P3 missing execution context (2026-10-08 support repair)
 
 Robot and world feedback readers apply source-observed masks to context BEFORE

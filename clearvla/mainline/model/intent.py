@@ -1080,6 +1080,24 @@ class StatelessObjectIntentOrganizer(nn.Module):
                         )
                         view_mass = facts.view_mass
                         view_log_mass = facts.view_log_mass
+                    else:
+                        source = facts.current_image_source
+                        if source is None:
+                            raise ValueError("full-token binding lost its G3 source measure")
+                        # A local source's spatial law is conditional and its
+                        # bilinear pushforward conserves camera mass. Retain
+                        # that marginal BEFORE exp underflow and task scoring.
+                        # Reducing the original source also keeps the camera
+                        # mass independent of pixel-knot coordinate derivatives.
+                        support = source.supported.flatten(3)
+                        has_source = support.any(-1, keepdim=True)
+                        logs = source.log_measure.flatten(3).masked_fill(~support, -torch.inf)
+                        view_log_mass = torch.logsumexp(
+                            torch.where(has_source, logs, 0.0), -1
+                        )
+                        view_log_mass = torch.where(
+                            has_source[..., 0], view_log_mass, -torch.inf
+                        )
                     target_binding = self.shared_binder(
                         goal_memory,
                         view_objects,

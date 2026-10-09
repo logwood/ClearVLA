@@ -245,6 +245,48 @@ the joint-task/P2-prior/P2-post-pool/target-prior-sequence initialization cases 
 (after). Real asset admission, actual pretrained migration, training execution
 and source-matched closed-loop acceptance remain separate outstanding gates.
 
+### Unit 4: A retains rare camera evidence until the shared binding score
+
+The local-mixture A path normalized the current G image to linear probability,
+summed it into camera mass, and supplied no log mass to the existing S binder.
+A finite source log allocation of -120 therefore became zero before task
+compatibility could offset it. An artificial actual-G/S counterexample uses the
+same original G3 source to materialize the image and a finite discriminative
+compatibility score near 120. The old K0 binding was about 0.2, while the same
+binder with the authoritative source log marginal gives about 1/3. B already
+supplied its canonical log mass and passes that negative control.
+
+A now passes a support-safe log-sum-exp over its original source's spatial and
+mixture axes. Because the local spatial law's bilinear pushforward conserves
+camera mass, this retains the correct marginal and avoids artificial pixel-knot
+coordinate gradients. Existing linear telemetry and the binder's K+null law,
+camera values, task score, parameters and source support are unchanged. Missing
+G3 source is rejected; B's canonical path is unchanged. No threshold revives an
+absent camera and no migration path allowlist is widened.
+
+| Verification | Result |
+| --- | --- |
+| New A/B cases against the pre-fix S implementation | 8 failed, 10 passed; 0 errors or skips |
+| New source-mass cases plus full-token binding and source-boundary regressions | 32 passed, 0 failed, 0 skipped (4.19 seconds) |
+| Independent affected-scope repeat | 32 passed, 0 failed, 0 skipped (4.28 seconds) |
+| Changed Python Ruff / declared-interpreter Pyright | 0 diagnostics / 0 errors, 291 warnings |
+
+New cases compare actual source and shared-score first VJPs to the independently
+computed log marginal, preserve representable-mass forward/parameter VJPs, and
+exercise FP32/CPU BF16, missing camera/K/all support and NaN unavailable payloads.
+The A pixel-knot check uses a separate ordinary linear bilinear reference and
+requires no spurious camera-mass coordinate gradient. These are source/numerical
+qualifications with artificial inputs and test-only score weights, not learned
+physical identity or task selection evidence.
+
+Reproduce with `python -m pytest -q tests/test_unified_binding_source_mass.py
+tests/test_full_token_binding.py tests/test_unified_source_boundaries.py`.
+JUnit SHA256 receipts:
+`3374778797c31153363985e8d519f36864269f488e9ab3c7e08db4f0b5bc9c8c`
+(before), `ab1c6bcca46a64d3cb49b2a3aa1b64a2fdebd2cc4a3bdf9eaa0143c51551e85b`
+(after). Real training, physical motion and source-matched closed loops remain
+unqualified independently of these passing artificial tests.
+
 ## Earlier continuation provenance
 
 Continuation input tree: `c88b6ca9ba1103b97a8937c4c2ce7fd98e51baad`
