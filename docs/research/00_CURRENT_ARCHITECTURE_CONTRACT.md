@@ -1721,6 +1721,18 @@ absent; no view/object selector, score, parameter or gain is introduced. B keeps
 its existing canonical `view_log_mass` path. This corrects source arithmetic,
 not physical instance identity or learned target choice.
 
+### A current reference uses observed current support (2026-10-09)
+
+The source-consistent G value exported as W's current reference restricts its
+read law to the current chart's observed cells BEFORE normalization, exactly as
+the observed Teacher measurement does. Values reuse the already quarantined
+frozen current content. Bilinear source mass outside that observed domain cannot
+read reconstruction placeholders or contaminate shared G gradients. The full G
+source law, typed facts, camera coordinates and every successor support remain
+unchanged. An empty current reference is finite zero. B retains its canonical
+observed reference path. This support repair establishes no new correspondence,
+physical motion or learned-behavior qualification.
+
 ### P3 missing execution context (2026-10-08 support repair)
 
 Robot and world feedback readers apply source-observed masks to context BEFORE

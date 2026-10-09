@@ -287,6 +287,54 @@ JUnit SHA256 receipts:
 (after). Real training, physical motion and source-matched closed loops remain
 unqualified independently of these passing artificial tests.
 
+### Unit 5: G/W's current reference respects the actual training mask
+
+The actual A training-mask producer can leave bilinear source mass straddling
+unobserved current cells. G's source-consistent `observed_content` normalized
+without that current-cell restriction and directly read the reconstruction
+payload. In the artificial production counterexample, 48 masked cells carried
+1.161773 aggregate read mass across four K objects. G/W's current reference
+differed from the actual observed Teacher's current reference by up to 0.162149;
+adding 100 only to those masked payloads changed the reference by 33.161766.
+The other typed facts stayed identical. NaN placeholders made the old reference
+nonfinite. Canonical B already respected the observed domain.
+
+The A reference now restricts its existing image measure to current observed
+cells before normalization and reads the function's already quarantined frozen
+`target_content`. The G ownership/source, other typed facts, camera geometry and
+all successor supports are unchanged. No new detach cuts G source gradients;
+current target content was already frozen. The existing local content-decoder
+non-None invariant is also checked explicitly after canonical's early return,
+resolving its inherited Optional type diagnostic without changing valid values,
+parameters or constructor RNG.
+
+| Verification | Result |
+| --- | --- |
+| Final new fixture against the pre-fix G implementation | 13 failed, 13 passed; A failures and B compatibility controls |
+| New 26 cases plus source-consistent measurement and source support regressions | 38 passed, 0 failed, 0 skipped (16.51 seconds) |
+| Independent final repeat, including explicit decoder invariant | 38 passed, 0 failed, 0 skipped (15.75 seconds) |
+| Changed Python Ruff / declared-interpreter Pyright | 0 diagnostics / 0 errors, 239 warnings |
+
+Tests follow the actual training-mask producer, G, W and observed Teacher. They
+cover large finite/NaN/positive and negative infinity on unobserved payloads,
+FP32/CPU BF16, exact clean/dirty nonzero ordinary G parameter VJPs, supported
+current values shifted by 0.25, and an entirely empty current reference with
+finite zero output/owner VJP. Earlier fixture mistakes about synchronized
+current history were retained separately and excluded from the 13 production
+failures. Independent review found no blocking mathematical, source-identity,
+legacy compatibility or ordinary-gradient issue in units 4 and 5.
+
+Reproduce with `python -m pytest -q
+tests/test_unified_observed_reference_support.py
+tests/test_source_consistent_measurement.py tests/test_unified_source_support_ownership.py`.
+JUnit SHA256 receipts:
+`0eab6d6d9083f0f82fa0837efe0efcca34cdaab25c442fd9c4ffcc571896f044`
+(before), `43a54daac34e2b322d15b37459ca68d654605216a447ef029f2a1378e6ea3363`
+(after), `05dd7edd8740c93930a4b28790c39e415259a7e41bf368796477c47c819d9cc6`
+(final independent repeat). These are artificial-input numerical/source tests;
+real data, CUDA, actual pretrained migration and closed-loop acceptance remain
+distinct required qualifications.
+
 ## Earlier continuation provenance
 
 Continuation input tree: `c88b6ca9ba1103b97a8937c4c2ce7fd98e51baad`

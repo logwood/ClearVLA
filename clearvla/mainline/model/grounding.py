@@ -794,6 +794,8 @@ class DenseObjectGrounder(nn.Module):
         # Preserve the existing reconstruction bandwidth without retaining a
         # loss-private object value.  The zero-initialized slot residual is now
         # part of the one exported content consumed by S, W and Teacher.
+        if self.decode_content_residual is None:
+            raise RuntimeError("local-mixture grounder has no content decoder")
         content = aggregated_content + self.decode_content_residual(slots)
         semantic, semantic_read, semantic_assignment = typed_reweight(
             "semantic", chart.candidate_semantic
@@ -1027,8 +1029,15 @@ class DenseObjectGrounder(nn.Module):
         if self.observation_measurement_mode == "source_consistent_v1":
             if image_measure is None:
                 raise ValueError("observed reference requires actual G image measure")
-            reference_law, _ = image_measure.normalized((2,3,4))
-            observed_content = torch.einsum("bkcyx,bcyxd->bkd", reference_law, chart.dino_content.float())
+            # Bilinear source support can straddle a masked current cell.
+            # Match the observed measurement's current-source domain without
+            # changing G ownership or any successor observation support.
+            reference_law, _ = image_measure.restrict(
+                chart.cell_observed[..., 0][:, None]
+            ).normalized((2, 3, 4))
+            observed_content = torch.einsum(
+                "bkcyx,bcyxd->bkd", reference_law, target_content
+            )
         facts = ObjectFactSet(
             observed_content=observed_content,
             **view_values,
