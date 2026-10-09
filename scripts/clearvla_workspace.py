@@ -121,8 +121,16 @@ def read_entry(path: Path) -> dict:
 
 
 def process_identity(pid: int) -> dict | None:
+    if type(pid) is not int or pid <= 0:
+        return None
     try:
-        proc = Path("/proc") / str(pid)
+        proc_root = Path("/proc")
+        # A mounted proc view can expose another PID namespace. Its numeric
+        # directories cannot identify PIDs returned by this process's OS API.
+        own_pid = (proc_root / "self/stat").read_text().split(maxsplit=1)[0]
+        if own_pid != str(os.getpid()):
+            return None
+        proc = proc_root / str(pid)
         # Account for spaces in comm; starttime prevents reused PID confusion.
         stat = (proc / "stat").read_text().rsplit(")", 1)[1].split()
         return {
@@ -143,7 +151,23 @@ def process_unverified(entry: dict) -> bool:
     saved = entry.get("process")
     if not saved:
         return entry.get("status") not in {"complete", "failed"}
-    return process_identity(saved["pid"]) is None and (Path("/proc") / str(saved["pid"])).exists()
+    pid = saved.get("pid")
+    if type(pid) is not int or pid <= 0:
+        return True
+    if process_identity(pid) is not None:
+        return False
+    # Missing proc identity is not evidence of exit. On POSIX, signal zero
+    # asks the kernel about this PID without sending a real signal. Refused
+    # or unavailable queries remain unknown; only ESRCH establishes absence.
+    if os.name != "posix":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def activate(root: Path, outlet: str, name: str) -> None:
@@ -239,7 +263,7 @@ def run_logged(command: list[str], code: Path, output: Path, env: dict, metadata
     )
     staged = Path(name)
     published = False
-    entry = dict(metadata, code=str(code), output=str(output), status="starting")
+    entry: dict[str, object] = dict(metadata, code=str(code), output=str(output), status="starting")
 
     def publish() -> None:
         nonlocal published

@@ -754,6 +754,16 @@ outlet tensors are saved separately and explicitly are not accepted/physical
 commands. All measurements identify fresh deterministic weights, not a trained
 policy. No external runtime packages, workflows, or user training jobs change.
 
+The managed workspace's active-run pointer is fail-closed when a prior process
+identity cannot be read. A `/proc` view is accepted only when its `/proc/self`
+PID agrees with the caller's PID domain; a missing or mismatched view must not
+be treated as proof that the process stopped. On POSIX, signal-zero is used only
+as a liveness query after identity is unavailable: permission or other errors
+remain unverified, and only `ProcessLookupError` establishes absence. Invalid
+PIDs and non-POSIX hosts remain unverified. A verified start-tick/cwd mismatch
+continues to identify PID reuse. This protects active pointers without sending
+signals or enumerating another namespace.
+
 ## M8e — P1 native-chart activation policy (2026-09-23)
 
 P1 query tiling now accounts for native candidate cardinality relative to its

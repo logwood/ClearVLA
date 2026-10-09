@@ -335,6 +335,43 @@ JUnit SHA256 receipts:
 real data, CUDA, actual pretrained migration and closed-loop acceptance remain
 distinct required qualifications.
 
+### Unit 6: active workspace pointers fail closed across PID views
+
+The cumulative CPU inventory on fixed `817c075` reproduced a process-lifecycle
+defect in `scripts/clearvla_workspace.py`. The test process was alive and
+`os.kill(pid, 0)` succeeded, but its `/proc` view exposed a different PID
+domain, so `process_identity()` returned `None` and the old
+`process_unverified()` treated the missing numeric `/proc/<pid>` entry as proof
+of exit. That could allow an active pointer to be replaced while the previous
+run was still alive or its identity was simply unavailable.
+
+The repair validates `/proc/self` against the caller's PID domain before using
+numeric identities. When identity is unavailable, POSIX signal-zero is used
+only as a kernel liveness query: successful, permission-denied and other
+errors remain unverified; only `ProcessLookupError` permits the stopped result.
+Invalid PIDs and non-POSIX hosts remain unverified. Verified start-tick/cwd
+comparisons retain the original PID-reuse semantics. No real signal is sent and
+no other namespace is entered or enumerated. Entry metadata is explicitly typed
+so the existing operational record retains arbitrary scalar/object values.
+
+| Verification | Result |
+| --- | ---: |
+| Original production copy plus new deterministic process-domain cases before repair | 21 passed, 15 failed, 0 skipped |
+| Repaired production copy, original tests plus 18 fake `/proc`/liveness cases | **36 passed, 0 failed, 0 skipped (1.15 seconds)** |
+| Ruff on production and tests | 0 diagnostics |
+| Declared-interpreter Pyright | 0 errors, 140 warnings; six inherited errors removed and none added |
+
+The pre-fix record includes the real isolated PID-domain failure; deterministic
+cases cover missing/permission/unavailable/gone liveness, invalid PIDs without
+signal queries, non-POSIX behavior, verified identity and PID reuse, namespace
+domain mismatch, and active-pointer preservation. Evidence is outside the
+repository in `continuation-verification/workspace-process-repair/`:
+patch SHA256 `e46c7291778292806101cc1a54eecfd8a71f9f107f31ad90b5204dd6c12812ed`,
+green JUnit SHA256
+`864e3ac992f8018ecb7690b0b42203952ebfd007423d510bb504ea5388905703`.
+The source and tests remain an operational workspace boundary; they do not
+qualify real data training or closed-loop task behavior.
+
 ## Earlier continuation provenance
 
 Continuation input tree: `c88b6ca9ba1103b97a8937c4c2ce7fd98e51baad`

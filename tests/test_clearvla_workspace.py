@@ -7,12 +7,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 SPEC = importlib.util.spec_from_file_location(
     "workspace_tool", Path(__file__).resolve().parents[1] / "scripts/clearvla_workspace.py"
 )
+assert SPEC is not None and SPEC.loader is not None
 workspace = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(workspace)
 
@@ -199,6 +201,118 @@ def test_unreadable_live_process_is_not_treated_as_stopped(monkeypatch):
     entry = {"process": {"pid": os.getpid(), "start_ticks": "known", "cwd": "/known"}}
     monkeypatch.setattr(workspace, "process_identity", lambda _: None)
     assert workspace.process_unverified(entry)
+
+
+def _proc_view(tmp_path, monkeypatch, *, self_pid=101, visible_self_pid=101):
+    """A private proc view; no test probes or signals a real foreign PID."""
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self/stat").write_text(f"{visible_self_pid} (self) S 0\n")
+    real_path = Path
+    monkeypatch.setattr(
+        workspace, "Path", lambda value: proc if value == "/proc" else real_path(value)
+    )
+    calls = []
+    process_os = SimpleNamespace(
+        name="posix", getpid=lambda: self_pid,
+        kill=lambda pid, sig: calls.append((pid, sig)), replace=os.replace,
+    )
+    monkeypatch.setattr(workspace, "os", process_os)
+    return proc, process_os, calls
+
+
+def _write_process(proc, pid, start_ticks):
+    directory = proc / str(pid)
+    directory.mkdir()
+    fields = ["S", *(["0"] * 19)]
+    fields[19] = start_ticks
+    (directory / "stat").write_text(f"{pid} (worker with spaces) {' '.join(fields)}\n")
+    (directory / "cwd").mkdir()
+    return {"pid": pid, "start_ticks": start_ticks, "cwd": str(directory / "cwd")}
+
+
+@pytest.mark.parametrize("liveness", ["alive", "permission", "unavailable", "gone"])
+def test_missing_proc_entry_does_not_establish_process_exit(tmp_path, monkeypatch, liveness):
+    _, process_os, calls = _proc_view(tmp_path, monkeypatch)
+    entry = {"process": {"pid": 202, "start_ticks": "known", "cwd": "/known"}}
+
+    def query(pid, sig):
+        calls.append((pid, sig))
+        if liveness == "permission":
+            raise PermissionError("identity and liveness cannot be inspected")
+        if liveness == "unavailable":
+            raise OSError("liveness query unavailable")
+        if liveness == "gone":
+            raise ProcessLookupError("PID no longer exists")
+
+    process_os.kill = query
+    assert workspace.process_identity(202) is None
+    assert workspace.process_unverified(entry) is (liveness != "gone")
+    assert calls == [(202, 0)]
+
+
+@pytest.mark.parametrize("pid", [0, -1, True, False, "202", None])
+def test_invalid_saved_pid_stays_unknown_without_a_signal_query(tmp_path, monkeypatch, pid):
+    _, _, calls = _proc_view(tmp_path, monkeypatch)
+    entry = {"process": {"pid": pid, "start_ticks": "known", "cwd": "/known"}}
+    assert workspace.process_unverified(entry)
+    assert calls == []
+
+
+def test_unknown_nonposix_process_never_uses_signal_zero(tmp_path, monkeypatch):
+    _, process_os, calls = _proc_view(tmp_path, monkeypatch)
+    process_os.name = "nt"
+    entry = {"process": {"pid": 202, "start_ticks": "known", "cwd": "/known"}}
+    assert workspace.process_unverified(entry)
+    assert calls == []
+
+
+@pytest.mark.parametrize("identity", ["same", "reused_pid", "changed_cwd"])
+def test_verified_proc_identity_keeps_existing_pid_reuse_semantics(tmp_path, monkeypatch, identity):
+    proc, _, calls = _proc_view(tmp_path, monkeypatch)
+    actual = _write_process(proc, 202, "12345")
+    saved = dict(actual)
+    if identity == "reused_pid":
+        saved["start_ticks"] = "12344"
+    elif identity == "changed_cwd":
+        saved["cwd"] = "/another-run"
+    entry = {"process": saved}
+    assert workspace.process_identity(202) == actual
+    assert workspace.is_running(entry) is (identity == "same")
+    assert not workspace.process_unverified(entry)
+    assert calls == []
+
+
+@pytest.mark.parametrize("domain", ["different_pid", "missing_self", "empty_self"])
+def test_proc_identity_rejects_an_unverified_pid_domain(tmp_path, monkeypatch, domain):
+    proc, _, _ = _proc_view(tmp_path, monkeypatch, visible_self_pid=909)
+    actual = _write_process(proc, 202, "12345")
+    if domain == "missing_self":
+        (proc / "self/stat").unlink()
+    elif domain == "empty_self":
+        (proc / "self/stat").write_text("")
+    # A well-formed numeric directory belongs to the mounted proc view. It
+    # cannot identify this process when that view's PID domain is unknown.
+    assert workspace.process_identity(202) is None
+    assert workspace.process_unverified({"process": actual})
+
+
+def test_active_pointer_preserves_live_run_when_proc_is_unavailable(tmp_path, monkeypatch):
+    require_symlinks(tmp_path)
+    root = workspace.layout(tmp_path / "managed")
+    for name in ("old", "new"):
+        run = workspace.run_path(root, "pen", name)
+        run.mkdir(parents=True)
+        (run / "run_context.json").write_text("{}")
+    workspace.activate(root, "pen", "old")
+    workspace.write_json(
+        workspace.run_path(root, "pen", "old") / "entry.json",
+        {"process": {"pid": 202, "start_ticks": "known", "cwd": "/known"}},
+    )
+    _proc_view(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="running or unverified"):
+        workspace.activate(root, "pen", "new")
+    assert (root / "active/pen").resolve().name == "old"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="remote virtualenv symlink boundary")
