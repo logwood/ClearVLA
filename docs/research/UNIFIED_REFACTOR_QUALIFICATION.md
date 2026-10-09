@@ -198,6 +198,53 @@ and `0770752b15b58fd0e57e785b3533ff78b0d48ad334dce5f1a824e45155cd6b06`.
 Raw logs remain outside repository memory. Real training and closed-loop gates
 remain separate and blocked as recorded above.
 
+### Unit 3: every declared causal migration reaches the actual loader
+
+The CLI, migration helpers and downstream checkpoint checks already supported
+`causal_unified_values_v1`, `causal_unified_reference_v1` and
+`causal_unified_outcome_v1`. The actual `load_checkpoint_for_initialization()`
+entry still listed only the older A/B and source modes. Therefore the latest
+candidate could not initialize even if its external assets were present.
+
+That one admission list now uses the existing `CAUSAL_INITIALIZATION_MODES`
+registry. No migration source pin, path allowlist, parameter inventory, tensor
+shape/dtype/finiteness rule, data identity, objective selector or neutral head
+check is relaxed. Earlier exact initialization paths retain their own contracts.
+
+New regressions call production `save_checkpoint()` and the actual loader.
+Their positive cases use a small artificial checkpoint and a test-local pin to
+its self-consistent artificial source digest; the production constant is not
+changed. All five modes also reject that checkpoint under the unmodified mature
+source pin. Thus these tests qualify dispatch and loading mechanics, not actual
+mature-checkpoint compatibility or real training.
+
+| Verification | Result |
+| --- | --- |
+| Corrected 28-case fixture against the frozen pre-fix production loader | 20 failed, 8 passed; 0 errors or skips |
+| New actual-loader cases plus unified/endpoint and four older actual initialization regressions | 39 passed, 0 failed, 0 skipped (60.30 seconds) |
+| Changed Python Ruff | 0 diagnostics |
+| Pyright with the declared CPU Python interpreter | 0 errors, 207 warnings |
+
+Every pre-fix failure is the incorrect unknown-migration rejection, including
+the six A/B positive cases for the three new modes and negative cases unable to
+reach the intended strict check. Earlier fixture authoring errors were retained
+separately and are excluded from that production counterexample. Positive
+cases preserve every inherited tensor exactly, retain the declared new neutral
+parameters and do not restore continuation optimizer/schedule/RNG state. Negative
+cases reject unknown/older modes, source-path drift, missing/extra/invalid
+tensors, non-neutral additions, objective/data/normalizer/language drift before
+mutating the destination model or RNG.
+
+Reproduce the new scope with `python -m pytest -q
+tests/test_unified_initialization_entry.py`; the adjacent scope is
+`test_unified_migration.py`, `test_calvin_endpoint_trajectory_migration.py` and
+the joint-task/P2-prior/P2-post-pool/target-prior-sequence initialization cases in
+`test_mainline_checkpoint.py`. JUnit SHA256 receipts:
+`13281ee3d7dd74c7e1bfff7b1e691f49b37e9cd9e9fc20ddd5dccd36be7ee8ab`
+(before), `d48a3f57997ab11087c9836c9bf716489186ff1951fb851c147367b89de28208`
+(after). Real asset admission, actual pretrained migration, training execution
+and source-matched closed-loop acceptance remain separate outstanding gates.
+
 ## Earlier continuation provenance
 
 Continuation input tree: `c88b6ca9ba1103b97a8937c4c2ce7fd98e51baad`

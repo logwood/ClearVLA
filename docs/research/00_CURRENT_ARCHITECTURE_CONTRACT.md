@@ -1743,6 +1743,15 @@ New optimizer warmup and real-data/behavior gates remain mandatory. This is
 not evidence that an opening scalar identifies an object or that measured robot
 motion means task progress. See `UNIFIED_REFACTOR_QUALIFICATION.md`.
 
+The actual checkpoint initialization entry admits all declared causal modes
+through the same `CAUSAL_INITIALIZATION_MODES` registry used by its downstream
+validators. Values/reference/outcome modes must reach their existing strict
+source/config/data/tensor checks, rather than fail at an obsolete entry list.
+Unknown modes remain rejected. This entry repair does not relax the mature
+source pin, any path allowlist, tensor inventory or neutral initialization.
+Artificial checkpoint loading tests are separate from actual mature-source
+migration and real training.
+
 ### Independent instruction-reference support (2026-10-08; not promoted)
 
 The source-consistent S/current-reference comparison now uses independent

@@ -28,11 +28,7 @@ from ..model.component_contracts import (
     modular_to_legacy_name,
 )
 from ..training.optimizer import WarmupCosineSchedule
-from .causal_identity_migration import (
-    CAUSAL_IDENTITY_AB_V1,
-    CAUSAL_INITIALIZATION_MODES,
-    CAUSAL_UNIFIED_SOURCE_V1,
-)
+from .causal_identity_migration import CAUSAL_INITIALIZATION_MODES
 
 CHECKPOINT_SCHEMA = "clearvla-mainline-checkpoint-v4"
 LIBERO_WINDOW_BOUNDARY_SUPERVISION_MIGRATION = "libero_window_boundary_supervision_v1"
@@ -1169,8 +1165,7 @@ def load_checkpoint_for_initialization(
         JOINT_TASK_OBJECT_BINDING_V1_MIGRATION,
         JOINT_TASK_OBJECT_BINDING_TRAJECTORY_V1_MIGRATION,
         CALVIN_ENDPOINT_TRAJECTORY_REPAIR_V1_MIGRATION,
-        CAUSAL_IDENTITY_AB_V1,
-        CAUSAL_UNIFIED_SOURCE_V1,
+        *CAUSAL_INITIALIZATION_MODES,
         DINOV3_DEEP_REPAIR_V1_MIGRATION,
         S_INTERVAL_VALUE_REPAIR_V1_MIGRATION,
         G_SLOT_IDENTITY_SOURCE_REPAIR_V1_MIGRATION,
