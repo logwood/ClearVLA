@@ -37,6 +37,7 @@ class RobotExecutionObserver(nn.Module):
             state_dim=self.state_dim,
             action_dim=self.action_dim,
             device=current_state.device,
+            strict=True,
         )
         if current_state.shape != (batch, self.state_dim) or not current_state.is_floating_point():
             raise ValueError("robot response current state has wrong feature chart")
@@ -45,6 +46,8 @@ class RobotExecutionObserver(nn.Module):
         previous = torch.where(valid, step.previous_state.detach().float(), 0.0)
         command = torch.where(valid, step.command.detach().float(), 0.0)
         current = torch.where(valid, current_state.detach().float(), 0.0)
+        if not bool(torch.isfinite(current).all()):
+            raise ValueError("observed robot current state must be finite")
         # FP32 input follows parameter dtype outside autocast, as other modules.
         prediction = self.response(
             torch.cat((previous, command), dim=-1).to(self.error_value.weight.dtype)
@@ -64,10 +67,19 @@ class RobotExecutionObserver(nn.Module):
         ), loss
 
     def read(self, feedback: RobotResponseFeedback, query: Tensor) -> Tensor:
-        if query.ndim != 4:
-            raise ValueError("robot response read requires [B,T,Q,H]")
+        if (
+            query.ndim != 4
+            or query.shape[-1] != self.plan_query.in_features
+            or not query.is_floating_point()
+        ):
+            raise ValueError("robot response read requires floating [B,T,Q,H]")
         feedback.validate(batch=query.shape[0], state_dim=self.state_dim, device=query.device)
         error = torch.where(feedback.observed[:, None], feedback.innovation, 0.0)
         value = self.error_value(error.to(self.error_value.weight.dtype))[:, None, None]
-        # Exact zero input gives zero value AND zero plan-context derivative.
-        return self.error_output(value * torch.tanh(self.plan_query(query)))
+        # Mask BOTH operands before projection/product. A missing observed
+        # transition cannot allow NaN context to contaminate shared weights.
+        # This mask is source availability, never learned error magnitude.
+        observed = feedback.observed[:, None, None, None]
+        context = torch.where(observed, query, 0.0)
+        result = self.error_output(value * torch.tanh(self.plan_query(context)))
+        return torch.where(observed, result, 0.0)

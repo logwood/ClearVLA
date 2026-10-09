@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import math
+
 import torch
 from torch import Tensor, nn
 
-from clearvla.vision.entity_chart import ImageLogMeasure
-
-from ..feedback_values import INNOVATION_ONLY, INNOVATION_AND_STATUS, FEEDBACK_VALUE_MODES
 from ..executed_world import ExecutedWorldFeedback, ExecutedWorldPlanValues
+from ..feedback_values import FEEDBACK_VALUE_MODES, INNOVATION_AND_STATUS, INNOVATION_ONLY
 from .target_binding import TargetBinding
 from .types import ObjectFactSet
 
@@ -17,7 +16,14 @@ from .types import ObjectFactSet
 class ExecutedWorldPlanRead(nn.Module):
     role_basis: Tensor
 
-    def __init__(self, *, hidden: int, content_dim: int, camera_names: tuple[str, ...], value_mode: str = INNOVATION_ONLY) -> None:
+    def __init__(
+        self,
+        *,
+        hidden: int,
+        content_dim: int,
+        camera_names: tuple[str, ...],
+        value_mode: str = INNOVATION_ONLY,
+    ) -> None:
         super().__init__()
         self.hidden = int(hidden)
         self.camera_names = tuple(camera_names)
@@ -61,7 +67,9 @@ class ExecutedWorldPlanRead(nn.Module):
         with torch.no_grad():
             image = source.on_image(rows=rows, columns=columns)
             support = image.supported & binding.supported[:, :, None, None, None]
-            current_law, _ = image.restrict(binding.supported[:, :, None, None, None]).normalized((-2, -1))
+            current_law, _ = image.restrict(binding.supported[:, :, None, None, None]).normalized(
+                (-2, -1)
+            )
             current_law = current_law.flatten(-2)
             current_views = support.flatten(-2).any(-1) & (facts.camera_validity[..., 0] > 0)
             current_law = torch.where(current_views[..., None], current_law, 0.0)
@@ -116,22 +124,30 @@ class ExecutedWorldPlanRead(nn.Module):
             # measurement. Do not turn entropy into a loss mask or confidence
             # threshold; a diffuse real match is not high-certainty evidence.
             with torch.autocast(device_type=query.device.type, enabled=False):
-                p = torch.where(feedback.view_observed[..., None], feedback.posterior, 0.0).flatten(2)
+                p = torch.where(feedback.view_observed[..., None], feedback.posterior, 0.0).flatten(
+                    2
+                )
                 qnull = torch.where(past_supported[..., None], feedback.null, 1.0)
                 law = torch.cat((p, qnull), -1).float()
                 entropy = -(law * law.clamp_min(1e-8).log()).sum(-1) / math.log(law.shape[-1])
                 unknown = qnull[..., 0] + (1 - qnull[..., 0]) * entropy
                 unmatched = full_match[..., -1]
                 matched_unknown = torch.einsum("bkj,bj->bk", match, unknown) + unmatched
-                match_entropy = -(full_match * full_match.clamp_min(1e-8).log()).sum(-1) / math.log(full_match.shape[-1])
+                match_entropy = -(full_match * full_match.clamp_min(1e-8).log()).sum(-1) / math.log(
+                    full_match.shape[-1]
+                )
                 per_target_status = torch.stack((unmatched, matched_unknown, match_entropy), -1)
                 # No pre-reset source and no observed current target yield no
                 # claimed observation. A valid but unmatched target yields an
                 # explicit unknown status instead of a manufactured zero error.
-                observed = current_views.any(-1) & binding.supported & feedback.window.observed[:, None]
+                observed = (
+                    current_views.any(-1) & binding.supported & feedback.window.observed[:, None]
+                )
                 per_target_status = torch.where(observed[..., None], per_target_status, 0.0)
                 status_features = (per_target_status * binding.mass[..., None]).sum(1)
-        return ExecutedWorldPlanValues(prepared, feedback, facts.content, id(self), binding, status_features)
+        return ExecutedWorldPlanValues(
+            prepared, feedback, facts.content, id(self), binding, status_features
+        )
 
     def forward(
         self, prepared: ExecutedWorldPlanValues, context: Tensor, binding: TargetBinding | None
@@ -139,24 +155,41 @@ class ExecutedWorldPlanRead(nn.Module):
         if prepared.reader_identity != id(self) or prepared.binding is not binding:
             raise ValueError("executed discrepancy cache belongs to another reader/target")
         if (
-            prepared.value.shape != (context.shape[0], self.hidden)
+            context.ndim != 4
+            or not context.is_floating_point()
+            or prepared.value.shape != (context.shape[0], self.hidden)
             or context.shape[-1] != self.hidden
+            or prepared.value.device != context.device
+            or prepared.feedback.window.observed.device != context.device
         ):
             raise ValueError("executed discrepancy cache lost B/H axes")
         dtype = self.output.weight.dtype
-        value = prepared.value.to(dtype)[:, None, None]
-        conditioned = torch.tanh(self.context(context.to(dtype)))
+        # An absent execution window has no context-dependent contribution.
+        # Quarantine before linear products; zero value times NaN context is
+        # neither a zero output nor a finite zero parameter gradient. Observed
+        # uncertain/null matches retain their existing status path unchanged.
+        observed = prepared.feedback.window.observed[:, None]
+        value = torch.where(observed, prepared.value, 0.0).to(dtype)[:, None, None]
+        safe_context = torch.where(observed[:, None, None], context, 0.0)
+        conditioned = torch.tanh(self.context(safe_context.to(dtype)))
         result = self.output(value * conditioned)
         if self.observed_status_projection is None:
             if prepared.status_features is not None:
                 raise ValueError("unselected world reader received status values")
         else:
             status = prepared.status_features
-            if status is None or status.shape != (context.shape[0], 3) or status.device != context.device:
-                raise ValueError("observed world status is missing or belongs to another batch/device")
+            if (
+                status is None
+                or status.shape != (context.shape[0], 3)
+                or status.device != context.device
+            ):
+                raise ValueError(
+                    "observed world status is missing or belongs to another batch/device"
+                )
+            status = torch.where(observed, status, 0.0)
             encoded = torch.matmul(status.to(dtype), self.observed_status_projection)[:, None, None]
             # Unlike signed innovation, absence/ambiguity must not vanish just
             # because context is zero. This is a learned evidence value, not
             # an instruction to stop or move; exact-zero projection is neutral.
             result = result + self.output(encoded * (1 + conditioned))
-        return result
+        return torch.where(observed[:, None, None], result, 0.0)

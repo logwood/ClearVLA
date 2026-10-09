@@ -1694,6 +1694,18 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### P3 missing execution context (2026-10-08 support repair)
+
+Robot and world feedback readers apply source-observed masks to context BEFORE
+projection as well as to values. Missing predecessors/windows cannot inject
+NaN parameter gradients through a zero feedback value. Observed zero innovation
+and observed uncertainty are not absence; no magnitude threshold is used. The
+robot producer validates its one-step clock/finite observed payload once per
+online encode. Parameter set, finite-source outputs, selectors and gains are
+unchanged. This is a missing-source contract repair, not learned-behavior
+qualification. See `UNIFIED_REFACTOR_QUALIFICATION.md`.
+
+
 ### Measured robot result in S before proposal (2026-10-08 candidate)
 
 `observed_outcome_mode=robot_world_before_proposal_v2` keeps the existing

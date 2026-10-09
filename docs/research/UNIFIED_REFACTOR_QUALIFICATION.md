@@ -323,3 +323,30 @@ verify exact module/parameter/buffer moves, and exercise complete, missing and
 inconsistent world outcome records. The 23 inherited type errors in these two
 changed producer/constructor files are eliminated; this is not a claim that
 every untyped member warning across the repository is resolved.
+
+
+## P3 execution context uses the same missing-source mask (2026-10-08)
+
+The new S robot-outcome reader already quarantined absent context, but the older
+P3 robot/world feedback consumers only zeroed their values. An absent row with
+NaN/Inf context still entered a Linear/tanh and produced zero-times-NaN output
+and nonfinite shared-parameter gradients. Fourteen new boundary assertions
+failed on de390553 (ten robot producer/read checks and four world read checks);
+these are artificial missing-source counterexamples, not measured failures of
+a trained policy.
+
+Both original P3 feedback readers now quarantine absent context BEFORE the
+projection, using the existing observed transition/window Boolean only. World
+prepared value and status use the same mask. Observed zero innovation is not
+a mask: a supported uncertain comparison retains its status value. No target
+threshold, new source, loss, selector, parameter, or gain is introduced. Finite
+valid-source forward values and parameter/context VJPs retain exact parity.
+Ordinary first/second derivatives, FP32/BF16 missing payloads, mixed-batch
+isolation, and actual online-generated world packets are separately tested.
+
+The robot response producer also checks its already-declared exact one-step
+clock and observed finite state/command before prediction. These checks run
+once during observation encoding, not inside every ODE node. The per-node
+consumer adds only tensor masking and structural shape checks. Invalid
+observed data is rejected, never silently converted into a successful record.
+No identity/physical-outcome or real-data training acceptance is inferred.
