@@ -316,7 +316,15 @@ class CalvinBridgeModel:
             raise RuntimeError("CALVIN observe requires an executed action")
         self._admit_observation()
         policy_input = calvin_policy_observation(observation, self._previous_action)
-        time_index = int(self.client.observe(policy_input))
+        try:
+            time_index = int(self.client.observe(policy_input))
+        except BaseException:
+            if self.require_step_receipt:
+                # The remote append may have succeeded even if its response
+                # was lost or invalid. Reuse the same recovery boundary as
+                # plan(); retrying this observation could invent a step.
+                self.invalidate_execution()
+            raise
         self._needs_observation = False
         self.observed_history_time_indices.append(time_index)
         self.observed_after_executed_steps.append(len(self.executed_actions))

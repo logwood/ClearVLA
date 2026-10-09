@@ -149,6 +149,55 @@ source `1f81e002...`. Local JUnit SHA256 receipts are
 3114-pass Actions result above belongs to the takeover baseline; it must not be
 relabelled as an Actions run of this new repair.
 
+## Continued production qualification (2026-10-09 UTC)
+
+The next continuation re-read both the remote ref and fetched Git source as
+`69f3ab9984df9e76ec654933c75635a3966d4d15`, tree
+`8262b1bca81850650b72d59f8145e23e31feace0`. This is the committed S past-world
+null repair above. Its ordinary existing [audit run 37879962126](https://github.com/logwood/ClearVLA/actions/runs/37879962126)
+was still running when the following unit was verified; the earlier baseline
+Actions result is not being transferred to this revision. The existing branch
+and workflows are retained.
+
+### Unit 2: uncertain remote observations cannot invent physical steps
+
+The receipt-enabled CALVIN adapter already invalidated execution after a remote
+planning failure, but its intermediate `observe()` lacked that boundary. The
+new counterexamples call the real bridge and causal history over artificial
+physics. The server accepts the one actual transition, then the response is
+lost or cannot be converted into a clock. Previously, retrying appended the
+same transition again while the physical step count remained unchanged.
+
+Only the stateful remote call and response conversion now share `plan()`'s
+existing execution invalidation. Subsequent commands, observations, planning
+and instruction resets are rejected until a successful environment reset.
+Local malformed-observation rejection happens before that boundary and remains
+retryable. The explicitly legacy, unacknowledged mode retains its prior recovery
+contract. No controller rule, sensor, clock inference or learned parameter is
+added, and existing accepted-command audit records remain intact.
+
+| Verification | Result |
+| --- | --- |
+| Four new cases against unchanged production | 2 failed, 2 passed |
+| Lifecycle, chunk execution, instruction boundary and execution receipts after repair | 59 passed, 0 failed, 0 skipped |
+| Independent repeat of the same affected scope | 59 passed, 0 failed, 0 skipped (2.13 seconds) |
+| Ruff on the two changed Python files / whitespace check | Passed / passed |
+
+The new positive controls distinguish a local pre-admission failure from an
+uncertain remote append and preserve legacy behavior. Failure cases verify
+that retries cannot advance remote time, an instruction event cannot impersonate
+an environment reset, and a successful physical reset establishes a fresh
+timeline. These are artificial-input protocol/lifecycle checks, not a CALVIN
+task-success or contact measurement.
+
+Reproduce with `python -m pytest -q tests/test_calvin_execution_lifecycle.py
+tests/test_calvin_chunked_execution.py tests/test_bridge_instruction_boundary.py
+tests/test_mainline_execution_receipts.py`. Pre/post-fix JUnit SHA256 receipts:
+`7d11cdc2dac57c054cf87566daf5e7235a2c0996d636f24823b1513b33474868`
+and `0770752b15b58fd0e57e785b3533ff78b0d48ad334dce5f1a824e45155cd6b06`.
+Raw logs remain outside repository memory. Real training and closed-loop gates
+remain separate and blocked as recorded above.
+
 ## Earlier continuation provenance
 
 Continuation input tree: `c88b6ca9ba1103b97a8937c4c2ce7fd98e51baad`

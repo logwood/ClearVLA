@@ -259,6 +259,96 @@ def test_plan_failure_cannot_duplicate_a_remote_history_append(
     assert bridge.history.time_index == 1
 
 
+@pytest.mark.parametrize("failure", ["response_lost", "invalid_response"])
+def test_observe_failure_cannot_duplicate_a_remote_history_append(
+    monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    _, bridge, client, model, physics, env = setup(4)
+    env.reset()
+    env.step(model.step(env.get_obs(), "red"))
+    confirmed = model.executed_actions[0].copy()
+    original = client.observe
+
+    def bad(observation: PolicyObservation) -> int:
+        # The server already owns this real transition when transport or
+        # response admission fails. A retry cannot append it a second time.
+        original(observation)
+        if failure == "response_lost":
+            raise ConnectionError("observe response lost after remote append")
+        return cast(Any, "invalid-clock")
+
+    monkeypatch.setattr(client, "observe", bad)
+    with pytest.raises((ConnectionError, ValueError)):
+        model.step(env.get_obs(), "red")
+    assert physics.t == 1 and bridge.history.time_index == 1
+    assert len(model.raw_chunks) == 1 and len(model.executed_actions) == 1
+    assert model.observed_history_time_indices == []
+    assert model.observed_after_executed_steps == []
+    np.testing.assert_array_equal(model._previous_action, confirmed)
+    assert model._pending_command is None
+
+    monkeypatch.setattr(client, "observe", original)
+    for retry in (
+        lambda: model.step(env.get_obs(), "red"),
+        lambda: model.observe(env.get_obs()),
+        lambda: model.plan(env.get_obs(), "blue"),
+        model.reset,
+    ):
+        with pytest.raises(RuntimeError, match="environment reset"):
+            retry()
+        assert physics.t == 1 and bridge.history.time_index == 1
+    with pytest.raises(RuntimeError):
+        model.execute_planned_row(1)
+    assert len(model.raw_chunks) == 1 and len(model.executed_actions) == 1
+
+    # A successful physical reset is the existing recovery boundary. It
+    # starts a fresh bridge timeline at the next observation, without
+    # relabelling the original accepted command as unexecuted.
+    env.reset()
+    action = model.step(env.get_obs(), "blue")
+    assert bridge.history.time_index == 0
+    assert bridge.history.snapshot().previous_state is None
+    assert not model._requires_episode_reset
+    env.step(action)
+    assert physics.t == 1 and len(model.executed_actions) == 2
+    np.testing.assert_array_equal(model.executed_actions[0], confirmed)
+
+
+def test_legacy_observe_failure_keeps_its_existing_recovery_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, bridge, client, _, physics, _ = setup(4)
+    model = CalvinBridgeModel(cast(RemotePolicyClient, client), execute_rows=4)
+    physics.step(model.step(physics.get_obs(), "red"))
+    original = client.observe
+
+    def bad(observation: PolicyObservation) -> int:
+        original(observation)
+        raise ConnectionError("legacy observe response lost")
+
+    monkeypatch.setattr(client, "observe", bad)
+    with pytest.raises(ConnectionError):
+        model.step(physics.get_obs(), "red")
+    assert bridge.history.time_index == 1
+    assert not model._requires_episode_reset
+    model.reset()
+    assert model._pending_instruction_start
+
+
+def test_observe_rejects_bad_local_evidence_without_invalidating_execution() -> None:
+    _, bridge, _, model, physics, env = setup(4)
+    env.reset()
+    env.step(model.step(env.get_obs(), "red"))
+    malformed = {**env.get_obs(), "robot_obs": np.zeros(2, dtype=np.float32)}
+    with pytest.raises(ValueError, match="robot_obs"):
+        model.observe(malformed)
+    assert bridge.history.time_index == 0 and physics.t == 1
+    assert not model._requires_episode_reset and model._needs_observation
+    env.step(model.step(env.get_obs(), "red"))
+    assert bridge.history.time_index == 1 and physics.t == 2
+    assert model.executed_chunk_rows == [0, 1]
+
+
 def test_failed_env_reset_is_not_a_successful_timeline_reset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

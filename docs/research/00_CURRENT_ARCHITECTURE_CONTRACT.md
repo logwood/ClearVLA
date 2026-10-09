@@ -815,8 +815,11 @@ step commits it. `ExecutedCommand` may explicitly report a different accepted
 canonical command; otherwise the adapter confirms the submitted command at the
 successful call boundary and rejects input-buffer mutation. This does NOT
 observe low-level actuator commands, displacement or contact. Wrong submissions
-fail before physics; uncertain/failed steps or remote planning failures require
-an environment reset rather than a duplicate history append. Observations and
+fail before physics; uncertain/failed steps, remote planning failures and lost
+or unparseable observation responses require an environment reset. A remote
+observation may already have appended history when its response fails; retrying
+cannot be treated as a new physical step. Local observation admission still
+precedes the remote call and can be retried without a reset. Observations and
 commands alternate exactly once in receipt-enabled chunked execution.
 
 The legacy unwrapped duck-typed model mode remains explicitly marked
