@@ -372,6 +372,50 @@ green JUnit SHA256
 The source and tests remain an operational workspace boundary; they do not
 qualify real data training or closed-loop task behavior.
 
+### Fixed-source cumulative verification (2026-10-09 UTC)
+
+After Units 1–6, the branch was re-read from the remote API and Git fetch at
+`3925f9b0a0c1c54810b2ca65c3575452c05a3bc6`, with tree
+`57e4b31bc1a77f22d9f316afe0619f1ee414d65d`; the checkout is clean. The six
+production commits are retained on the existing branch and no workflow or
+payload was recreated.
+
+The declared isolated runner was used for a focused cumulative gate over all
+changed boundaries and their adjacent contracts: 19 test files, **266 passed,
+0 failed, 0 skipped**. This includes the S null repair, CALVIN receipt
+lifecycle, all five causal initialization modes, A source camera log mass, A
+observed current reference, and workspace process identity repair. Changed-file
+Ruff is clean. Declared-interpreter Pyright delta against `1f81e002` reports
+zero new errors and zero new missing-import diagnostics; inherited warnings and
+diagnostics remain visible in the receipt.
+
+The attempted local all-file inventory used the existing four-shard runner under
+the 8 GiB cgroup, without changing its code. It did not complete and is not a
+pass: while two shards were running, one old-source workspace test exposed the
+PID-domain defect now fixed in Unit 6, and one DINO production integration
+process exited `-9`. The cgroup recorded `oom=1`, `oom_kill=1`, and a peak of
+8 GiB. The other two shards were stopped before they could be mistaken for a
+complete result. The fixed-source targeted gate is the actionable local result;
+the partial all-file attempt is recorded as resource-blocked. The prior
+`69f3ab9` Actions run remains a separate exact-source result: 3154 collected,
+3138 passed, 16 skipped, zero failures/errors. Actions for later commits were
+cancelled or queued by the existing serial workflow; the run for `3925f9b` was
+pending at this record and is not called passed.
+
+### Real training and closed-loop status at the final source
+
+The A and B `unified_outcomes_*_calvin_check.json` preflights were rerun with
+`causal_unified_outcome_v1` and the final source. Both exited 2 with
+`state=blocked`, `training_executed=false`, and `training_passed=false`.
+The declared runtime matched Python 3.12.14/Torch 2.11.0+CPU, but CUDA,
+`transformers`, the HDF5 episodes, split manifest, T5 bank, mature checkpoint,
+DINOv3 model directory and CALVIN raw source were absent. No training update,
+checkpoint migration with the actual mature source, or optimizer receipt was
+run. The explicit closed-loop scripts and official environments likewise have
+no source-matched trained policy/assets or acceptance receipt in this checkout;
+no closed-loop result is inferred from artificial physics, random weights or the
+266-case CPU gate.
+
 ## Earlier continuation provenance
 
 Continuation input tree: `c88b6ca9ba1103b97a8937c4c2ce7fd98e51baad`
