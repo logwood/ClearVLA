@@ -1694,6 +1694,41 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### Cross-version task decision (2026-10-08, research34.33.29)
+
+Use original complete B-v1 as the improvement base. Same60 physical windows
+now compare v1/v2/v3 on identical visible/support pixels and87 eligible pairs.
+Top-view different-object conditional-K TV medians .4133/.0548/.4462, while
+standard scores17/12/12. V3 restores this read separation without restoring
+behavior. All120 natural-command repeats per version are0; color action RMS
+medians remain .000424/.000468/.000416. Neither K TV nor response magnitude
+proves correct semantic identity. Fixed-G v3 global source READ ceilings in
+05/24 and11/24 remain .0901/.0196; this is not a full-policy capacity bound.
+
+Next: T1 isolated S spatial feature repair (minimal centered offset first;
+task-before-pooling only if evidence requires), T2 carry the existing full
+current per-view law/support through W/P2 to its spatial consumer. Test
+separately before combining. T3 address-memory remains pending, with final
+gains/ordinary gradients/physical target access required; do not silently
+include it as proven. T4 independent future-support-v2 fix needs explicit
+B-v1 integration/ledger, not a bulk v2/v3 merge. T5 identity objective/reduction
+and online supervision coverage are a separate unresolved training mechanism.
+T6 contact/maintained progress/first8 arm-gripper is the shared behavior gate.
+
+The v1->v2 online graph was unchanged: its objective/support/denominator
+changes cannot be erased from the regression explanation. Freeze objectives
+during structural localization without declaring the null escape correct.
+Meaningful short ->256offline->18R8 onGPU1, with full NPZ and per-case review.
+BS4 is authorized only with explicit sample/update/clock accounting.
+No new GPU run launched for this synthesis. Do not repeat rejected controller,
+inference-arm-recoding or matcher sweeps without a concrete new discriminator.
+
+V3 full qualification is complete, not waiting. Independent SAM region r1
+failed (latest2680 updates/no checkpoint); slot-feedback r2 is still live
+(PID2921404, sampled7560/11012). Preserve that job and its immutable runtime.
+No successful complete SAM behavioral result is available for integration.
+
+
 ### Paired B-v1 audit and durable training boundary (2026-10-08)
 
 Research34.33.28 confirms BOTH e4be3be6 shorts completed1024BS8 updates,
