@@ -1694,6 +1694,23 @@ execution adaptation from being accidentally disabled by a short repair test.
 
 ## Agent quick contract
 
+### General capability requirement (2026-10-08, explicit user instruction)
+
+All repairs must develop general object differentiation, language-conditioned
+target binding, spatial/relational reasoning and sustained task execution.
+Appearance/color is an ordinary visual attribute; color-swap probes are one
+controlled audit slice, not the scope of the learned capability. Do not hard-code
+color/task/scene selectors, fixed K-to-object identities, or simulator-oracle
+shortcuts. General, economical mechanisms borrowed from SAM remain eligible
+under the same evidence gates.
+
+Qualification must check correct instruction-to-target grounding and maintained
+physical execution, not merely a larger response to changed color words. Use
+semantically valid attribute, spatial-relation, action-direction and temporal
+checks where the data supports them; state any untested generalization. Retain
+the declared standard panel for comparable scores and keep diagnostic labels
+separate from policy inputs. This requirement refines T1/T2 and all later repairs.
+
 ### Cross-version task decision (2026-10-08, research34.33.29)
 
 Use original complete B-v1 as the improvement base. Same60 physical windows
@@ -2933,6 +2950,10 @@ Current checkpoint observations, when needed, live in the temporary
     not an aligned forecast. Unknown controls cannot become synthetic zeros.
     Observed-action training branches use separately typed matched labels and
     never replace online W or the one-rebuild Q5 lifecycle.
+
+18. Target grounding and execution repairs must serve general instructions and
+    objects. Color probes do not authorize color/task-specific decision rules,
+    fixed semantic slot assignments, or claims of untested generalization.
 
 ## Typed boundary summary
 
