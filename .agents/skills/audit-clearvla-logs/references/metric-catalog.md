@@ -1,5 +1,10 @@
 # ClearVLA Log Metric Catalog
 
+Look up the metric family needed for the present decision. This catalog
+includes historical variants; source, active objective weights and archived
+run identity determine whether an entry applies. It is not a mandatory audit
+checklist or a set of automatic stop thresholds.
+
 ## Contents
 
 - Evidence hierarchy

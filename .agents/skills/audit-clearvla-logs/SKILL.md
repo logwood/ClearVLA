@@ -1,58 +1,53 @@
 ---
 name: audit-clearvla-logs
-description: Audit and compare ClearVLA training logs against the current workspace source. Use for attached nohup/text logs, run directories, v39_policy_epochs.jsonl files, loss composition questions, gradient or controller health checks, validation regressions, cross-version experiment comparisons, and decisions about whether a run should continue or the implementation should change.
+description: Diagnose ClearVLA training logs, validation regressions and cross-run differences against each run's actual source and configuration.
 ---
 
 # Audit ClearVLA Logs
 
-Build a source-grounded experiment diagnosis from raw logs. Treat every run as a new artifact; do not inherit conclusions from an older version unless the current manifest and implementation support them.
+Deliver the evidence needed for the user's specific experiment decision.
+A narrow status question needs a narrow check; a requested full health audit
+covers the full available curve and completed validation, not just its best point.
 
-## Workflow
+## Start from the run
 
-1. Resolve every supplied log or run directory and identify its actual version header, context manifest, initialization counts, batch range, and completed epoch records.
-2. From the repository root, run:
+Identify its source, resolved configuration, initialization/clock, normalizers
+and completed stages. Use the existing summary tool when it fits:
 
-   ```bash
-   python -m clearvla.tools.audit_policy_logs LOG_OR_RUN_DIR [MORE_LOGS]
-   ```
+```bash
+python -m clearvla.tools.audit_policy_logs LOG_OR_RUN_DIR [MORE_RUNS] --format json
+```
 
-   Pass a run directory when available.  Legacy runs merge `nohup.log` with
-   `v39_policy_epochs.jsonl`; the independent capability-named mainline merges
-   its console log with `metrics.jsonl`. Use `--format json` when downstream
-   calculations need the complete normalized summary.
-3. Read [metric-catalog.md](references/metric-catalog.md) for metric semantics and comparison constraints. Read [source-map.md](references/source-map.md) whenever the request asks why a behavior occurs, whether a loss is active, or whether code should change.
-4. Inspect the utility findings, then verify every material claim against the relevant raw rows and current source. Rules are triage signals, not proof of causality.
-5. Report the smallest decision-complete set of evidence:
-   - actual run contract and initialization state;
-   - exact loss-group contributions when a ledger exists, otherwise clearly labeled estimates;
-   - training trajectory versus epoch validation;
-   - horizon, arm, gripper/event, rollout, proposal, conditioning, controller/capacity, and gradient health;
-   - diagnostic coverage and missing evidence;
-   - causal interpretation, competing explanations, and a continue/stop/change recommendation.
+Prefer a run directory with archived metrics to a copied console tail.
+For independent mainline runs inspect clearvla/mainline/ and the serialized
+manifest; V-number ancestry does not select the current implementation.
 
-## Evidence Rules
+## Read only the relevant reference
 
-- Prefer the serialized run context and header over shell-script defaults.
-- Prefer `loss_contrib_*`, `loss_group_*`, and `loss_ledger_residual` over raw loss magnitudes. Never call a large raw auxiliary loss dominant without multiplying its effective weight.
-- Distinguish an audit-only metric from an objective that enters backward.
-- Treat an active-path zero gradient as evidence. Ignore zero placeholders from inactive branches.
-- For independent-mainline runs, inspect `clearvla/mainline/` and its serialized
-  `ArchitectureManifest` before historical V39 sources. A `v120`/`v122` label
-  is comparison ancestry, not proof that the active graph is the monolith.
-- Do not use event accuracy alone; pair it with precision, recall, F1, predicted/target event counts, and decoded gripper event ratio.
-- Keep decoded gripper events, the auxiliary event head, and the motion head as
-  three distinct semantic objects; never merge their counts or F1 values.
-- Do not infer generalization from training pflow. Compare validation RMSE by horizon and semantic channel.
-- Read all completed epochs.  Do not select only the first few hundred batches
-  or the best validation point when a full run is available.
-- Interpret capacity/depth only after execution progress leaves warmup. Interpret z interventions only when diagnostic coverage is present.
-- Compare `physical_flow_native_uniform` across runs only when the action-normalizer fingerprint matches.
-- Separate implementation facts, log observations, inferences, and experiment proposals in the final answer.
+- [Metric catalog](references/metric-catalog.md): locate the named metric,
+  loss group, channel or diagnostic under investigation.
+- [Source map](references/source-map.md): locate the producer, objective,
+  backward or logging boundary needed to explain an observation.
 
-## Comparing Runs
+These include historical variants. Match them to the run; they are not mandatory
+full-document reads. Verify material claims against actual source and raw rows.
 
-Use one command with multiple inputs. Confirm data split, normalizer fingerprint, decoder, training stage, checkpoint migration, batch size, and effective objective weights before attributing differences to architecture. If those contracts differ, describe the comparison as directional rather than controlled.
+## Decision-critical distinctions
 
-## When Evidence Is Missing
+- Weighted loss contributions and ledger closure determine optimization budget;
+  raw magnitude or a detached gauge does not.
+- Missing gradients, exact zero, inactive placeholders and tiny finite gradients
+  are different. Activation VJP does not establish parameter updates or behavior.
+- CALVIN binary commands, continuous gripper fields and auxiliary event heads
+  have distinct metrics. Use event counts and precision/recall/F1 when relevant.
+- Training, offline validation, saved weights and closed-loop behavior are
+  separate completion states. A pending-validation snapshot is not best/latest.
+- Cross-run attribution needs compatible data, normalization, exposure,
+  initialization, clock, objectives and runtime. Label unmatched comparisons.
+- Keep numerical repeat noise, intervention sensitivity and real task
+  correctness distinct. K separation or color-response amplitude alone is not
+  general instruction grounding.
 
-State exactly which conclusion cannot be made. Prefer the archived JSONL or run snapshot over adding speculative logging. Recommend a logging change only when the missing observation would alter a concrete experimental decision.
+Use existing evidence to distinguish causes. Add logging or a probe only when
+the result can change the next decision. State what is established, what remains
+uncertain, and the next justified action; avoid a full checklist for every query.

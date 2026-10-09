@@ -1,40 +1,19 @@
-# Auxiliary research references
+# 辅助资料索引
 
-This directory is not an alternate architecture contract. Read
-[`../00_CURRENT_ARCHITECTURE_CONTRACT.md`](../00_CURRENT_ARCHITECTURE_CONTRACT.md)
-first.
+按问题查阅。这里除运行交接外主要是特定outlet或历史研究资料，
+不构成第二套当前架构。
 
-## Operational and current contracts
+| 文件 | 用途与范围 |
+| --- | --- |
+| [ACTIVE_MAINLINE_HANDOFF.md](ACTIVE_MAINLINE_HANDOFF.md) | 当前主线的运行身份、路径和带时间戳的状态 |
+| [RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md](RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md) | RDT适配设计；按该outlet源码核对 |
+| [CLEARVLA_WAM_LITERATURE_INTEGRATION.md](CLEARVLA_WAM_LITERATURE_INTEGRATION.md) | 文献到源码的候选假设，不是已采用方案 |
+| [CALVIN_SCHEMA30_HEALTH_LITERATURE_SOURCE_MEMO.md](CALVIN_SCHEMA30_HEALTH_LITERATURE_SOURCE_MEMO.md) | 历史CALVIN日志与文献对应 |
+| [SCHEMA31_BSPINE_EARLY_AUDIT.md](SCHEMA31_BSPINE_EARLY_AUDIT.md) | B-spline早期审计，不是当前默认配置 |
+| [R1_R2_CLOSURE_INDEX.md](R1_R2_CLOSURE_INDEX.md) | 历史Schema25修复索引 |
+| [CONVERSATION_INSIGHT_LEDGER.md](CONVERSATION_INSIGHT_LEDGER.md) | 历史结论索引，不是待执行任务 |
+| [STRUCTURAL_REBUILD_PEN.md](STRUCTURAL_REBUILD_PEN.md) | 早期Pen/CALVIN结构重建背景 |
 
-| File | Use |
-|---|---|
-| [`ACTIVE_MAINLINE_HANDOFF.md`](ACTIVE_MAINLINE_HANDOFF.md) | Volatile remote/local state, active run identifiers and immediate safety/next-action notes |
-| [`RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md`](RDT_FT_DATA_MULTIVIEW_BIMANUAL_ADAPTATION.md) | Current bounded RDT data/language/camera/action adapter contract |
-
-`SCHEMA31_BSPINE_EARLY_AUDIT.md`, when present, is a temporary checkpoint note
-for the active opt-in experiment. It is replaced after the next decision
-checkpoint and is not an architecture contract.
-
-## Exploratory research
-
-| File | Use |
-|---|---|
-| [`CLEARVLA_WAM_LITERATURE_INTEGRATION.md`](CLEARVLA_WAM_LITERATURE_INTEGRATION.md) | Non-authoritative literature-to-source map with falsifiable WAM, solver/MIP, future-supervision and chunk-continuity hypotheses |
-| [`CALVIN_SCHEMA30_HEALTH_LITERATURE_SOURCE_MEMO.md`](CALVIN_SCHEMA30_HEALTH_LITERATURE_SOURCE_MEMO.md) | Remote CALVIN health audit mapped to launch/current source, original literature, matched counterfactuals and code-change gates |
-
-## Historical indexes
-
-| File | Use |
-|---|---|
-| [`R1_R2_CLOSURE_INDEX.md`](R1_R2_CLOSURE_INDEX.md) | Compact decision record for ten completed Schema25 R1/R2 units |
-| [`CONVERSATION_INSIGHT_LEDGER.md`](CONVERSATION_INSIGHT_LEDGER.md) | Curated historical research index; not an execution queue |
-
-Long replay ledgers and source-unit plans are archived under
-[`../archive/replay/`](../archive/replay/README.md). Older probes and research
-notes are under
-[`../archive/legacy_evidence/`](../archive/legacy_evidence/README.md). The
-retired R1/R2 worksheet texts remain recoverable from Git commit `f60bd80`.
-
-Use an archived document only for ancestry, an old log or the reason for a
-previous repair. Verify the active source, serialized run context and current
-contract before reusing any historical conclusion.
+当前问题与下一步从[研究入口](../README.md)查找。
+旧文中的“现在”“必须先”“本轮停止”只适用于其记录的上下文，
+不能覆盖实际源码、当前用户授权和当前计划。

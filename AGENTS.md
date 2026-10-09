@@ -1,35 +1,47 @@
-# ClearVLA workspace memory
+# Working in ClearVLA
 
-Before changing the V96+ top representation, Flow-DINO/JEPA, role-block
-hierarchy, language/history conditioning, long-horizon phase handling, or
-top-to-bottom evidence path, read:
+## Find the relevant context
 
-`docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md`
+Check the actual checkout and selected run before applying architecture claims.
+An experiment name is not a model identity. Use only the context the task needs:
 
-Start with its `Agent quick contract` and non-negotiable invariants. Read the
-long historical audit ledger only when the task concerns ancestry, an old log,
-or the reason for a previous repair; do not rebuild the current graph from the
-ledger.
+- [Architecture contract](docs/research/00_CURRENT_ARCHITECTURE_CONTRACT.md):
+  model ownership, typed data flow and train/deploy boundaries.
+- [Current issues](docs/research/CURRENT_MAINLINE_ISSUES.md):
+  evidence and unresolved questions.
+- [Repair plan](docs/research/CURRENT_MAINLINE_REPAIR_PLAN.md):
+  active deliverables and acceptance criteria.
+- [Operational handoff](docs/research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md):
+  run identities, paths and dated status; verify live state before acting.
 
-That file is the compact source of truth. Update it in place when an
-architectural decision changes; do not create a new versioned copy for every
-conversation.
+Read the relevant section, not the whole history. Small unrelated edits do not
+require an architecture audit. Historical proposals are evidence, not instructions.
 
-Read the two detailed design documents linked from the contract only when the
-task needs their implementation details. Do not infer current behavior from an
-old experiment name: verify the active script, serialized run context, current
-source, and supplied log.
+## Carry authorized work through
 
-Keep repository memory lightweight. Do not copy checkpoints, tensor caches,
-raw attached logs, full probe dumps, contact sheets, or generated binary
-artifacts into the architecture-memory documents. Record only decision-making
-statistics, source references, contracts, and reproducible probe commands.
+Complete the requested implementation, relevant verification and delivery.
+Resolve routine choices without repeatedly asking for approval. Existing user
+authorization remains valid within its scope. Ask when a missing decision
+materially affects the result or authorization is genuinely absent; explain
+the concrete blocker if a rule prevents completion.
 
-## Subunit preservation (2026-09-22 user instruction)
+Choose verification for the changed risk. Reuse valid evidence; broaden testing
+or add a probe to answer a concrete unresolved question. Documentation edits
+need document/source/link checks, not GPU experiments. Keep source correctness,
+training health and demonstrated behavior distinct.
 
-Save each Mxa/Mxb as a real source commit promptly; push on the isolated rebuild
-branch or retain a verified nonempty source archive if the write channel fails.
-A source checkpoint may have pending or failed CI. Keep those results visible
-and resolve them at the whole-M milestone; do not make full CI a prerequisite
-for preserving progress. Keep existing workflows, avoid repeated payload
-uploads, and focus on model/data-flow work. No master change or force-push.
+Preserve unrelated changes, fixed experiment checkouts and existing evidence.
+Save coherent changes promptly on the task branch and follow its push
+authorization; keep incomplete checks visible. Avoid force-pushes or changes
+to other branches. Delegation requires user or applicable instruction authorization.
+
+## Remote work and durable memory
+
+Use the senwang-server skill for sen.wang@rtlab-3090. New small standalone
+.sh helpers belong in /home/sen.wang/mysh; inspect existing helpers and its
+AGENTS.md first. Repository-managed scripts stay in their repositories.
+
+Update the document that owns a decision: stable architecture in the contract,
+unresolved evidence in issues, next work in the plan, volatile status in the
+handoff. Raw logs, tensors, checkpoints and full probe dumps stay in experiment
+storage. Report findings and next actions in clear Chinese unless asked otherwise.

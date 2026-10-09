@@ -1,5 +1,11 @@
 # ClearVLA Loss and Logging Source Map
 
+Use this as a symbol locator, not a current-configuration declaration.
+Match each entry to the run's source and resolved components. Search the
+relevant boundary; historical monolith sections are unnecessary for a
+capability-named mainline audit. Current B-v1 research context is in
+docs/research/README.md at the repository root.
+
 ## Contents
 
 - Objective construction

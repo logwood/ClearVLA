@@ -1,5 +1,12 @@
 # ClearVLA simulation and benchmark runbook
 
+> Scope: this file contains several outlet protocols and historical examples.
+> For the current CALVIN research panel use the dated
+> [handoff](../research/auxiliary/ACTIVE_MAINLINE_HANDOFF.md):
+> 18 cases, seed 0, max_steps 360, execute_rows 8, stored_target.
+> A first-row example below does not override that panel or another outlet's
+> serialized execution contract.
+
 This is a development runbook for simulator data and external evaluators. It
 does not define the G/S/W/P architecture, live process state, or benchmark
 results. Read the
@@ -23,7 +30,7 @@ The simulator policy sees only the admitted observation contract:
 top/wrist RGB + measured 7D state + previous executed 7D action
   -> ClearVLA history
   -> predicted 24-step chunk
-  -> execute first action only
+  -> execute the declared action prefix (current CALVIN panel: 8 rows)
   -> simulator step
   -> evaluator-only reward/success
   -> atomic HDF5 episode + manifest
@@ -55,8 +62,10 @@ ManiSkill uses normalized `pd_ee_delta_pose` actions:
   `action[t] == action_state[t+1]`, and a passing ClearVLA loader audit.
 
 Simulator and benchmark roots must remain separate from Pen/RDT roots. Each
-outlet owns its own normalizer, decoded cache, DINO cache, language bank,
-configuration and checkpoint. Never mix converted smoke data with expert data.
+outlet owns its own normalizer, language bank, configuration and checkpoint.
+Decoded/DINO caches apply only to configurations that explicitly use them;
+the current online-DINO CALVIN mainline disables RGB/DINO value caches.
+Never mix converted smoke data with expert data.
 
 CALVIN conversion keeps terminal action tails rather than truncating windows:
 policy centers through `terminal-24` are followed by 24 absorbing frames
