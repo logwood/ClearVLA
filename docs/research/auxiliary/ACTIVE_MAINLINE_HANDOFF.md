@@ -1,3 +1,15 @@
+# Active takeover run - 2026-10-10
+
+Target checkout: `codex/causal-unified-refactor-20261008`, HEAD `1eb95441a83206d11b0b5f36a69d741ec844ceea`; the checkout was clean before this status entry. The real-data candidate is the B-structure outcome configuration (`entity_ownership_mode=canonical_image_v1`, `identity_supervision_mode=rgbd_temporal_conditional_v2`, `observed_outcome_mode=robot_world_before_proposal_v2`, `typed_object_value_mode=conditional_object_v1`) with `causal_unified_outcome_v1`.
+
+The admitted source is `/data/senwang/clearvla/experiments/dinov3-gslot-identity-carrier-20261005/train-bs8-gpu0-r1/checkpoints/best.pt`. Its checkpoint metadata reports `global_step=11012` and the admitted source digest `df3fd978ba754058943859a333cafd671871684c3cd4e6f55bf92576831d3f66`. The external configs under `/data/senwang/clearvla/experiments/unified-admissions-20261010/` set `optimizer.update_origin=11012`; this is required for causal identity initialization with a fresh optimizer.
+
+The bounded real-data admission passed on GPU5 with two updates and two validation batches per task. It ended at step 11014 and produced complete `run_context.json`, `metrics.jsonl`, and `checkpoints/latest.pt` artifacts in `/data/senwang/clearvla/experiments/unified-outcomes-b-short-20261010-source-origin11012-gpu5`. This validates source/migration/finite-update/artifact behavior only; it is not a behavior or closed-loop result.
+
+The current full run uses `unified_outcomes_b_calvin_long_origin11012_gpu6_20261010.json`, `cuda:6`, `max_train_batches=11012`, and `max_val_batches=256`, with output `/data/senwang/clearvla/experiments/unified-outcomes-b-long-20261010-source-origin11012-gpu6`. Runner PID is `1392456`, trainer PID is `1392929`, and the admission report is `/data/senwang/clearvla/experiments/unified-admissions-20261010/unified-outcomes-b-long-20261010-source-origin11012-gpu6-exec.json`. At this save point the report remains `running`; the latest observed metrics reached batch 239 / step 11251. Do not claim completion, weight reload, closed-loop behavior, or task success until the final receipt is present.
+
+Preserved failed evidence includes the derived B-short checkpoint migration rejection, the missing source-clock declaration, and two GPU out-of-memory starts caused by concurrent processes on GPU6/GPU5. No unrelated process was stopped.
+
 # Current M8a–M8g continuation (2026-09-23)
 
 Recovered M7l exactly: `457107a6d091e4f893469b347a927e47c3737eeb`,
