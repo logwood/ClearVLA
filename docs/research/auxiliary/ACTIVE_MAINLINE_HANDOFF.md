@@ -1,3 +1,9 @@
+## 2026-10-10 structure merge follow-up
+
+Branch HEAD is now 04b4ea89 (config: record unified CALVIN B long-run profile) and is pushed to origin/codex/causal-unified-refactor-20261008. The new reproducible profiles are configs/mainline/causal_unified_calvin_b_short_20261010.json (1024 BS8 updates) and configs/mainline/causal_unified_calvin_b_long_20261010.json (eight full epochs). They preserve the target branch outcome/value/source repairs and add the B-short evidence settings identity_correspondence=0.02, identity_source_prediction=0.02, learning_rate=2e-5, and warmup_steps=100.
+
+The already-running GPU6 job was launched before this commit from the prior external config, so it remains an auditable target-branch unified outcome run with the target structural modes but the earlier .01 identity weights and 8e-5/500 optimizer settings. It is not relabelled as the new profile. Its observed metrics remain finite with no recorded gradient failure; do not interrupt it or claim behavior until its final receipt. The new profiles are ready for the next isolated run once a whole GPU is available.
+
 # Active takeover run - 2026-10-10
 
 Target checkout: `codex/causal-unified-refactor-20261008`, HEAD `1eb95441a83206d11b0b5f36a69d741ec844ceea`; the checkout was clean before this status entry. The real-data candidate is the B-structure outcome configuration (`entity_ownership_mode=canonical_image_v1`, `identity_supervision_mode=rgbd_temporal_conditional_v2`, `observed_outcome_mode=robot_world_before_proposal_v2`, `typed_object_value_mode=conditional_object_v1`) with `causal_unified_outcome_v1`.
